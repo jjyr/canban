@@ -28,8 +28,12 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, bail, ensure};
+use canban_herdr::HerdrBackend;
 use canban_types::{
-    EnvEntryMeta, HostTransport, SavedHost, SyncAction, SyncItemState, unqualified_entity_id,
+    EnvEntryMeta, FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE, FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB,
+    FP_HERDR_AFTER_SEND_BEFORE_DB, FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+    FP_OUTBOX_MID_WRITE_TRUNCATE, FailpointAction, HostConnectionState, HostTransport, SavedHost,
+    SyncAction, SyncItemState, unqualified_entity_id,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
@@ -39,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const SECONDARY_CLIENT: &str = "ui-client-2";
-const NUM_CHAOS_OP_KINDS: usize = 38;
+const NUM_CHAOS_OP_KINDS: usize = 39;
 
 const CHAOS_WORKFLOW_YAML: &str = r#"schema: 12
 id: chaos-flow
@@ -106,7 +110,7 @@ steps:
     with:
       target_branch: main
       strategy: rebase
-      sync_upstream: false
+      sync_upstream: true
       batch_size: 2
       test_command: sim-chaos-test --workspace
       max_conflict_attempts: 2
@@ -250,6 +254,8 @@ pub struct ChaosProfile {
     pub enable_drafts: bool,
     pub enable_subscriptions: bool,
     pub enable_bundle_ops: bool,
+    pub enable_dual_write_failpoints: bool,
+    pub framed_local_transport: bool,
     pub full_durability: bool,
     pub weights: [u32; NUM_CHAOS_OP_KINDS],
 }
@@ -296,6 +302,27 @@ impl ChaosProfile {
         // Deterministic full-durability slice (`FsDurability::Full` + `PRAGMA synchronous = FULL`)
         // on 1/8th of seeds so CI stays fast while verifying real fsync paths under chaos.
         let full_durability = seed.is_multiple_of(8);
+
+        // Exercise framed local transport (`AppServer::serve_local_stream` over `turmoil::net`)
+        // deterministically on half of desktop sub-profiles while preserving in-process coverage
+        // on the other half.
+        let framed_local_transport = desktop_local
+            && matches!(
+                sub_profile,
+                ChaosSubProfile::AuthMultiClientBlackhole
+                    | ChaosSubProfile::WorkflowAndSchedule
+                    | ChaosSubProfile::FullMix
+            );
+
+        // Enable per-instance dual-write crash failpoints on focused fault & full-mix sub-profiles.
+        let enable_dual_write_failpoints = matches!(
+            sub_profile,
+            ChaosSubProfile::DeliveryAndStorage
+                | ChaosSubProfile::SessionsMentionReclaimClock
+                | ChaosSubProfile::BundleGitHubPartition
+                | ChaosSubProfile::AuthMultiClientBlackhole
+                | ChaosSubProfile::FullMix
+        );
 
         let (
             enable_partitions,
@@ -504,6 +531,7 @@ impl ChaosProfile {
                 weights[22] += 3; // AdvanceTime
                 weights[27] += 14; // WorktreeDeliveryOp (deliver + @merger + conflicts)
                 weights[30] += 10; // StorageFault (Busy/IoError)
+                weights[38] += 4; // DualWriteFailpoint
                 weights[3] = 1; // ArchiveCard rare
             }
             ChaosSubProfile::WorkflowAndSchedule => {
@@ -533,6 +561,7 @@ impl ChaosProfile {
                 weights[25] += 10; // MultiClientRace
                 weights[28] += 10; // AuthRevokeRecover (invite/pair/revoke/re-pair)
                 weights[31] += 8; // HalfOpenBlackhole (>keepalive)
+                weights[38] += 4; // DualWriteFailpoint (FP#1/FP#5)
             }
             ChaosSubProfile::SessionsMentionReclaimClock => {
                 weights[0] += 4; // CreateCard
@@ -547,6 +576,7 @@ impl ChaosProfile {
                 weights[23] += 10; // ClockFault (forward/backward NTP steps & drift)
                 weights[30] += 4; // StorageFault
                 weights[32] += 14; // AgentSessionOp (agent.open/@mention/reply/interrupt/end/adopt)
+                weights[38] += 5; // DualWriteFailpoint (FP#1/FP#2)
             }
             ChaosSubProfile::BundleGitHubPartition => {
                 weights[0] += 4; // CreateCard
@@ -559,6 +589,7 @@ impl ChaosProfile {
                 weights[35] += 8; // DraftOp (draft.*)
                 weights[36] += 8; // SubscriptionOp (subscription.* + event.list)
                 weights[37] += 8; // ProjectBundleOp (project.export / project.import)
+                weights[38] += 4; // DualWriteFailpoint (FP#3/FP#5)
             }
             ChaosSubProfile::FullMix => {
                 weights[0] += 3; // CreateCard
@@ -583,6 +614,7 @@ impl ChaosProfile {
                 weights[35] += 2; // DraftOp
                 weights[36] += 2; // SubscriptionOp
                 weights[37] += 2; // ProjectBundleOp
+                weights[38] += 3; // DualWriteFailpoint
             }
         }
 
@@ -656,6 +688,9 @@ impl ChaosProfile {
         if !enable_bundle_ops {
             weights[37] = 0;
         }
+        if !enable_dual_write_failpoints {
+            weights[38] = 0;
+        }
 
         Self {
             sub_profile,
@@ -690,6 +725,8 @@ impl ChaosProfile {
             enable_drafts,
             enable_subscriptions,
             enable_bundle_ops,
+            enable_dual_write_failpoints,
+            framed_local_transport,
             full_durability,
             weights,
         }
@@ -895,6 +932,15 @@ pub enum ChaosOp {
     /// cross-host & duplicate rejection).
     ProjectBundleOp {
         kind: u8,
+        tag: u32,
+    },
+    /// Per-instance dual-write crash-window failpoints (`world.failpoints` / `world.client_failpoints`)
+    /// armed strictly after preconditions hold and paired immediately with their triggering op so
+    /// zero vacuous armed faults occur.
+    DualWriteFailpoint {
+        kind: u8,
+        host_idx: usize,
+        card_pick: usize,
         tag: u32,
     },
 }
@@ -1120,8 +1166,14 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
                 card_pick: rng.random_range(0..64),
                 tag,
             },
-            _ => ChaosOp::ProjectBundleOp {
+            37 => ChaosOp::ProjectBundleOp {
                 kind: rng.random_range(0..3),
+                tag,
+            },
+            _ => ChaosOp::DualWriteFailpoint {
+                kind: rng.random_range(0..5),
+                host_idx: rng.random_range(0..16),
+                card_pick: rng.random_range(0..64),
                 tag,
             },
         };
@@ -1169,6 +1221,12 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "database is locked",
                 "sqlite_ioerr",
                 "disk i/o error",
+                "failpoint",
+                "outbox.mid_write_truncate",
+                "herdr.after_terminal_run_before_db_commit",
+                "herdr.after_send_before_db_commit",
+                "github.after_pr_write_before_db_commit",
+                "git.after_push_before_batch_finalize",
                 "archived",
                 "removed",
                 "restore the card before",
@@ -1218,6 +1276,7 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "not active",
                 "workflow run is not",
                 "batch is not",
+                "batch test command",
                 "live terminal",
                 "unresolved",
                 "cherry-pick",
@@ -1271,6 +1330,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
     if profile.enable_multi_client {
         cfg.extra_clients = vec![SECONDARY_CLIENT.into()];
     }
+    cfg.framed_local_transport = profile.framed_local_transport;
     if profile.full_durability {
         cfg.fs_durability = FsDurability::Full;
         cfg.sqlite_synchronous_off = false;
@@ -1283,6 +1343,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
         } else {
             "profile:mobile"
         });
+        if profile.framed_local_transport {
+            world.trace.mix_str("transport:local_framed");
+        }
         world
             .trace
             .mix_str(&format!("sub_profile:{}", profile.sub_profile.snake_name()));
@@ -1578,7 +1641,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             .find(|(h, _)| h == &gh_host)
             .map(|(_, p)| p.clone())
             .unwrap();
-        let gh_repo = "acme/chaos-repo";
+        let gh_repo = "acme/canban-sim";
         if profile.enable_github_faults || profile.enable_review_pr {
             world.github.add_repo(gh_repo, 9001, "main");
             world
@@ -1624,6 +1687,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
         let mut seen_delivery_batches: BTreeSet<String> = BTreeSet::new();
         let mut draft_revs: BTreeMap<(String, String), u64> = BTreeMap::new();
         let mut tracked_subs: Vec<(String, String, String)> = Vec::new(); // (host, pid, sub_id)
+        let mut queued_shell_test_fails: usize = 0;
+        let mut published_pr_branches: BTreeSet<String> = BTreeSet::new();
         let mut gh_clock_high_water_ms: u64 =
             world.server(&gh_host).map(|s| s.now_ms()).unwrap_or(0);
 
@@ -1648,6 +1713,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     Some(pid),
                 )?;
                 let cid = c["id"].as_str().unwrap().to_owned();
+                oracle.observe_write_receipt(PRIMARY_CLIENT, host, &c)?;
                 oracle.record_committed_card(
                     server_key(host),
                     &cid,
@@ -1685,6 +1751,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             match op {
                 ChaosOp::CreateCard { host_idx, tag } => {
                     let (host, pid) = &host_projects[*host_idx % host_projects.len()];
+                    let rkey = format!("chaos-card-{seed}-{tag}");
                     if let Some(res) = check_expected_chaos_err(
                         "card.create",
                         world.client_call(
@@ -1693,6 +1760,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 "project_id": pid,
                                 "title": format!("Chaos Card #{tag}"),
                                 "body": format!("seed-{seed}-tag-{tag}"),
+                                "request_key": rkey,
                             }),
                             Some(pid),
                         ),
@@ -1700,6 +1768,10 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     {
                         let srv_name = server_key(host);
                         let raw_cid = strip_host_id(cid);
+                        let offline_q = is_offline_queued(&res);
+                        if !offline_q {
+                            oracle.observe_write_receipt(PRIMARY_CLIENT, host, &res)?;
+                        }
                         let confirmed = if let Some(srv_card) = world
                             .server(srv_name)
                             .and_then(|s| s.snapshot().ok())
@@ -1715,6 +1787,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         } else {
                             false
                         };
+                        oracle.record_request_key_attempt(
+                            srv_name,
+                            &rkey,
+                            "card.create",
+                            !offline_q && confirmed,
+                        );
                         cards.push(TrackedCard {
                             host: host.clone(),
                             pid: pid.clone(),
@@ -1725,11 +1803,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     }
                 }
                 ChaosOp::UpdateCard { card_pick, tag } => {
-                    if let Some((_host, pid, cid)) =
+                    if let Some((host, pid, cid)) =
                         pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
                     {
                         let rev = lookup_card_rev(world, &cid);
-                        let _ = check_expected_chaos_err(
+                        if let Some(res) = check_expected_chaos_err(
                             "card.update",
                             world.client_call(
                                 "card.update",
@@ -1741,26 +1819,32 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 }),
                                 Some(&pid),
                             ),
-                        )?;
+                        )? && !is_offline_queued(&res)
+                        {
+                            oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res)?;
+                        }
                     }
                 }
                 ChaosOp::MoveCard {
                     card_pick,
                     stage_idx,
                 } => {
-                    if let Some((_host, pid, cid)) =
+                    if let Some((host, pid, cid)) =
                         pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
                     {
                         let rev = lookup_card_rev(world, &cid);
                         let stage = stages[*stage_idx % stages.len()];
-                        let _ = check_expected_chaos_err(
+                        if let Some(res) = check_expected_chaos_err(
                             "card.move",
                             world.client_call(
                                 "card.move",
                                 json!({ "card_id": cid, "revision": rev, "stage": stage }),
                                 Some(&pid),
                             ),
-                        )?;
+                        )? && !is_offline_queued(&res)
+                        {
+                            oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res)?;
+                        }
                     }
                 }
                 ChaosOp::ArchiveCard { card_pick } => {
@@ -1788,15 +1872,20 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             let rev = lookup_card_rev(world, &cid);
                             let srv_name = server_key(&host);
                             let raw_cid = strip_host_id(&cid);
-                            let archived_ok = check_expected_chaos_err(
+                            let archive_res = check_expected_chaos_err(
                                 "card.archive",
                                 world.client_call(
                                     "card.archive",
                                     json!({ "card_id": cid, "revision": rev }),
                                     Some(&pid),
                                 ),
-                            )?
-                            .is_some();
+                            )?;
+                            if let Some(ref res) = archive_res
+                                && !is_offline_queued(res)
+                            {
+                                oracle.observe_write_receipt(PRIMARY_CLIENT, &host, res)?;
+                            }
+                            let archived_ok = archive_res.is_some();
                             let server_archived = world
                                 .server(srv_name)
                                 .and_then(|s| s.snapshot().ok())
@@ -2580,6 +2669,13 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         world.crash_client()?;
                         world.advance(Duration::from_millis(120))?;
                         world.bounce_client()?;
+                        if auth_revoked {
+                            // A freshly restarted client legitimately performs 1 initial dial to
+                            // re-discover AuthFailed before halting again.
+                            oracle
+                                .auth_failed_baselines
+                                .remove(&(PRIMARY_CLIENT.to_owned(), auth_host.clone()));
+                        }
                     }
                     world.hit("chaos.client_bounce");
                 }
@@ -2623,7 +2719,18 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     tag,
                 } => {
                     if profile.enable_stream_faults && !remotes.is_empty() {
-                        let target = remotes[*remote_idx % remotes.len()].clone();
+                        let start = *remote_idx % remotes.len();
+                        let live_target = (0..remotes.len()).find_map(|offset| {
+                            let cand = &remotes[(start + offset) % remotes.len()];
+                            let ok = !partitioned_remotes.contains(cand)
+                                && !(auth_revoked && cand == &auth_host)
+                                && world.server(cand).is_some()
+                                && host_is_connected(world, PRIMARY_CLIENT, cand);
+                            ok.then(|| cand.clone())
+                        });
+                        let target = live_target
+                            .clone()
+                            .unwrap_or_else(|| remotes[start].clone());
                         let target_pid = host_projects
                             .iter()
                             .find(|(h, _)| h == &target)
@@ -2648,10 +2755,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             )
                             .map(|c| c.cid.clone());
                         // Strictly gate stream faults & coverage hits on a live connected stream!
-                        let can_drive_live = !partitioned_remotes.contains(&target)
-                            && !(auth_revoked && target == auth_host)
-                            && world.server(&target).is_some()
-                            && host_is_connected(world, PRIMARY_CLIENT, &target);
+                        let can_drive_live = live_target.is_some();
 
                         let spawn_probe =
                             |w: &mut SimWorld| -> Result<crate::world::ClientCallHandle> {
@@ -2675,7 +2779,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
 
                         if can_drive_live {
                             match kind % 7 {
-                                0 => {
+                                0 | 6 => {
                                     // 1-byte framing chunking across live yamux + JSON-RPC frames.
                                     crate::trace::record_fault_armed("net.stream_chunk");
                                     world.stream_fault_policy().set_for_host(
@@ -2707,15 +2811,17 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         },
                                     );
                                     let h = spawn_probe(world)?;
-                                    world.advance(Duration::from_millis(120))?;
+                                    let res = check_expected_chaos_err(
+                                        "stream_fault.write_rst",
+                                        world.await_call(h, 15_000),
+                                    )?;
                                     let disconnected =
                                         !host_is_connected(world, PRIMARY_CLIENT, &target);
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let res = check_expected_chaos_err(
-                                        "stream_fault.write_rst",
-                                        world.await_call(h, 60_000),
-                                    )?;
-                                    if res.is_none() || disconnected {
+                                    if res.is_none()
+                                        || res.as_ref().is_some_and(is_offline_queued)
+                                        || disconnected
+                                    {
                                         crate::trace::record_fault_fired("net.stream_write_rst");
                                         world.hit("chaos.faulty_stream_rst");
                                     }
@@ -2731,15 +2837,17 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         },
                                     );
                                     let h = spawn_probe(world)?;
-                                    world.advance(Duration::from_millis(120))?;
+                                    let res = check_expected_chaos_err(
+                                        "stream_fault.read_rst",
+                                        world.await_call(h, 15_000),
+                                    )?;
                                     let disconnected =
                                         !host_is_connected(world, PRIMARY_CLIENT, &target);
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let res = check_expected_chaos_err(
-                                        "stream_fault.read_rst",
-                                        world.await_call(h, 60_000),
-                                    )?;
-                                    if res.is_none() || disconnected {
+                                    if res.is_none()
+                                        || res.as_ref().is_some_and(is_offline_queued)
+                                        || disconnected
+                                    {
                                         crate::trace::record_fault_fired("net.stream_read_rst");
                                         world.hit("chaos.faulty_stream_rst");
                                     }
@@ -2755,15 +2863,17 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         },
                                     );
                                     let h = spawn_probe(world)?;
-                                    world.advance(Duration::from_millis(120))?;
+                                    let res = check_expected_chaos_err(
+                                        "stream_fault.read_eof",
+                                        world.await_call(h, 15_000),
+                                    )?;
                                     let disconnected =
                                         !host_is_connected(world, PRIMARY_CLIENT, &target);
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let res = check_expected_chaos_err(
-                                        "stream_fault.read_eof",
-                                        world.await_call(h, 60_000),
-                                    )?;
-                                    if res.is_none() || disconnected {
+                                    if res.is_none()
+                                        || res.as_ref().is_some_and(is_offline_queued)
+                                        || disconnected
+                                    {
                                         crate::trace::record_fault_fired("net.stream_read_eof");
                                         world.hit("chaos.faulty_stream_rst");
                                         world.hit("chaos.faulty_stream_eof");
@@ -2821,9 +2931,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         world.hit("chaos.faulty_stream_stall");
                                     }
                                 }
-                                _ => {
-                                    world.stream_fault_policy().clear_for_host(&target);
-                                }
+                                _ => unreachable!(),
                             }
                         } else if kind % 7 == 6 {
                             world.stream_fault_policy().clear_for_host(&target);
@@ -2889,6 +2997,13 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     if let Some(res) = res_opt
                                         && let Some(cid) = res["id"].as_str()
                                     {
+                                        if !is_offline_queued(&res) {
+                                            oracle.observe_write_receipt(
+                                                creator,
+                                                &target_host,
+                                                &res,
+                                            )?;
+                                        }
                                         let raw_cid = strip_host_id(cid);
                                         let confirmed = if let Some(srv_card) = world
                                             .server(&target_host)
@@ -2918,7 +3033,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.multi_client_race");
                             }
                             1 if !remote_active.is_empty() => {
-                                let (_h, pid, cid) =
+                                let (host, pid, cid) =
                                     remote_active[*card_pick % remote_active.len()].clone();
                                 let rev1 = lookup_card_rev_on(world, PRIMARY_CLIENT, &cid);
                                 let rev2 = lookup_card_rev_on(world, SECONDARY_CLIENT, &cid);
@@ -2953,18 +3068,24 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     Some(&pid),
                                 )?;
                                 world.advance(Duration::from_millis(20))?;
-                                let _ = check_expected_chaos_err(
+                                if let Some(res1) = check_expected_chaos_err(
                                     "race.c1.card.update",
                                     world.await_call(h1, 60_000),
-                                )?;
-                                let _ = check_expected_chaos_err(
+                                )? && !is_offline_queued(&res1)
+                                {
+                                    oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res1)?;
+                                }
+                                if let Some(res2) = check_expected_chaos_err(
                                     "race.c2.card.update",
                                     world.await_call(h2, 60_000),
-                                )?;
+                                )? && !is_offline_queued(&res2)
+                                {
+                                    oracle.observe_write_receipt(SECONDARY_CLIENT, &host, &res2)?;
+                                }
                                 world.hit("chaos.multi_client_race");
                             }
                             2 if !remote_active.is_empty() => {
-                                let (_h, pid, cid) =
+                                let (host, pid, cid) =
                                     remote_active[*card_pick % remote_active.len()].clone();
                                 let rev1 = lookup_card_rev_on(world, PRIMARY_CLIENT, &cid);
                                 let rev2 = lookup_card_rev_on(world, SECONDARY_CLIENT, &cid);
@@ -2983,14 +3104,20 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     Some(&pid),
                                 )?;
                                 world.advance(Duration::from_millis(20))?;
-                                let _ = check_expected_chaos_err(
+                                if let Some(res1) = check_expected_chaos_err(
                                     "race.c1.card.move",
                                     world.await_call(h1, 60_000),
-                                )?;
-                                let _ = check_expected_chaos_err(
+                                )? && !is_offline_queued(&res1)
+                                {
+                                    oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res1)?;
+                                }
+                                if let Some(res2) = check_expected_chaos_err(
                                     "race.c2.card.move",
                                     world.await_call(h2, 60_000),
-                                )?;
+                                )? && !is_offline_queued(&res2)
+                                {
+                                    oracle.observe_write_receipt(SECONDARY_CLIENT, &host, &res2)?;
+                                }
                                 world.hit("chaos.multi_client_race");
                             }
                             3 if !remote_active.is_empty() => {
@@ -3219,6 +3346,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 "simulated chaos batch test failure\n",
                                             )],
                                         );
+                                        queued_shell_test_fails += 1;
                                     }
                                     world.hit("chaos.worktree_delivery_ops");
                                 }
@@ -3259,30 +3387,114 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             let evict_card = batch
                                                 .conflict_card_number
                                                 .filter(|_| tag.is_multiple_of(2));
-                                            let params = if let Some(cnum) = evict_card {
+                                            let rkey = format!("chaos-batch-{seed}-{tag}");
+                                            if let Some(cnum) = evict_card {
                                                 let _ =
                                                     exec.abort_worktree_conflict(&batch.worktree);
-                                                json!({
+                                                let params = json!({
                                                     "batch_id": batch.id,
                                                     "state": "completed",
                                                     "evict": [cnum],
                                                     "message": format!("chaos evict card {cnum}"),
-                                                    "request_key": format!("chaos-batch-{seed}-{tag}"),
-                                                })
+                                                    "request_key": rkey,
+                                                });
+                                                let res = check_expected_chaos_err(
+                                                    "batch.report",
+                                                    world.server_call(
+                                                        &wf_host,
+                                                        "batch.report",
+                                                        params,
+                                                    ),
+                                                )?;
+                                                oracle.record_request_key_attempt(
+                                                    &wf_host,
+                                                    &rkey,
+                                                    "batch.report",
+                                                    res.is_some(),
+                                                );
                                             } else {
                                                 let _ = exec
                                                     .resolve_worktree_and_commit(&batch.worktree);
-                                                json!({
+                                                let params = json!({
                                                     "batch_id": batch.id,
                                                     "state": "completed",
                                                     "message": format!("chaos resolve batch {tag}"),
-                                                    "request_key": format!("chaos-batch-{seed}-{tag}"),
-                                                })
+                                                    "request_key": rkey,
+                                                });
+                                                let ran_test_cmds = exec
+                                                    .recorded_commands()
+                                                    .iter()
+                                                    .filter(|c| {
+                                                        c.args
+                                                            .iter()
+                                                            .any(|a| a.contains("sim-chaos-test"))
+                                                    })
+                                                    .count();
+                                                let can_fire_fp4 = profile
+                                                    .enable_dual_write_failpoints
+                                                    && batch.sync_upstream
+                                                    && ran_test_cmds >= queued_shell_test_fails
+                                                    && exec.head_sha(&wf_dir).as_deref()
+                                                        == Some(batch.target_head.as_str());
+                                                if can_fire_fp4 {
+                                                    let fp = world.failpoints(&wf_host);
+                                                    fp.arm(
+                                                        FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
+                                                        FailpointAction::FailOnce(format!(
+                                                            "chaos-fp4-{seed}-{tag}"
+                                                        )),
+                                                    );
+                                                    let first = check_expected_chaos_err(
+                                                        "batch.report(fp4)",
+                                                        world.server_call(
+                                                            &wf_host,
+                                                            "batch.report",
+                                                            params.clone(),
+                                                        ),
+                                                    )?;
+                                                    fp.disarm(
+                                                        FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
+                                                    );
+                                                    oracle.record_request_key_attempt(
+                                                        &wf_host,
+                                                        &rkey,
+                                                        "batch.report",
+                                                        first.is_some(),
+                                                    );
+                                                    if first.is_none() {
+                                                        let retry = check_expected_chaos_err(
+                                                            "batch.report(fp4_retry)",
+                                                            world.server_call(
+                                                                &wf_host,
+                                                                "batch.report",
+                                                                params,
+                                                            ),
+                                                        )?;
+                                                        oracle.record_request_key_attempt(
+                                                            &wf_host,
+                                                            &rkey,
+                                                            "batch.report",
+                                                            retry.is_some(),
+                                                        );
+                                                        world.hit("chaos.failpoint_git_after_push");
+                                                    }
+                                                } else {
+                                                    let res = check_expected_chaos_err(
+                                                        "batch.report",
+                                                        world.server_call(
+                                                            &wf_host,
+                                                            "batch.report",
+                                                            params,
+                                                        ),
+                                                    )?;
+                                                    oracle.record_request_key_attempt(
+                                                        &wf_host,
+                                                        &rkey,
+                                                        "batch.report",
+                                                        res.is_some(),
+                                                    );
+                                                }
                                             };
-                                            let _ = check_expected_chaos_err(
-                                                "batch.report",
-                                                world.server_call(&wf_host, "batch.report", params),
-                                            )?;
                                         }
                                         world.hit("chaos.worktree_delivery_ops");
                                     } else if let Some(wt_res) = check_expected_chaos_err(
@@ -3435,6 +3647,20 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 if check_expected_chaos_err("device.revoke", res)?.is_some() {
                                     auth_revoked = true;
                                     world.advance(Duration::from_millis(200))?;
+                                    if !partitioned_remotes.contains(&auth_host) {
+                                        let _ = world.wait_until(5_000, |w| {
+                                            Ok(w.client_host_summaries_on(PRIMARY_CLIENT)
+                                                .iter()
+                                                .any(|s| {
+                                                    s.id == auth_host
+                                                        && matches!(
+                                                            s.connection,
+                                                            HostConnectionState::AuthFailed { .. }
+                                                        )
+                                                }))
+                                        });
+                                    }
+                                    oracle.check_auth_failed_zero_dials(world)?;
                                     let _ = check_expected_chaos_err(
                                         "project.list(revoked)",
                                         world.client_call(
@@ -3443,9 +3669,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             None,
                                         ),
                                     )?;
+                                    oracle.check_auth_failed_zero_dials(world)?;
                                 }
                             }
                         } else if *recover && !partitioned_remotes.contains(&auth_host) {
+                            oracle.check_auth_failed_zero_dials(world)?;
                             world.stream_fault_policy().clear_for_host(&auth_host);
                             let repair_res = pair_host_on_primary_client(world, &auth_host)
                                 .map(|dev_id| json!({ "device_id": dev_id }));
@@ -3454,7 +3682,16 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             {
                                 auth_paired_device_id = Some(new_dev_id.to_owned());
                                 auth_revoked = false;
+                                oracle.check_auth_failed_zero_dials(world)?;
                                 world.hit("chaos.auth_revoke_recover");
+                            } else {
+                                // Explicit user re-pair attempt may dial once before failing under
+                                // transient packet loss; refresh the AuthFailed baseline so future
+                                // steps strictly verify zero *background* dials.
+                                oracle
+                                    .auth_failed_baselines
+                                    .remove(&(PRIMARY_CLIENT.to_owned(), auth_host.clone()));
+                                oracle.check_auth_failed_zero_dials(world)?;
                             }
                         }
                     }
@@ -3722,6 +3959,24 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     "chaos.storage_fault_busy"
                                 });
                                 // Idempotent retry after clean SQLite rollback!
+                                if method == "card.create" {
+                                    oracle.record_request_key_attempt(
+                                        &srv_name,
+                                        &req_key,
+                                        "card.create",
+                                        first_res.as_ref().is_some_and(|v| !is_offline_queued(v)),
+                                    );
+                                } else if method == "comment.add"
+                                    && let Some((_, ref body)) = comment_meta
+                                {
+                                    oracle.record_request_key_attempt_with_marker(
+                                        &srv_name,
+                                        &req_key,
+                                        "comment.add",
+                                        first_res.as_ref().is_some_and(|v| !is_offline_queued(v)),
+                                        body.clone(),
+                                    );
+                                }
                                 if first_res.is_none() {
                                     let retry_res = if via_client {
                                         check_expected_chaos_err(
@@ -3735,9 +3990,23 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         )?
                                     };
                                     if let Some(val) = retry_res {
+                                        let acked = !is_offline_queued(&val);
                                         if method == "card.create"
                                             && let Some(cid) = val["id"].as_str()
                                         {
+                                            if via_client && acked {
+                                                oracle.observe_write_receipt(
+                                                    PRIMARY_CLIENT,
+                                                    &host,
+                                                    &val,
+                                                )?;
+                                            }
+                                            oracle.record_request_key_attempt(
+                                                &srv_name,
+                                                &req_key,
+                                                "card.create",
+                                                acked,
+                                            );
                                             let raw_cid = strip_host_id(cid);
                                             if let Some(srv_card) = world
                                                 .server(&srv_name)
@@ -3770,7 +4039,15 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             }
                                         } else if method == "comment.add"
                                             && let Some((raw_cid, body)) = comment_meta
-                                            && world
+                                        {
+                                            oracle.record_request_key_attempt_with_marker(
+                                                &srv_name,
+                                                &req_key,
+                                                "comment.add",
+                                                acked,
+                                                body.clone(),
+                                            );
+                                            if world
                                                 .server(&srv_name)
                                                 .and_then(|s| s.events().ok())
                                                 .is_some_and(|evs| {
@@ -3782,10 +4059,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                                 || e.message == body)
                                                     })
                                                 })
-                                        {
-                                            oracle.record_committed_comment(
-                                                &srv_name, &raw_cid, body,
-                                            );
+                                            {
+                                                oracle.record_committed_comment(
+                                                    &srv_name, &raw_cid, body,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -3801,12 +4079,16 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     tag,
                 } => {
                     if profile.enable_half_open_blackhole && !remotes.is_empty() {
-                        let target = remotes[*remote_idx % remotes.len()].clone();
-                        let can_drive_live = !partitioned_remotes.contains(&target)
-                            && !(auth_revoked && target == auth_host)
-                            && world.server(&target).is_some()
-                            && host_is_connected(world, PRIMARY_CLIENT, &target);
-                        if can_drive_live {
+                        let start = *remote_idx % remotes.len();
+                        let live_target = (0..remotes.len()).find_map(|offset| {
+                            let cand = &remotes[(start + offset) % remotes.len()];
+                            let ok = !partitioned_remotes.contains(cand)
+                                && !(auth_revoked && cand == &auth_host)
+                                && world.server(cand).is_some()
+                                && host_is_connected(world, PRIMARY_CLIENT, cand);
+                            ok.then(|| cand.clone())
+                        });
+                        if let Some(target) = live_target {
                             let target_pid = host_projects
                                 .iter()
                                 .find(|(h, _)| h == &target)
@@ -4305,6 +4587,28 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 &wt,
                                                 &format!("feat(review): chaos commit {tag}"),
                                             );
+                                            // Finish the review agent PTY cleanly on half the ops
+                                            // so subsequent `review.merge` / `github.pr.publish` /
+                                            // FP#3 ops see `merge_allowed: true`!
+                                            if tag.is_multiple_of(2)
+                                                && let Some(herdr) = world.herdr(&wf_host)
+                                                && let Some(addr) = world
+                                                    .server(&wf_host)
+                                                    .and_then(|s| s.snapshot().ok())
+                                                    .and_then(|snap| {
+                                                        snap.terminals.into_iter().find_map(|t| {
+                                                            let a = t.agent?;
+                                                            if a.card_id == raw_cid && !a.finished()
+                                                            {
+                                                                a.terminal
+                                                            } else {
+                                                                None
+                                                            }
+                                                        })
+                                                    })
+                                            {
+                                                herdr.finish_terminal(&addr, 0, "exited");
+                                            }
                                         }
                                         world.hit("chaos.review_ops");
                                     }
@@ -4476,7 +4780,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 json!({ "card_id": w_cid }),
                                                 Some(&w_pid),
                                             ),
-                                        )? && let Some(token) = prev["token"].as_str()
+                                        )? && prev["merge_allowed"] == true
+                                            && let Some(token) = prev["token"].as_str()
                                         {
                                             let rev = lookup_card_rev(world, &w_cid);
                                             if check_expected_chaos_err(
@@ -4494,6 +4799,18 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             )?
                                             .is_some()
                                             {
+                                                if let Some(br) = world
+                                                    .server(&wf_host)
+                                                    .and_then(|s| s.snapshot().ok())
+                                                    .and_then(|snap| {
+                                                        snap.cards
+                                                            .into_iter()
+                                                            .find(|c| c.id == w_raw)
+                                                            .and_then(|c| c.branch)
+                                                    })
+                                                {
+                                                    published_pr_branches.insert(br);
+                                                }
                                                 world.hit("chaos.github_pr_ops");
                                             }
                                         }
@@ -4932,6 +5249,452 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         }
                     }
                 }
+                ChaosOp::DualWriteFailpoint {
+                    kind,
+                    host_idx,
+                    card_pick,
+                    tag,
+                } => {
+                    if profile.enable_dual_write_failpoints {
+                        match kind % 5 {
+                            0 => {
+                                // FP #1: `FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB`
+                                let (host, pid) = &host_projects[*host_idx % host_projects.len()];
+                                let srv_name = server_key(host);
+                                if world.server(srv_name).is_some()
+                                    && !offline_herdr_hosts.contains(host)
+                                {
+                                    let fp = world.failpoints(srv_name);
+                                    let raw_pid = strip_host_id(pid);
+                                    fp.arm(
+                                        FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+                                        FailpointAction::FailOnce(format!(
+                                            "chaos-fp1-{seed}-{tag}"
+                                        )),
+                                    );
+                                    let res = check_expected_chaos_err(
+                                        "fp1.terminal.create",
+                                        world.server_call(
+                                            srv_name,
+                                            "terminal.create",
+                                            json!({
+                                                "project_id": raw_pid,
+                                                "name": format!("Chaos FP1 Shell {tag}"),
+                                                "request_key": format!("chaos-fp1-term-{seed}-{tag}"),
+                                            }),
+                                        ),
+                                    )?;
+                                    fp.disarm(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB);
+                                    if let Some(val) = res
+                                        && let Some(tid) = val["id"].as_str()
+                                    {
+                                        let _ = check_expected_chaos_err(
+                                            "fp1.terminal.close",
+                                            world.server_call(
+                                                srv_name,
+                                                "terminal.close",
+                                                json!({
+                                                    "terminal_id": tid,
+                                                    "request_key": format!("chaos-fp1-close-{seed}-{tag}"),
+                                                }),
+                                            ),
+                                        )?;
+                                        world.hit("chaos.failpoint_herdr_terminal_run");
+                                    }
+                                }
+                            }
+                            1 => {
+                                // FP #2: `FP_HERDR_AFTER_SEND_BEFORE_DB`
+                                if world.server(&wf_host).is_some()
+                                    && !offline_herdr_hosts.contains(&wf_host)
+                                    && let Some(herdr) = world.herdr(&wf_host)
+                                {
+                                    let cur_core_id = herdr.core_id();
+                                    let target = world
+                                        .server(&wf_host)
+                                        .and_then(|s| s.snapshot().ok())
+                                        .and_then(|snap| {
+                                            snap.terminals.into_iter().find_map(|t| {
+                                                let a = t.agent?;
+                                                if a.state != "running"
+                                                    || a.connection_state != "connected"
+                                                    || a.core_id.as_deref()
+                                                        != Some(cur_core_id.as_str())
+                                                {
+                                                    return None;
+                                                }
+                                                let addr = a.terminal?;
+                                                let live = herdr
+                                                    .call(
+                                                        "terminal.get",
+                                                        json!({ "terminal": addr }),
+                                                    )
+                                                    .ok()
+                                                    .is_some_and(|v| v["state"] == "live");
+                                                if !live {
+                                                    return None;
+                                                }
+                                                let card_active = snap
+                                                    .cards
+                                                    .iter()
+                                                    .any(|c| c.id == a.card_id && c.active());
+                                                let has_open_q = snap.questions.iter().any(|q| {
+                                                    q.card_id == a.card_id
+                                                        && q.profile_id == a.profile.id
+                                                        && matches!(
+                                                            q.state.as_str(),
+                                                            "pending" | "delivering"
+                                                        )
+                                                });
+                                                if card_active && !has_open_q {
+                                                    Some((a.card_id, a.profile.id))
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                        });
+                                    if let Some((raw_cid, prof_id)) = target {
+                                        let fp = world.failpoints(&wf_host);
+                                        let before_fired =
+                                            fp.stats_for(FP_HERDR_AFTER_SEND_BEFORE_DB).fired;
+                                        let fp2_key = format!("chaos-fp2-mention-{seed}-{tag}");
+                                        let body = format!("@{prof_id} chaos fp2 mention #{tag}");
+                                        fp.arm(
+                                            FP_HERDR_AFTER_SEND_BEFORE_DB,
+                                            FailpointAction::FailOnce(format!(
+                                                "chaos-fp2-{seed}-{tag}"
+                                            )),
+                                        );
+                                        let res = check_expected_chaos_err(
+                                            "fp2.comment.add",
+                                            world.server_call(
+                                                &wf_host,
+                                                "comment.add",
+                                                json!({
+                                                    "card_id": raw_cid,
+                                                    "body": body,
+                                                    "mentions": [prof_id],
+                                                    "request_key": fp2_key,
+                                                }),
+                                            ),
+                                        )?;
+                                        let _ = world.wait_until(3_000, |w| {
+                                            Ok(w.failpoints(&wf_host)
+                                                .stats_for(FP_HERDR_AFTER_SEND_BEFORE_DB)
+                                                .fired
+                                                > before_fired)
+                                        });
+                                        fp.disarm(FP_HERDR_AFTER_SEND_BEFORE_DB);
+                                        if res.is_some() {
+                                            oracle.record_request_key_attempt_with_marker(
+                                                &wf_host,
+                                                &fp2_key,
+                                                "comment.add",
+                                                true,
+                                                body.clone(),
+                                            );
+                                            oracle
+                                                .record_committed_comment(&wf_host, &raw_cid, body);
+                                        }
+                                        if fp.stats_for(FP_HERDR_AFTER_SEND_BEFORE_DB).fired
+                                            > before_fired
+                                        {
+                                            world.hit("chaos.failpoint_herdr_send");
+                                        }
+                                    }
+                                }
+                            }
+                            2 => {
+                                // FP #3: `FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB`
+                                if profile.enable_review_pr
+                                    && gh_host == wf_host
+                                    && world.server(&wf_host).is_some()
+                                {
+                                    let raw_wf_pid = strip_host_id(&wf_pid);
+                                    let candidate = world
+                                        .server(&wf_host)
+                                        .and_then(|s| s.snapshot().ok())
+                                        .and_then(|snap| {
+                                            let gh_ready = snap
+                                                .projects
+                                                .iter()
+                                                .find(|p| p.id == raw_wf_pid)
+                                                .and_then(|p| p.github.as_ref())
+                                                .and_then(|g| g.synced_at)
+                                                .is_some();
+                                            if !gh_ready {
+                                                return None;
+                                            }
+                                            let eligible: Vec<_> = snap
+                                                .cards
+                                                .iter()
+                                                .filter(|c| {
+                                                    let has_live_agent =
+                                                        snap.terminals.iter().any(|t| {
+                                                            t.agent.as_ref().is_some_and(|a| {
+                                                                a.card_id == c.id && !a.finished()
+                                                            })
+                                                        });
+                                                    c.active()
+                                                        && !has_live_agent
+                                                        && c.pull_request.is_none()
+                                                        && c.worktree
+                                                            .as_deref()
+                                                            .is_some_and(|w| Path::new(w).is_dir())
+                                                        && c.branch.as_deref().is_some_and(|b| {
+                                                            !published_pr_branches.contains(b)
+                                                        })
+                                                })
+                                                .collect();
+                                            if eligible.is_empty() {
+                                                return None;
+                                            }
+                                            let c = eligible[*card_pick % eligible.len()];
+                                            Some((
+                                                c.id.clone(),
+                                                c.revision,
+                                                c.worktree.clone().unwrap(),
+                                                c.branch.clone().unwrap(),
+                                            ))
+                                        });
+                                    if let Some((raw_cid, _rev, wt_path, branch)) = candidate
+                                        && let Some(exec) = world.exec_runner(&wf_host)
+                                    {
+                                        world.github.clear_injected_faults();
+                                        if let Ok(head) = exec.commit_in_worktree(
+                                            &wt_path,
+                                            &format!("feat(fp3): chaos pr {tag}"),
+                                        ) {
+                                            world.github.set_branch_head(gh_repo, &branch, &head);
+                                            if let Some(prev) = check_expected_chaos_err(
+                                                "fp3.review.preview",
+                                                world.server_call(
+                                                    &wf_host,
+                                                    "review.preview",
+                                                    json!({ "card_id": raw_cid }),
+                                                ),
+                                            )? && prev["merge_allowed"] == true
+                                                && let Some(token) = prev["token"].as_str()
+                                                && let Some(fresh_rev) = world
+                                                    .server(&wf_host)
+                                                    .and_then(|s| s.snapshot().ok())
+                                                    .and_then(|snap| {
+                                                        snap.cards
+                                                            .into_iter()
+                                                            .find(|c| c.id == raw_cid)
+                                                            .map(|c| c.revision)
+                                                    })
+                                            {
+                                                let fp = world.failpoints(&wf_host);
+                                                fp.arm(
+                                                    FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB,
+                                                    FailpointAction::FailOnce(format!(
+                                                        "chaos-fp3-{seed}-{tag}"
+                                                    )),
+                                                );
+                                                let pub_res = check_expected_chaos_err(
+                                                    "fp3.github.pr.publish",
+                                                    world.server_call(
+                                                        &wf_host,
+                                                        "github.pr.publish",
+                                                        json!({
+                                                            "card_id": raw_cid,
+                                                            "revision": fresh_rev,
+                                                            "token": token,
+                                                            "request_key": format!("chaos-fp3-pr-{seed}-{tag}"),
+                                                        }),
+                                                    ),
+                                                )?;
+                                                fp.disarm(FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB);
+                                                if pub_res.is_some() {
+                                                    published_pr_branches.insert(branch);
+                                                    let _ = check_expected_chaos_err(
+                                                        "fp3.github.pr.refresh",
+                                                        world.server_call(
+                                                            &wf_host,
+                                                            "github.pr.refresh",
+                                                            json!({ "card_id": raw_cid }),
+                                                        ),
+                                                    )?;
+                                                    world.hit("chaos.failpoint_github_pr_write");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            3 => {
+                                // FP #4: `FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE`
+                                if profile.enable_worktree_delivery
+                                    && let Some(srv) = world.server(&wf_host)
+                                    && let Some(exec) = world.exec_runner(&wf_host)
+                                {
+                                    let snap = srv.snapshot()?;
+                                    let batch = snap.merge_batches.into_iter().find(|b| {
+                                        b.state == "running"
+                                            && b.sync_upstream
+                                            && Path::new(&b.worktree).is_dir()
+                                    });
+                                    let ran_test_cmds = exec
+                                        .recorded_commands()
+                                        .iter()
+                                        .filter(|c| {
+                                            c.args.iter().any(|a| a.contains("sim-chaos-test"))
+                                        })
+                                        .count();
+                                    if let Some(batch) = batch
+                                        && ran_test_cmds >= queued_shell_test_fails
+                                        && exec.head_sha(&wf_dir).as_deref()
+                                            == Some(batch.target_head.as_str())
+                                    {
+                                        oracle.record_committed_merge_batch(
+                                            &wf_host,
+                                            &batch.id,
+                                            &batch.project_id,
+                                        );
+                                        let _ = exec.resolve_worktree_and_commit(&batch.worktree);
+                                        let rkey = format!("chaos-fp4-batch-{seed}-{tag}");
+                                        let params = json!({
+                                            "batch_id": batch.id,
+                                            "state": "completed",
+                                            "message": format!("chaos fp4 resolve {tag}"),
+                                            "request_key": rkey,
+                                        });
+                                        let fp = world.failpoints(&wf_host);
+                                        fp.arm(
+                                            FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
+                                            FailpointAction::FailOnce(format!(
+                                                "chaos-fp4-{seed}-{tag}"
+                                            )),
+                                        );
+                                        let first = check_expected_chaos_err(
+                                            "fp4.batch.report",
+                                            world.server_call(
+                                                &wf_host,
+                                                "batch.report",
+                                                params.clone(),
+                                            ),
+                                        )?;
+                                        fp.disarm(FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE);
+                                        oracle.record_request_key_attempt(
+                                            &wf_host,
+                                            &rkey,
+                                            "batch.report",
+                                            first.is_some(),
+                                        );
+                                        if first.is_none() {
+                                            let retry = check_expected_chaos_err(
+                                                "fp4.batch.report.retry",
+                                                world.server_call(&wf_host, "batch.report", params),
+                                            )?;
+                                            oracle.record_request_key_attempt(
+                                                &wf_host,
+                                                &rkey,
+                                                "batch.report",
+                                                retry.is_some(),
+                                            );
+                                            world.hit("chaos.failpoint_git_after_push");
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // FP #5: `FP_OUTBOX_MID_WRITE_TRUNCATE`
+                                // Only arm when target remote has 0 existing outbox items so
+                                // quarantining the torn `.outbox.json` never drops unrelated items.
+                                if !remotes.is_empty() {
+                                    let candidate = remotes
+                                        .iter()
+                                        .rev()
+                                        .find(|r| {
+                                            !(auth_revoked && **r == auth_host)
+                                                && world
+                                                    .client_sync_items_on(PRIMARY_CLIENT)
+                                                    .iter()
+                                                    .all(|it| it.host_id != **r)
+                                                && ((partitioned_remotes.contains(*r)
+                                                    && !host_is_connected(
+                                                        world,
+                                                        PRIMARY_CLIENT,
+                                                        r,
+                                                    ))
+                                                    || (profile.enable_partitions
+                                                        && world.server(r).is_some()))
+                                        })
+                                        .cloned();
+                                    if let Some(target) = candidate
+                                        && let Some((_, target_pid)) = host_projects
+                                            .iter()
+                                            .find(|(h, _)| h == &target)
+                                            .cloned()
+                                    {
+                                        let was_partitioned = partitioned_remotes.contains(&target);
+                                        let mut crashed_for_fp5 = false;
+                                        if !was_partitioned {
+                                            world.crash_server(&target)?;
+                                            crashed_for_fp5 = true;
+                                            world.partition(PRIMARY_CLIENT, &target);
+                                            let _ = world.wait_until(8_000, |w| {
+                                                Ok(!host_is_connected(w, PRIMARY_CLIENT, &target))
+                                            });
+                                        }
+                                        let still_disconnected = !host_is_connected(
+                                            world,
+                                            PRIMARY_CLIENT,
+                                            &target,
+                                        ) && !world
+                                            .client_host_summaries_on(PRIMARY_CLIENT)
+                                            .iter()
+                                            .any(|s| {
+                                                s.id == target
+                                                    && matches!(
+                                                        s.connection,
+                                                        HostConnectionState::AuthFailed { .. }
+                                                    )
+                                            });
+                                        if still_disconnected {
+                                            let fp = world.client_failpoints(PRIMARY_CLIENT);
+                                            fp.arm(
+                                                FP_OUTBOX_MID_WRITE_TRUNCATE,
+                                                FailpointAction::FailOnce(format!(
+                                                    "chaos-fp5-{seed}-{tag}"
+                                                )),
+                                            );
+                                            let _ = check_expected_chaos_err(
+                                                "fp5.outbox.card.create",
+                                                world.client_call(
+                                                    "card.create",
+                                                    json!({
+                                                        "project_id": target_pid,
+                                                        "title": format!("Chaos FP5 Torn {tag}"),
+                                                        "request_key": format!("chaos-fp5-{seed}-{tag}"),
+                                                    }),
+                                                    Some(&target_pid),
+                                                ),
+                                            )?;
+                                            fp.disarm(FP_OUTBOX_MID_WRITE_TRUNCATE);
+                                            // Bounce primary client to quarantine torn `.outbox.json`.
+                                            world.bounce_client()?;
+                                            if auth_revoked {
+                                                oracle.auth_failed_baselines.remove(&(
+                                                    PRIMARY_CLIENT.to_owned(),
+                                                    auth_host.clone(),
+                                                ));
+                                            }
+                                            world.hit("chaos.failpoint_outbox_truncate");
+                                        }
+                                        if !was_partitioned {
+                                            world.repair(PRIMARY_CLIENT, &target);
+                                        }
+                                        if crashed_for_fp5 {
+                                            world.bounce_server(&target)?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Advance a small virtual tick, observe any real delivery batches, and check
@@ -4946,19 +5709,27 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     &mut archived_cards,
                 );
             }
+            if auth_revoked {
+                oracle.check_auth_failed_zero_dials(world)?;
+            }
             oracle.check_step_invariants(world)?;
         }
 
         // Clean pre-quiescence recovery:
-        // 1. Repair links/stream/storage/GitHub/Herdr/clock faults and ensure all servers/clients
-        //    are running WITHOUT manually calling `reconnect` or `poll_remotes_once_async` yet!
+        // 1. Repair links/stream/storage/failpoints/GitHub/Herdr/clock faults and ensure all
+        //    servers/clients are running WITHOUT manually calling `reconnect` or
+        //    `poll_remotes_once_async` yet!
         world.repair_all();
         world.github.clear_injected_faults();
         for h in world.servers.values() {
             h.storage_faults.clear();
+            h.failpoints.clear();
             h.clock.reset_adjustments();
             h.herdr.clear_injected_faults();
             h.herdr.set_offline(false);
+        }
+        for c in world.clients.values() {
+            c.failpoints.clear();
         }
         let crashed_servers: Vec<String> = world
             .servers
@@ -5001,7 +5772,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
 
         // 3. Re-pair `auth_host` if still revoked so strict `Connected` + convergence checks run.
         if auth_revoked {
+            oracle.check_auth_failed_zero_dials(world)?;
             let _new_dev_id = pair_host_on_primary_client(world, &auth_host)?;
+            oracle.check_auth_failed_zero_dials(world)?;
             world.hit("chaos.auth_revoke_recover");
         }
 
@@ -5161,12 +5934,19 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             );
         }
 
-        // Final strict quiescent invariant check (fails on ANY unexpected `SyncItemState::Failed`,
-        // divergence on ANY client, SQLite integrity error, post-bounce stuck state, or secret leak!).
+        // Final strict quiescent invariant check (RYW, At-Most-Once, fails on ANY unexpected
+        // `SyncItemState::Failed`, divergence on ANY client, SQLite integrity error, post-bounce
+        // stuck state, or secret leak!).
+        oracle.check_read_your_writes(world)?;
+        oracle.check_at_most_once(world)?;
         oracle.check_quiescent_invariants(world)?;
 
         Ok(finalize_digest(world))
     })
+}
+
+fn is_offline_queued(val: &Value) -> bool {
+    val.get("offline_queued").and_then(Value::as_bool) == Some(true)
 }
 
 fn host_is_connected(world: &SimWorld, client_id: &str, host_id: &str) -> bool {
@@ -5650,8 +6430,8 @@ mod tests {
     #[test]
     fn delivery_and_storage_sub_profile_hits_real_delivery_batch_and_storage_faults() {
         crate::trace::reset_thread_coverage();
-        // Seed 600 % 6 == 0 -> DeliveryAndStorage
-        let d1 = run(600, 45).expect("DeliveryAndStorage seed 600 failed");
+        // Seed 606 % 6 == 0 -> DeliveryAndStorage
+        let d1 = run(606, 45).expect("DeliveryAndStorage seed 606 failed");
         let cov = crate::trace::take_thread_coverage();
         assert!(cov.count("chaos.profile.delivery_and_storage") > 0);
         assert!(
@@ -5673,7 +6453,7 @@ mod tests {
             "vacuous armed faults detected: {:?}",
             cov.armed_vs_fired_report()
         );
-        let d2 = run(600, 45).expect("DeliveryAndStorage seed 600 replay failed");
+        let d2 = run(606, 45).expect("DeliveryAndStorage seed 606 replay failed");
         assert_eq!(d1, d2, "DeliveryAndStorage must replay deterministically");
     }
 }

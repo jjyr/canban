@@ -39,11 +39,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run one complete deterministic simulation round (all 16 scripted scenarios + chaos),
+    /// Run one complete deterministic simulation round (all 17 scripted scenarios + chaos),
     /// or replay a specific `--seed` / `--scenario` or `--replay-file`.
     Run {
-        /// Optional scenario name (e.g. `remote_faults`, `transport_auth`, `workspaces_delivery`, `project_import_export`, `sessions_and_adoption`, `review_and_events`, `chaos`).
-        /// Omit to run one complete round (all 16 scripted scenarios + chaos).
+        /// Optional scenario name (e.g. `remote_faults`, `transport_auth`, `workspaces_delivery`, `project_import_export`, `sessions_and_adoption`, `review_and_events`, `scheduler_cross_contention`, `chaos`).
+        /// Omit to run one complete round (all 17 scripted scenarios + chaos).
         #[arg(long)]
         scenario: Option<String>,
         /// Deterministic seed (default: 2026). Pass a failing seed to replay it exactly.
@@ -92,7 +92,7 @@ enum Command {
         /// Stop immediately on the first failing seed instead of continuing until Ctrl-C.
         #[arg(long, short = 'x')]
         fail_fast: bool,
-        /// Target scenario: `chaos` (default), `all` (random mix of all 16 scripted + chaos), or a specific scenario name.
+        /// Target scenario: `chaos` (default), `all` (random mix of all 17 scripted + chaos), or a specific scenario name.
         #[arg(long, default_value = "chaos")]
         scenario: String,
         /// Optional cap on total seeds (omit to run continuously until Ctrl-C).
@@ -477,10 +477,61 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "events.journal_listed",
     "events.subscription_delivery_and_ack",
     "events.subscription_crash_retry",
+    "sched_contention.four_way_cap",
+    "sched_contention.single_card_collision",
+    "sched_contention.mixed_pty_reclaim",
+    "sched_contention.all_five_failpoints",
+    "sched_contention.natural_quiesce",
+    "transport.local_framed_rpc",
+    "oracle.read_your_writes_checked",
+    "oracle.at_most_once_checked",
+    "oracle.auth_failed_zero_dials_checked",
+    "oracle.committed_merge_batch_checked",
 ];
+
+const SCHEDULER_CONTENTION_REQUIRED_COVERAGE: &[&str] = &[
+    "sched_contention.four_way_cap",
+    "sched_contention.single_card_collision",
+    "sched_contention.mixed_pty_reclaim",
+    "sched_contention.all_five_failpoints",
+    "sched_contention.natural_quiesce",
+    "transport.local_framed_rpc",
+    "oracle.read_your_writes_checked",
+    "oracle.at_most_once_checked",
+    "oracle.committed_merge_batch_checked",
+    "world.quiesce_natural",
+];
+
+const TRANSPORT_AUTH_REQUIRED_COVERAGE: &[&str] = &[
+    "auth.invite_single_use",
+    "auth.client_pair_persisted",
+    "auth.duplicate_server_rejected",
+    "auth.revoke_kicks_live_stream",
+    "auth.client_revoked_auth_failed",
+    "auth.tailscale_ephemeral_enc",
+    "auth.client_tailscale_autoseal",
+    "auth.api_mismatch",
+    "oracle.auth_failed_zero_dials_checked",
+];
+
+fn required_coverage_for_scenario(sc: Scenario) -> &'static [&'static str] {
+    match sc {
+        Scenario::SchedulerCrossContention => SCHEDULER_CONTENTION_REQUIRED_COVERAGE,
+        Scenario::TransportAuth => TRANSPORT_AUTH_REQUIRED_COVERAGE,
+        _ => &[],
+    }
+}
 
 const CHAOS_RANDOM_REQUIRED_COVERAGE: &[&str] = &[
     "oracle.committed_durability_checked",
+    "oracle.committed_merge_batch_checked",
+    "oracle.read_your_writes_checked",
+    "oracle.at_most_once_checked",
+    "oracle.auth_failed_zero_dials_checked",
+    "transport.local_framed_rpc",
+    "world.quiesce_natural",
+    "chaos.profile.desktop",
+    "chaos.profile.mobile",
     "chaos.net_partition",
     "chaos.server_crash_bounce",
     "chaos.client_bounce",
@@ -488,11 +539,28 @@ const CHAOS_RANDOM_REQUIRED_COVERAGE: &[&str] = &[
     "chaos.faulty_stream_chunk",
     "chaos.faulty_stream_rst",
     "chaos.faulty_stream_stall",
+    "chaos.half_open_blackhole",
+    "chaos.keepalive_timeout_fired",
     "chaos.multi_client_race",
     "chaos.schedule_ops",
     "chaos.worktree_delivery_ops",
+    "chaos.delivery_batch_entered",
+    "exec.shell_executed",
+    "chaos.storage_fault_busy",
+    "chaos.storage_fault_io_error",
+    "chaos.failpoint_herdr_terminal_run",
     "chaos.auth_revoke_recover",
     "chaos.project_archive_restore",
+    "chaos.natural_quiesce_recovered",
+];
+
+const CHAOS_SWARM_PROFILE_REQUIRED_COVERAGE: &[&str] = &[
+    "chaos.profile.delivery_and_storage",
+    "chaos.profile.workflow_and_schedule",
+    "chaos.profile.auth_multi_client_blackhole",
+    "chaos.profile.sessions_mention_reclaim_clock",
+    "chaos.profile.bundle_github_partition",
+    "chaos.profile.full_mix",
 ];
 
 fn print_fault_telemetry_table(tracker: &CoverageTracker) {
@@ -847,11 +915,15 @@ fn run_suite(
     trace_dir: PathBuf,
 ) -> Result<()> {
     let is_full_suite = replay_file.is_none() && scenario.is_none();
+    let single_scenario = match (&replay_file, &scenario) {
+        (None, Some(name)) => Some(Scenario::parse(name)?),
+        _ => None,
+    };
     let plan: Vec<ReplayEntry> = if let Some(path) = replay_file {
         load_replay_file(&path, ops)?
     } else {
-        let list: Vec<Scenario> = match scenario {
-            Some(name) => vec![Scenario::parse(&name)?],
+        let list: Vec<Scenario> = match single_scenario {
+            Some(sc) => vec![sc],
             None => {
                 let mut full = Scenario::ALL_NAMED.to_vec();
                 full.push(Scenario::Chaos);
@@ -948,8 +1020,14 @@ fn run_suite(
         "\nAll {passed} deterministic simulation run(s) passed in {:.2}s.",
         started.elapsed().as_secs_f64()
     );
+    if assert_coverage {
+        print_fault_telemetry_table(&total_coverage);
+        print_cold_properties_table(&total_coverage, COLD_PROPERTIES_TOP_N);
+    }
     let suite_req: &[&str] = if is_full_suite {
         FULL_SUITE_REQUIRED_COVERAGE
+    } else if let Some(sc) = single_scenario {
+        required_coverage_for_scenario(sc)
     } else {
         &[]
     };
@@ -980,7 +1058,7 @@ impl RandomTarget {
         match self {
             Self::Single(sc) => *sc,
             Self::AllMixed => {
-                // 50% full-spectrum chaos, 50% one of the 16 focused scenarios.
+                // 50% full-spectrum chaos, 50% one of the 17 focused scenarios.
                 if rng.random_bool(0.5) {
                     Scenario::Chaos
                 } else {
@@ -1202,6 +1280,9 @@ fn run_random(
     let mut random_req: Vec<&str> = Vec::new();
     if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
         random_req.extend_from_slice(CHAOS_RANDOM_REQUIRED_COVERAGE);
+        if passed >= 24 {
+            random_req.extend_from_slice(CHAOS_SWARM_PROFILE_REQUIRED_COVERAGE);
+        }
     } else if scenario_arg.trim().eq_ignore_ascii_case("all") && passed >= 12 {
         random_req.extend_from_slice(&[
             "oracle.post_bounce_recovery_checked",
@@ -1356,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn full_suite_coverage_gate_requires_69_unique_properties() {
+    fn full_suite_coverage_gate_requires_unique_properties() {
         use std::collections::BTreeSet;
 
         let all: Vec<&str> = BASE_REQUIRED_COVERAGE
@@ -1367,8 +1448,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            69,
-            "full suite coverage gate must require 69 properties"
+            79,
+            "full suite coverage gate must require 79 properties"
         );
         assert_eq!(
             unique.len(),
@@ -1388,6 +1469,26 @@ mod tests {
         }
         assert!(verify_coverage(&incomplete, true, &[], FULL_SUITE_REQUIRED_COVERAGE).is_err());
 
+        // Per-scenario required coverage for Scenario 18 and transport_auth must have no duplicates
+        // and be subsets of Gate A.
+        for sc in [Scenario::SchedulerCrossContention, Scenario::TransportAuth] {
+            let per_sc = required_coverage_for_scenario(sc);
+            assert!(
+                !per_sc.is_empty(),
+                "expected per-scenario required coverage for {}",
+                sc.name()
+            );
+            let sc_set: BTreeSet<&str> = per_sc.iter().copied().collect();
+            assert_eq!(sc_set.len(), per_sc.len());
+            for key in per_sc {
+                assert!(
+                    unique.contains(key),
+                    "per-scenario key '{key}' for {} missing from Gate A FULL_SUITE_REQUIRED_COVERAGE",
+                    sc.name()
+                );
+            }
+        }
+
         let chaos_all: Vec<&str> = BASE_REQUIRED_COVERAGE
             .iter()
             .chain(CHAOS_RANDOM_REQUIRED_COVERAGE.iter())
@@ -1396,13 +1497,30 @@ mod tests {
         let chaos_unique: BTreeSet<&str> = chaos_all.iter().copied().collect();
         assert_eq!(
             chaos_all.len(),
-            18,
-            "chaos random coverage gate must require 18 properties"
+            34,
+            "chaos random coverage gate must require 34 properties"
         );
         assert_eq!(
             chaos_unique.len(),
             chaos_all.len(),
             "chaos random coverage gate must not contain duplicate property keys"
+        );
+
+        let chaos_24_all: Vec<&str> = chaos_all
+            .iter()
+            .chain(CHAOS_SWARM_PROFILE_REQUIRED_COVERAGE.iter())
+            .copied()
+            .collect();
+        let chaos_24_unique: BTreeSet<&str> = chaos_24_all.iter().copied().collect();
+        assert_eq!(
+            chaos_24_all.len(),
+            40,
+            "chaos 24-seed coverage gate must require 40 properties"
+        );
+        assert_eq!(
+            chaos_24_unique.len(),
+            chaos_24_all.len(),
+            "chaos 24-seed coverage gate must not contain duplicate property keys"
         );
 
         let mut chaos_tracker = CoverageTracker::new();

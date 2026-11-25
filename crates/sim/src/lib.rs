@@ -164,6 +164,37 @@ mod tests {
     }
 
     #[test]
+    fn scenario_18_scheduler_cross_contention() {
+        const REQUIRED_COVERAGE: &[&str] = &[
+            "sched_contention.four_way_cap",
+            "sched_contention.single_card_collision",
+            "sched_contention.mixed_pty_reclaim",
+            "sched_contention.all_five_failpoints",
+            "sched_contention.natural_quiesce",
+            "transport.local_framed_rpc",
+            "oracle.read_your_writes_checked",
+            "oracle.at_most_once_checked",
+            "oracle.committed_merge_batch_checked",
+            "world.quiesce_natural",
+        ];
+
+        crate::trace::reset_thread_coverage();
+        let digest = scenarios::scheduler_cross_contention::run(202_618)
+            .expect("scheduler_cross_contention scenario failed");
+        let cov = crate::trace::take_thread_coverage();
+        cov.assert_required(REQUIRED_COVERAGE)
+            .expect("scheduler_cross_contention missing required coverage hits");
+        assert!(
+            cov.vacuous_armed_faults().is_empty(),
+            "scheduler_cross_contention must have 0 vacuous armed faults: {:?}",
+            cov.vacuous_armed_faults()
+        );
+        cov.assert_never_zero(&["exec.blocked_command"])
+            .expect("scheduler_cross_contention must never invoke blocked OS commands");
+        assert_ne!(digest, 0, "scenario_18 digest must be non-zero");
+    }
+
+    #[test]
     fn chaos_outbox_regression_seed_6581024343186838594() {
         let d1 = scenarios::chaos::run(6_581_024_343_186_838_594, 40)
             .expect("outbox revision_conflict regression seed 6581024343186838594 failed");

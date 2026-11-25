@@ -426,6 +426,8 @@ pub fn run(seed: u64) -> Result<u64> {
         })?;
         world.hit("auth.revoke_kicks_live_stream");
 
+        oracle.check_auth_failed_zero_dials(world)?;
+        let dials_at_auth_failed = world.client_dial_count("ui-client", "remote-b");
         let reconnect_count_at_auth_failed = world
             .client_host_summaries()
             .into_iter()
@@ -463,6 +465,14 @@ pub fn run(seed: u64) -> Result<u64> {
             "MultiHostClient kept retrying revoked host! reconnect_count grew from {reconnect_count_at_auth_failed} to {}",
             summary_b_after_wait.reconnect_count
         );
+        oracle.check_auth_failed_zero_dials(world)?;
+        oracle.assert_auth_failed_zero_dials_for(
+            world,
+            "ui-client",
+            "remote-b",
+            dials_at_auth_failed,
+            reconnect_count_at_auth_failed,
+        )?;
 
         // RPCs targeted at the revoked host must fail cleanly with an auth error (and NEVER enqueue offline outbox items).
         let list_err = world
@@ -514,6 +524,13 @@ pub fn run(seed: u64) -> Result<u64> {
                 .contains("auth_failed"),
             "Expected auth_failed for env.save on revoked host, got: {env_err:#}"
         );
+        oracle.assert_auth_failed_zero_dials_for(
+            world,
+            "ui-client",
+            "remote-b",
+            dials_at_auth_failed,
+            reconnect_count_at_auth_failed,
+        )?;
 
         // Unaffected hosts (`local` and `remote-a`) stay Connected and healthy!
         let healthy_summaries = world.client_host_summaries();

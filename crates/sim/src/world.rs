@@ -622,10 +622,12 @@ async fn run_framed_local_watcher(
         };
         if let Ok(hs) = decode_framed_jsonrpc_reply(&hs_line) {
             let changed = hs["changed"].as_bool().unwrap_or(false);
-            if changed {
-                let _ = driver.refresh_framed_cache_async().await;
-            }
-            if !hs["revision"].is_null() {
+            let refreshed_ok = if changed {
+                driver.refresh_framed_cache_async().await.is_ok()
+            } else {
+                true
+            };
+            if refreshed_ok && !hs["revision"].is_null() {
                 last_cursor = hs["revision"].clone();
             }
         }
@@ -633,8 +635,13 @@ async fn run_framed_local_watcher(
             if weak_client.strong_count() == 0 {
                 return;
             }
-            match read_bounded_line(&mut reader, MAX_FRAME_BYTES).await {
-                Ok(Some(first_line)) => {
+            match tokio::time::timeout(
+                Duration::from_secs(45),
+                read_bounded_line(&mut reader, MAX_FRAME_BYTES),
+            )
+            .await
+            {
+                Ok(Ok(Some(first_line))) => {
                     // Drain any already-buffered push lines in one batch so multi-event mutations
                     // trigger a single framed `app.state` refresh instead of one per event.
                     let mut latest_cursor = Value::Null;
@@ -668,7 +675,7 @@ async fn run_framed_local_watcher(
                         let _ = driver.refresh_framed_runtime_only_async().await;
                     }
                 }
-                Ok(None) | Err(_) => {
+                Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     break;
                 }
@@ -2710,13 +2717,23 @@ impl SimWorld {
         let Ok(state) = local_srv.call("app.state", json!({})) else {
             return false;
         };
-        let expected_rev = &state["revision"];
+        // Compare `[identity, state_instance, db_changes, state_revision]` while ignoring element
+        // `[4]` (`observed_at`), which ticks silently on periodic 15s Herdr heartbeats without
+        // emitting a `StateChanged` push event when no snapshot state changed.
+        fn revision_state_prefix(rev: &Value) -> Option<&[Value]> {
+            rev.as_array().map(|arr| &arr[..arr.len().min(4)])
+        }
+        let Some(expected_prefix) = revision_state_prefix(&state["revision"]) else {
+            return false;
+        };
         for handle in self.clients.values() {
             if let Some(driver) = handle.local_driver.lock().unwrap().clone()
                 && driver.is_framed()
-                && driver.framed_cached_revision().as_ref() != Some(expected_rev)
             {
-                return false;
+                let cached = driver.framed_cached_revision();
+                if cached.as_ref().and_then(revision_state_prefix) != Some(expected_prefix) {
+                    return false;
+                }
             }
         }
         true
