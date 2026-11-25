@@ -278,7 +278,7 @@ impl AppServer {
         CheckPermit(self)
     }
     pub(super) fn browse_directory(&self, p: Value) -> Result<Value> {
-        let host = canban_herdr::host::Host::new(self.config());
+        let host = canban_herdr::host::Host::with_runner(self.config(), self.exec_runner.clone());
         let raw = p["path"].as_str().map(str::trim).filter(|v| !v.is_empty());
         let path = match raw {
             Some("~") => host.home()?,

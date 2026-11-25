@@ -1442,7 +1442,7 @@ impl AppServer {
                         Some("local"),
                     );
                     let (exit_code, timed_out) =
-                        crate::scripts::run_local_process_with_policy_and_unset(
+                        crate::scripts::run_local_process_with_policy_unset_and_runner(
                             &argv,
                             &script_cwd,
                             &resolved_env.env,
@@ -1451,6 +1451,7 @@ impl AppServer {
                             &resolved_env.unset_keys,
                             &log_file,
                             timeout_secs,
+                            self.exec_runner.as_ref(),
                         )?;
                     let duration_ms = self.now_ms().saturating_sub(step_started_at);
                     if let Ok(raw_env) = std::fs::read_to_string(&env_file)
@@ -1714,7 +1715,11 @@ impl AppServer {
             .as_deref()
             .is_some_and(|s| s.starts_with("herdr:"));
         if !is_herdr_template {
-            argv[0] = canban_profiles::executable_with_env(&argv[0], &config.hc_env);
+            argv[0] = canban_profiles::executable_with_runner(
+                &argv[0],
+                &config.hc_env,
+                self.exec_runner.as_ref(),
+            );
         }
 
         let core_id = self.verified_core_id()?;

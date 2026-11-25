@@ -517,11 +517,10 @@ fn collect_script_outputs(
 }
 
 /// Best-effort termination for any active scripts on `card_id` using an already-held DB lock.
-pub(crate) fn kill_card_scripts_db(db: Db<'_>, config: &Config, card_id: &str) {
+pub(crate) fn kill_card_scripts_db(db: Db<'_>, client: &canban_herdr::Client, card_id: &str) {
     let Ok(all) = db.list::<WorkflowRun>() else {
         return;
     };
-    let client = canban_herdr::Client::new(config.clone());
     for run in all
         .into_iter()
         .filter(|r| r.card_id.as_deref() == Some(card_id) && r.state == "waiting_script")
@@ -537,14 +536,13 @@ pub(crate) fn kill_card_scripts_db(db: Db<'_>, config: &Config, card_id: &str) {
 }
 
 /// Best-effort termination for any active script on `run_id` using an already-held DB lock.
-pub(crate) fn kill_run_scripts_db(db: Db<'_>, config: &Config, run_id: &str) {
+pub(crate) fn kill_run_scripts_db(db: Db<'_>, client: &canban_herdr::Client, run_id: &str) {
     let Ok(run) = db.get::<WorkflowRun>(run_id) else {
         return;
     };
     if run.state != "waiting_script" {
         return;
     }
-    let client = canban_herdr::Client::new(config.clone());
     if let Some(addr) = run
         .inputs
         .get("script_terminal")
@@ -1242,7 +1240,7 @@ impl AppServer {
                 }
             };
             let hc_env = self.config().hc_env;
-            let (exit_code, timed_out) = run_local_process_with_policy_and_unset(
+            let (exit_code, timed_out) = run_local_process_with_policy_unset_and_runner(
                 &prep.argv,
                 &prep.cwd,
                 &prep.env,
@@ -1251,6 +1249,7 @@ impl AppServer {
                 &prep.unset_keys,
                 &prep.raw_log_file,
                 prep.timeout_secs,
+                self.exec_runner.as_ref(),
             )?;
             self.finalize_prepared_script(&run, &step_id, &prep, "", exit_code, timed_out)?;
         }
@@ -1405,19 +1404,76 @@ pub(crate) fn run_local_process_with_policy_and_unset(
     log_path: &Path,
     timeout_secs: u64,
 ) -> Result<(Option<i64>, bool)> {
+    run_local_process_with_policy_unset_and_runner(
+        argv,
+        cwd,
+        env,
+        hc_env,
+        env_policy,
+        unset_keys,
+        log_path,
+        timeout_secs,
+        &canban_exec::SystemRunner,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_local_process_with_policy_unset_and_runner(
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    hc_env: &BTreeMap<String, String>,
+    env_policy: canban_exec::shell_env::LocalEnvPolicy,
+    unset_keys: &BTreeSet<String>,
+    log_path: &Path,
+    timeout_secs: u64,
+    runner: &dyn canban_exec::CommandRunner,
+) -> Result<(Option<i64>, bool)> {
     ensure!(!argv.is_empty(), "Empty script command");
+    let mut merged_env = env.clone();
+    canban_herdr::merge_local_env_with_policy_with_runner(
+        &mut merged_env,
+        hc_env,
+        env_policy,
+        runner,
+    );
+    for key in unset_keys {
+        merged_env.remove(key);
+    }
+
+    if !runner.is_system() {
+        use std::io::Write as _;
+        let mut env_remove = vec![
+            "GIT_DIR".into(),
+            "GIT_WORK_TREE".into(),
+            "GIT_INDEX_FILE".into(),
+        ];
+        env_remove.extend(unset_keys.iter().cloned());
+        let spec = canban_exec::CommandSpec {
+            program: argv[0].clone(),
+            args: argv[1..].to_vec(),
+            cwd: Some(cwd.to_path_buf()),
+            env_set: merged_env,
+            env_remove,
+            stdin: None,
+        };
+        let out = runner.run(&spec)?;
+        let mut log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_path)?;
+        log_file.write_all(&out.stdout)?;
+        log_file.write_all(&out.stderr)?;
+        return Ok((Some(i64::from(out.status_code)), false));
+    }
+
     let stdout_file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(log_path)?;
     let stderr_file = stdout_file.try_clone()?;
-
-    let mut merged_env = env.clone();
-    canban_exec::shell_env::merge_local_env_with_policy(&mut merged_env, hc_env, env_policy);
-    for key in unset_keys {
-        merged_env.remove(key);
-    }
 
     let mut cmd = canban_exec::command(&argv[0]);
     cmd.args(&argv[1..])

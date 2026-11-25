@@ -228,7 +228,11 @@ impl AppServer {
             "runtime.state" => self.runtime_state_response(&p),
             "host.probe" => Ok(self.host_probe_payload()),
             "host.env.refresh" => {
-                let snapshot = canban_exec::shell_env::refresh_local_shell_env();
+                let snapshot = if self.exec_runner.is_system() {
+                    canban_exec::shell_env::refresh_local_shell_env()
+                } else {
+                    self.exec_runner.shell_env()
+                };
                 Ok(json!({
                     "ok": true,
                     "shell": snapshot.shell,
@@ -1068,7 +1072,13 @@ impl AppServer {
                             .iter()
                             .any(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active())
                         {
-                            workflow::stop_card(db, &config, &c.id, "superseded", now_ms)?;
+                            workflow::stop_card(
+                                db,
+                                &self.herdr_client_with_config(config.clone()),
+                                &c.id,
+                                "superseded",
+                                now_ms,
+                            )?;
                         }
                         cancel_other_pending(db)?;
                         let wf_run = workflow::adopt_stage(
@@ -1092,7 +1102,13 @@ impl AppServer {
 
                     let from = c.stage.clone();
                     cancel_other_pending(db)?;
-                    workflow::stop_card(db, &config, &c.id, "superseded", now_ms)?;
+                    workflow::stop_card(
+                        db,
+                        &self.herdr_client_with_config(config.clone()),
+                        &c.id,
+                        "superseded",
+                        now_ms,
+                    )?;
                     c.stage = target.into();
                     c.board_order = None;
                     canban_kanban::order::place(db, &mut c, None)?;
@@ -1221,7 +1237,7 @@ impl AppServer {
                     json!({"from":from,"to":target,"before_card_id":p["before_card_id"]}),
                     now_ms,
                 )?;
-                workflow::stop_card(db, &self.config(), &c.id, "superseded", now_ms)?;
+                workflow::stop_card(db, &self.herdr_client(), &c.id, "superseded", now_ms)?;
                 Ok(serde_json::to_value(c)?)
             }),
             "card.continue" => self.continue_card(p),

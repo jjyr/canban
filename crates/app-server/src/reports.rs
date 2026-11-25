@@ -393,7 +393,7 @@ impl AppServer {
                 if state == "backlog" {
                     crate::workflow::stop_card(
                         db,
-                        &config,
+                        &self.herdr_client_with_config(config.clone()),
                         &card.id,
                         "returned_to_backlog",
                         now_ms,

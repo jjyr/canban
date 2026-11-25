@@ -1059,10 +1059,18 @@ impl AppServer {
         self.db_changes.load(Ordering::SeqCst)
     }
     pub(crate) fn herdr_client(&self) -> canban_herdr::Client {
-        canban_herdr::Client::with_backend(self.config(), self.herdr_backend.clone())
+        canban_herdr::Client::with_backend_and_runner(
+            self.config(),
+            self.herdr_backend.clone(),
+            self.exec_runner.clone(),
+        )
     }
     pub(crate) fn herdr_client_with_config(&self, config: Config) -> canban_herdr::Client {
-        canban_herdr::Client::with_backend(config, self.herdr_backend.clone())
+        canban_herdr::Client::with_backend_and_runner(
+            config,
+            self.herdr_backend.clone(),
+            self.exec_runner.clone(),
+        )
     }
     pub(crate) fn herdr_activity(
         &self,

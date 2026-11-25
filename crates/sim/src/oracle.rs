@@ -255,10 +255,11 @@ impl InvariantOracle {
                 }
             }
 
-            // Reminder consistency against `canban_notifications::reminders_from_events`.
+            // Reminder consistency against `canban_notifications::reminders_from_events_at`.
             let mut events = server.events()?;
             events.retain(|e| seen_cards.contains(&e.card_id));
-            let expected_reminders = canban_notifications::reminders_from_events(&snap, &events);
+            let expected_reminders =
+                canban_notifications::reminders_from_events_at(&snap, &events, server.now_ms());
             let mut seen_snap_rem = BTreeSet::new();
             let mut snap_rem_map: BTreeMap<String, (String, bool, bool)> = BTreeMap::new();
             for r in &snap.reminders {
@@ -515,7 +516,10 @@ impl InvariantOracle {
     /// exclusivity, and `protected_terminals` safety!
     fn check_herdr_runtime_parity(&self, world: &SimWorld) -> Result<()> {
         let rt = world.client_merged_runtime()?;
-        let now_ms = world.now_ms();
+        let local_now_ms = world
+            .server("local-server")
+            .map(|s| s.now_ms())
+            .unwrap_or_else(|| world.now_ms());
         let mut computed: BTreeMap<String, usize> = BTreeMap::new();
         for t in &rt.terminals {
             let host = rt
@@ -529,7 +533,7 @@ impl InvariantOracle {
                         && !a.finished()
                         && (a.close_state == "closing"
                             || !matches!(
-                                a.runtime_status_at(now_ms),
+                                a.runtime_status_at(local_now_ms),
                                 "closed" | "blocked" | "idle" | "done" | "error"
                             )))
                         || (a.terminal.is_none()

@@ -340,9 +340,16 @@ fn run_herdr_installer(
             } else {
                 configured_hc
             };
-            let Some(resolved) =
-                canban_profiles::find_local_executable_with_env(lookup_name, &raw.hc_env)
-            else {
+            let server_arc = server.as_ref().and_then(std::sync::Weak::upgrade);
+            let runner: &dyn canban_exec::CommandRunner = server_arc
+                .as_deref()
+                .map(|s| s.exec_runner().as_ref())
+                .unwrap_or(&canban_exec::SystemRunner);
+            let Some(resolved) = canban_profiles::find_local_executable_with_runner(
+                lookup_name,
+                &raw.hc_env,
+                runner,
+            ) else {
                 {
                     let mut guard = install_state.lock().unwrap();
                     guard.phase = "failed".into();
@@ -355,7 +362,11 @@ fn run_herdr_installer(
             };
             let mut probe_config = raw;
             probe_config.hc = resolved.to_string_lossy().into_owned();
-            match canban_herdr::Client::new(probe_config).status() {
+            let probe_client = server_arc
+                .as_deref()
+                .map(|s| s.herdr_client_with_config(probe_config.clone()))
+                .unwrap_or_else(|| canban_herdr::Client::new(probe_config));
+            match probe_client.status() {
                 Ok(status_val) => {
                     let version = status_val["core"]["version"]
                         .as_str()

@@ -338,8 +338,10 @@ impl AppServer {
                 bins.push(cmd.as_str());
             }
         }
-        canban_herdr::refresh_local_shell_path_if_stale(Duration::from_secs(2));
-        let host = canban_herdr::host::Host::new(config.clone());
+        if self.exec_runner.is_system() {
+            canban_herdr::refresh_local_shell_path_if_stale(Duration::from_secs(2));
+        }
+        let host = canban_herdr::host::Host::with_runner(config.clone(), self.exec_runner.clone());
         let (probed, probe_error) = match host.probe_binaries(&bins) {
             Ok(map) => (map, None),
             Err(e) => (BTreeMap::new(), Some(format!("{e:#}"))),

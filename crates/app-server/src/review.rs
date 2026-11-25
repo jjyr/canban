@@ -1397,7 +1397,7 @@ impl AppServer {
                 .unwrap_or(&project.directory)
                 .to_owned()
         };
-        let host = canban_herdr::host::Host::new(self.config());
+        let host = canban_herdr::host::Host::with_runner(self.config(), self.exec_runner.clone());
         ensure!(
             Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
             "Working directory is unavailable: {cwd}"

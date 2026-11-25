@@ -144,6 +144,7 @@ pub trait HerdrBackend: Send + Sync + 'static {
 pub struct Client {
     pub config: Config,
     pub backend: Option<Arc<dyn HerdrBackend>>,
+    runner: Arc<dyn canban_exec::CommandRunner>,
 }
 /// Retain runtime facts, not argv/env copies of the potentially very long prompt.
 pub fn observation(value: &Value) -> Value {
@@ -178,15 +179,66 @@ pub fn cwd(value: &Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
         .or_else(|| value["cwd"].as_str().filter(|s| !s.is_empty()))
 }
+/// Merge local host environment into `env` according to `policy` using an explicit
+/// [`canban_exec::CommandRunner`]. Production [`canban_exec::SystemRunner`] delegates
+/// unchanged to [`merge_local_env_with_policy`]; non-system runners (such as `SimExec` in DST)
+/// read purely from `runner.shell_env()` without spawning a login shell probe.
+pub fn merge_local_env_with_policy_with_runner(
+    env: &mut BTreeMap<String, String>,
+    hc_env: &BTreeMap<String, String>,
+    policy: LocalEnvPolicy,
+    runner: &dyn canban_exec::CommandRunner,
+) {
+    if runner.is_system() {
+        merge_local_env_with_policy(env, hc_env, policy);
+        return;
+    }
+    let snapshot = runner.shell_env();
+    if policy == LocalEnvPolicy::InheritHostShell
+        && !hc_env.contains_key("CANBAN_HERDR_SEARCH_PATHS")
+    {
+        merge_shell_env_snapshot(env, hc_env, &snapshot);
+    }
+    if !env.get("PATH").is_some_and(|v| !v.is_empty())
+        && !hc_env.contains_key("CANBAN_HERDR_SEARCH_PATHS")
+        && let Some(path) = canban_exec::merged_path_string_from_snapshot(&snapshot, hc_env)
+    {
+        env.insert("PATH".into(), path);
+    }
+}
+
 impl Client {
     pub fn new(config: Config) -> Self {
         Self {
             config,
             backend: None,
+            runner: canban_exec::system_runner(),
         }
     }
     pub fn with_backend(config: Config, backend: Option<Arc<dyn HerdrBackend>>) -> Self {
-        Self { config, backend }
+        Self {
+            config,
+            backend,
+            runner: canban_exec::system_runner(),
+        }
+    }
+    pub fn with_backend_and_runner(
+        config: Config,
+        backend: Option<Arc<dyn HerdrBackend>>,
+        runner: Arc<dyn canban_exec::CommandRunner>,
+    ) -> Self {
+        Self {
+            config,
+            backend,
+            runner,
+        }
+    }
+    pub fn with_runner(mut self, runner: Arc<dyn canban_exec::CommandRunner>) -> Self {
+        self.runner = runner;
+        self
+    }
+    pub fn runner(&self) -> &Arc<dyn canban_exec::CommandRunner> {
+        &self.runner
     }
     /// hc connect speaks the public JSON-RPC protocol and resolves the installed
     /// core's socket/config without linking Herdr's private implementation.
@@ -234,15 +286,38 @@ impl Client {
         &self,
         argv: Vec<String>,
         cwd: &str,
-        mut env: BTreeMap<String, String>,
+        env: BTreeMap<String, String>,
         labels: BTreeMap<String, String>,
         env_policy: LocalEnvPolicy,
         unset_keys: &BTreeSet<String>,
         size: Option<TerminalSize>,
     ) -> Result<Value> {
+        self.launch_with_policy_unset_size_and_runner(
+            argv,
+            cwd,
+            env,
+            labels,
+            env_policy,
+            unset_keys,
+            size,
+            self.runner.as_ref(),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_with_policy_unset_size_and_runner(
+        &self,
+        argv: Vec<String>,
+        cwd: &str,
+        mut env: BTreeMap<String, String>,
+        labels: BTreeMap<String, String>,
+        env_policy: LocalEnvPolicy,
+        unset_keys: &BTreeSet<String>,
+        size: Option<TerminalSize>,
+        runner: &dyn canban_exec::CommandRunner,
+    ) -> Result<Value> {
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
         merge_default_terminal_env(&mut env, &self.config.hc_env);
-        merge_local_env_with_policy(&mut env, &self.config.hc_env, env_policy);
+        merge_local_env_with_policy_with_runner(&mut env, &self.config.hc_env, env_policy, runner);
         for k in unset_keys {
             env.remove(k);
         }
@@ -484,5 +559,105 @@ for line in sys.stdin:
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["size"], json!({"cols": 112, "rows": 36}));
         assert!(lines[1].get("size").is_none());
+    }
+
+    #[test]
+    fn client_with_runner_merges_shell_env_without_probing_host_shell() {
+        use std::sync::Mutex;
+
+        struct StubRunner {
+            snapshot: ShellEnvSnapshot,
+        }
+
+        impl canban_exec::CommandRunner for StubRunner {
+            fn run(&self, _spec: &canban_exec::CommandSpec) -> Result<canban_exec::ExecOutput> {
+                anyhow::bail!("unexpected command run")
+            }
+            fn find_executable(&self, _name: &str) -> Option<std::path::PathBuf> {
+                None
+            }
+            fn shell_env(&self) -> ShellEnvSnapshot {
+                self.snapshot.clone()
+            }
+            fn hostname(&self) -> String {
+                "stub-host".into()
+            }
+        }
+
+        struct RecordingBackend {
+            calls: Mutex<Vec<Value>>,
+        }
+
+        impl HerdrBackend for RecordingBackend {
+            fn call(&self, _method: &str, params: Value) -> Result<Value> {
+                self.calls.lock().unwrap().push(params);
+                Ok(json!({ "address": "t-stub-1" }))
+            }
+            fn subscribe(&self, _wake: Arc<dyn Fn() + Send + Sync>) -> Result<BackendSubscription> {
+                anyhow::bail!("unused")
+            }
+            fn activity(&self, _core: &str, _terminal: &str) -> crate::activity::Activity {
+                crate::activity::Activity::default()
+            }
+        }
+
+        let runner: Arc<dyn canban_exec::CommandRunner> = Arc::new(StubRunner {
+            snapshot: ShellEnvSnapshot {
+                shell: "/bin/stubsh".into(),
+                vars: BTreeMap::from([
+                    ("PATH".into(), "/stub/bin:/usr/bin".into()),
+                    ("STUB_HOST_VAR".into(), "from-runner".into()),
+                    ("DYLD_INSERT_LIBRARIES".into(), "/bad.dylib".into()),
+                ]),
+                path_entries: vec![
+                    std::path::PathBuf::from("/stub/bin"),
+                    std::path::PathBuf::from("/usr/bin"),
+                ],
+                full_env_captured: true,
+            },
+        });
+        let backend = Arc::new(RecordingBackend {
+            calls: Mutex::new(Vec::new()),
+        });
+        let client =
+            Client::with_backend_and_runner(Config::default(), Some(backend.clone()), runner);
+
+        // InheritHostShell pulls non-denied vars and PATH exclusively from runner.shell_env().
+        client
+            .launch_with_policy_unset_and_size(
+                vec!["/bin/echo".into(), "hi".into()],
+                "/tmp",
+                BTreeMap::from([("CALLER_VAR".into(), "1".into())]),
+                BTreeMap::new(),
+                LocalEnvPolicy::InheritHostShell,
+                &BTreeSet::new(),
+                None,
+            )
+            .unwrap();
+
+        // MinimalPathOnly pulls PATH only and never pulls STUB_HOST_VAR.
+        client
+            .launch_with_policy_unset_and_size(
+                vec!["/bin/echo".into(), "hi".into()],
+                "/tmp",
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LocalEnvPolicy::MinimalPathOnly,
+                &BTreeSet::new(),
+                None,
+            )
+            .unwrap();
+
+        let calls = backend.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        let env0 = &calls[0]["env"];
+        assert_eq!(env0["PATH"].as_str(), Some("/stub/bin:/usr/bin"));
+        assert_eq!(env0["STUB_HOST_VAR"].as_str(), Some("from-runner"));
+        assert_eq!(env0["CALLER_VAR"].as_str(), Some("1"));
+        assert!(env0.get("DYLD_INSERT_LIBRARIES").is_none());
+
+        let env1 = &calls[1]["env"];
+        assert_eq!(env1["PATH"].as_str(), Some("/stub/bin:/usr/bin"));
+        assert!(env1.get("STUB_HOST_VAR").is_none());
     }
 }

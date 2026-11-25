@@ -613,26 +613,7 @@ pub fn find_local_executable_with_env(
     program: &str,
     env: &BTreeMap<String, String>,
 ) -> Option<PathBuf> {
-    let program = program.trim();
-    if program.is_empty() {
-        return None;
-    }
-    if Path::new(program).components().count() != 1 {
-        let p = PathBuf::from(program);
-        return p.is_file().then_some(p);
-    }
-    let paths = canban_exec::local_search_paths(env);
-    let candidates: &[&str] = if program == "hc" {
-        &["hc", "herdr-core"]
-    } else {
-        std::slice::from_ref(&program)
-    };
-    for name in candidates {
-        if let Some(found) = paths.iter().map(|p| p.join(name)).find(|p| p.is_file()) {
-            return Some(found);
-        }
-    }
-    None
+    find_local_executable_with_runner(program, env, &canban_exec::SystemRunner)
 }
 
 #[cfg(feature = "local-exec")]
@@ -641,9 +622,6 @@ pub fn find_local_executable_with_runner(
     env: &BTreeMap<String, String>,
     runner: &dyn canban_exec::CommandRunner,
 ) -> Option<PathBuf> {
-    if runner.is_system() {
-        return find_local_executable_with_env(program, env);
-    }
     let program = program.trim();
     if program.is_empty() {
         return None;
@@ -653,8 +631,21 @@ pub fn find_local_executable_with_runner(
     } else {
         std::slice::from_ref(&program)
     };
+    if !runner.is_system() {
+        for name in candidates {
+            if let Some(found) = runner.find_executable_with_env(name, env) {
+                return Some(found);
+            }
+        }
+        return None;
+    }
+    if Path::new(program).components().count() != 1 {
+        let p = PathBuf::from(program);
+        return p.is_file().then_some(p);
+    }
+    let paths = canban_exec::local_search_paths(env);
     for name in candidates {
-        if let Some(found) = runner.find_executable_with_env(name, env) {
+        if let Some(found) = paths.iter().map(|p| p.join(name)).find(|p| p.is_file()) {
             return Some(found);
         }
     }
@@ -668,9 +659,7 @@ pub fn executable(program: &str) -> String {
 
 #[cfg(feature = "local-exec")]
 pub fn executable_with_env(program: &str, env: &BTreeMap<String, String>) -> String {
-    find_local_executable_with_env(program, env)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| program.into())
+    executable_with_runner(program, env, &canban_exec::SystemRunner)
 }
 
 #[cfg(feature = "local-exec")]
@@ -2345,6 +2334,57 @@ mod machine_tests {
         assert_eq!(
             find_local_executable_with_env(&missing.display().to_string(), &env),
             Some(missing)
+        );
+    }
+
+    #[cfg(feature = "local-exec")]
+    #[test]
+    fn find_local_executable_with_runner_uses_injected_runner_and_herdr_core_fallback() {
+        struct MockRunner {
+            bins: BTreeMap<String, PathBuf>,
+        }
+
+        impl canban_exec::CommandRunner for MockRunner {
+            fn run(&self, _spec: &canban_exec::CommandSpec) -> Result<canban_exec::ExecOutput> {
+                bail!("unexpected run")
+            }
+            fn find_executable(&self, name: &str) -> Option<PathBuf> {
+                self.bins.get(name).cloned()
+            }
+            fn shell_env(&self) -> canban_exec::ShellEnvSnapshot {
+                canban_exec::ShellEnvSnapshot::default()
+            }
+            fn hostname(&self) -> String {
+                "mock".into()
+            }
+        }
+
+        let env = BTreeMap::new();
+        let fallback_runner = MockRunner {
+            bins: BTreeMap::from([("herdr-core".into(), PathBuf::from("/sim/bin/herdr-core"))]),
+        };
+        assert_eq!(
+            find_local_executable_with_runner("hc", &env, &fallback_runner),
+            Some(PathBuf::from("/sim/bin/herdr-core"))
+        );
+        assert_eq!(
+            executable_with_runner("hc", &env, &fallback_runner),
+            "/sim/bin/herdr-core"
+        );
+        assert_eq!(
+            executable_with_runner("missing-tool", &env, &fallback_runner),
+            "missing-tool"
+        );
+
+        let hc_runner = MockRunner {
+            bins: BTreeMap::from([
+                ("hc".into(), PathBuf::from("/sim/bin/hc")),
+                ("herdr-core".into(), PathBuf::from("/sim/bin/herdr-core")),
+            ]),
+        };
+        assert_eq!(
+            find_local_executable_with_runner("hc", &env, &hc_runner),
+            Some(PathBuf::from("/sim/bin/hc"))
         );
     }
 }

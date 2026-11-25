@@ -94,7 +94,7 @@ impl AppServer {
                 )?;
                 db.save(&c)?;
             }
-            crate::workflow::stop_card(db, &self.config(), &c.id, "cancelled", now_ms)?;
+            crate::workflow::stop_card(db, &self.herdr_client(), &c.id, "cancelled", now_ms)?;
             for mut entry in db.list::<TerminalEntry>()? {
                 if let Some(a) = &mut entry.agent
                     && a.card_id == c.id
@@ -646,7 +646,13 @@ impl AppServer {
                 db.save(&n)?;
             }
 
-            crate::workflow::stop_card(db, &config, &c.id, "cancelled", resolved_at)?;
+            crate::workflow::stop_card(
+                db,
+                &self.herdr_client_with_config(config.clone()),
+                &c.id,
+                "cancelled",
+                resolved_at,
+            )?;
             for mut entry in terminals {
                 if let Some(a) = &mut entry.agent
                     && a.card_id == c.id

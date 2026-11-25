@@ -899,7 +899,7 @@ impl AppServer {
         let raw_output = strp(&p, "output")?;
         let include_archived = p["include_archived"].as_bool().unwrap_or(false);
         let overwrite = p["overwrite"].as_bool().unwrap_or(false);
-        let host = Host::new(self.config());
+        let host = Host::with_runner(self.config(), self.exec_runner.clone());
         let output_path = expand_absolute_path(&host, raw_output, "output")?;
         let outcome =
             self.export_project_to_path(raw_pid, &output_path, include_archived, overwrite, false)?;
@@ -1432,7 +1432,7 @@ impl AppServer {
 
     pub(super) fn import_project(&self, p: Value) -> Result<Value> {
         let raw_file = strp(&p, "file")?;
-        let host = Host::new(self.config());
+        let host = Host::with_runner(self.config(), self.exec_runner.clone());
         let archive_path = expand_absolute_path(&host, raw_file, "file")?;
         let target_directory = self.resolve_project_directory(&p)?;
         let name_override = p

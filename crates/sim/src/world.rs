@@ -44,6 +44,25 @@ pub const SIM_PORT: u16 = 7680;
 pub const PRIMARY_CLIENT: &str = "ui-client";
 const MAX_BUFFERED_CLIENT_EVENTS: usize = 2_048;
 
+/// Derives a deterministic, platform-independent 64-bit seed for a simulated host and boot
+/// generation (FNV-1a + SplitMix64 mixing; no randomized hasher).
+///
+/// Boot generation `0` is initial startup; each [`SimWorld::bounce_server`] increments the host's
+/// boot generation so post-bounce `DeterministicIdGen` sequences never collide with pre-bounce IDs
+/// while remaining 100% reproducible for the same world seed.
+pub(crate) fn derive_host_seed(world_seed: u64, host_name: &str, boot_generation: u64) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ world_seed;
+    for &b in host_name.as_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^= 0xff ^ boot_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    h = h.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^ (h >> 31)
+}
+
 /// Configuration for constructing a [`SimWorld`].
 #[derive(Clone, Debug)]
 pub struct SimWorldConfig {
@@ -246,6 +265,7 @@ pub struct SimServerHandle {
     pub token: Arc<Mutex<Option<String>>>,
     pub crashed: Arc<AtomicBool>,
     pub ever_bounced: Arc<AtomicBool>,
+    pub boot_generation: Arc<AtomicU64>,
 }
 
 impl SimServerHandle {
@@ -317,7 +337,10 @@ pub struct SimWorld {
 
 impl SimWorld {
     pub fn new(config: SimWorldConfig) -> Result<Self> {
-        let tempdir = tempfile::tempdir().context("create sim tempdir")?;
+        let tempdir = tempfile::Builder::new()
+            .prefix(&format!("canban-sim-{}-", config.seed))
+            .tempdir()
+            .context("create sim tempdir")?;
         let root = tempdir.path().to_path_buf();
         let client_data_dir = root.join(PRIMARY_CLIENT);
         std::fs::create_dir_all(&client_data_dir)?;
@@ -382,6 +405,7 @@ impl SimWorld {
             let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let crashed = Arc::new(AtomicBool::new(false));
             let ever_bounced = Arc::new(AtomicBool::new(false));
+            let boot_generation = Arc::new(AtomicU64::new(0));
 
             let h_home = home.clone();
             let h_clock = clock.clone();
@@ -391,7 +415,9 @@ impl SimWorld {
             let h_slot = Arc::clone(&server_slot);
             let h_abrupt = Arc::clone(&abrupt_slot);
             let h_token = Arc::clone(&token_slot);
+            let h_boot_gen = Arc::clone(&boot_generation);
             let h_name = host_name.clone();
+            let h_seed = config.seed;
             let h_durability = config.fs_durability;
             let h_sqlite_sync_off = config.sqlite_synchronous_off;
             let h_disable_watchers = config.disable_os_watchers;
@@ -410,12 +436,19 @@ impl SimWorld {
                 let slot = Arc::clone(&h_slot);
                 let abrupt_slot = Arc::clone(&h_abrupt);
                 let token_slot = Arc::clone(&h_token);
+                let boot_gen = h_boot_gen.fetch_add(1, Ordering::SeqCst);
                 let host_label = h_name.clone();
+                let id_gen = canban_types::deterministic_id_gen(derive_host_seed(
+                    h_seed,
+                    &host_label,
+                    boot_gen,
+                ));
                 let stream_policy = h_stream_policy.clone();
                 async move {
                     #[allow(clippy::needless_update)]
                     let env = ServerRuntimeEnv {
                         clock,
+                        id_gen,
                         herdr_backend: Some(herdr),
                         github_transport: Some(host_github),
                         inline_workers: true,
@@ -473,6 +506,7 @@ impl SimWorld {
                     token: token_slot,
                     crashed,
                     ever_bounced,
+                    boot_generation,
                 },
             );
         }
@@ -1877,5 +1911,284 @@ where
     match res {
         Ok(v) => Ok(v),
         Err(err) => Err(world.annotate_err(err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn same_seed_produces_identical_server_ids_tokens_and_post_bounce_ids() {
+        let mut world_a = SimWorld::new(SimWorldConfig::desktop_default(202_677, "unit_det_ids_a"))
+            .expect("world_a init");
+        let mut world_b = SimWorld::new(SimWorldConfig::desktop_default(202_677, "unit_det_ids_b"))
+            .expect("world_b init");
+        let world_diff = SimWorld::new(SimWorldConfig::desktop_default(
+            202_678,
+            "unit_det_ids_diff",
+        ))
+        .expect("world_diff init");
+
+        let mut distinct_ids = BTreeSet::new();
+        for host in ["local-server", "remote-a", "remote-b"] {
+            let srv_a = world_a.server(host).expect("srv_a");
+            let srv_b = world_b.server(host).expect("srv_b");
+            let srv_diff = world_diff.server(host).expect("srv_diff");
+
+            let state_a = srv_a.call("app.state", json!({})).expect("state_a");
+            let state_b = srv_b.call("app.state", json!({})).expect("state_b");
+            let state_diff = srv_diff.call("app.state", json!({})).expect("state_diff");
+            let inst_a = state_a["revision"][1].as_str().expect("state_instance_a");
+            let inst_b = state_b["revision"][1].as_str().expect("state_instance_b");
+            let inst_diff = state_diff["revision"][1]
+                .as_str()
+                .expect("state_instance_diff");
+
+            assert_eq!(
+                srv_a.server_id(),
+                srv_b.server_id(),
+                "[{host}] server_id must be identical for the same seed"
+            );
+            assert_eq!(
+                inst_a, inst_b,
+                "[{host}] state_instance must be identical for the same seed"
+            );
+            assert_ne!(
+                inst_a, inst_diff,
+                "[{host}] different seeds must produce distinct state_instances"
+            );
+            assert_eq!(
+                world_a.servers[host].token(),
+                world_b.servers[host].token(),
+                "[{host}] issued device token must be identical for the same seed"
+            );
+            assert_ne!(
+                srv_a.server_id(),
+                srv_diff.server_id(),
+                "[{host}] different seeds must produce distinct server_ids"
+            );
+            assert!(
+                distinct_ids.insert(srv_a.server_id().to_owned()),
+                "[{host}] each host in a world must derive a unique server_id"
+            );
+            assert_eq!(
+                world_a.servers[host].boot_generation.load(Ordering::SeqCst),
+                1
+            );
+        }
+
+        // Create a project and card directly on remote-a in both worlds -> identical deterministic IDs
+        // generated by the host's injected `DeterministicIdGen`.
+        let dir_a = world_a.project_dir("det-repo").expect("dir_a");
+        let dir_b = world_b.project_dir("det-repo").expect("dir_b");
+        let pa = world_a
+            .server_call(
+                "remote-a",
+                "project.create",
+                json!({ "name": "Det", "directory": dir_a }),
+            )
+            .expect("pa");
+        let pb = world_b
+            .server_call(
+                "remote-a",
+                "project.create",
+                json!({ "name": "Det", "directory": dir_b }),
+            )
+            .expect("pb");
+        let pid_a = pa["id"].as_str().unwrap().to_owned();
+        let pid_b = pb["id"].as_str().unwrap().to_owned();
+        assert_eq!(pid_a, pid_b, "project ID must be deterministic");
+
+        let pre_card_a = world_a
+            .server_call(
+                "remote-a",
+                "card.create",
+                json!({ "project_id": pid_a, "title": "Pre-bounce" }),
+            )
+            .expect("pre_card_a")["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pre_card_b = world_b
+            .server_call(
+                "remote-a",
+                "card.create",
+                json!({ "project_id": pid_b, "title": "Pre-bounce" }),
+            )
+            .expect("pre_card_b")["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(pre_card_a, pre_card_b, "card ID must be deterministic");
+
+        // Bounce remote-a in both worlds: persistent server_id stays the same, boot_generation
+        // advances, state_instance & newly created card IDs are non-colliding AND identical across
+        // both same-seed worlds!
+        let pre_server_id = world_a.server("remote-a").unwrap().server_id().to_owned();
+        let pre_state_instance = world_a
+            .server("remote-a")
+            .unwrap()
+            .call("app.state", json!({}))
+            .unwrap()["revision"][1]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        world_a.bounce_server("remote-a").expect("bounce a");
+        world_b.bounce_server("remote-a").expect("bounce b");
+        world_a.heal_and_quiesce(15_000).expect("heal a");
+        world_b.heal_and_quiesce(15_000).expect("heal b");
+
+        assert_eq!(
+            world_a.servers["remote-a"]
+                .boot_generation
+                .load(Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            world_a.server("remote-a").unwrap().server_id(),
+            pre_server_id,
+            "server_id must persist across bounce"
+        );
+        assert_eq!(
+            world_b.server("remote-a").unwrap().server_id(),
+            pre_server_id
+        );
+        let post_state_a = world_a
+            .server("remote-a")
+            .unwrap()
+            .call("app.state", json!({}))
+            .unwrap()["revision"][1]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let post_state_b = world_b
+            .server("remote-a")
+            .unwrap()
+            .call("app.state", json!({}))
+            .unwrap()["revision"][1]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(
+            post_state_a, pre_state_instance,
+            "post-bounce boot generation must derive a distinct state_instance"
+        );
+        assert_eq!(
+            post_state_a, post_state_b,
+            "post-bounce state_instance must remain deterministic across same-seed runs"
+        );
+
+        let post_card_a = world_a
+            .server_call(
+                "remote-a",
+                "card.create",
+                json!({ "project_id": pid_a, "title": "Post-bounce" }),
+            )
+            .expect("post_card_a")["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let post_card_b = world_b
+            .server_call(
+                "remote-a",
+                "card.create",
+                json!({ "project_id": pid_b, "title": "Post-bounce" }),
+            )
+            .expect("post_card_b")["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(
+            post_card_a, pre_card_a,
+            "post-bounce card ID must not collide with pre-bounce card ID"
+        );
+        assert_eq!(
+            post_card_a, post_card_b,
+            "post-bounce card ID must be identical across same-seed runs"
+        );
+    }
+
+    #[test]
+    fn sim_world_boot_and_agent_launch_incur_zero_login_shell_probe() {
+        // Drop any cached host login-shell snapshot so any accidental call into
+        // `canban_exec::local_shell_env_snapshot()` / `local_search_paths()` would trigger a real
+        // interactive login-shell probe (~3s) and inject host env values instead of SimExec's.
+        canban_exec::invalidate_local_shell_env_cache();
+        let started = Instant::now();
+
+        let mut cfg = SimWorldConfig::desktop_default(202_699, "unit_zero_shell_probe");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+
+        // Exercise host-env, catalog, diagnostics, and env preview RPCs on remote-a.
+        let srv = world.server("remote-a").expect("remote-a server");
+        let refreshed = srv
+            .call("host.env.refresh", json!({}))
+            .expect("host.env.refresh");
+        assert_eq!(
+            refreshed["shell"].as_str(),
+            Some("/bin/sh"),
+            "host.env.refresh must read SimExec::shell_env(), not host login shell"
+        );
+        assert_eq!(refreshed["var_count"].as_u64(), Some(4));
+        let _ = srv.call("agent.catalog", json!({})).expect("agent.catalog");
+        let _ = srv
+            .call("diagnostics.status", json!({}))
+            .expect("diagnostics.status");
+        let preview = srv.call("env.preview", json!({})).expect("env.preview");
+        let preview_path = preview["rows"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|r| r["key"].as_str() == Some("PATH")))
+            .and_then(|r| r["display_value"].as_str());
+        assert_eq!(
+            preview_path,
+            Some("/sim/bin:/usr/bin:/bin"),
+            "env.preview must resolve PATH from SimExec::shell_env(), not host login shell"
+        );
+
+        // Launch a real agent terminal through `terminal.create` (which exercises both
+        // `canban_profiles::executable_with_runner` and
+        // `canban_herdr::Client::launch_with_policy_unset_and_size`).
+        let dir = world.project_dir("zero-probe-proj").expect("project_dir");
+        let proj = world
+            .client_call(
+                "project.create",
+                json!({ "host_id": "remote-a", "name": "ZeroProbe", "directory": dir }),
+                None,
+            )
+            .expect("project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let _ = world
+            .client_call(
+                "terminal.create",
+                json!({
+                    "project_id": pid,
+                    "agent": true,
+                    "profile_id": "developer",
+                    "prompt": "verify zero shell probe"
+                }),
+                Some(&pid),
+            )
+            .expect("terminal.create");
+
+        let herdr = world.herdr("remote-a").expect("remote-a herdr");
+        let addrs = herdr.terminal_addresses();
+        assert!(
+            !addrs.is_empty(),
+            "expected terminal.create to launch a simulated terminal in SimHerdr"
+        );
+        assert!(
+            world.servers["remote-a"].exec.blocked_commands().is_empty(),
+            "unexpected OS commands blocked during zero-probe test: {:?}",
+            world.servers["remote-a"].exec.blocked_commands()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cold-start SimWorld + terminal launch took {:?} (>= 2s implies a real shell probe leaked!)",
+            started.elapsed()
+        );
     }
 }

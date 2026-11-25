@@ -720,7 +720,7 @@ impl AppServer {
             .is_some_and(|s| !s.trim().is_empty());
         let explicit_card_arg = p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
             || super::parse_card_number(&p["card"]).is_some();
-        let host = canban_herdr::host::Host::new(self.config());
+        let host = canban_herdr::host::Host::with_runner(self.config(), self.exec_runner.clone());
         let valid_dir = |path: &str| Path::new(path).is_absolute() && host.is_dir(Path::new(path));
         let inherited_dir = inherited_cwd
             .as_deref()
@@ -1088,7 +1088,11 @@ impl AppServer {
                     .as_deref()
                     .is_some_and(|s| s.starts_with("herdr:"));
                 if !argv.is_empty() && !is_herdr_template {
-                    argv[0] = canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
+                    argv[0] = canban_profiles::executable_with_runner(
+                        &argv[0],
+                        &client.config.hc_env,
+                        self.exec_runner.as_ref(),
+                    );
                 }
                 argv
             } else {

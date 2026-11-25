@@ -6,12 +6,12 @@ fn latest(db: Db<'_>, id: &str) -> Result<WorkflowRevision> {
 }
 pub(super) fn stop_card(
     db: Db<'_>,
-    config: &Config,
+    client: &canban_herdr::Client,
     card: &str,
     state: &str,
     now_ms: u64,
 ) -> Result<()> {
-    crate::scripts::kill_card_scripts_db(db, config, card);
+    crate::scripts::kill_card_scripts_db(db, client, card);
     engine::stop_card_at(db, card, state, now_ms)
 }
 pub(super) fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
@@ -383,14 +383,20 @@ impl AppServer {
                 );
                 ensure!(run.active(), "Workflow already ended");
                 if let Some(card_id) = run.card_id.as_deref() {
-                    stop_card(db, &self.config(), card_id, "cancelled", self.now_ms())?;
+                    stop_card(
+                        db,
+                        &self.herdr_client(),
+                        card_id,
+                        "cancelled",
+                        self.now_ms(),
+                    )?;
                     let mut card: Card = db.get(card_id)?;
                     card.human_gate = None;
                     card.attention = None;
                     card.revision += 1;
                     db.save(&card)?;
                 } else {
-                    crate::scripts::kill_run_scripts_db(db, &self.config(), &run.id);
+                    crate::scripts::kill_run_scripts_db(db, &self.herdr_client(), &run.id);
                     engine::stop_run_at(db, &run.id, "cancelled", self.now_ms())?;
                 }
                 Ok(json!({"stopped":true,"live_agents_terminated":false}))
@@ -630,7 +636,13 @@ impl AppServer {
                         card.attention = None;
                     }
                 } else {
-                    stop_card(db, &config, &card.id, "superseded", now_ms)?;
+                    stop_card(
+                        db,
+                        &self.herdr_client_with_config(config.clone()),
+                        &card.id,
+                        "superseded",
+                        now_ms,
+                    )?;
                     card.human_gate = None;
                     card.attention = None;
                     let stage = card.stage.clone();

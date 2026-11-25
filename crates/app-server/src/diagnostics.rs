@@ -175,8 +175,22 @@ impl AppServer {
             &config.hc_env,
             self.exec_runner.as_ref(),
         );
-        let tailscale_ip = network::detect_tailscale_ipv4().ok();
-        let service_mgr = network::service_status(&self.home);
+        let tailscale_ip = if self.exec_runner.is_system() {
+            network::detect_tailscale_ipv4().ok()
+        } else {
+            None
+        };
+        let service_mgr = if self.exec_runner.is_system() {
+            network::service_status(&self.home)
+        } else {
+            json!({
+                "kind": "simulated",
+                "installed": false,
+                "active": false,
+                "linger": Value::Null,
+                "unit_path": Value::Null,
+            })
+        };
 
         let mut profile_checks = Vec::new();
         for prof in config.profiles.iter().filter(|pr| pr.enabled) {
