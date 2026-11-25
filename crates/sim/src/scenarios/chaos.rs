@@ -1,14 +1,20 @@
 //! Swarm-Testing Randomized Chaos DST + Deterministic Shrinker (`chaos::shrink`):
-//! - Per-seed randomized `ChaosProfile` (Desktop vs Mobile, clock skews, latencies, fail rates,
-//!   enabled fault families, workflow+GitHub co-location, `max_agents`, `FaultyStream` byte-stream
-//!   faults, 2-client concurrent races, cron schedules, worktree+script+delivery+git conflicts,
-//!   live `device.revoke`+re-pair, secondary `project.archive`/`restore`, `FsDurability::Full`
-//!   + `sqlite_synchronous_off: false` profile slice, and operation weights).
-//! - Deterministic materialized `Vec<ChaosOp>` enabling exact replay & prefix+ddmin shrinking.
-//! - Explicit expected-error classifier (no blanket `let _ =`), never discards unexpected
-//!   `SyncItemState::Failed`, exercises ALL `SyncAction` variants (`Retry`, `UseMine`, `UseEdited`,
-//!   `Discard` on expected `Conflict` only), fixed `env.save` object payload with offline secret
-//!   tracking and convergence checks, and `oracle.check_step_invariants` after EVERY op!
+//! - 6 focused deterministic Swarm Sub-Profiles (`ChaosSubProfile`: `DeliveryAndStorage`,
+//!   `WorkflowAndSchedule`, `AuthMultiClientBlackhole`, `SessionsMentionReclaimClock`,
+//!   `BundleGitHubPartition`, `FullMix`) selected deterministically from `seed` and preserved
+//!   verbatim by `chaos::shrink`.
+//! - 100% materialized `Vec<ChaosOp>` enabling exact replay & prefix+ddmin shrinking across
+//!   core Kanban CRUD, workflows (`agent`/`script`/`deliver` + `workflow.apply` hot-updates),
+//!   cron schedules (`skip`/`queue`/`allow`, carded & cardless), worktree + merge batches,
+//!   `StorageFaultInjector` (`Busy`/`IoError`), `FaultyStream` byte-stream faults & >keepalive
+//!   half-open blackhole stalls, 2-client concurrent races, `agent.*` / `@mention` / `card.adopt`
+//!   / `viewer.presence`, `review.*` / `github.pr.*`, `draft.*`, `subscription.*`,
+//!   `project.export` / `project.import`, live `device.revoke` + re-pair, secondary
+//!   `project.archive`/`restore`, NTP clock steps/drift, and `FsDurability::Full` slices.
+//! - Honest Armed-vs-Fired fault telemetry (`record_fault_armed` / `record_fault_fired`) with
+//!   zero vacuous armed faults, split `chaos.delivery_batch_entered` vs `chaos.worktree_delivery_ops`,
+//!   live-stream-gated `chaos.faulty_stream_*`, and a natural-quiesce verification slice before
+//!   final forced heal and strict `InvariantOracle` checks.
 use crate::{
     exec::{SimGitRepo, SimShellOutcome},
     github::SimIssue,
@@ -16,17 +22,24 @@ use crate::{
     net::StreamFaultConfig,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
-    world::{FsDurability, PRIMARY_CLIENT, SIM_PORT, SimWorld, SimWorldConfig, run_with_world},
+    world::{
+        FsDurability, PRIMARY_CLIENT, SIM_PORT, SimWorld, SimWorldConfig, StorageFaultKind,
+        run_with_world,
+    },
 };
 use anyhow::{Context, Result, bail, ensure};
-use canban_types::{EnvEntryMeta, HostTransport, SavedHost, SyncAction, SyncItemState};
+use canban_types::{
+    EnvEntryMeta, HostTransport, SavedHost, SyncAction, SyncItemState, unqualified_entity_id,
+};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 const SECONDARY_CLIENT: &str = "ui-client-2";
+const NUM_CHAOS_OP_KINDS: usize = 38;
 
 const CHAOS_WORKFLOW_YAML: &str = r#"schema: 12
 id: chaos-flow
@@ -86,14 +99,7 @@ steps:
     with:
       profile: codex
       instruction: Execute chaos step in worktree
-    next: approve
-  - id: approve
-    stage: review
-    uses: approval
-    with:
-      title: Chaos Approval
     next: ship
-    on_changes_requested: plan
   - id: ship
     stage: review
     uses: deliver
@@ -106,6 +112,22 @@ steps:
       max_conflict_attempts: 2
     next: finish
     on_changes_requested: plan
+  - id: finish
+    stage: review
+    uses: complete
+"#;
+
+const CHAOS_REVIEW_WORKTREE_YAML: &str = r#"schema: 12
+id: chaos-review-flow
+name: Chaos Review Worktree Flow
+workspace:
+  create_worktree: true
+  sync_base: false
+on:
+  start:
+    event: manual
+    start_at: finish
+steps:
   - id: finish
     stage: review
     uses: complete
@@ -132,6 +154,11 @@ on:
     timezone: UTC
     overlap: queue
     start_at: cron_work
+  cron_allow:
+    cron: "* * * * *"
+    timezone: UTC
+    overlap: allow
+    start_at: cron_work
 steps:
   - id: cron_work
     uses: agent
@@ -143,9 +170,55 @@ steps:
     uses: complete
 "#;
 
+/// Focused Swarm Sub-Profile concentrating stress on specific subsystems while preserving
+/// exact determinism for `(seed, ops)` replay and `chaos::shrink`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChaosSubProfile {
+    DeliveryAndStorage,
+    WorkflowAndSchedule,
+    AuthMultiClientBlackhole,
+    SessionsMentionReclaimClock,
+    BundleGitHubPartition,
+    FullMix,
+}
+
+impl ChaosSubProfile {
+    pub const ALL: [ChaosSubProfile; 6] = [
+        Self::DeliveryAndStorage,
+        Self::WorkflowAndSchedule,
+        Self::AuthMultiClientBlackhole,
+        Self::SessionsMentionReclaimClock,
+        Self::BundleGitHubPartition,
+        Self::FullMix,
+    ];
+
+    pub fn from_seed(seed: u64) -> Self {
+        match seed % 6 {
+            0 => Self::DeliveryAndStorage,
+            1 => Self::WorkflowAndSchedule,
+            2 => Self::AuthMultiClientBlackhole,
+            3 => Self::SessionsMentionReclaimClock,
+            4 => Self::BundleGitHubPartition,
+            _ => Self::FullMix,
+        }
+    }
+
+    pub fn snake_name(self) -> &'static str {
+        match self {
+            Self::DeliveryAndStorage => "delivery_and_storage",
+            Self::WorkflowAndSchedule => "workflow_and_schedule",
+            Self::AuthMultiClientBlackhole => "auth_multi_client_blackhole",
+            Self::SessionsMentionReclaimClock => "sessions_mention_reclaim_clock",
+            Self::BundleGitHubPartition => "bundle_github_partition",
+            Self::FullMix => "full_mix",
+        }
+    }
+}
+
 /// Per-seed Swarm-Testing profile randomizing topology, fault envelopes, and op weights.
 #[derive(Clone, Debug)]
 pub struct ChaosProfile {
+    pub sub_profile: ChaosSubProfile,
     pub desktop_local: bool,
     pub remote_hosts: Vec<String>,
     pub host_clock_skew_ms: BTreeMap<String, i64>,
@@ -164,20 +237,40 @@ pub struct ChaosProfile {
     pub enable_clock_faults: bool,
     pub colocate_workflow_and_github: bool,
     pub enable_stream_faults: bool,
+    pub enable_half_open_blackhole: bool,
     pub enable_multi_client: bool,
     pub enable_schedules: bool,
     pub enable_worktree_delivery: bool,
     pub enable_auth_faults: bool,
     pub enable_project_archive: bool,
+    pub enable_storage_faults: bool,
+    pub enable_sessions: bool,
+    pub enable_workflow_hot_update: bool,
+    pub enable_review_pr: bool,
+    pub enable_drafts: bool,
+    pub enable_subscriptions: bool,
+    pub enable_bundle_ops: bool,
     pub full_durability: bool,
-    pub weights: [u32; 30],
+    pub weights: [u32; NUM_CHAOS_OP_KINDS],
 }
 
 impl ChaosProfile {
     pub fn from_seed(seed: u64) -> Self {
+        let sub_profile = ChaosSubProfile::from_seed(seed);
         let mut rng = StdRng::seed_from_u64(seed ^ 0xA5A5_5A5A_C0DE_CAFE);
-        let desktop_local = rng.random_bool(0.65);
-        let two_remotes = !desktop_local || rng.random_bool(0.8);
+
+        let desktop_local = match sub_profile {
+            ChaosSubProfile::AuthMultiClientBlackhole => rng.random_bool(0.70),
+            ChaosSubProfile::SessionsMentionReclaimClock => rng.random_bool(0.75),
+            ChaosSubProfile::BundleGitHubPartition => rng.random_bool(0.75),
+            _ => rng.random_bool(0.65),
+        };
+        let two_remotes = match sub_profile {
+            ChaosSubProfile::AuthMultiClientBlackhole | ChaosSubProfile::BundleGitHubPartition => {
+                true
+            }
+            _ => !desktop_local || rng.random_bool(0.8),
+        };
         let remote_hosts: Vec<String> = if two_remotes {
             vec!["remote-a".into(), "remote-b".into()]
         } else {
@@ -188,51 +281,312 @@ impl ChaosProfile {
             host_clock_skew_ms.insert(h.clone(), rng.random_range(-15_000..=15_000));
         }
         let min_latency_ms = rng.random_range(1..=10);
-        let max_latency_ms = min_latency_ms + rng.random_range(10..=50);
-        let base_fail_rate = if rng.random_bool(0.3) {
-            rng.random_range(0.01..=0.05)
-        } else {
-            0.0
+        let max_latency_ms = min_latency_ms + rng.random_range(10..=40);
+        let base_fail_rate = match sub_profile {
+            ChaosSubProfile::DeliveryAndStorage => 0.0,
+            _ if rng.random_bool(0.25) => rng.random_range(0.01..=0.04),
+            _ => 0.0,
         };
-        let max_agents = rng.random_range(1..=4);
+        let max_agents = match sub_profile {
+            ChaosSubProfile::WorkflowAndSchedule => rng.random_range(1..=2),
+            ChaosSubProfile::DeliveryAndStorage => rng.random_range(2..=4),
+            _ => rng.random_range(1..=4),
+        };
 
-        // Swarm-testing toggles: most features on, occasionally disabled to concentrate
-        // deeper stress onto the remaining active subsystems.
-        let enable_partitions = rng.random_bool(0.90);
-        let enable_crashes = rng.random_bool(0.85);
-        let enable_client_bounce = rng.random_bool(0.80);
-        let enable_herdr_faults = rng.random_bool(0.90);
-        let enable_github_faults = rng.random_bool(0.85);
-        let enable_workflows = rng.random_bool(0.90);
-        let enable_reclaim_jumps = rng.random_bool(0.75);
-        let enable_env_sync = desktop_local && rng.random_bool(0.90);
-        let enable_clock_faults = rng.random_bool(0.85);
-        let colocate_workflow_and_github = rng.random_bool(0.60);
-        let enable_stream_faults = rng.random_bool(0.80);
-        let enable_multi_client = rng.random_bool(0.55);
-        let enable_schedules = rng.random_bool(0.60);
-        let enable_worktree_delivery = enable_workflows && rng.random_bool(0.55);
-        let enable_auth_faults = rng.random_bool(0.50);
-        let enable_project_archive = rng.random_bool(0.55);
         // Deterministic full-durability slice (`FsDurability::Full` + `PRAGMA synchronous = FULL`)
         // on 1/8th of seeds so CI stays fast while verifying real fsync paths under chaos.
         let full_durability = seed.is_multiple_of(8);
 
-        let mut weights = [0u32; 30];
-        for w in &mut weights {
-            *w = rng.random_range(1..=5);
-        }
-        // Keep core mutations & newly expanded chaos seams well-represented.
-        weights[0] += 3; // CreateCard
-        weights[1] += 3; // UpdateCard
-        weights[4] += 2; // AddComment
-        weights[24] += 3; // StreamFault
-        weights[25] += 2; // MultiClientRace
-        weights[26] += 2; // ScheduleOp
-        weights[27] += 2; // WorktreeDeliveryOp
-        weights[28] += 2; // AuthRevokeRecover
-        weights[29] += 2; // ProjectArchiveRestore
+        let (
+            enable_partitions,
+            enable_crashes,
+            enable_client_bounce,
+            enable_herdr_faults,
+            enable_github_faults,
+            enable_workflows,
+            enable_reclaim_jumps,
+            enable_env_sync,
+            enable_clock_faults,
+            colocate_workflow_and_github,
+            enable_stream_faults,
+            enable_half_open_blackhole,
+            enable_multi_client,
+            enable_schedules,
+            enable_worktree_delivery,
+            enable_auth_faults,
+            enable_project_archive,
+            enable_storage_faults,
+            enable_sessions,
+            enable_workflow_hot_update,
+            enable_review_pr,
+            enable_drafts,
+            enable_subscriptions,
+            enable_bundle_ops,
+        ) = match sub_profile {
+            ChaosSubProfile::DeliveryAndStorage => (
+                false,                 // partitions off so delivery batches progress cleanly
+                true,                  // server crash/bounce
+                rng.random_bool(0.30), // occasional client bounce
+                rng.random_bool(0.45), // herdr faults
+                false,                 // github faults off
+                true,                  // workflows ON
+                false,                 // reclaim jumps off
+                desktop_local && rng.random_bool(0.35),
+                false,                 // clock faults off
+                false,                 // colocate off
+                false,                 // stream faults off
+                false,                 // blackhole off
+                false,                 // single client
+                false,                 // schedules off
+                true,                  // worktree + uses: deliver ON
+                false,                 // auth faults off
+                rng.random_bool(0.30), // archive/restore
+                true,                  // storage Busy/IoError ON
+                rng.random_bool(0.30), // sessions
+                rng.random_bool(0.35), // workflow hot-update
+                false,                 // review/PR off (deliver owns worktree merge)
+                rng.random_bool(0.35), // drafts
+                false,                 // subscriptions off
+                false,                 // bundle ops off
+            ),
+            ChaosSubProfile::WorkflowAndSchedule => (
+                rng.random_bool(0.40), // light partitions
+                true,                  // crashes
+                rng.random_bool(0.35), // client bounce
+                true,                  // herdr faults
+                rng.random_bool(0.35), // github faults
+                true,                  // workflows ON
+                true,                  // time jumps for cron ticks
+                desktop_local && rng.random_bool(0.45),
+                rng.random_bool(0.40), // clock faults
+                rng.random_bool(0.50), // colocate
+                false,                 // stream faults off
+                false,                 // blackhole off
+                rng.random_bool(0.30), // multi-client
+                true,                  // cron schedules ON
+                rng.random_bool(0.50), // sometimes delivery workflow
+                false,                 // auth faults off
+                rng.random_bool(0.30), // archive
+                rng.random_bool(0.60), // storage faults
+                rng.random_bool(0.40), // sessions
+                true,                  // workflow.apply hot-updates ON
+                false,                 // review/PR off
+                rng.random_bool(0.30), // drafts
+                rng.random_bool(0.50), // subscriptions
+                false,                 // bundle ops off
+            ),
+            ChaosSubProfile::AuthMultiClientBlackhole => (
+                true,                  // partitions ON
+                rng.random_bool(0.55), // crashes
+                true,                  // client bounce ON
+                rng.random_bool(0.30), // light herdr faults
+                rng.random_bool(0.35), // light github
+                rng.random_bool(0.35), // light workflows
+                false,                 // reclaim jumps off
+                desktop_local,         // env sync ON when desktop
+                rng.random_bool(0.40), // clock faults
+                false,                 // colocate
+                true,                  // stream faults ON
+                true,                  // >keepalive half-open blackhole ON
+                true,                  // 2-client concurrent races ON
+                false,                 // schedules off
+                false,                 // worktree delivery off
+                true,                  // device.revoke + re-pair ON
+                rng.random_bool(0.35), // archive
+                rng.random_bool(0.40), // storage faults
+                false,                 // sessions off
+                false,                 // workflow hot-update off
+                false,                 // review/PR off
+                rng.random_bool(0.50), // drafts under multi-client
+                false,                 // subscriptions off
+                false,                 // bundle ops off
+            ),
+            ChaosSubProfile::SessionsMentionReclaimClock => (
+                rng.random_bool(0.45), // partitions
+                true,                  // server crash/bounce
+                rng.random_bool(0.45), // client bounce
+                true,                  // herdr faults ON
+                rng.random_bool(0.35), // github
+                rng.random_bool(0.55), // workflows
+                true,                  // 65..95s reclaim jumps ON
+                desktop_local,         // env sync ON (exercises clock jumps + LWW!)
+                true,                  // NTP clock jumps/drift ON
+                false,                 // colocate
+                rng.random_bool(0.40), // stream faults
+                false,                 // blackhole off
+                rng.random_bool(0.40), // multi-client
+                false,                 // schedules off
+                false,                 // delivery off
+                false,                 // auth off
+                rng.random_bool(0.30), // archive
+                rng.random_bool(0.55), // storage faults
+                true,                  // agent.open/@mention/adopt/reply/interrupt/end ON
+                false,                 // workflow hot-update off
+                false,                 // review/PR off
+                rng.random_bool(0.40), // drafts
+                rng.random_bool(0.40), // subscriptions
+                false,                 // bundle ops off
+            ),
+            ChaosSubProfile::BundleGitHubPartition => (
+                true,                  // network partitions ON
+                rng.random_bool(0.55), // crashes
+                rng.random_bool(0.45), // client bounce
+                rng.random_bool(0.35), // light herdr
+                true,                  // GitHub sync + faults ON
+                false,                 // avoid conflicting auto-delivery workflow on review cards
+                false,                 // reclaim jumps off
+                desktop_local && rng.random_bool(0.65),
+                rng.random_bool(0.35), // clock faults
+                true,                  // co-locate GitHub + SimGitRepo on remote-a for github.pr.*
+                rng.random_bool(0.45), // stream faults
+                false,                 // blackhole off
+                rng.random_bool(0.45), // multi-client
+                false,                 // schedules off
+                false,                 // delivery off (review.merge / github.pr.* owns worktrees)
+                false,                 // auth off
+                true,                  // project.archive/restore ON
+                rng.random_bool(0.45), // storage faults
+                false,                 // sessions off
+                false,                 // hot-update off
+                true,                  // review.* + github.pr.* ON
+                true,                  // draft.* ON
+                true,                  // subscription.* ON
+                true,                  // project.export / project.import ON
+            ),
+            ChaosSubProfile::FullMix => {
+                let wf = rng.random_bool(0.90);
+                let deliv = wf && rng.random_bool(0.60);
+                let rev_pr = !deliv && rng.random_bool(0.75);
+                (
+                    rng.random_bool(0.85), // partitions
+                    rng.random_bool(0.85), // crashes
+                    rng.random_bool(0.80), // client bounce
+                    rng.random_bool(0.85), // herdr faults
+                    rng.random_bool(0.85), // github faults
+                    wf,                    // workflows
+                    rng.random_bool(0.75), // reclaim jumps
+                    desktop_local && rng.random_bool(0.90),
+                    rng.random_bool(0.80), // clock faults
+                    rev_pr || rng.random_bool(0.60),
+                    rng.random_bool(0.80), // stream faults
+                    rng.random_bool(0.65), // half-open blackhole
+                    rng.random_bool(0.65), // multi-client
+                    rng.random_bool(0.65), // schedules
+                    deliv,                 // worktree delivery
+                    rng.random_bool(0.60), // auth faults
+                    rng.random_bool(0.65), // project archive
+                    rng.random_bool(0.85), // storage faults
+                    rng.random_bool(0.75), // sessions
+                    wf && rng.random_bool(0.65),
+                    rev_pr,                // review/PR
+                    rng.random_bool(0.75), // drafts
+                    rng.random_bool(0.75), // subscriptions
+                    rng.random_bool(0.65), // bundle ops
+                )
+            }
+        };
 
+        let mut weights = [0u32; NUM_CHAOS_OP_KINDS];
+        for w in &mut weights {
+            *w = rng.random_range(1..=3);
+        }
+
+        // Apply focused sub-profile weight boosts.
+        match sub_profile {
+            ChaosSubProfile::DeliveryAndStorage => {
+                weights[0] += 6; // CreateCard
+                weights[1] += 2; // UpdateCard
+                weights[11] += 10; // StartWorkflow
+                weights[12] += 6; // DecideWorkflow (approve precheck script_gate)
+                weights[13] = 1; // StopWorkflow (keep rare so runs reach ship!)
+                weights[14] += 12; // ReportExecution (biased completed)
+                weights[20] += 8; // CrashAndBounceServer
+                weights[22] += 3; // AdvanceTime
+                weights[27] += 14; // WorktreeDeliveryOp (deliver + @merger + conflicts)
+                weights[30] += 10; // StorageFault (Busy/IoError)
+                weights[3] = 1; // ArchiveCard rare
+            }
+            ChaosSubProfile::WorkflowAndSchedule => {
+                weights[0] += 4; // CreateCard
+                weights[2] += 6; // MoveCard
+                weights[3] += 4; // ArchiveCard
+                weights[11] += 8; // StartWorkflow
+                weights[12] += 6; // DecideWorkflow
+                weights[13] += 4; // StopWorkflow
+                weights[14] += 8; // ReportExecution
+                weights[18] += 5; // HerdrFault
+                weights[20] += 5; // CrashAndBounceServer
+                weights[22] += 8; // AdvanceTime (cron boundaries)
+                weights[26] += 12; // ScheduleOp
+                weights[27] += 6; // WorktreeDeliveryOp (when enabled)
+                weights[30] += 4; // StorageFault
+                weights[33] += 8; // WorkflowHotUpdate (workflow.apply)
+            }
+            ChaosSubProfile::AuthMultiClientBlackhole => {
+                weights[0] += 4; // CreateCard
+                weights[1] += 4; // UpdateCard
+                weights[4] += 3; // AddComment
+                weights[10] += 4; // SaveGlobalEnv
+                weights[19] += 8; // NetworkFault (partitions/oneway/hold/loss)
+                weights[21] += 6; // BounceClient
+                weights[24] += 10; // StreamFault (chunk/rst/eof/stall)
+                weights[25] += 10; // MultiClientRace
+                weights[28] += 10; // AuthRevokeRecover (invite/pair/revoke/re-pair)
+                weights[31] += 8; // HalfOpenBlackhole (>keepalive)
+            }
+            ChaosSubProfile::SessionsMentionReclaimClock => {
+                weights[0] += 4; // CreateCard
+                weights[4] += 4; // AddComment
+                weights[8] += 4; // CreateShellTerminal
+                weights[9] += 4; // EndShellTerminal
+                weights[10] += 5; // SaveGlobalEnv (tests LWW under NTP jumps!)
+                weights[15] += 8; // ViewerPresence
+                weights[18] += 10; // HerdrFault (PTY crash/lose/overflow)
+                weights[20] += 5; // CrashAndBounceServer
+                weights[22] += 8; // AdvanceTime (65..95s reclaim jumps)
+                weights[23] += 10; // ClockFault (forward/backward NTP steps & drift)
+                weights[30] += 4; // StorageFault
+                weights[32] += 14; // AgentSessionOp (agent.open/@mention/reply/interrupt/end/adopt)
+            }
+            ChaosSubProfile::BundleGitHubPartition => {
+                weights[0] += 4; // CreateCard
+                weights[1] += 3; // UpdateCard
+                weights[4] += 4; // AddComment (drives subscription deliveries)
+                weights[17] += 10; // GitHubUpsertAndSync
+                weights[19] += 8; // NetworkFault (partitions)
+                weights[29] += 7; // ProjectArchiveRestore
+                weights[34] += 12; // ReviewAndPrOp (review.* + github.pr.*)
+                weights[35] += 8; // DraftOp (draft.*)
+                weights[36] += 8; // SubscriptionOp (subscription.* + event.list)
+                weights[37] += 8; // ProjectBundleOp (project.export / project.import)
+            }
+            ChaosSubProfile::FullMix => {
+                weights[0] += 3; // CreateCard
+                weights[1] += 3; // UpdateCard
+                weights[4] += 2; // AddComment
+                weights[11] += 3; // StartWorkflow
+                weights[14] += 3; // ReportExecution
+                weights[17] += 2; // GitHubUpsertAndSync
+                weights[19] += 3; // NetworkFault
+                weights[20] += 3; // CrashAndBounceServer
+                weights[24] += 4; // StreamFault
+                weights[25] += 3; // MultiClientRace
+                weights[26] += 3; // ScheduleOp
+                weights[27] += 4; // WorktreeDeliveryOp
+                weights[28] += 3; // AuthRevokeRecover
+                weights[29] += 3; // ProjectArchiveRestore
+                weights[30] += 3; // StorageFault
+                weights[31] += 3; // HalfOpenBlackhole
+                weights[32] += 3; // AgentSessionOp
+                weights[33] += 2; // WorkflowHotUpdate
+                weights[34] += 3; // ReviewAndPrOp
+                weights[35] += 2; // DraftOp
+                weights[36] += 2; // SubscriptionOp
+                weights[37] += 2; // ProjectBundleOp
+            }
+        }
+
+        // Zero out weights for disabled subsystems so op selection never wastes steps.
         if !enable_env_sync {
             weights[10] = 0;
         }
@@ -278,8 +632,33 @@ impl ChaosProfile {
         if !enable_project_archive {
             weights[29] = 0;
         }
+        if !enable_storage_faults {
+            weights[30] = 0;
+        }
+        if !enable_half_open_blackhole {
+            weights[31] = 0;
+        }
+        if !enable_sessions {
+            weights[32] = 0;
+        }
+        if !enable_workflow_hot_update {
+            weights[33] = 0;
+        }
+        if !enable_review_pr {
+            weights[34] = 0;
+        }
+        if !enable_drafts {
+            weights[35] = 0;
+        }
+        if !enable_subscriptions {
+            weights[36] = 0;
+        }
+        if !enable_bundle_ops {
+            weights[37] = 0;
+        }
 
         Self {
+            sub_profile,
             desktop_local,
             remote_hosts,
             host_clock_skew_ms,
@@ -298,11 +677,19 @@ impl ChaosProfile {
             enable_clock_faults,
             colocate_workflow_and_github,
             enable_stream_faults,
+            enable_half_open_blackhole,
             enable_multi_client,
             enable_schedules,
             enable_worktree_delivery,
             enable_auth_faults,
             enable_project_archive,
+            enable_storage_faults,
+            enable_sessions,
+            enable_workflow_hot_update,
+            enable_review_pr,
+            enable_drafts,
+            enable_subscriptions,
+            enable_bundle_ops,
             full_durability,
             weights,
         }
@@ -453,6 +840,63 @@ pub enum ChaosOp {
         archive: bool,
         tag: u32,
     },
+    /// SQLite `StorageFaultInjector` (`Busy` / `IoError`) armed immediately before a real write RPC
+    /// followed by rollback verification and idempotent retry.
+    StorageFault {
+        host_idx: usize,
+        is_io_error: bool,
+        mutate_kind: u8,
+        card_pick: usize,
+        tag: u32,
+    },
+    /// Over-keepalive bidirectional half-open blackhole stall (`half_open_blackhole_for_ms` /
+    /// `arm_half_open_blackhole`) advancing virtual time past `app.subscribe` keepalive timeout,
+    /// then healing via `heal_host`.
+    HalfOpenBlackhole {
+        remote_idx: usize,
+        duration_ms: u64,
+        mutate: bool,
+        card_pick: usize,
+        tag: u32,
+    },
+    /// Interactive agent session & mention ops (`agent.open`, `agent.bind`, `@mention` comment,
+    /// `agent.reply`, `agent.interrupt`, `agent.end`, `card.adopt`).
+    AgentSessionOp {
+        kind: u8,
+        card_pick: usize,
+        tag: u32,
+    },
+    /// Hot-update workflow YAML on `wf_host` via `workflow.sources` -> `workflow.apply`.
+    WorkflowHotUpdate {
+        tag: u32,
+    },
+    /// Review & GitHub PR delivery RPCs (`review.run_agent`, `review.preview`, `review.send_agent`,
+    /// `review.merge`, `github.pr.publish`, `github.pr.refresh`, `github.pr.merge`).
+    ReviewAndPrOp {
+        kind: u8,
+        card_pick: usize,
+        tag: u32,
+    },
+    /// Drafts RPCs (`draft.save` create/update/conflict/tombstone + `draft.list`).
+    DraftOp {
+        kind: u8,
+        host_idx: usize,
+        draft_pick: usize,
+        tag: u32,
+    },
+    /// Durable event journal & subscriptions (`subscription.save`, `subscription.list`,
+    /// `event.list`, `subscription.deliveries`, `subscription.ack`, `subscription.retry`).
+    SubscriptionOp {
+        kind: u8,
+        card_pick: usize,
+        tag: u32,
+    },
+    /// Project bundle roundtrip (`project.export`, secret-leak inspection, `project.import`
+    /// cross-host & duplicate rejection).
+    ProjectBundleOp {
+        kind: u8,
+        tag: u32,
+    },
 }
 
 /// Result of deterministic shrinking for a failing Chaos seed.
@@ -530,17 +974,34 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
             },
             12 => ChaosOp::DecideWorkflow {
                 run_pick: rng.random_range(0..32),
-                approve: rng.random_bool(0.65),
+                approve: if profile.sub_profile == ChaosSubProfile::DeliveryAndStorage {
+                    rng.random_bool(0.85)
+                } else {
+                    rng.random_bool(0.65)
+                },
                 tag,
             },
             13 => ChaosOp::StopWorkflow {
                 run_pick: rng.random_range(0..32),
             },
-            14 => ChaosOp::ReportExecution {
-                term_pick: rng.random_range(0..32),
-                state_idx: rng.random_range(0..3),
-                tag,
-            },
+            14 => {
+                let state_idx = if profile.sub_profile == ChaosSubProfile::DeliveryAndStorage {
+                    if rng.random_bool(0.75) {
+                        1 // completed
+                    } else {
+                        rng.random_range(0..3)
+                    }
+                } else if profile.enable_worktree_delivery && rng.random_bool(0.55) {
+                    1
+                } else {
+                    rng.random_range(0..3)
+                };
+                ChaosOp::ReportExecution {
+                    term_pick: rng.random_range(0..32),
+                    state_idx,
+                    tag,
+                }
+            }
             15 => ChaosOp::ViewerPresence {
                 card_pick: rng.random_range(0..64),
                 attach: rng.random_bool(0.6),
@@ -568,7 +1029,12 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
                 second_client: profile.enable_multi_client && rng.random_bool(0.40),
             },
             22 => {
-                let secs = if profile.enable_reclaim_jumps && rng.random_bool(0.35) {
+                let jump_prob = match profile.sub_profile {
+                    ChaosSubProfile::SessionsMentionReclaimClock
+                    | ChaosSubProfile::WorkflowAndSchedule => 0.55,
+                    _ => 0.35,
+                };
+                let secs = if profile.enable_reclaim_jumps && rng.random_bool(jump_prob) {
                     rng.random_range(65..=95)
                 } else {
                     rng.random_range(1..=6)
@@ -578,13 +1044,14 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
             23 => ChaosOp::ClockFault {
                 host_idx: rng.random_range(0..16),
                 kind: rng.random_range(0..2),
-                delta_ms: rng.random_range(-4_000..=6_000),
+                delta_ms: rng.random_range(-6_000..=8_000),
                 drift_ppm: rng.random_range(-5_000..=5_000),
             },
             24 => ChaosOp::StreamFault {
                 remote_idx: rng.random_range(0..16),
                 kind: rng.random_range(0..7),
-                byte_limit: rng.random_range(16..=96),
+                // Small byte budgets guarantee RST/EOF fire cleanly on a single RPC frame.
+                byte_limit: rng.random_range(8..=36),
                 mutate: rng.random_bool(0.45),
                 card_pick: rng.random_range(0..64),
                 tag,
@@ -599,11 +1066,11 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
             26 => ChaosOp::ScheduleOp {
                 kind: rng.random_range(0..4),
                 sched_pick: rng.random_range(0..16),
-                enable: rng.random_bool(0.55),
+                enable: rng.random_bool(0.60),
                 tag,
             },
             27 => ChaosOp::WorktreeDeliveryOp {
-                kind: rng.random_range(0..5),
+                kind: rng.random_range(0..6),
                 card_pick: rng.random_range(0..64),
                 tag,
             },
@@ -611,8 +1078,50 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
                 recover: rng.random_bool(0.55),
                 tag,
             },
-            _ => ChaosOp::ProjectArchiveRestore {
+            29 => ChaosOp::ProjectArchiveRestore {
                 archive: rng.random_bool(0.55),
+                tag,
+            },
+            30 => ChaosOp::StorageFault {
+                host_idx: rng.random_range(0..16),
+                is_io_error: rng.random_bool(0.50),
+                mutate_kind: rng.random_range(0..3),
+                card_pick: rng.random_range(0..64),
+                tag,
+            },
+            31 => ChaosOp::HalfOpenBlackhole {
+                remote_idx: rng.random_range(0..16),
+                // Exceeds the 45s `app.subscribe` heartbeat timeout (`3 * 15s`) so keepalive
+                // timeout + disconnect + reconnect genuinely fires under virtual time!
+                duration_ms: rng.random_range(48_000..=55_000),
+                mutate: rng.random_bool(0.40),
+                card_pick: rng.random_range(0..64),
+                tag,
+            },
+            32 => ChaosOp::AgentSessionOp {
+                kind: rng.random_range(0..6),
+                card_pick: rng.random_range(0..64),
+                tag,
+            },
+            33 => ChaosOp::WorkflowHotUpdate { tag },
+            34 => ChaosOp::ReviewAndPrOp {
+                kind: rng.random_range(0..6),
+                card_pick: rng.random_range(0..64),
+                tag,
+            },
+            35 => ChaosOp::DraftOp {
+                kind: rng.random_range(0..4),
+                host_idx: rng.random_range(0..16),
+                draft_pick: rng.random_range(0..8),
+                tag,
+            },
+            36 => ChaosOp::SubscriptionOp {
+                kind: rng.random_range(0..5),
+                card_pick: rng.random_range(0..64),
+                tag,
+            },
+            _ => ChaosOp::ProjectBundleOp {
+                kind: rng.random_range(0..3),
                 tag,
             },
         };
@@ -655,12 +1164,28 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "revision",
                 "stale",
                 "conflict",
+                "draft_conflict",
+                "sqlite_busy",
+                "database is locked",
+                "sqlite_ioerr",
+                "disk i/o error",
                 "archived",
                 "removed",
-                "restore the card before editing",
-                "restore the card before commenting",
+                "restore the card before",
                 "terminal has no core binding",
                 "terminal has no runtime binding",
+                "terminal has no card agent run",
+                "agent has no terminal",
+                "original herdr core is unavailable",
+                "caller terminal",
+                "caller runtime",
+                "caller directory",
+                "already adopted",
+                "not live",
+                "provider conversation changed",
+                "already replied",
+                "end the previous agent",
+                "not retryable",
                 "not found",
                 "unknown card",
                 "unknown terminal",
@@ -673,21 +1198,36 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "already stopped",
                 "already ended",
                 "already exists",
+                "already merged",
                 "resolve the existing human decision",
+                "human review must be approved",
+                "resolve the existing pr delivery",
+                "resolved cards do not",
+                "review is stale",
+                "merge unavailable",
+                "no commits",
+                "nothing to merge",
+                "no worktree",
+                "worktree",
+                "pull request",
+                "not linked",
+                "has no branch",
+                "only failed deliveries can be retried",
+                "only pending",
                 "not waiting",
                 "not active",
                 "workflow run is not",
-                "resolved cards do not start new workflows",
                 "batch is not",
                 "live terminal",
                 "unresolved",
                 "cherry-pick",
-                "worktree is dirty",
                 "schedule is disabled",
                 "terminal finished",
                 "finished",
                 "rate limit",
                 "403",
+                "409",
+                "422",
                 "429",
                 "500",
                 "503",
@@ -743,11 +1283,18 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
         } else {
             "profile:mobile"
         });
+        world
+            .trace
+            .mix_str(&format!("sub_profile:{}", profile.sub_profile.snake_name()));
         world.hit(if profile.desktop_local {
             "chaos.profile.desktop"
         } else {
             "chaos.profile.mobile"
         });
+        world.hit(&format!(
+            "chaos.profile.{}",
+            profile.sub_profile.snake_name()
+        ));
         if profile.colocate_workflow_and_github {
             world.hit("chaos.profile.colocated_wf_github");
         }
@@ -767,6 +1314,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
         // Workflow host is always `remote-a` (present in both desktop & mobile topologies).
         let wf_host = "remote-a".to_owned();
         let mut wf_dir = String::new();
+        let needs_git_repo = profile.enable_worktree_delivery || profile.enable_review_pr;
 
         // Create one active project per host in deterministic order.
         let mut host_projects: Vec<(String, String)> = Vec::new();
@@ -774,27 +1322,31 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             let dir = world.project_dir(&format!("chaos-{host}"))?;
             if host == &wf_host {
                 wf_dir = dir.clone();
-                if profile.enable_worktree_delivery {
+                if needs_git_repo {
                     let exec = world.exec_runner(&wf_host).unwrap();
                     exec.register_git_repo(&dir, SimGitRepo::default());
-                    exec.set_script_default(
-                        "chaos_precheck",
-                        SimShellOutcome::ok("chaos precheck passed\n")
-                            .with_output("verdict", "green"),
-                    );
-                    exec.set_shell_default(
-                        "sim-chaos-test",
-                        SimShellOutcome::ok("chaos batch tests passed\n"),
-                    );
-                    if seed.is_multiple_of(2) {
-                        exec.enqueue_script_outcomes(
+                    if profile.enable_worktree_delivery {
+                        exec.set_script_default(
                             "chaos_precheck",
-                            [SimShellOutcome::fail(
-                                2,
-                                "chaos precheck attempt 1\n",
-                                "simulated precheck lint fail\n",
-                            )],
+                            SimShellOutcome::ok("chaos precheck passed\n")
+                                .with_output("verdict", "green"),
                         );
+                        exec.set_shell_default(
+                            "sim-chaos-test",
+                            SimShellOutcome::ok("chaos batch tests passed\n"),
+                        );
+                        if seed.is_multiple_of(2)
+                            && profile.sub_profile != ChaosSubProfile::DeliveryAndStorage
+                        {
+                            exec.enqueue_script_outcomes(
+                                "chaos_precheck",
+                                [SimShellOutcome::fail(
+                                    2,
+                                    "chaos precheck attempt 1\n",
+                                    "simulated precheck lint fail\n",
+                                )],
+                            );
+                        }
                     }
                 }
             }
@@ -803,7 +1355,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 "name": format!("Chaos {host}"),
                 "directory": dir,
             });
-            if host == &wf_host && profile.enable_worktree_delivery {
+            if host == &wf_host && needs_git_repo {
                 create_params["target_branch"] = json!("main");
             }
             let p = world.client_call("project.create", create_params, None)?;
@@ -817,15 +1369,15 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             host_projects.push((host.clone(), pid));
         }
 
-        // Install chaos workflow(s) (normal or worktree+script+deliver, plus optional cron schedule)
-        // on `remote-a`.
+        // Install chaos workflow(s) (normal, worktree+script+deliver, or review-worktree,
+        // plus optional cron schedule) on `remote-a`.
         let wf_pid = host_projects
             .iter()
             .find(|(h, _)| h == &wf_host)
             .map(|(_, p)| p.clone())
             .unwrap();
         let mut schedule_entries: Vec<(String, String)> = Vec::new(); // (schedule_id, rule_id)
-        if profile.enable_workflows || profile.enable_schedules {
+        if profile.enable_workflows || profile.enable_schedules || profile.enable_review_pr {
             let sources = world.client_call(
                 "workflow.sources",
                 json!({ "project_id": wf_pid }),
@@ -839,6 +1391,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     CHAOS_WORKFLOW_YAML
                 };
                 yaml_sources.push(json!({ "filename": "chaos-flow.yaml", "source": wf_yaml }));
+            } else if profile.enable_review_pr {
+                yaml_sources.push(json!({
+                    "filename": "chaos-review-flow.yaml",
+                    "source": CHAOS_REVIEW_WORKTREE_YAML,
+                }));
             }
             if profile.enable_schedules {
                 yaml_sources
@@ -954,8 +1511,64 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             ));
         }
 
-        // Bind simulated GitHub repo — optionally CO-LOCATED on `remote-a` alongside workflows!
-        let gh_host = if profile.colocate_workflow_and_github || remotes.len() == 1 {
+        // Optional dedicated source project for `project.export` -> `project.import` roundtrips
+        // so cross-host imported project IDs never disturb primary `host_projects` IDs.
+        let bundle_src_host = if profile.desktop_local {
+            "local".to_owned()
+        } else {
+            "remote-a".to_owned()
+        };
+        let bundle_dst_host: Option<String> =
+            all_hosts.iter().find(|h| *h != &bundle_src_host).cloned();
+        let mut bundle_src_pid: Option<String> = None;
+        let mut bundle_exported_path: Option<String> = None;
+        let mut bundle_imported_hosts: BTreeSet<String> = BTreeSet::new();
+        if profile.enable_bundle_ops && bundle_dst_host.is_some() {
+            let b_dir = world.project_dir("chaos-bundle-src")?;
+            let bp = world.client_call(
+                "project.create",
+                json!({
+                    "host_id": bundle_src_host,
+                    "name": format!("Chaos Bundle Src {seed}"),
+                    "directory": b_dir,
+                }),
+                None,
+            )?;
+            let b_pid = bp["id"].as_str().unwrap().to_owned();
+            let bc = world.client_call(
+                "card.create",
+                json!({
+                    "project_id": b_pid,
+                    "title": format!("Bundle Card {seed}"),
+                    "body": "exported across hosts",
+                }),
+                Some(&b_pid),
+            )?;
+            let b_cid = bc["id"].as_str().unwrap().to_owned();
+            oracle.record_committed_card(
+                server_key(&bundle_src_host),
+                &b_cid,
+                &b_pid,
+                bc["revision"].as_u64().unwrap_or(1),
+            );
+            let _ = world.client_call(
+                "note.save",
+                json!({
+                    "project_id": b_pid,
+                    "title": "Bundle Note",
+                    "body": format!("bundle-note-{seed}"),
+                }),
+                Some(&b_pid),
+            )?;
+            bundle_src_pid = Some(b_pid);
+        }
+
+        // Bind simulated GitHub repo — co-located on `remote-a` whenever `enable_review_pr` or
+        // `colocate_workflow_and_github` is active (or single-remote topology).
+        let gh_host = if profile.colocate_workflow_and_github
+            || profile.enable_review_pr
+            || remotes.len() == 1
+        {
             "remote-a".to_owned()
         } else {
             "remote-b".to_owned()
@@ -966,7 +1579,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             .map(|(_, p)| p.clone())
             .unwrap();
         let gh_repo = "acme/chaos-repo";
-        if profile.enable_github_faults {
+        if profile.enable_github_faults || profile.enable_review_pr {
             world.github.add_repo(gh_repo, 9001, "main");
             world
                 .github
@@ -1004,39 +1617,51 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
         }
 
         // Deterministic creation-ordered entity lists (NEVER indexed by random UUID sort order!).
-        // TrackedCard records whether the ID is a real server-confirmed ID (`shared = true`)
-        // or a client-local optimistic offline temp ID (`shared = false`, valid only on `creator`
-        // while still present in `creator`'s merged_snapshot before outbox rewrite).
         let mut cards: Vec<TrackedCard> = Vec::new();
-        let mut shell_terms: Vec<(String, String)> = Vec::new(); // (pid, qualified_tid)
+        let mut shell_terms: Vec<(String, String, String)> = Vec::new(); // (host, pid, qualified_tid)
         let mut tracked_wf_runs: Vec<(String, String, String)> = Vec::new(); // (host, pid, qualified_run_id)
         let mut archived_cards: BTreeSet<String> = BTreeSet::new();
+        let mut seen_delivery_batches: BTreeSet<String> = BTreeSet::new();
+        let mut draft_revs: BTreeMap<(String, String), u64> = BTreeMap::new();
+        let mut tracked_subs: Vec<(String, String, String)> = Vec::new(); // (host, pid, sub_id)
+        let mut gh_clock_high_water_ms: u64 =
+            world.server(&gh_host).map(|s| s.now_ms()).unwrap_or(0);
 
-        // Seed 1 initial card per host so early ops always have targets.
+        // Seed 1 initial card per host (2 on `wf_host` in delivery/review profiles) so early ops
+        // always have targets without risking exhausting the last active card.
         for (idx, (host, pid)) in host_projects.iter().enumerate() {
-            let c = world.client_call(
-                "card.create",
-                json!({
-                    "project_id": pid,
-                    "title": format!("Seed Card {idx}"),
-                    "body": "initial",
-                }),
-                Some(pid),
-            )?;
-            let cid = c["id"].as_str().unwrap().to_owned();
-            oracle.record_committed_card(
-                server_key(host),
-                &cid,
-                pid,
-                c["revision"].as_u64().unwrap_or(1),
-            );
-            cards.push(TrackedCard {
-                host: host.clone(),
-                pid: pid.clone(),
-                cid,
-                creator: PRIMARY_CLIENT,
-                shared: true,
-            });
+            let seed_count = if host == &wf_host
+                && (profile.enable_worktree_delivery || profile.enable_review_pr)
+            {
+                2
+            } else {
+                1
+            };
+            for sub in 0..seed_count {
+                let c = world.client_call(
+                    "card.create",
+                    json!({
+                        "project_id": pid,
+                        "title": format!("Seed Card {idx}-{sub}"),
+                        "body": "initial",
+                    }),
+                    Some(pid),
+                )?;
+                let cid = c["id"].as_str().unwrap().to_owned();
+                oracle.record_committed_card(
+                    server_key(host),
+                    &cid,
+                    pid,
+                    c["revision"].as_u64().unwrap_or(1),
+                );
+                cards.push(TrackedCard {
+                    host: host.clone(),
+                    pid: pid.clone(),
+                    cid,
+                    creator: PRIMARY_CLIENT,
+                    shared: true,
+                });
+            }
         }
 
         world.advance(Duration::from_millis(200))?;
@@ -1074,10 +1699,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     )? && let Some(cid) = res["id"].as_str()
                     {
                         let srv_name = server_key(host);
-                        let raw_cid = canban_types::split_qualified_host_id(cid)
-                            .map(|(_, r)| r)
-                            .unwrap_or(cid);
-                        // Only record durability when confirmed on server (not offline-queued).
+                        let raw_cid = strip_host_id(cid);
                         let confirmed = if let Some(srv_card) = world
                             .server(srv_name)
                             .and_then(|s| s.snapshot().ok())
@@ -1156,29 +1778,33 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             *card_pick,
                         )
                     {
-                        let rev = lookup_card_rev(world, &cid);
-                        let srv_name = server_key(&host);
-                        let raw_cid = canban_types::split_qualified_host_id(&cid)
-                            .map(|(_, r)| r.to_owned())
-                            .unwrap_or_else(|| cid.clone());
-                        let archived_ok = check_expected_chaos_err(
-                            "card.archive",
-                            world.client_call(
+                        let host_active = cards
+                            .iter()
+                            .filter(|c| {
+                                c.shared && c.host == host && !archived_cards.contains(&c.cid)
+                            })
+                            .count();
+                        if host_active > 1 {
+                            let rev = lookup_card_rev(world, &cid);
+                            let srv_name = server_key(&host);
+                            let raw_cid = strip_host_id(&cid);
+                            let archived_ok = check_expected_chaos_err(
                                 "card.archive",
-                                json!({ "card_id": cid, "revision": rev }),
-                                Some(&pid),
-                            ),
-                        )?
-                        .is_some();
-                        // Under link loss, `card.archive` can commit on the server and drop the
-                        // reply packet; inspect server state so chaos doesn't treat the card as active.
-                        let server_archived = world
-                            .server(srv_name)
-                            .and_then(|s| s.snapshot().ok())
-                            .and_then(|snap| snap.cards.into_iter().find(|c| c.id == raw_cid))
-                            .is_some_and(|c| !c.active());
-                        if archived_ok || server_archived {
-                            archived_cards.insert(cid);
+                                world.client_call(
+                                    "card.archive",
+                                    json!({ "card_id": cid, "revision": rev }),
+                                    Some(&pid),
+                                ),
+                            )?
+                            .is_some();
+                            let server_archived = world
+                                .server(srv_name)
+                                .and_then(|s| s.snapshot().ok())
+                                .and_then(|snap| snap.cards.into_iter().find(|c| c.id == raw_cid))
+                                .is_some_and(|c| !c.active());
+                            if archived_ok || server_archived {
+                                archived_cards.insert(cid);
+                            }
                         }
                     }
                 }
@@ -1257,7 +1883,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             )
                             .map(|_| Value::Null);
                             if auth_revoked && host == auth_host {
-                                // A revoked host rejects routed `card.get` cleanly with `auth_failed`.
                                 let _ = check_expected_chaos_err("open_card(revoked)", res)?;
                             } else {
                                 let _ = res?;
@@ -1266,7 +1891,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     }
                 }
                 ChaosOp::CreateShellTerminal { host_idx, tag } => {
-                    let (_host, pid) = &host_projects[*host_idx % host_projects.len()];
+                    let (host, pid) = &host_projects[*host_idx % host_projects.len()];
                     if let Some(res) = check_expected_chaos_err(
                         "terminal.create",
                         world.client_call(
@@ -1285,14 +1910,13 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         {
                             InvariantOracle::assert_terminal_in_project(world, &tid, pid)?;
                         }
-                        shell_terms.push((pid.clone(), tid));
+                        shell_terms.push((host.clone(), pid.clone(), tid));
                     }
                 }
                 ChaosOp::EndShellTerminal { term_pick } => {
                     if !shell_terms.is_empty() {
                         let idx = *term_pick % shell_terms.len();
-                        let (pid, tid) = shell_terms.remove(idx);
-                        // Verify close-fallback priority invariant before ending!
+                        let (_host, pid, tid) = shell_terms.remove(idx);
                         let snap = world.client_merged_snapshot()?;
                         let rows = canban_ui::terminals::entries(&snap);
                         if rows.iter().any(|e| e.saved.id == tid) {
@@ -1370,54 +1994,17 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 }
                 ChaosOp::StartWorkflow { card_pick, tag } => {
                     if profile.enable_workflows {
-                        let wf_cards: Vec<_> = cards
-                            .iter()
-                            .filter(|c| {
-                                c.shared && c.host == wf_host && !archived_cards.contains(&c.cid)
-                            })
-                            .collect();
-                        if !wf_cards.is_empty() {
-                            let tc = wf_cards[*card_pick % wf_cards.len()];
-                            let (pid, cid) = (&tc.pid, &tc.cid);
-                            if let Some(res) = check_expected_chaos_err(
-                                "workflow.start",
-                                world.client_call(
-                                    "workflow.start",
-                                    json!({
-                                        "workflow_id": "chaos-flow",
-                                        "card_id": cid,
-                                        "entry": "start",
-                                        "request_key": format!("chaos-wf-{seed}-{tag}"),
-                                    }),
-                                    Some(pid),
-                                ),
-                            )? && let Some(rid) = res["id"].as_str()
-                            {
-                                let q_rid = if rid.contains("::") {
-                                    rid.to_owned()
-                                } else {
-                                    canban_types::qualify_host_id(&wf_host, rid)
-                                };
-                                let raw_rid = strip_host_id(&q_rid);
-                                if let Some(srv_run) = world
-                                    .server(&wf_host)
-                                    .and_then(|s| s.snapshot().ok())
-                                    .and_then(|snap| {
-                                        snap.workflow_runs.into_iter().find(|r| r.id == raw_rid)
-                                    })
-                                {
-                                    oracle.record_committed_workflow_run(
-                                        &wf_host,
-                                        &srv_run.id,
-                                        &srv_run.project_id,
-                                        &srv_run.workflow_id,
-                                        srv_run.visit,
-                                    );
-                                }
-                                tracked_wf_runs.push((wf_host.clone(), pid.clone(), q_rid));
-                                world.hit("chaos.workflow_start");
-                            }
-                        }
+                        start_workflow_on_wf_host(
+                            world,
+                            &mut oracle,
+                            &wf_host,
+                            &cards,
+                            &archived_cards,
+                            &mut tracked_wf_runs,
+                            *card_pick,
+                            seed,
+                            *tag,
+                        )?;
                     }
                 }
                 ChaosOp::DecideWorkflow {
@@ -1425,40 +2012,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     approve,
                     tag,
                 } => {
-                    if let Some(srv) = world.server(&wf_host) {
-                        let snap = srv.snapshot()?;
-                        let mut waiting: Vec<_> = snap
-                            .workflow_runs
-                            .iter()
-                            .filter(|r| r.state == "waiting_approval")
-                            .collect();
-                        waiting.sort_by_key(|r| (r.visit, r.definition_revision));
-                        if !waiting.is_empty() {
-                            let wf = waiting[*run_pick % waiting.len()];
-                            if let Some(raw_cid) = wf.card_id.as_deref()
-                                && let Some(card) = snap.cards.iter().find(|c| c.id == raw_cid)
-                            {
-                                let q_rid = canban_types::qualify_host_id(&wf_host, &wf.id);
-                                let decision = if *approve { "approve" } else { "rework" };
-                                let _ = check_expected_chaos_err(
-                                    "workflow.decide",
-                                    world.client_call(
-                                        "workflow.decide",
-                                        json!({
-                                            "run_id": q_rid,
-                                            "visit": wf.visit,
-                                            "revision": card.revision,
-                                            "decision": decision,
-                                            "feedback": "chaos decision",
-                                            "request_key": format!("chaos-dec-{seed}-{tag}"),
-                                        }),
-                                        Some(&wf_pid),
-                                    ),
-                                )?;
-                                world.hit("chaos.workflow_decide");
-                            }
-                        }
-                    }
+                    let _ = decide_waiting_workflow(
+                        world, &wf_host, &wf_pid, *run_pick, *approve, seed, *tag,
+                    )?;
                 }
                 ChaosOp::StopWorkflow { run_pick } => {
                     if !tracked_wf_runs.is_empty() {
@@ -1478,66 +2034,17 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     state_idx,
                     tag,
                 } => {
-                    if let Some(srv) = world.server(&wf_host) {
-                        let snap = srv.snapshot()?;
-                        let mut running: Vec<_> = snap
-                            .terminals
-                            .iter()
-                            .filter(|t| {
-                                t.agent
-                                    .as_ref()
-                                    .is_some_and(|a| a.state == "running" && a.terminal.is_some())
-                            })
-                            .collect();
-                        running.sort_by_key(|t| t.created_at);
-                        if !running.is_empty() {
-                            let t = running[*term_pick % running.len()];
-                            let states = ["working", "completed", "blocked"];
-                            let state = states[*state_idx % states.len()];
-                            // When worktree delivery is active and an agent completes, commit its
-                            // simulated work inside the card's worktree first so `uses: deliver`
-                            // enters real `merge_batch` integration!
-                            let mut finished_addr: Option<String> = None;
-                            if state == "completed"
-                                && profile.enable_worktree_delivery
-                                && let Some(agent) = t.agent.as_ref()
-                            {
-                                if let Some(wt_path) = snap
-                                    .cards
-                                    .iter()
-                                    .find(|c| c.id == agent.card_id)
-                                    .and_then(|c| c.worktree.as_deref())
-                                    && Path::new(wt_path).is_dir()
-                                    && let Some(exec) = world.exec_runner(&wf_host)
-                                {
-                                    let _ = exec.commit_in_worktree(
-                                        wt_path,
-                                        &format!("feat: chaos commit {tag}"),
-                                    );
-                                }
-                                finished_addr = agent.terminal.clone();
-                            }
-                            let _ = check_expected_chaos_err(
-                                "execution.report",
-                                world.server_call(
-                                    &wf_host,
-                                    "execution.report",
-                                    json!({
-                                        "terminal_id": t.id,
-                                        "state": state,
-                                        "message": format!("chaos report {tag}"),
-                                        "request_key": format!("chaos-rep-{seed}-{tag}"),
-                                    }),
-                                ),
-                            )?;
-                            if let Some(addr) = finished_addr
-                                && let Some(herdr) = world.herdr(&wf_host)
-                            {
-                                herdr.finish_terminal(&addr, 0, "exited");
-                            }
-                            world.hit("chaos.execution_report");
-                        }
-                    }
+                    let states = ["working", "completed", "blocked"];
+                    let state = states[*state_idx % states.len()];
+                    let _ = report_running_execution(
+                        world,
+                        &wf_host,
+                        profile.enable_worktree_delivery,
+                        *term_pick,
+                        state,
+                        seed,
+                        *tag,
+                    )?;
                 }
                 ChaosOp::ViewerPresence { card_pick, attach } => {
                     if let Some((_host, pid, cid)) =
@@ -1610,48 +2117,136 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 check_conclusion: is_pr.then(|| "success".into()),
                             },
                         );
-                        match fault_kind {
-                            1 => world.github.inject_error(500, vec![]),
-                            2 => world
-                                .github
-                                .inject_stale_response_once("/issues", json!([])),
-                            3 => world.github.inject_secondary_rate_limit(429, 10),
-                            5 => world.github.inject_stale_response_once("/pulls", json!([])),
-                            6 => {
-                                world.github.inject_io_error(
-                                    std::io::ErrorKind::ConnectionReset,
-                                    "simulated github io reset",
-                                );
-                                world.hit("chaos.github_io_error");
-                            }
-                            7 => {
-                                world.github.set_host_offline(&gh_host, true);
-                                world.hit("chaos.github_host_offline");
-                            }
-                            8 => {
-                                let reset_secs = (world.now_ms() / 1000).saturating_add(5);
-                                world.github.set_host_rate_limit_budget(
-                                    &gh_host,
-                                    Some(1),
-                                    reset_secs,
-                                );
-                                world.hit("chaos.github_rate_limit_budget");
-                            }
-                            _ => {
-                                // Ensure transient host-offline and rate-limit GitHub faults recover on clean ops.
-                                world.github.set_host_offline(&gh_host, false);
-                                world.github.set_host_rate_limit_budget(&gh_host, None, 0);
-                                world.github.set_rate_limit_budget(None, 0);
+
+                        // Clear stale host-offline / budget limits before deciding next fault so
+                        // each armed fault is clean and observable.
+                        world.github.set_host_offline(&gh_host, false);
+                        world.github.set_host_rate_limit_budget(&gh_host, None, 0);
+                        world.github.set_rate_limit_budget(None, 0);
+
+                        let gh_srv_now = world.server(&gh_host).map(|s| s.now_ms()).unwrap_or(0);
+                        let gh_clock_ready = gh_srv_now >= gh_clock_high_water_ms;
+                        gh_clock_high_water_ms = gh_clock_high_water_ms.max(gh_srv_now);
+
+                        let can_drive_sync = world.server(&gh_host).is_some()
+                            && !partitioned_remotes.contains(&gh_host)
+                            && !(auth_revoked && gh_host == auth_host)
+                            && host_is_connected(world, PRIMARY_CLIENT, &gh_host)
+                            && gh_clock_ready;
+
+                        let mut armed_fault: Option<(&'static str, bool)> = None;
+                        // (fault_name, expects_error_or_stat_err)
+                        if can_drive_sync {
+                            match fault_kind {
+                                1 => {
+                                    world.github.inject_error(500, vec![]);
+                                    crate::trace::record_fault_armed("github.http_500");
+                                    armed_fault = Some(("github.http_500", true));
+                                }
+                                2 => {
+                                    world
+                                        .github
+                                        .inject_stale_response_once("/issues", json!([]));
+                                    crate::trace::record_fault_armed("github.stale_response");
+                                    armed_fault = Some(("github.stale_response", false));
+                                }
+                                3 => {
+                                    world.github.inject_secondary_rate_limit(429, 10);
+                                    crate::trace::record_fault_armed("github.secondary_rate_limit");
+                                    armed_fault = Some(("github.secondary_rate_limit", true));
+                                }
+                                5 => {
+                                    world.github.inject_stale_response_once("/pulls", json!([]));
+                                    crate::trace::record_fault_armed("github.stale_response");
+                                    armed_fault = Some(("github.stale_response", false));
+                                }
+                                6 => {
+                                    world.github.inject_io_error(
+                                        std::io::ErrorKind::ConnectionReset,
+                                        "simulated github io reset",
+                                    );
+                                    crate::trace::record_fault_armed("github.io_error");
+                                    armed_fault = Some(("github.io_error", true));
+                                }
+                                7 => {
+                                    world.github.set_host_offline(&gh_host, true);
+                                    crate::trace::record_fault_armed("github.host_offline");
+                                    armed_fault = Some(("github.host_offline", true));
+                                }
+                                8 => {
+                                    let reset_secs = (world.now_ms() / 1000).saturating_add(300);
+                                    world.github.set_host_rate_limit_budget(
+                                        &gh_host,
+                                        Some(0),
+                                        reset_secs,
+                                    );
+                                    crate::trace::record_fault_armed("github.rate_limit_budget");
+                                    armed_fault = Some(("github.rate_limit_budget", true));
+                                }
+                                _ => {}
                             }
                         }
-                        let _ = check_expected_chaos_err(
-                            "github.sync.request",
+
+                        let stats_before = world.github.stats();
+                        let sync_method = if armed_fault.is_some() {
+                            "github.sync"
+                        } else {
+                            "github.sync.request"
+                        };
+                        let _sync_res = check_expected_chaos_err(
+                            sync_method,
                             world.client_call(
-                                "github.sync.request",
+                                sync_method,
                                 json!({ "project_id": gh_pid }),
                                 Some(&gh_pid),
                             ),
                         )?;
+                        let mut stats_after = world.github.stats();
+                        // If a transient Turmoil TCP drop prevented the RPC from reaching the
+                        // server while a GitHub fault was armed, execute directly on `gh_host` so
+                        // the armed GitHub fault genuinely fires in `SimGitHub`.
+                        if let Some((_, expects_err)) = armed_fault {
+                            let hit_already = if expects_err {
+                                stats_after.responses_error > stats_before.responses_error
+                            } else {
+                                stats_after.total_requests > stats_before.total_requests
+                            };
+                            if !hit_already {
+                                let _ = check_expected_chaos_err(
+                                    "github.sync(server_fallback)",
+                                    world.server_call(
+                                        server_key(&gh_host),
+                                        "github.sync",
+                                        json!({ "project_id": strip_host_id(&gh_pid) }),
+                                    ),
+                                )?;
+                                stats_after = world.github.stats();
+                            }
+                        }
+
+                        if let Some((fault_name, expects_err)) = armed_fault {
+                            let fired = if expects_err {
+                                stats_after.responses_error > stats_before.responses_error
+                            } else {
+                                stats_after.total_requests > stats_before.total_requests
+                            };
+                            if fired {
+                                crate::trace::record_fault_fired(fault_name);
+                                match fault_name {
+                                    "github.io_error" => world.hit("chaos.github_io_error"),
+                                    "github.host_offline" => world.hit("chaos.github_host_offline"),
+                                    "github.rate_limit_budget" => {
+                                        world.hit("chaos.github_rate_limit_budget")
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            // Immediately clean up sticky per-host fault after firing so subsequent
+                            // review/PR ops aren't starved unless explicitly faulted again.
+                            world.github.set_host_offline(&gh_host, false);
+                            world.github.set_host_rate_limit_budget(&gh_host, None, 0);
+                            world.github.clear_injected_faults();
+                        }
                         world.hit("chaos.github_sync");
                     }
                 }
@@ -1660,13 +2255,31 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     kind,
                     tag,
                 } => {
-                    let host = &all_hosts[*host_idx % all_hosts.len()];
-                    let srv_name = server_key(host);
-                    if let Some(herdr) = world.herdr(srv_name) {
+                    let host = all_hosts[*host_idx % all_hosts.len()].clone();
+                    let srv_name = server_key(&host).to_owned();
+                    let host_pid = host_projects
+                        .iter()
+                        .find(|(h, _)| h == &host)
+                        .map(|(_, p)| p.clone())
+                        .unwrap();
+                    if world.server(&srv_name).is_some()
+                        && let Some(herdr) = world.herdr(&srv_name)
+                    {
                         let addrs = herdr.terminal_addresses();
+                        let live_addr = addrs
+                            .iter()
+                            .find(|a| {
+                                herdr
+                                    .terminal_record(a)
+                                    .is_some_and(|r| r["state"].as_str() == Some("live"))
+                            })
+                            .cloned();
                         match kind {
                             0..=3 => {
-                                if let Some(addr) = addrs.first() {
+                                if let Some(addr) = live_addr
+                                    .as_deref()
+                                    .or_else(|| addrs.first().map(String::as_str))
+                                {
                                     let st = match kind {
                                         0 => "working",
                                         1 => "idle",
@@ -1685,71 +2298,211 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             5 => herdr.emit_missed_snapshot(),
                             6 => herdr.drop_subscribers(),
                             7 => {
-                                let now_off = !offline_herdr_hosts.contains(host);
+                                let now_off = !offline_herdr_hosts.contains(&host);
                                 if now_off {
                                     offline_herdr_hosts.insert(host.clone());
+                                    crate::trace::record_fault_armed("herdr.offline");
+                                    herdr.set_offline(true);
+                                    // Trigger a real Herdr-dependent RPC so offline error fires.
+                                    let r = check_expected_chaos_err(
+                                        "terminal.create(herdr_offline)",
+                                        world.server_call(
+                                            &srv_name,
+                                            "terminal.create",
+                                            json!({
+                                                "project_id": strip_host_id(&host_pid),
+                                                "name": format!("Offline Probe {tag}"),
+                                            }),
+                                        ),
+                                    )?;
+                                    world.advance(Duration::from_millis(120))?;
+                                    if r.is_none() || herdr.subscriber_count() == 0 {
+                                        crate::trace::record_fault_fired("herdr.offline");
+                                        world.hit("chaos.herdr_offline_toggle");
+                                    }
                                 } else {
-                                    offline_herdr_hosts.remove(host);
+                                    offline_herdr_hosts.remove(&host);
+                                    herdr.set_offline(false);
+                                    world.hit("chaos.herdr_offline_toggle");
                                 }
-                                herdr.set_offline(now_off);
-                                world.hit("chaos.herdr_offline_toggle");
                             }
                             8 => {
-                                herdr.restart_core(format!("chaos-core-{host}-{seed}-{tag}"));
-                                world.hit("chaos.herdr_restart_core");
+                                if !offline_herdr_hosts.contains(&host)
+                                    && herdr.subscriber_count() > 0
+                                {
+                                    let prev_core = herdr.core_id();
+                                    crate::trace::record_fault_armed("herdr.restart_core");
+                                    herdr.restart_core(format!("chaos-core-{host}-{seed}-{tag}"));
+                                    let evicted = herdr.core_id() != prev_core
+                                        && herdr.subscriber_count() == 0;
+                                    world.advance(Duration::from_millis(250))?;
+                                    if evicted {
+                                        crate::trace::record_fault_fired("herdr.restart_core");
+                                        world.hit("chaos.herdr_restart_core");
+                                    }
+                                }
                             }
                             9 => {
-                                let fault = match tag % 3 {
-                                    0 => RunFault::FailBeforeCreate(
-                                        "simulated herdr run failure".into(),
-                                    ),
-                                    1 => RunFault::OrphanAfterCreate(
-                                        "simulated herdr orphan timeout".into(),
-                                    ),
-                                    _ => RunFault::FirstMessageUnsent,
-                                };
-                                herdr.inject_next_run_fault(fault);
-                                world.hit("chaos.herdr_run_fault");
+                                if !offline_herdr_hosts.contains(&host) {
+                                    let fault = match tag % 3 {
+                                        0 => RunFault::FailBeforeCreate(
+                                            "simulated herdr run failure".into(),
+                                        ),
+                                        1 => RunFault::OrphanAfterCreate(
+                                            "simulated herdr orphan timeout".into(),
+                                        ),
+                                        _ => RunFault::FirstMessageUnsent,
+                                    };
+                                    let terms_before = herdr.terminal_addresses().len();
+                                    crate::trace::record_fault_armed("herdr.run_fault");
+                                    herdr.inject_next_run_fault(fault.clone());
+                                    // Immediately launch a shell terminal on this host so
+                                    // `terminal.run` executes and consumes the armed RunFault!
+                                    let res = check_expected_chaos_err(
+                                        "terminal.create(run_fault)",
+                                        world.server_call(
+                                            &srv_name,
+                                            "terminal.create",
+                                            json!({
+                                                "project_id": strip_host_id(&host_pid),
+                                                "name": format!("RunFault Probe {tag}"),
+                                            }),
+                                        ),
+                                    )?;
+                                    world.advance(Duration::from_millis(200))?;
+                                    let terms_after = herdr.terminal_addresses().len();
+                                    let fired = match fault {
+                                        RunFault::FailBeforeCreate(_) => {
+                                            res.is_none() || terms_after == terms_before
+                                        }
+                                        RunFault::OrphanAfterCreate(_)
+                                        | RunFault::FirstMessageUnsent => {
+                                            res.is_none() || terms_after > terms_before
+                                        }
+                                    };
+                                    if fired {
+                                        crate::trace::record_fault_fired("herdr.run_fault");
+                                        world.hit("chaos.herdr_run_fault");
+                                    }
+                                    herdr.clear_injected_faults();
+                                }
                             }
                             10 => {
-                                herdr.drop_next_events(1);
-                                world.hit("chaos.herdr_drop_events");
+                                if !offline_herdr_hosts.contains(&host)
+                                    && herdr.subscriber_count() > 0
+                                    && let Some(addr) = live_addr.as_deref()
+                                {
+                                    crate::trace::record_fault_armed("herdr.event_drop");
+                                    herdr.drop_next_events(1);
+                                    // Emit a real event immediately so the drop fires now!
+                                    herdr.set_status(addr, "working", Some(u64::from(*tag)));
+                                    crate::trace::record_fault_fired("herdr.event_drop");
+                                    world.hit("chaos.herdr_drop_events");
+                                }
                             }
                             11 => {
-                                herdr.duplicate_next_events(1);
-                                world.hit("chaos.herdr_dup_events");
+                                if !offline_herdr_hosts.contains(&host)
+                                    && herdr.subscriber_count() > 0
+                                    && let Some(addr) = live_addr.as_deref()
+                                {
+                                    crate::trace::record_fault_armed("herdr.event_dup");
+                                    herdr.duplicate_next_events(1);
+                                    // Emit a real event immediately so duplication fires now!
+                                    herdr.set_status(addr, "idle", Some(u64::from(*tag)));
+                                    crate::trace::record_fault_fired("herdr.event_dup");
+                                    world.hit("chaos.herdr_dup_events");
+                                }
                             }
                             12 => {
-                                if let Some(addr) = addrs.first() {
+                                if !offline_herdr_hosts.contains(&host)
+                                    && herdr.subscriber_count() > 0
+                                    && let Some(addr) = live_addr.as_deref()
+                                {
+                                    crate::trace::record_fault_armed("herdr.event_reorder");
                                     herdr.buffer_next_events_for_reorder(2);
                                     herdr.set_status(addr, "working", Some(u64::from(*tag)));
                                     herdr.set_status(addr, "idle", Some(u64::from(*tag) + 1));
                                     herdr.flush_reordered_events();
+                                    crate::trace::record_fault_fired("herdr.event_reorder");
                                     world.hit("chaos.herdr_reorder_events");
                                 }
                             }
                             13 => {
-                                if let Some(addr) = addrs.first() {
+                                if !offline_herdr_hosts.contains(&host)
+                                    && herdr.subscriber_count() > 0
+                                    && let Some(addr) = live_addr.as_deref()
+                                {
+                                    let drops_before = herdr.overflow_drop_count();
+                                    crate::trace::record_fault_armed("herdr.sub_overflow");
                                     herdr.simulate_subscriber_overflow(addr);
-                                    world.hit("chaos.herdr_sub_overflow");
+                                    if herdr.overflow_drop_count() > drops_before {
+                                        crate::trace::record_fault_fired("herdr.sub_overflow");
+                                        world.hit("chaos.herdr_sub_overflow");
+                                    }
                                 }
                             }
                             14 => {
-                                if let Some(addr) = addrs.first() {
-                                    herdr.set_hang_kill(addr, true);
-                                    world.hit("chaos.herdr_hang_kill");
+                                // Only arm `hang_kill` when we have an owned shell terminal on
+                                // this host whose live Herdr address we immediately invoke
+                                // `terminal.end` on so `terminal.kill` genuinely fires!
+                                if !offline_herdr_hosts.contains(&host)
+                                    && let Some(pos) =
+                                        shell_terms.iter().position(|(h, _, _)| h == &host)
+                                {
+                                    let (_, pid, q_tid) = shell_terms[pos].clone();
+                                    let raw_tid = strip_host_id(&q_tid);
+                                    let target_addr = world
+                                        .server(&srv_name)
+                                        .and_then(|s| s.snapshot().ok())
+                                        .and_then(|snap| {
+                                            snap.terminals
+                                                .into_iter()
+                                                .find(|t| t.id == raw_tid)
+                                                .and_then(|t| t.runtime)
+                                                .and_then(|r| r.terminal)
+                                        });
+                                    if let Some(addr) = target_addr {
+                                        let kills_before = herdr.killed_terminals().len();
+                                        crate::trace::record_fault_armed("herdr.hang_kill");
+                                        herdr.set_hang_kill(&addr, true);
+                                        let _ = check_expected_chaos_err(
+                                            "terminal.end(hang_kill)",
+                                            world.server_call(
+                                                &srv_name,
+                                                "terminal.end",
+                                                json!({ "terminal_id": raw_tid }),
+                                            ),
+                                        )?;
+                                        world.advance(Duration::from_millis(120))?;
+                                        herdr.set_hang_kill(&addr, false);
+                                        let _ = pid;
+                                        if herdr.killed_terminals().len() > kills_before {
+                                            crate::trace::record_fault_fired("herdr.hang_kill");
+                                            world.hit("chaos.herdr_hang_kill");
+                                            shell_terms.remove(pos);
+                                        }
+                                    }
                                 }
                             }
                             _ => {
-                                // Only lose a live terminal when Herdr is online and event delivery
-                                // is clean so the observer immediately observes the `lost` event.
-                                if !offline_herdr_hosts.contains(host)
-                                    && let Some(addr) = addrs.first()
+                                if !offline_herdr_hosts.contains(&host)
+                                    && let Some(addr) = live_addr.as_deref()
+                                    && herdr
+                                        .terminal_record(addr)
+                                        .is_some_and(|r| !r["pid"].is_null())
                                 {
                                     herdr.clear_injected_faults();
+                                    crate::trace::record_fault_armed("herdr.lose_terminal");
                                     herdr.lose_terminal(addr, "simulated_pty_lost");
                                     world.advance(Duration::from_millis(200))?;
-                                    world.hit("chaos.herdr_lose_terminal");
+                                    if herdr.terminal_record(addr).is_none_or(|r| {
+                                        r["state"].as_str() != Some("live")
+                                            || r["pid"].is_null()
+                                            || r["reason"].as_str() == Some("simulated_pty_lost")
+                                    }) {
+                                        crate::trace::record_fault_fired("herdr.lose_terminal");
+                                        world.hit("chaos.herdr_lose_terminal");
+                                    }
                                 }
                             }
                         }
@@ -1806,7 +2559,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     }
                 }
                 ChaosOp::CrashAndBounceServer { host_idx } => {
-                    // Can crash ANY host (`remote-a`, `remote-b`, AND `local-server` when desktop!).
                     let target = &all_hosts[*host_idx % all_hosts.len()];
                     let srv_name = server_key(target);
                     if world.server(srv_name).is_some() {
@@ -1833,7 +2585,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 }
                 ChaosOp::AdvanceTime { secs } => {
                     if *secs >= 60 {
-                        // Step in bounded chunks so background idle reclaimer & cron evaluators tick cleanly.
                         let mut remaining = *secs;
                         while remaining > 0 {
                             let chunk = remaining.min(15);
@@ -1896,8 +2647,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         .max(1),
                             )
                             .map(|c| c.cid.clone());
+                        // Strictly gate stream faults & coverage hits on a live connected stream!
                         let can_drive_live = !partitioned_remotes.contains(&target)
-                            && !(auth_revoked && target == auth_host);
+                            && !(auth_revoked && target == auth_host)
+                            && world.server(&target).is_some()
+                            && host_is_connected(world, PRIMARY_CLIENT, &target);
 
                         let spawn_probe =
                             |w: &mut SimWorld| -> Result<crate::world::ClientCallHandle> {
@@ -1919,143 +2673,160 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 }
                             };
 
-                        match kind % 7 {
-                            0 => {
-                                // 1-byte framing chunking across live yamux + JSON-RPC frames.
-                                world.stream_fault_policy().set_for_host(
-                                    target.clone(),
-                                    StreamFaultConfig {
-                                        max_read_chunk: Some(1),
-                                        ..StreamFaultConfig::default()
-                                    },
-                                );
-                                if can_drive_live {
+                        if can_drive_live {
+                            match kind % 7 {
+                                0 => {
+                                    // 1-byte framing chunking across live yamux + JSON-RPC frames.
+                                    crate::trace::record_fault_armed("net.stream_chunk");
+                                    world.stream_fault_policy().set_for_host(
+                                        target.clone(),
+                                        StreamFaultConfig {
+                                            max_read_chunk: Some(1),
+                                            ..StreamFaultConfig::default()
+                                        },
+                                    );
                                     let h = spawn_probe(world)?;
-                                    let _ = check_expected_chaos_err(
+                                    let res = check_expected_chaos_err(
                                         "stream_fault.chunk",
                                         world.await_call(h, 60_000),
                                     )?;
+                                    world.stream_fault_policy().clear_for_host(&target);
+                                    if res.is_some() {
+                                        crate::trace::record_fault_fired("net.stream_chunk");
+                                        world.hit("chaos.faulty_stream_chunk");
+                                    }
                                 }
-                                world.stream_fault_policy().clear_for_host(&target);
-                                world.hit("chaos.faulty_stream_chunk");
-                            }
-                            1 => {
-                                // Mid-stream TCP RST during write.
-                                world.stream_fault_policy().set_for_host(
-                                    target.clone(),
-                                    StreamFaultConfig {
-                                        rst_after_write_bytes: Some(*byte_limit),
-                                        ..StreamFaultConfig::default()
-                                    },
-                                );
-                                if can_drive_live {
+                                1 => {
+                                    // Mid-stream TCP RST during write.
+                                    crate::trace::record_fault_armed("net.stream_write_rst");
+                                    world.stream_fault_policy().set_for_host(
+                                        target.clone(),
+                                        StreamFaultConfig {
+                                            rst_after_write_bytes: Some(*byte_limit),
+                                            ..StreamFaultConfig::default()
+                                        },
+                                    );
                                     let h = spawn_probe(world)?;
                                     world.advance(Duration::from_millis(120))?;
+                                    let disconnected =
+                                        !host_is_connected(world, PRIMARY_CLIENT, &target);
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let _ = check_expected_chaos_err(
+                                    let res = check_expected_chaos_err(
                                         "stream_fault.write_rst",
                                         world.await_call(h, 60_000),
                                     )?;
-                                } else {
-                                    world.stream_fault_policy().clear_for_host(&target);
+                                    if res.is_none() || disconnected {
+                                        crate::trace::record_fault_fired("net.stream_write_rst");
+                                        world.hit("chaos.faulty_stream_rst");
+                                    }
                                 }
-                                world.hit("chaos.faulty_stream_rst");
-                            }
-                            2 => {
-                                // Mid-stream TCP RST during read.
-                                world.stream_fault_policy().set_for_host(
-                                    target.clone(),
-                                    StreamFaultConfig {
-                                        rst_after_read_bytes: Some(*byte_limit),
-                                        ..StreamFaultConfig::default()
-                                    },
-                                );
-                                if can_drive_live {
+                                2 => {
+                                    // Mid-stream TCP RST during read.
+                                    crate::trace::record_fault_armed("net.stream_read_rst");
+                                    world.stream_fault_policy().set_for_host(
+                                        target.clone(),
+                                        StreamFaultConfig {
+                                            rst_after_read_bytes: Some(*byte_limit),
+                                            ..StreamFaultConfig::default()
+                                        },
+                                    );
                                     let h = spawn_probe(world)?;
                                     world.advance(Duration::from_millis(120))?;
+                                    let disconnected =
+                                        !host_is_connected(world, PRIMARY_CLIENT, &target);
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let _ = check_expected_chaos_err(
+                                    let res = check_expected_chaos_err(
                                         "stream_fault.read_rst",
                                         world.await_call(h, 60_000),
                                     )?;
-                                } else {
-                                    world.stream_fault_policy().clear_for_host(&target);
+                                    if res.is_none() || disconnected {
+                                        crate::trace::record_fault_fired("net.stream_read_rst");
+                                        world.hit("chaos.faulty_stream_rst");
+                                    }
                                 }
-                                world.hit("chaos.faulty_stream_rst");
-                            }
-                            3 => {
-                                // Mid-stream clean 0-byte EOF truncation.
-                                world.stream_fault_policy().set_for_host(
-                                    target.clone(),
-                                    StreamFaultConfig {
-                                        eof_after_read_bytes: Some(*byte_limit),
-                                        ..StreamFaultConfig::default()
-                                    },
-                                );
-                                if can_drive_live {
+                                3 => {
+                                    // Mid-stream clean 0-byte EOF truncation.
+                                    crate::trace::record_fault_armed("net.stream_read_eof");
+                                    world.stream_fault_policy().set_for_host(
+                                        target.clone(),
+                                        StreamFaultConfig {
+                                            eof_after_read_bytes: Some(*byte_limit),
+                                            ..StreamFaultConfig::default()
+                                        },
+                                    );
                                     let h = spawn_probe(world)?;
                                     world.advance(Duration::from_millis(120))?;
+                                    let disconnected =
+                                        !host_is_connected(world, PRIMARY_CLIENT, &target);
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let _ = check_expected_chaos_err(
+                                    let res = check_expected_chaos_err(
                                         "stream_fault.read_eof",
                                         world.await_call(h, 60_000),
                                     )?;
-                                } else {
-                                    world.stream_fault_policy().clear_for_host(&target);
+                                    if res.is_none() || disconnected {
+                                        crate::trace::record_fault_fired("net.stream_read_eof");
+                                        world.hit("chaos.faulty_stream_rst");
+                                        world.hit("chaos.faulty_stream_eof");
+                                    }
                                 }
-                                world.hit("chaos.faulty_stream_rst");
-                                world.hit("chaos.faulty_stream_eof");
-                            }
-                            4 => {
-                                // Transient half-open read blackhole stall -> clear to resume.
-                                world.stream_fault_policy().set_for_host(
-                                    target.clone(),
-                                    StreamFaultConfig {
-                                        stall_reads: true,
-                                        ..StreamFaultConfig::default()
-                                    },
-                                );
-                                if can_drive_live {
+                                4 => {
+                                    // Transient half-open read blackhole stall -> clear to resume.
+                                    crate::trace::record_fault_armed("net.stream_stall_reads");
+                                    world.stream_fault_policy().set_for_host(
+                                        target.clone(),
+                                        StreamFaultConfig {
+                                            stall_reads: true,
+                                            ..StreamFaultConfig::default()
+                                        },
+                                    );
                                     let h = spawn_probe(world)?;
-                                    world.advance(Duration::from_millis(240))?;
+                                    world.advance(Duration::from_millis(120))?;
+                                    let mut parked =
+                                        world.stream_fault_policy().parked_waker_count() > 0;
+                                    world.advance(Duration::from_millis(120))?;
+                                    parked |= world.stream_fault_policy().parked_waker_count() > 0;
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let _ = check_expected_chaos_err(
+                                    let res = check_expected_chaos_err(
                                         "stream_fault.stall_reads",
                                         world.await_call(h, 60_000),
                                     )?;
-                                } else {
-                                    world.advance(Duration::from_millis(120))?;
-                                    world.stream_fault_policy().clear_for_host(&target);
+                                    if parked || res.is_none() {
+                                        crate::trace::record_fault_fired("net.stream_stall_reads");
+                                        world.hit("chaos.faulty_stream_stall");
+                                    }
                                 }
-                                world.hit("chaos.faulty_stream_stall");
-                            }
-                            5 => {
-                                // Transient half-open write blackhole stall -> clear to resume.
-                                world.stream_fault_policy().set_for_host(
-                                    target.clone(),
-                                    StreamFaultConfig {
-                                        stall_writes: true,
-                                        ..StreamFaultConfig::default()
-                                    },
-                                );
-                                if can_drive_live {
+                                5 => {
+                                    // Transient half-open write blackhole stall -> clear to resume.
+                                    crate::trace::record_fault_armed("net.stream_stall_writes");
+                                    world.stream_fault_policy().set_for_host(
+                                        target.clone(),
+                                        StreamFaultConfig {
+                                            stall_writes: true,
+                                            ..StreamFaultConfig::default()
+                                        },
+                                    );
                                     let h = spawn_probe(world)?;
-                                    world.advance(Duration::from_millis(240))?;
+                                    world.advance(Duration::from_millis(120))?;
+                                    let mut parked =
+                                        world.stream_fault_policy().parked_waker_count() > 0;
+                                    world.advance(Duration::from_millis(120))?;
+                                    parked |= world.stream_fault_policy().parked_waker_count() > 0;
                                     world.stream_fault_policy().clear_for_host(&target);
-                                    let _ = check_expected_chaos_err(
+                                    let res = check_expected_chaos_err(
                                         "stream_fault.stall_writes",
                                         world.await_call(h, 60_000),
                                     )?;
-                                } else {
-                                    world.advance(Duration::from_millis(120))?;
+                                    if parked || res.is_none() {
+                                        crate::trace::record_fault_fired("net.stream_stall_writes");
+                                        world.hit("chaos.faulty_stream_stall");
+                                    }
+                                }
+                                _ => {
                                     world.stream_fault_policy().clear_for_host(&target);
                                 }
-                                world.hit("chaos.faulty_stream_stall");
                             }
-                            _ => {
-                                // Explicit stream-fault recovery on `target`.
-                                world.stream_fault_policy().clear_for_host(&target);
-                            }
+                        } else if kind % 7 == 6 {
+                            world.stream_fault_policy().clear_for_host(&target);
                         }
                     }
                 }
@@ -2073,8 +2844,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             .find(|(h, _)| h == &target_host)
                             .map(|(_, p)| p.clone())
                             .unwrap();
-                        // Multi-client races target server-confirmed cards (never another client's
-                        // private offline optimistic temp ID that does not exist on the server).
                         let remote_active: Vec<(String, String, String)> = cards
                             .iter()
                             .filter(|c| {
@@ -2085,7 +2854,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
 
                         match kind % 5 {
                             0 => {
-                                // Concurrent `card.create` from both clients onto the same remote project!
                                 let h1 = world.client_spawn_on(
                                     PRIMARY_CLIENT,
                                     "card.create",
@@ -2150,7 +2918,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.multi_client_race");
                             }
                             1 if !remote_active.is_empty() => {
-                                // Concurrent `card.update` (alternating same-field vs disjoint-field race!).
                                 let (_h, pid, cid) =
                                     remote_active[*card_pick % remote_active.len()].clone();
                                 let rev1 = lookup_card_rev_on(world, PRIMARY_CLIENT, &cid);
@@ -2197,7 +2964,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.multi_client_race");
                             }
                             2 if !remote_active.is_empty() => {
-                                // Concurrent `card.move` from both clients onto the same card!
                                 let (_h, pid, cid) =
                                     remote_active[*card_pick % remote_active.len()].clone();
                                 let rev1 = lookup_card_rev_on(world, PRIMARY_CLIENT, &cid);
@@ -2228,7 +2994,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.multi_client_race");
                             }
                             3 if !remote_active.is_empty() => {
-                                // Concurrent `comment.add` from both clients onto the same card!
                                 let (host, pid, cid) =
                                     remote_active[*card_pick % remote_active.len()].clone();
                                 let body1 = format!("race-c1-comment-{tag}");
@@ -2275,7 +3040,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.multi_client_race");
                             }
                             _ if remote_active.len() > remotes.len() => {
-                                // Concurrent `card.archive` (from C2) vs `card.update` (from C1)!
                                 let (host, pid, cid) =
                                     remote_active[*card_pick % remote_active.len()].clone();
                                 let rev1 = lookup_card_rev_on(world, PRIMARY_CLIENT, &cid);
@@ -2334,7 +3098,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             &schedule_entries[*sched_pick % schedule_entries.len()];
                         match kind % 4 {
                             0 => {
-                                // Manual `schedule.trigger` alongside partitions & server bounces!
                                 let before_ids: BTreeSet<String> = world
                                     .server(&wf_host)
                                     .and_then(|s| s.snapshot().ok())
@@ -2393,8 +3156,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.schedule_ops");
                             }
                             _ => {
-                                // Complete an active cardless `ScheduledRun` if any is running so
-                                // queued triggers drain cleanly under chaos.
                                 if let Some(srv) = world.server(&wf_host) {
                                     let snap = srv.snapshot()?;
                                     let mut active_scheds: Vec<_> = snap
@@ -2436,9 +3197,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     tag,
                 } => {
                     if profile.enable_worktree_delivery && !wf_dir.is_empty() {
-                        match kind % 5 {
+                        match kind % 6 {
                             0 => {
-                                // Inject script or batch test failure to exercise rework & `@merger`!
+                                // Inject script or batch test failure to exercise rework & `@merger`.
                                 if let Some(exec) = world.exec_runner(&wf_host) {
                                     if tag.is_multiple_of(2) {
                                         exec.enqueue_script_outcomes(
@@ -2463,7 +3224,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 }
                             }
                             1 => {
-                                // Inject a git merge conflict on the next `deliver` batch integration!
+                                // Inject a git merge conflict on the next `deliver` batch integration.
                                 if let Some(exec) = world.exec_runner(&wf_host) {
                                     exec.inject_merge_conflict(
                                         &wf_dir,
@@ -2474,7 +3235,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             }
                             2 => {
                                 // Drive any active `@merger` `MergeBatch` (`state == "running"`)
-                                // via `batch.report` (either resolving or evicting the conflicting card!).
+                                // via `batch.report`, or run a standalone worktree cycle.
                                 if let Some(srv) = world.server(&wf_host) {
                                     let snap = srv.snapshot()?;
                                     let mut batches: Vec<_> = snap
@@ -2489,6 +3250,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             &batch.id,
                                             &batch.project_id,
                                         );
+                                        if seen_delivery_batches.insert(batch.id.clone()) {
+                                            world.hit("chaos.delivery_batch_entered");
+                                        }
                                         if let Some(exec) = world.exec_runner(&wf_host)
                                             && Path::new(&batch.worktree).is_dir()
                                         {
@@ -2521,40 +3285,39 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             )?;
                                         }
                                         world.hit("chaos.worktree_delivery_ops");
-                                    } else {
-                                        // If no `@merger` batch is currently running, run a standalone
-                                        // `worktree.create` -> `worktree.status` -> `worktree.remove` cycle!
-                                        if let Some(wt_res) = check_expected_chaos_err(
+                                    } else if let Some(wt_res) = check_expected_chaos_err(
+                                        "worktree.create",
+                                        world.client_call(
                                             "worktree.create",
+                                            json!({
+                                                "project_id": wf_pid,
+                                                "branch": format!("chaos/wt-{seed}-{tag}"),
+                                                "launch": "none",
+                                            }),
+                                            Some(&wf_pid),
+                                        ),
+                                    )? && let Some(wt_id) =
+                                        wt_res["worktree"]["id"].as_str()
+                                    {
+                                        let _ = check_expected_chaos_err(
+                                            "worktree.status",
                                             world.client_call(
-                                                "worktree.create",
-                                                json!({
-                                                    "project_id": wf_pid,
-                                                    "branch": format!("chaos/wt-{seed}-{tag}"),
-                                                    "launch": "none",
-                                                }),
+                                                "worktree.status",
+                                                json!({ "worktree_id": wt_id }),
                                                 Some(&wf_pid),
                                             ),
-                                        )? && let Some(wt_id) = wt_res["worktree"]["id"].as_str()
-                                        {
-                                            let _ = check_expected_chaos_err(
-                                                "worktree.status",
-                                                world.client_call(
-                                                    "worktree.status",
-                                                    json!({ "worktree_id": wt_id }),
-                                                    Some(&wf_pid),
-                                                ),
-                                            )?;
-                                            let _ = check_expected_chaos_err(
+                                        )?;
+                                        let _ = check_expected_chaos_err(
+                                            "worktree.remove",
+                                            world.client_call(
                                                 "worktree.remove",
-                                                world.client_call(
-                                                    "worktree.remove",
-                                                    json!({ "worktree_id": wt_id, "force": true }),
-                                                    Some(&wf_pid),
-                                                ),
-                                            )?;
-                                            world.hit("chaos.worktree_delivery_ops");
-                                        }
+                                                json!({ "worktree_id": wt_id, "force": true }),
+                                                Some(&wf_pid),
+                                            ),
+                                        )?;
+                                        // Standalone worktree ops count ONLY as `worktree_delivery_ops`,
+                                        // NEVER as `chaos.delivery_batch_entered`!
+                                        world.hit("chaos.worktree_delivery_ops");
                                     }
                                 }
                             }
@@ -2586,8 +3349,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     }
                                 }
                             }
-                            _ => {
-                                // Toggle `card.hold_auto_merge` on an active card on `wf_host`.
+                            4 => {
+                                // Toggle `card.hold_auto_merge` (releasing held cards so they enter delivery!).
                                 let wf_cards: Vec<_> = cards
                                     .iter()
                                     .filter(|c| {
@@ -2599,6 +3362,19 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 if !wf_cards.is_empty() {
                                     let tc = wf_cards[*card_pick % wf_cards.len()];
                                     let (pid, cid) = (&tc.pid, &tc.cid);
+                                    let raw_cid = strip_host_id(cid);
+                                    let currently_held = world
+                                        .server(&wf_host)
+                                        .and_then(|s| s.snapshot().ok())
+                                        .and_then(|snap| {
+                                            snap.cards.into_iter().find(|c| c.id == raw_cid)
+                                        })
+                                        .is_some_and(|c| c.hold_auto_merge);
+                                    let desired_hold = if currently_held {
+                                        false
+                                    } else {
+                                        tag.is_multiple_of(3)
+                                    };
                                     let rev = lookup_card_rev(world, cid);
                                     let _ = check_expected_chaos_err(
                                         "card.hold_auto_merge",
@@ -2607,13 +3383,42 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             json!({
                                                 "card_id": cid,
                                                 "revision": rev,
-                                                "hold": tag.is_multiple_of(2),
+                                                "hold": desired_hold,
                                             }),
                                             Some(pid),
                                         ),
                                     )?;
                                     world.hit("chaos.worktree_delivery_ops");
                                 }
+                            }
+                            _ => {
+                                // Advance the delivery pipeline naturally: approve waiting gates,
+                                // complete running worktree agents, or start a fresh delivery run!
+                                let advanced = decide_waiting_workflow(
+                                    world, &wf_host, &wf_pid, *card_pick, true, seed, *tag,
+                                )? || report_running_execution(
+                                    world,
+                                    &wf_host,
+                                    true,
+                                    *card_pick,
+                                    "completed",
+                                    seed,
+                                    *tag,
+                                )?;
+                                if !advanced {
+                                    start_workflow_on_wf_host(
+                                        world,
+                                        &mut oracle,
+                                        &wf_host,
+                                        &cards,
+                                        &archived_cards,
+                                        &mut tracked_wf_runs,
+                                        *card_pick,
+                                        seed,
+                                        *tag,
+                                    )?;
+                                }
+                                world.hit("chaos.worktree_delivery_ops");
                             }
                         }
                     }
@@ -2630,7 +3435,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 if check_expected_chaos_err("device.revoke", res)?.is_some() {
                                     auth_revoked = true;
                                     world.advance(Duration::from_millis(200))?;
-                                    // Probe a routed RPC while revoked so `AuthFailed` handling is actively fuzzed.
                                     let _ = check_expected_chaos_err(
                                         "project.list(revoked)",
                                         world.client_call(
@@ -2642,7 +3446,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 }
                             }
                         } else if *recover && !partitioned_remotes.contains(&auth_host) {
-                            // Clear any transient stream fault on `auth_host` before re-pairing.
                             world.stream_fault_policy().clear_for_host(&auth_host);
                             let repair_res = pair_host_on_primary_client(world, &auth_host)
                                 .map(|dev_id| json!({ "device_id": dev_id }));
@@ -2746,36 +3549,1384 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 }
                                 world.hit("chaos.project_archive_restore");
                             }
-                        } else {
-                            // Project is active and `*archive == false`: update its Note and track durability!
-                            if let Some(res) = check_expected_chaos_err(
+                        } else if let Some(res) = check_expected_chaos_err(
+                            "note.save",
+                            world.client_call(
                                 "note.save",
-                                world.client_call(
-                                    "note.save",
-                                    json!({
-                                        "project_id": arch_pid,
-                                        "title": "Chaos Archive Note",
-                                        "body": format!("seed-{seed}-note-{tag}"),
-                                    }),
-                                    Some(arch_pid),
-                                ),
-                            )? && let Some(nid) = res["id"].as_str()
+                                json!({
+                                    "project_id": arch_pid,
+                                    "title": "Chaos Archive Note",
+                                    "body": format!("seed-{seed}-note-{tag}"),
+                                }),
+                                Some(arch_pid),
+                            ),
+                        )? && let Some(nid) = res["id"].as_str()
+                        {
+                            let raw_nid = strip_host_id(nid);
+                            *arch_raw_nid = Some(raw_nid.clone());
+                            if let Some(n) = world
+                                .server(srv_name)
+                                .and_then(|s| s.snapshot().ok())
+                                .and_then(|snap| snap.notes.into_iter().find(|n| n.id == raw_nid))
                             {
-                                let raw_nid = strip_host_id(nid);
-                                *arch_raw_nid = Some(raw_nid.clone());
-                                if let Some(n) = world
-                                    .server(srv_name)
-                                    .and_then(|s| s.snapshot().ok())
-                                    .and_then(|snap| {
-                                        snap.notes.into_iter().find(|n| n.id == raw_nid)
-                                    })
+                                oracle.record_committed_note(
+                                    srv_name,
+                                    &n.id,
+                                    &n.project_id,
+                                    n.revision,
+                                );
+                            }
+                        }
+                    }
+                }
+                ChaosOp::StorageFault {
+                    host_idx,
+                    is_io_error,
+                    mutate_kind,
+                    card_pick,
+                    tag,
+                } => {
+                    if profile.enable_storage_faults {
+                        let (host, pid) = host_projects[*host_idx % host_projects.len()].clone();
+                        let srv_name = server_key(&host).to_owned();
+                        if world.server(&srv_name).is_some()
+                            && let Some(faults) = world.storage_faults(&srv_name).map(Arc::clone)
+                        {
+                            let fault_kind = if *is_io_error {
+                                StorageFaultKind::IoError
+                            } else {
+                                StorageFaultKind::Busy
+                            };
+                            let fault_name = if *is_io_error {
+                                "storage.io_error"
+                            } else {
+                                "storage.busy"
+                            };
+                            let raw_pid = strip_host_id(&pid);
+                            let req_key = format!("chaos-sf-{seed}-{tag}");
+                            let via_client = host == "local"
+                                || (!partitioned_remotes.contains(&host)
+                                    && !(auth_revoked && host == auth_host)
+                                    && host_is_connected(world, PRIMARY_CLIENT, &host));
+
+                            // Pick a concrete write RPC (card.create, comment.add, or draft.save)
+                            // that executes immediately while the storage fault is armed!
+                            let host_card = cards
+                                .iter()
+                                .filter(|c| {
+                                    c.shared && c.host == host && !archived_cards.contains(&c.cid)
+                                })
+                                .nth(
+                                    *card_pick
+                                        % cards
+                                            .iter()
+                                            .filter(|c| {
+                                                c.shared
+                                                    && c.host == host
+                                                    && !archived_cards.contains(&c.cid)
+                                            })
+                                            .count()
+                                            .max(1),
+                                )
+                                .map(|c| c.cid.clone());
+
+                            let before_triggers = faults.triggered_count();
+                            faults.inject_next(fault_kind);
+                            crate::trace::record_fault_armed(fault_name);
+
+                            let (method, client_params, server_params, comment_meta) =
+                                match mutate_kind % 3 {
+                                    1 if host_card.is_some() => {
+                                        let q_cid = host_card.unwrap();
+                                        let raw_cid = strip_host_id(&q_cid);
+                                        let body = format!("sf-comment-{seed}-{tag}");
+                                        (
+                                            "comment.add",
+                                            json!({
+                                                "card_id": q_cid,
+                                                "body": body,
+                                                "request_key": req_key,
+                                            }),
+                                            json!({
+                                                "card_id": raw_cid,
+                                                "body": body,
+                                                "request_key": req_key,
+                                            }),
+                                            Some((raw_cid, body)),
+                                        )
+                                    }
+                                    2 => {
+                                        let draft_id = format!("new-card:chaos-sf-{seed}-{tag}");
+                                        let data = json!({ "body": format!("sf-draft-{tag}") });
+                                        (
+                                            "draft.save",
+                                            json!({
+                                                "host_id": host,
+                                                "id": draft_id,
+                                                "revision": 0,
+                                                "data": data,
+                                            }),
+                                            json!({
+                                                "id": draft_id,
+                                                "revision": 0,
+                                                "data": data,
+                                            }),
+                                            None,
+                                        )
+                                    }
+                                    _ => (
+                                        "card.create",
+                                        json!({
+                                            "project_id": pid,
+                                            "title": format!("SF Card #{tag}"),
+                                            "body": format!("sf-rollback-{seed}-{tag}"),
+                                            "request_key": req_key,
+                                        }),
+                                        json!({
+                                            "project_id": raw_pid,
+                                            "title": format!("SF Card #{tag}"),
+                                            "body": format!("sf-rollback-{seed}-{tag}"),
+                                            "request_key": req_key,
+                                        }),
+                                        None,
+                                    ),
+                                };
+
+                            let first_res = if via_client {
+                                check_expected_chaos_err(
+                                    "storage_fault.write",
+                                    world.client_call(method, client_params.clone(), Some(&pid)),
+                                )?
+                            } else {
+                                check_expected_chaos_err(
+                                    "storage_fault.server_write",
+                                    world.server_call(&srv_name, method, server_params.clone()),
+                                )?
+                            };
+                            // If a network hiccup prevented reaching SQLite, fallback directly
+                            // to `server_call` while armed so the storage fault fires honestly!
+                            if faults.triggered_count() == before_triggers {
+                                let _ = check_expected_chaos_err(
+                                    "storage_fault.server_fallback",
+                                    world.server_call(&srv_name, method, server_params.clone()),
+                                )?;
+                            }
+                            faults.clear();
+
+                            let fired = faults.triggered_count() > before_triggers;
+                            if fired {
+                                crate::trace::record_fault_fired(fault_name);
+                                world.hit(if *is_io_error {
+                                    "chaos.storage_fault_io_error"
+                                } else {
+                                    "chaos.storage_fault_busy"
+                                });
+                                // Idempotent retry after clean SQLite rollback!
+                                if first_res.is_none() {
+                                    let retry_res = if via_client {
+                                        check_expected_chaos_err(
+                                            "storage_fault.retry",
+                                            world.client_call(method, client_params, Some(&pid)),
+                                        )?
+                                    } else {
+                                        check_expected_chaos_err(
+                                            "storage_fault.server_retry",
+                                            world.server_call(&srv_name, method, server_params),
+                                        )?
+                                    };
+                                    if let Some(val) = retry_res {
+                                        if method == "card.create"
+                                            && let Some(cid) = val["id"].as_str()
+                                        {
+                                            let raw_cid = strip_host_id(cid);
+                                            if let Some(srv_card) = world
+                                                .server(&srv_name)
+                                                .and_then(|s| s.snapshot().ok())
+                                                .and_then(|snap| {
+                                                    snap.cards.into_iter().find(|c| c.id == raw_cid)
+                                                })
+                                            {
+                                                oracle.record_committed_card(
+                                                    &srv_name,
+                                                    &srv_card.id,
+                                                    &srv_card.project_id,
+                                                    srv_card.revision,
+                                                );
+                                                let q_cid = if host == "local" {
+                                                    srv_card.id
+                                                } else {
+                                                    canban_types::qualify_host_id(
+                                                        &host,
+                                                        &srv_card.id,
+                                                    )
+                                                };
+                                                cards.push(TrackedCard {
+                                                    host: host.clone(),
+                                                    pid: pid.clone(),
+                                                    cid: q_cid,
+                                                    creator: PRIMARY_CLIENT,
+                                                    shared: true,
+                                                });
+                                            }
+                                        } else if method == "comment.add"
+                                            && let Some((raw_cid, body)) = comment_meta
+                                            && world
+                                                .server(&srv_name)
+                                                .and_then(|s| s.events().ok())
+                                                .is_some_and(|evs| {
+                                                    evs.iter().any(|e| {
+                                                        e.card_id == raw_cid
+                                                            && e.kind == "comment.created"
+                                                            && (e.data["body"].as_str()
+                                                                == Some(body.as_str())
+                                                                || e.message == body)
+                                                    })
+                                                })
+                                        {
+                                            oracle.record_committed_comment(
+                                                &srv_name, &raw_cid, body,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ChaosOp::HalfOpenBlackhole {
+                    remote_idx,
+                    duration_ms,
+                    mutate,
+                    card_pick,
+                    tag,
+                } => {
+                    if profile.enable_half_open_blackhole && !remotes.is_empty() {
+                        let target = remotes[*remote_idx % remotes.len()].clone();
+                        let can_drive_live = !partitioned_remotes.contains(&target)
+                            && !(auth_revoked && target == auth_host)
+                            && world.server(&target).is_some()
+                            && host_is_connected(world, PRIMARY_CLIENT, &target);
+                        if can_drive_live {
+                            let target_pid = host_projects
+                                .iter()
+                                .find(|(h, _)| h == &target)
+                                .map(|(_, p)| p.clone())
+                                .unwrap();
+                            let target_card = cards
+                                .iter()
+                                .filter(|c| {
+                                    c.shared && c.host == target && !archived_cards.contains(&c.cid)
+                                })
+                                .nth(
+                                    *card_pick
+                                        % cards
+                                            .iter()
+                                            .filter(|c| {
+                                                c.shared
+                                                    && c.host == target
+                                                    && !archived_cards.contains(&c.cid)
+                                            })
+                                            .count()
+                                            .max(1),
+                                )
+                                .map(|c| c.cid.clone());
+
+                            crate::trace::record_fault_armed("net.half_open_blackhole");
+                            world
+                                .stream_fault_policy()
+                                .arm_half_open_blackhole(&target, Some(*duration_ms));
+
+                            let h = if *mutate && let Some(ref cid) = target_card {
+                                world.client_spawn(
+                                    "comment.add",
+                                    json!({
+                                        "card_id": cid,
+                                        "body": format!("blackhole-comment-{tag}"),
+                                    }),
+                                    Some(&target_pid),
+                                )?
+                            } else {
+                                world.client_spawn(
+                                    "card.list",
+                                    json!({ "project_id": target_pid, "limit": 5 }),
+                                    Some(&target_pid),
+                                )?
+                            };
+
+                            world.advance(Duration::from_millis(200))?;
+                            let mut saw_parked =
+                                world.stream_fault_policy().parked_waker_count() > 0;
+
+                            // Advance virtual time in chunks past the 45s `app.subscribe`
+                            // keepalive timeout until the client detects the half-open stall
+                            // and transitions the host out of Connected (capped at 48s).
+                            let mut elapsed_bh_ms = 200u64;
+                            let mut saw_keepalive_timeout = false;
+                            while elapsed_bh_ms < 48_000 {
+                                world.advance(Duration::from_secs(2))?;
+                                elapsed_bh_ms += 2_000;
+                                saw_parked |= world.stream_fault_policy().parked_waker_count() > 0;
+                                if !host_is_connected(world, PRIMARY_CLIENT, &target) {
+                                    saw_keepalive_timeout = true;
+                                    break;
+                                }
+                            }
+
+                            world.stream_fault_policy().heal_host(&target);
+                            let probe_res = check_expected_chaos_err(
+                                "half_open_blackhole.probe",
+                                world.await_call(h, 60_000),
+                            )?;
+                            if saw_parked || saw_keepalive_timeout || probe_res.is_none() {
+                                crate::trace::record_fault_fired("net.half_open_blackhole");
+                                world.hit("chaos.half_open_blackhole");
+                                world.hit("chaos.faulty_stream_stall");
+                            }
+                            if saw_keepalive_timeout {
+                                world.hit("chaos.keepalive_timeout_fired");
+                            }
+                        }
+                    }
+                }
+                ChaosOp::AgentSessionOp {
+                    kind,
+                    card_pick,
+                    tag,
+                } => {
+                    if profile.enable_sessions && world.server(&wf_host).is_some() {
+                        let wf_cards: Vec<_> = cards
+                            .iter()
+                            .filter(|c| {
+                                c.shared && c.host == wf_host && !archived_cards.contains(&c.cid)
+                            })
+                            .collect();
+                        if !wf_cards.is_empty() {
+                            let tc = wf_cards[*card_pick % wf_cards.len()];
+                            let (pid, cid) = (tc.pid.clone(), tc.cid.clone());
+                            let raw_cid = strip_host_id(&cid);
+                            match kind % 6 {
+                                0 => {
+                                    // `agent.open` (+ optional `agent.bind` on fresh interactive session).
+                                    if let Some(opened) = check_expected_chaos_err(
+                                        "agent.open",
+                                        world.client_call(
+                                            "agent.open",
+                                            json!({
+                                                "card_id": cid,
+                                                "profile_id": "codex",
+                                                "request_key": format!("chaos-open-{seed}-{tag}"),
+                                            }),
+                                            Some(&pid),
+                                        ),
+                                    )? {
+                                        world.hit("chaos.agent_open");
+                                        world.hit("chaos.agent_session_ops");
+                                        if let Some(tid) = opened["terminal_id"].as_str() {
+                                            let q_tid = if tid.contains("::") {
+                                                tid.to_owned()
+                                            } else {
+                                                canban_types::qualify_host_id(&wf_host, tid)
+                                            };
+                                            let _ = check_expected_chaos_err(
+                                                "agent.bind",
+                                                world.client_call(
+                                                    "agent.bind",
+                                                    json!({
+                                                        "terminal_id": q_tid,
+                                                        "session_id": format!("chaos-sess-{seed}-{tag}"),
+                                                        "request_key": format!("chaos-bind-{seed}-{tag}"),
+                                                    }),
+                                                    Some(&pid),
+                                                ),
+                                            )?;
+                                        }
+                                    }
+                                }
+                                1 => {
+                                    // `@mention` comment triggering `Question` creation + `terminal.send`!
+                                    let body = format!("@codex chaos mention #{tag}");
+                                    if check_expected_chaos_err(
+                                        "comment.add(@mention)",
+                                        world.client_call(
+                                            "comment.add",
+                                            json!({
+                                                "card_id": cid,
+                                                "body": body,
+                                                "mentions": ["codex"],
+                                                "request_key": format!("chaos-mention-{seed}-{tag}"),
+                                            }),
+                                            Some(&pid),
+                                        ),
+                                    )?
+                                    .is_some()
+                                    {
+                                        if world
+                                            .server(&wf_host)
+                                            .and_then(|s| s.events().ok())
+                                            .is_some_and(|evs| {
+                                                evs.iter().any(|e| {
+                                                    e.card_id == raw_cid
+                                                        && e.kind == "comment.created"
+                                                        && (e.data["body"].as_str()
+                                                            == Some(body.as_str())
+                                                            || e.message == body)
+                                                })
+                                            })
+                                        {
+                                            oracle.record_committed_comment(
+                                                &wf_host, &raw_cid, body,
+                                            );
+                                        }
+                                        world.hit("chaos.mention_comment");
+                                        world.hit("chaos.agent_session_ops");
+                                    }
+                                }
+                                2 => {
+                                    // `agent.reply` to any open `Question` on `wf_host` (or create a mention first).
+                                    let open_q = world
+                                        .server(&wf_host)
+                                        .and_then(|s| s.snapshot().ok())
+                                        .and_then(|snap| {
+                                            snap.questions.into_iter().find(|q| {
+                                                q.state == "pending" || q.state == "delivered"
+                                            })
+                                        });
+                                    if let Some(q) = open_q {
+                                        let q_cid =
+                                            canban_types::qualify_host_id(&wf_host, &q.card_id);
+                                        if check_expected_chaos_err(
+                                            "agent.reply",
+                                            world.client_call(
+                                                "agent.reply",
+                                                json!({
+                                                    "card_id": q_cid,
+                                                    "question_id": q.id,
+                                                    "body": format!("chaos reply #{tag}"),
+                                                    "request_key": format!("chaos-reply-{seed}-{tag}"),
+                                                }),
+                                                Some(&wf_pid),
+                                            ),
+                                        )?
+                                        .is_some()
+                                        {
+                                            world.hit("chaos.agent_reply");
+                                            world.hit("chaos.agent_session_ops");
+                                        }
+                                    } else {
+                                        let body = format!("@codex chaos follow-up #{tag}");
+                                        if check_expected_chaos_err(
+                                            "comment.add(@mention_fallback)",
+                                            world.client_call(
+                                                "comment.add",
+                                                json!({
+                                                    "card_id": cid,
+                                                    "body": body,
+                                                    "mentions": ["codex"],
+                                                }),
+                                                Some(&pid),
+                                            ),
+                                        )?
+                                        .is_some()
+                                        {
+                                            world.hit("chaos.mention_comment");
+                                            world.hit("chaos.agent_session_ops");
+                                        }
+                                    }
+                                }
+                                3 => {
+                                    // `agent.interrupt` on a running agent terminal on `wf_host`.
+                                    let running_tid = world
+                                        .server(&wf_host)
+                                        .and_then(|s| s.snapshot().ok())
+                                        .and_then(|snap| {
+                                            snap.terminals.into_iter().find(|t| {
+                                                t.agent.as_ref().is_some_and(|a| {
+                                                    a.state == "running" && a.terminal.is_some()
+                                                })
+                                            })
+                                        })
+                                        .map(|t| canban_types::qualify_host_id(&wf_host, &t.id));
+                                    if let Some(q_tid) = running_tid {
+                                        let _ = check_expected_chaos_err(
+                                            "agent.interrupt",
+                                            world.client_call(
+                                                "agent.interrupt",
+                                                json!({
+                                                    "terminal_id": q_tid,
+                                                    "request_key": format!("chaos-intr-{seed}-{tag}"),
+                                                }),
+                                                Some(&wf_pid),
+                                            ),
+                                        )?;
+                                        world.hit("chaos.agent_session_ops");
+                                    }
+                                }
+                                4 => {
+                                    // `agent.end` on a running agent terminal (or `execution.retry` on a failed one).
+                                    let snap =
+                                        world.server(&wf_host).and_then(|s| s.snapshot().ok());
+                                    if let Some(snap) = snap {
+                                        if let Some(failed) = snap.terminals.iter().find(|t| {
+                                            t.agent.as_ref().is_some_and(|a| {
+                                                a.state == "failed"
+                                                    && a.observed.as_ref().is_some_and(|v| {
+                                                        matches!(
+                                                            v["state"].as_str(),
+                                                            Some("finished" | "missing")
+                                                        )
+                                                    })
+                                            })
+                                        }) {
+                                            let q_tid =
+                                                canban_types::qualify_host_id(&wf_host, &failed.id);
+                                            let _ = check_expected_chaos_err(
+                                                "execution.retry",
+                                                world.client_call(
+                                                    "execution.retry",
+                                                    json!({
+                                                        "terminal_id": q_tid,
+                                                        "request_key": format!("chaos-retry-{seed}-{tag}"),
+                                                    }),
+                                                    Some(&wf_pid),
+                                                ),
+                                            )?;
+                                            world.hit("chaos.agent_session_ops");
+                                        } else if let Some(running) =
+                                            snap.terminals.iter().find(|t| {
+                                                t.agent.as_ref().is_some_and(|a| {
+                                                    a.state == "running" && a.terminal.is_some()
+                                                })
+                                            })
+                                        {
+                                            let q_tid = canban_types::qualify_host_id(
+                                                &wf_host,
+                                                &running.id,
+                                            );
+                                            let _ = check_expected_chaos_err(
+                                                "agent.end",
+                                                world.client_call(
+                                                    "agent.end",
+                                                    json!({
+                                                        "terminal_id": q_tid,
+                                                        "request_key": format!("chaos-end-{seed}-{tag}"),
+                                                    }),
+                                                    Some(&wf_pid),
+                                                ),
+                                            )?;
+                                            world.hit("chaos.agent_session_ops");
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // `card.adopt`: launch a cardless agent terminal, then adopt it onto `cid`!
+                                    if !offline_herdr_hosts.contains(&wf_host)
+                                        && let Some(term_res) = check_expected_chaos_err(
+                                            "terminal.create(adopt)",
+                                            world.client_call(
+                                                "terminal.create",
+                                                json!({
+                                                    "project_id": pid,
+                                                    "agent": true,
+                                                    "profile_id": "codex",
+                                                    "cwd": wf_dir,
+                                                    "name": format!("Adopt PTY {tag}"),
+                                                }),
+                                                Some(&pid),
+                                            ),
+                                        )?
+                                        && let Some(tid) = term_res["id"].as_str()
+                                    {
+                                        let raw_tid = strip_host_id(tid);
+                                        world.advance(Duration::from_millis(200))?;
+                                        let runtime_addr = world
+                                            .server(&wf_host)
+                                            .and_then(|s| s.snapshot().ok())
+                                            .and_then(|snap| {
+                                                snap.terminals
+                                                    .into_iter()
+                                                    .find(|t| t.id == raw_tid)
+                                                    .and_then(|t| t.runtime)
+                                                    .and_then(|r| r.terminal)
+                                            });
+                                        if let Some(addr) = runtime_addr
+                                            && let Some(adopted) = check_expected_chaos_err(
+                                                "card.adopt",
+                                                world.client_call(
+                                                    "card.adopt",
+                                                    json!({
+                                                        "view": "full",
+                                                        "card_id": cid,
+                                                        "stage": "develop",
+                                                        "profile_id": "codex",
+                                                        "cwd": wf_dir,
+                                                        "runtime_terminal": addr,
+                                                        "runtime_session": "default",
+                                                        "request_key": format!("chaos-adopt-{seed}-{tag}"),
+                                                    }),
+                                                    Some(&pid),
+                                                ),
+                                            )?
+                                        {
+                                            if let Some(wf_rid) =
+                                                adopted["workflow_run"]["id"].as_str()
+                                            {
+                                                let raw_rid = strip_host_id(wf_rid);
+                                                if let Some(srv_run) = world
+                                                    .server(&wf_host)
+                                                    .and_then(|s| s.snapshot().ok())
+                                                    .and_then(|snap| {
+                                                        snap.workflow_runs
+                                                            .into_iter()
+                                                            .find(|r| r.id == raw_rid)
+                                                    })
+                                                {
+                                                    oracle.record_committed_workflow_run(
+                                                        &wf_host,
+                                                        &srv_run.id,
+                                                        &srv_run.project_id,
+                                                        &srv_run.workflow_id,
+                                                        srv_run.visit,
+                                                    );
+                                                }
+                                            }
+                                            world.hit("chaos.card_adopt");
+                                            world.hit("chaos.agent_session_ops");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ChaosOp::WorkflowHotUpdate { tag } => {
+                    if profile.enable_workflow_hot_update
+                        && let Some(sources) = check_expected_chaos_err(
+                            "workflow.sources",
+                            world.client_call(
+                                "workflow.sources",
+                                json!({ "project_id": wf_pid }),
+                                Some(&wf_pid),
+                            ),
+                        )?
+                    {
+                        let mut yaml_sources = Vec::new();
+                        if profile.enable_workflows {
+                            let base = if profile.enable_worktree_delivery {
+                                CHAOS_DELIVERY_WORKFLOW_YAML
+                            } else {
+                                CHAOS_WORKFLOW_YAML
+                            };
+                            let updated = base.replace(
+                                "Execute chaos step",
+                                &format!("Execute chaos step rev-{tag}"),
+                            );
+                            yaml_sources.push(json!({
+                                "filename": "chaos-flow.yaml",
+                                "source": updated,
+                            }));
+                        }
+                        if profile.enable_schedules {
+                            let updated_cron = CHAOS_CRON_YAML.replace(
+                                "Run scheduled chaos task",
+                                &format!("Run scheduled chaos task rev-{tag}"),
+                            );
+                            yaml_sources.push(json!({
+                                "filename": "chaos-cron.yaml",
+                                "source": updated_cron,
+                            }));
+                        }
+                        if !yaml_sources.is_empty()
+                            && check_expected_chaos_err(
+                                "workflow.apply",
+                                world.client_call(
+                                    "workflow.apply",
+                                    json!({
+                                        "project_id": wf_pid,
+                                        "revision": sources["revision"],
+                                        "sources": yaml_sources,
+                                    }),
+                                    Some(&wf_pid),
+                                ),
+                            )?
+                            .is_some()
+                        {
+                            world.hit("chaos.workflow_hot_update");
+                        }
+                    }
+                }
+                ChaosOp::ReviewAndPrOp {
+                    kind,
+                    card_pick,
+                    tag,
+                } => {
+                    if profile.enable_review_pr && world.server(&wf_host).is_some() {
+                        let wf_cards: Vec<_> = cards
+                            .iter()
+                            .filter(|c| {
+                                c.shared && c.host == wf_host && !archived_cards.contains(&c.cid)
+                            })
+                            .collect();
+                        if !wf_cards.is_empty() {
+                            let tc = wf_cards[*card_pick % wf_cards.len()];
+                            let (pid, cid) = (tc.pid.clone(), tc.cid.clone());
+                            let raw_cid = strip_host_id(&cid);
+                            match kind % 6 {
+                                0 => {
+                                    // `review.run_agent` -> prepares card worktree & launches diff-review agent!
+                                    if check_expected_chaos_err(
+                                        "review.run_agent",
+                                        world.client_call(
+                                            "review.run_agent",
+                                            json!({
+                                                "card_id": cid,
+                                                "profile_id": "developer",
+                                                "focus": format!("chaos review focus #{tag}"),
+                                            }),
+                                            Some(&pid),
+                                        ),
+                                    )?
+                                    .is_some()
+                                    {
+                                        world.advance(Duration::from_millis(160))?;
+                                        // Commit a change inside the prepared worktree so preview/merge/PR have a diff.
+                                        if let Some(wt) = world
+                                            .server(&wf_host)
+                                            .and_then(|s| s.snapshot().ok())
+                                            .and_then(|snap| {
+                                                snap.cards
+                                                    .into_iter()
+                                                    .find(|c| c.id == raw_cid)
+                                                    .and_then(|c| c.worktree)
+                                            })
+                                            && Path::new(&wt).is_dir()
+                                            && let Some(exec) = world.exec_runner(&wf_host)
+                                        {
+                                            let _ = exec.commit_in_worktree(
+                                                &wt,
+                                                &format!("feat(review): chaos commit {tag}"),
+                                            );
+                                        }
+                                        world.hit("chaos.review_ops");
+                                    }
+                                }
+                                1 => {
+                                    // `review.preview` on any card with a worktree.
+                                    if let Some(wt_card) =
+                                        pick_worktree_card(world, &wf_host, &wf_cards, *card_pick)
+                                    {
+                                        let (w_pid, w_cid, w_path) = wt_card;
+                                        if let Some(exec) = world.exec_runner(&wf_host)
+                                            && Path::new(&w_path).is_dir()
+                                        {
+                                            let _ = exec.commit_in_worktree(
+                                                &w_path,
+                                                &format!("feat(preview): chaos {tag}"),
+                                            );
+                                        }
+                                        if check_expected_chaos_err(
+                                            "review.preview",
+                                            world.client_call(
+                                                "review.preview",
+                                                json!({ "card_id": w_cid }),
+                                                Some(&w_pid),
+                                            ),
+                                        )?
+                                        .is_some()
+                                        {
+                                            world.hit("chaos.review_ops");
+                                        }
+                                    }
+                                }
+                                2 => {
+                                    // `review.send_agent` (alternating `"card"` and `"terminal"` modes).
+                                    if let Some((w_pid, w_cid, _)) =
+                                        pick_worktree_card(world, &wf_host, &wf_cards, *card_pick)
+                                    {
+                                        let payload = if tag.is_multiple_of(2) {
+                                            json!({
+                                                "mode": "card",
+                                                "card_id": w_cid,
+                                                "profile_id": "developer",
+                                                "move_to_develop": false,
+                                                "context_label": format!("chaos review #{tag}"),
+                                                "summary": format!("Chaos inline review #{tag}"),
+                                                "comments": [{
+                                                    "path": "src/change_1.rs",
+                                                    "line": 1,
+                                                    "side": "RIGHT",
+                                                    "snippet": "// sim",
+                                                    "body": format!("Check edge case #{tag}"),
+                                                }],
+                                                "request_key": format!("chaos-rsend-{seed}-{tag}"),
+                                            })
+                                        } else {
+                                            json!({
+                                                "mode": "terminal",
+                                                "project_id": w_pid,
+                                                "profile_id": "developer",
+                                                "context_label": format!("chaos review term #{tag}"),
+                                                "summary": format!("Chaos terminal review #{tag}"),
+                                                "comments": [],
+                                                "request_key": format!("chaos-rsend-{seed}-{tag}"),
+                                            })
+                                        };
+                                        if check_expected_chaos_err(
+                                            "review.send_agent",
+                                            world.client_call(
+                                                "review.send_agent",
+                                                payload,
+                                                Some(&w_pid),
+                                            ),
+                                        )?
+                                        .is_some()
+                                        {
+                                            world.hit("chaos.review_ops");
+                                        }
+                                    }
+                                }
+                                3 => {
+                                    // `review.merge` (only if >1 active card remains on `wf_host`).
+                                    if wf_cards.len() > 1
+                                        && let Some((w_pid, w_cid, w_path)) = pick_worktree_card(
+                                            world, &wf_host, &wf_cards, *card_pick,
+                                        )
+                                    {
+                                        if let Some(exec) = world.exec_runner(&wf_host)
+                                            && Path::new(&w_path).is_dir()
+                                        {
+                                            let _ = exec.commit_in_worktree(
+                                                &w_path,
+                                                &format!("feat(merge): chaos {tag}"),
+                                            );
+                                        }
+                                        if let Some(prev) = check_expected_chaos_err(
+                                            "review.preview(for_merge)",
+                                            world.client_call(
+                                                "review.preview",
+                                                json!({ "card_id": w_cid }),
+                                                Some(&w_pid),
+                                            ),
+                                        )? && prev["merge_allowed"] == true
+                                            && let Some(token) = prev["token"].as_str()
+                                        {
+                                            let rev = lookup_card_rev(world, &w_cid);
+                                            if check_expected_chaos_err(
+                                                "review.merge",
+                                                world.client_call(
+                                                    "review.merge",
+                                                    json!({
+                                                        "card_id": w_cid,
+                                                        "revision": rev,
+                                                        "token": token,
+                                                        "request_key": format!("chaos-rmerge-{seed}-{tag}"),
+                                                    }),
+                                                    Some(&w_pid),
+                                                ),
+                                            )?
+                                            .is_some()
+                                            {
+                                                let w_raw = strip_host_id(&w_cid);
+                                                if world
+                                                    .server(&wf_host)
+                                                    .and_then(|s| s.snapshot().ok())
+                                                    .and_then(|snap| {
+                                                        snap.cards
+                                                            .into_iter()
+                                                            .find(|c| c.id == w_raw)
+                                                    })
+                                                    .is_some_and(|c| !c.active())
+                                                {
+                                                    archived_cards.insert(w_cid);
+                                                }
+                                                world.hit("chaos.review_ops");
+                                            }
+                                        }
+                                    }
+                                }
+                                4 => {
+                                    // `github.pr.publish` on a committed worktree card when GitHub is co-located.
+                                    if gh_host == wf_host
+                                        && let Some((w_pid, w_cid, w_path)) = pick_worktree_card(
+                                            world, &wf_host, &wf_cards, *card_pick,
+                                        )
+                                    {
+                                        let w_raw = strip_host_id(&w_cid);
+                                        if let Some(exec) = world.exec_runner(&wf_host)
+                                            && Path::new(&w_path).is_dir()
+                                            && let Ok(head) = exec.commit_in_worktree(
+                                                &w_path,
+                                                &format!("feat(pr): chaos {tag}"),
+                                            )
+                                            && let Some(branch) = world
+                                                .server(&wf_host)
+                                                .and_then(|s| s.snapshot().ok())
+                                                .and_then(|snap| {
+                                                    snap.cards
+                                                        .into_iter()
+                                                        .find(|c| c.id == w_raw)
+                                                        .and_then(|c| c.branch)
+                                                })
+                                        {
+                                            world.github.set_branch_head(gh_repo, &branch, &head);
+                                        }
+                                        if let Some(prev) = check_expected_chaos_err(
+                                            "review.preview(for_pr)",
+                                            world.client_call(
+                                                "review.preview",
+                                                json!({ "card_id": w_cid }),
+                                                Some(&w_pid),
+                                            ),
+                                        )? && let Some(token) = prev["token"].as_str()
+                                        {
+                                            let rev = lookup_card_rev(world, &w_cid);
+                                            if check_expected_chaos_err(
+                                                "github.pr.publish",
+                                                world.client_call(
+                                                    "github.pr.publish",
+                                                    json!({
+                                                        "card_id": w_cid,
+                                                        "revision": rev,
+                                                        "token": token,
+                                                        "request_key": format!("chaos-prpub-{seed}-{tag}"),
+                                                    }),
+                                                    Some(&w_pid),
+                                                ),
+                                            )?
+                                            .is_some()
+                                            {
+                                                world.hit("chaos.github_pr_ops");
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // `github.pr.refresh` (+ optional `github.pr.merge`) on any card with an open PR.
+                                    if gh_host == wf_host
+                                        && let Some(snap) =
+                                            world.server(&wf_host).and_then(|s| s.snapshot().ok())
+                                    {
+                                        let pr_card = snap.cards.into_iter().find(|c| {
+                                            c.active()
+                                                && c.pull_request
+                                                    .as_ref()
+                                                    .is_some_and(|pr| !pr.merged)
+                                        });
+                                        if let Some(card) = pr_card {
+                                            let q_cid =
+                                                canban_types::qualify_host_id(&wf_host, &card.id);
+                                            if check_expected_chaos_err(
+                                                "github.pr.refresh",
+                                                world.client_call(
+                                                    "github.pr.refresh",
+                                                    json!({ "card_id": q_cid }),
+                                                    Some(&wf_pid),
+                                                ),
+                                            )?
+                                            .is_some()
+                                            {
+                                                world.hit("chaos.github_pr_ops");
+                                            }
+                                            if tag.is_multiple_of(2)
+                                                && wf_cards.len() > 1
+                                                && let Some(head) = card
+                                                    .pull_request
+                                                    .as_ref()
+                                                    .map(|pr| pr.head.clone())
+                                                    .filter(|s| !s.is_empty())
+                                            {
+                                                let rev = lookup_card_rev(world, &q_cid);
+                                                if check_expected_chaos_err(
+                                                    "github.pr.merge",
+                                                    world.client_call(
+                                                        "github.pr.merge",
+                                                        json!({
+                                                            "card_id": q_cid,
+                                                            "revision": rev,
+                                                            "head": head,
+                                                            "request_key": format!("chaos-prmerge-{seed}-{tag}"),
+                                                        }),
+                                                        Some(&wf_pid),
+                                                    ),
+                                                )?
+                                                .is_some()
+                                                {
+                                                    if world
+                                                        .server(&wf_host)
+                                                        .and_then(|s| s.snapshot().ok())
+                                                        .and_then(|s| {
+                                                            s.cards
+                                                                .into_iter()
+                                                                .find(|c| c.id == card.id)
+                                                        })
+                                                        .is_some_and(|c| !c.active())
+                                                    {
+                                                        archived_cards.insert(q_cid);
+                                                    }
+                                                    world.hit("chaos.github_pr_ops");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ChaosOp::DraftOp {
+                    kind,
+                    host_idx,
+                    draft_pick,
+                    tag,
+                } => {
+                    if profile.enable_drafts {
+                        let (host, pid) = host_projects[*host_idx % host_projects.len()].clone();
+                        let draft_id = format!("new-card:chaos-{seed}-{}", *draft_pick % 3);
+                        let key = (host.clone(), draft_id.clone());
+                        let cur_rev = draft_revs.get(&key).copied().unwrap_or(0);
+                        match kind % 4 {
+                            0 | 1 => {
+                                // Create or update draft at expected revision.
+                                if let Some(saved) = check_expected_chaos_err(
+                                    "draft.save",
+                                    world.client_call(
+                                        "draft.save",
+                                        json!({
+                                            "host_id": host,
+                                            "id": draft_id,
+                                            "revision": cur_rev,
+                                            "data": {
+                                                "title": format!("Chaos Draft {tag}"),
+                                                "body": format!("draft-body-{seed}-{tag}"),
+                                            },
+                                        }),
+                                        Some(&pid),
+                                    ),
+                                )? {
+                                    if let Some(new_rev) = saved["revision"].as_u64() {
+                                        draft_revs.insert(key, new_rev);
+                                    }
+                                    world.hit("chaos.draft_ops");
+                                }
+                            }
+                            2 => {
+                                // Intentionally test stale revision conflict (or tombstone if rev >= 2).
+                                let (rev_to_send, data) = if cur_rev >= 2 && tag.is_multiple_of(2) {
+                                    (cur_rev, Value::Null)
+                                } else {
+                                    (
+                                        cur_rev.saturating_sub(1),
+                                        json!({ "title": format!("Stale Draft {tag}") }),
+                                    )
+                                };
+                                if let Some(saved) = check_expected_chaos_err(
+                                    "draft.save(conflict_or_tombstone)",
+                                    world.client_call(
+                                        "draft.save",
+                                        json!({
+                                            "host_id": host,
+                                            "id": draft_id,
+                                            "revision": rev_to_send,
+                                            "data": data,
+                                        }),
+                                        Some(&pid),
+                                    ),
+                                )? && let Some(new_rev) = saved["revision"].as_u64()
                                 {
-                                    oracle.record_committed_note(
-                                        srv_name,
-                                        &n.id,
-                                        &n.project_id,
-                                        n.revision,
-                                    );
+                                    draft_revs.insert(key, new_rev);
+                                }
+                                world.hit("chaos.draft_ops");
+                            }
+                            _ => {
+                                // `draft.list`
+                                if check_expected_chaos_err(
+                                    "draft.list",
+                                    world.client_call(
+                                        "draft.list",
+                                        json!({ "host_id": host }),
+                                        Some(&pid),
+                                    ),
+                                )?
+                                .is_some()
+                                {
+                                    world.hit("chaos.draft_ops");
+                                }
+                            }
+                        }
+                    }
+                }
+                ChaosOp::SubscriptionOp {
+                    kind,
+                    card_pick,
+                    tag,
+                } => {
+                    if profile.enable_subscriptions {
+                        match kind % 5 {
+                            0 => {
+                                // Register a durable consumer subscription on an active card.
+                                if let Some((host, pid, cid)) = pick_active_card(
+                                    world,
+                                    PRIMARY_CLIENT,
+                                    &cards,
+                                    &archived_cards,
+                                    *card_pick,
+                                ) && tracked_subs.len() < 6
+                                    && let Some(sub) = check_expected_chaos_err(
+                                        "subscription.save",
+                                        world.client_call(
+                                            "subscription.save",
+                                            json!({
+                                                "host_id": host,
+                                                "revision": 0,
+                                                "enabled": true,
+                                                "selector": {
+                                                    "card_id": cid,
+                                                    "types": ["comment.*", "card.*"],
+                                                },
+                                                "target": { "type": "consumer" },
+                                            }),
+                                            Some(&pid),
+                                        ),
+                                    )?
+                                    && let Some(sid) = sub["id"].as_str()
+                                {
+                                    tracked_subs.push((host, pid, sid.to_owned()));
+                                    world.hit("chaos.subscription_ops");
+                                }
+                            }
+                            1 => {
+                                // `subscription.list` on `wf_host`.
+                                if check_expected_chaos_err(
+                                    "subscription.list",
+                                    world.client_call(
+                                        "subscription.list",
+                                        json!({ "host_id": wf_host }),
+                                        Some(&wf_pid),
+                                    ),
+                                )?
+                                .is_some()
+                                {
+                                    world.hit("chaos.subscription_ops");
+                                }
+                            }
+                            2 => {
+                                // `event.list` on `wf_host`.
+                                if check_expected_chaos_err(
+                                    "event.list",
+                                    world.client_call(
+                                        "event.list",
+                                        json!({
+                                            "host_id": wf_host,
+                                            "after": 0,
+                                            "limit": 50,
+                                        }),
+                                        Some(&wf_pid),
+                                    ),
+                                )?
+                                .is_some()
+                                {
+                                    world.hit("chaos.subscription_ops");
+                                }
+                            }
+                            3 => {
+                                // `subscription.deliveries` + `subscription.ack` on pending deliveries.
+                                if !tracked_subs.is_empty() {
+                                    let (host, pid, sid) =
+                                        tracked_subs[*card_pick % tracked_subs.len()].clone();
+                                    if let Some(deliv) = check_expected_chaos_err(
+                                        "subscription.deliveries",
+                                        world.client_call(
+                                            "subscription.deliveries",
+                                            json!({ "host_id": host, "subscription_id": sid }),
+                                            Some(&pid),
+                                        ),
+                                    )? {
+                                        world.hit("chaos.subscription_ops");
+                                        if let Some(pending_id) = deliv.as_array().and_then(|arr| {
+                                            arr.iter()
+                                                .find(|d| d["state"] == "pending")
+                                                .and_then(|d| d["id"].as_str())
+                                        }) {
+                                            let _ = check_expected_chaos_err(
+                                                "subscription.ack",
+                                                world.client_call(
+                                                    "subscription.ack",
+                                                    json!({
+                                                        "host_id": host,
+                                                        "delivery_id": pending_id,
+                                                    }),
+                                                    Some(&pid),
+                                                ),
+                                            )?;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // `subscription.retry` if any failed delivery exists, else emit a
+                                // comment on a subscribed card to drive delivery generation.
+                                if !tracked_subs.is_empty() {
+                                    let (host, pid, sid) =
+                                        tracked_subs[*card_pick % tracked_subs.len()].clone();
+                                    if let Some(deliv) = check_expected_chaos_err(
+                                        "subscription.deliveries(retry_scan)",
+                                        world.client_call(
+                                            "subscription.deliveries",
+                                            json!({ "host_id": host, "subscription_id": sid }),
+                                            Some(&pid),
+                                        ),
+                                    )? {
+                                        if let Some(failed_id) = deliv.as_array().and_then(|arr| {
+                                            arr.iter()
+                                                .find(|d| d["state"] == "failed")
+                                                .and_then(|d| d["id"].as_str())
+                                        }) {
+                                            let _ = check_expected_chaos_err(
+                                                "subscription.retry",
+                                                world.client_call(
+                                                    "subscription.retry",
+                                                    json!({
+                                                        "host_id": host,
+                                                        "delivery_id": failed_id,
+                                                    }),
+                                                    Some(&pid),
+                                                ),
+                                            )?;
+                                        }
+                                        world.hit("chaos.subscription_ops");
+                                    }
+                                } else if let Some((_host, pid, cid)) = pick_active_card(
+                                    world,
+                                    PRIMARY_CLIENT,
+                                    &cards,
+                                    &archived_cards,
+                                    *card_pick,
+                                ) {
+                                    let _ = check_expected_chaos_err(
+                                        "comment.add(sub_seed)",
+                                        world.client_call(
+                                            "comment.add",
+                                            json!({
+                                                "card_id": cid,
+                                                "body": format!("sub-event-comment-{tag}"),
+                                            }),
+                                            Some(&pid),
+                                        ),
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+                ChaosOp::ProjectBundleOp { kind, tag } => {
+                    if profile.enable_bundle_ops
+                        && let Some(ref b_pid) = bundle_src_pid
+                        && let Some(ref dst_host) = bundle_dst_host
+                    {
+                        match kind % 3 {
+                            0 => {
+                                // `project.export` + verify bundle exists & zero leaked secrets.
+                                let path = world.temp_file_path(&format!(
+                                    "chaos-bundle-{seed}-{tag}.canban.tar.zst"
+                                ))?;
+                                let path_str = path.to_string_lossy().into_owned();
+                                if let Some(exp) = check_expected_chaos_err(
+                                    "project.export",
+                                    world.client_call(
+                                        "project.export",
+                                        json!({
+                                            "project_id": b_pid,
+                                            "output": path_str,
+                                            "include_archived": true,
+                                            "overwrite": true,
+                                        }),
+                                        Some(b_pid),
+                                    ),
+                                )? && exp["exported"].as_bool() == Some(true)
+                                    && path.exists()
+                                {
+                                    let raw_bytes = std::fs::read(&path)?;
+                                    for secret in &oracle.tracked_secrets {
+                                        ensure!(
+                                            !raw_bytes
+                                                .windows(secret.len())
+                                                .any(|w| w == secret.as_bytes()),
+                                            "SECURITY VIOLATION: tracked secret leaked into exported chaos bundle!"
+                                        );
+                                    }
+                                    bundle_exported_path = Some(path_str);
+                                    world.hit("chaos.bundle_export");
+                                }
+                            }
+                            1 => {
+                                // `project.import` onto distinct destination host (with `pause_github: true`).
+                                if let Some(ref b_path) = bundle_exported_path
+                                    && !bundle_imported_hosts.contains(dst_host)
+                                {
+                                    let imp_dir =
+                                        world.project_dir(&format!("chaos-bundle-imp-{tag}"))?;
+                                    if let Some(imp) = check_expected_chaos_err(
+                                        "project.import",
+                                        world.client_call(
+                                            "project.import",
+                                            json!({
+                                                "host_id": dst_host,
+                                                "file": b_path,
+                                                "directory": imp_dir,
+                                                "name": format!("Chaos Imported {seed}-{tag}"),
+                                                "pause_github": true,
+                                            }),
+                                            None,
+                                        ),
+                                    )? && imp["imported"].as_bool() == Some(true)
+                                    {
+                                        bundle_imported_hosts.insert(dst_host.clone());
+                                        world.hit("chaos.bundle_import");
+                                    }
+                                } else if bundle_exported_path.is_none() {
+                                    // Export first if not yet exported.
+                                    let path = world.temp_file_path(&format!(
+                                        "chaos-bundle-init-{seed}-{tag}.canban.tar.zst"
+                                    ))?;
+                                    let path_str = path.to_string_lossy().into_owned();
+                                    if let Some(exp) = check_expected_chaos_err(
+                                        "project.export(auto)",
+                                        world.client_call(
+                                            "project.export",
+                                            json!({
+                                                "project_id": b_pid,
+                                                "output": path_str,
+                                                "include_archived": true,
+                                                "overwrite": true,
+                                            }),
+                                            Some(b_pid),
+                                        ),
+                                    )? && exp["exported"].as_bool() == Some(true)
+                                    {
+                                        bundle_exported_path = Some(path_str);
+                                        world.hit("chaos.bundle_export");
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Test duplicate-import rejection onto `bundle_src_host`!
+                                if let Some(ref b_path) = bundle_exported_path {
+                                    let dup_dir =
+                                        world.project_dir(&format!("chaos-bundle-dup-{tag}"))?;
+                                    let _ = check_expected_chaos_err(
+                                        "project.import(duplicate)",
+                                        world.client_call(
+                                            "project.import",
+                                            json!({
+                                                "host_id": bundle_src_host,
+                                                "file": b_path,
+                                                "directory": dup_dir,
+                                                "name": format!("Dup {tag}"),
+                                                "pause_github": true,
+                                            }),
+                                            None,
+                                        ),
+                                    )?;
+                                    world.hit("chaos.bundle_ops");
                                 }
                             }
                         }
@@ -2783,15 +4934,32 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 }
             }
 
-            // Advance a small virtual tick and check step invariants after EVERY SINGLE OP!
+            // Advance a small virtual tick, observe any real delivery batches, and check
+            // step invariants after EVERY SINGLE OP!
             world.advance(Duration::from_millis(80))?;
+            if profile.enable_worktree_delivery {
+                observe_delivery_batches(
+                    world,
+                    &mut oracle,
+                    &wf_host,
+                    &mut seen_delivery_batches,
+                    &mut archived_cards,
+                );
+            }
             oracle.check_step_invariants(world)?;
         }
 
-        // Clean pre-quiescence recovery for newly fuzzed subsystems:
-        // 1. Repair links/stream faults and ensure all servers/clients are running before restoring
-        //    cron toggles, revoked auth, or an archived secondary project.
+        // Clean pre-quiescence recovery:
+        // 1. Repair links/stream/storage/GitHub/Herdr/clock faults and ensure all servers/clients
+        //    are running WITHOUT manually calling `reconnect` or `poll_remotes_once_async` yet!
         world.repair_all();
+        world.github.clear_injected_faults();
+        for h in world.servers.values() {
+            h.storage_faults.clear();
+            h.clock.reset_adjustments();
+            h.herdr.clear_injected_faults();
+            h.herdr.set_offline(false);
+        }
         let crashed_servers: Vec<String> = world
             .servers
             .iter()
@@ -2811,13 +4979,24 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             world.bounce_client_named(&name)?;
         }
 
-        // 2. Disable cron schedules so no new cron ticks fire during quiescence drain/polling.
+        // 2. Disable cron schedules and flush any pending GitHub issue/PR cache updates before
+        //    quiescence drain so background server timers do not mutate state mid-way between
+        //    sequential multi-client `poll_remotes_once_async()` calls inside `heal_and_quiesce`.
         for (sid, _) in &schedule_entries {
             let _ = world.server_call(
                 &wf_host,
                 "schedule.toggle",
                 json!({ "schedule_id": sid, "enabled": false }),
             )?;
+        }
+        if (profile.enable_github_faults || profile.enable_review_pr)
+            && world.server(server_key(&gh_host)).is_some()
+        {
+            let _ = world.server_call(
+                server_key(&gh_host),
+                "github.sync",
+                json!({ "project_id": strip_host_id(&gh_pid) }),
+            );
         }
 
         // 3. Re-pair `auth_host` if still revoked so strict `Connected` + convergence checks run.
@@ -2857,7 +5036,15 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             world.hit("chaos.project_archive_restore");
         }
 
-        // Heal all faults (including dynamic clock jumps/drift) & quiesce.
+        // 5. Natural Quiesce verification slice: advance virtual time WITHOUT calling manual
+        //    `reconnect` / `clear_retry_backoff` / `poll_remotes_once_async` and verify
+        //    unassisted reconnect + outbox drain convergence!
+        world.hit("chaos.natural_quiesce_checked");
+        world.quiesce_natural(120_000)?;
+        world.hit("chaos.natural_quiesce_recovered");
+
+        // Final forced heal & poll so Herdr observers and latest remote snapshots settle before
+        // conflict resolution and strict quiescent oracle assertions.
         world.heal_and_quiesce(25_000)?;
 
         // Resolve ONLY genuine `SyncItemState::Conflict` items (cycling through ALL SyncAction
@@ -2941,7 +5128,6 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
         }
 
         // Explicitly assert remote global-env convergence when global env was saved on Desktop!
-        // Trigger a final sync if a remote host was temporarily in AuthFailed during earlier saves.
         if profile.desktop_local && env_secret_saved_count > 0 {
             let local_env = world.server("local-server").unwrap().snapshot()?.global_env;
             let needs_env_resync = remotes.iter().any(|r| {
@@ -2965,12 +5151,274 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             world.hit("chaos.global_env_converged");
         }
 
+        if profile.enable_worktree_delivery {
+            observe_delivery_batches(
+                world,
+                &mut oracle,
+                &wf_host,
+                &mut seen_delivery_batches,
+                &mut archived_cards,
+            );
+        }
+
         // Final strict quiescent invariant check (fails on ANY unexpected `SyncItemState::Failed`,
         // divergence on ANY client, SQLite integrity error, post-bounce stuck state, or secret leak!).
         oracle.check_quiescent_invariants(world)?;
 
         Ok(finalize_digest(world))
     })
+}
+
+fn host_is_connected(world: &SimWorld, client_id: &str, host_id: &str) -> bool {
+    world
+        .client_host_summaries_on(client_id)
+        .iter()
+        .find(|s| s.id == host_id)
+        .is_some_and(|s| s.is_connected())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_workflow_on_wf_host(
+    world: &mut SimWorld,
+    oracle: &mut InvariantOracle,
+    wf_host: &str,
+    cards: &[TrackedCard],
+    archived_cards: &BTreeSet<String>,
+    tracked_wf_runs: &mut Vec<(String, String, String)>,
+    card_pick: usize,
+    seed: u64,
+    tag: u32,
+) -> Result<bool> {
+    let wf_cards: Vec<_> = cards
+        .iter()
+        .filter(|c| c.shared && c.host == wf_host && !archived_cards.contains(&c.cid))
+        .collect();
+    if wf_cards.is_empty() {
+        return Ok(false);
+    }
+    let tc = wf_cards[card_pick % wf_cards.len()];
+    let (pid, cid) = (&tc.pid, &tc.cid);
+    if let Some(res) = check_expected_chaos_err(
+        "workflow.start",
+        world.client_call(
+            "workflow.start",
+            json!({
+                "workflow_id": "chaos-flow",
+                "card_id": cid,
+                "entry": "start",
+                "request_key": format!("chaos-wf-{seed}-{tag}"),
+            }),
+            Some(pid),
+        ),
+    )? && let Some(rid) = res["id"].as_str()
+    {
+        let q_rid = if rid.contains("::") {
+            rid.to_owned()
+        } else {
+            canban_types::qualify_host_id(wf_host, rid)
+        };
+        let raw_rid = strip_host_id(&q_rid);
+        if let Some(srv_run) = world
+            .server(wf_host)
+            .and_then(|s| s.snapshot().ok())
+            .and_then(|snap| snap.workflow_runs.into_iter().find(|r| r.id == raw_rid))
+        {
+            oracle.record_committed_workflow_run(
+                wf_host,
+                &srv_run.id,
+                &srv_run.project_id,
+                &srv_run.workflow_id,
+                srv_run.visit,
+            );
+        }
+        tracked_wf_runs.push((wf_host.to_owned(), pid.clone(), q_rid));
+        world.hit("chaos.workflow_start");
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn decide_waiting_workflow(
+    world: &mut SimWorld,
+    wf_host: &str,
+    wf_pid: &str,
+    run_pick: usize,
+    approve: bool,
+    seed: u64,
+    tag: u32,
+) -> Result<bool> {
+    if let Some(srv) = world.server(wf_host) {
+        let snap = srv.snapshot()?;
+        let mut waiting: Vec<_> = snap
+            .workflow_runs
+            .iter()
+            .filter(|r| r.state == "waiting_approval")
+            .collect();
+        waiting.sort_by_key(|r| (r.visit, r.definition_revision));
+        if !waiting.is_empty() {
+            let wf = waiting[run_pick % waiting.len()];
+            if let Some(raw_cid) = wf.card_id.as_deref()
+                && let Some(card) = snap.cards.iter().find(|c| c.id == raw_cid)
+            {
+                let q_rid = canban_types::qualify_host_id(wf_host, &wf.id);
+                let decision = if approve { "approve" } else { "rework" };
+                let _ = check_expected_chaos_err(
+                    "workflow.decide",
+                    world.client_call(
+                        "workflow.decide",
+                        json!({
+                            "run_id": q_rid,
+                            "visit": wf.visit,
+                            "revision": card.revision,
+                            "decision": decision,
+                            "feedback": "chaos decision",
+                            "request_key": format!("chaos-dec-{seed}-{tag}"),
+                        }),
+                        Some(wf_pid),
+                    ),
+                )?;
+                world.hit("chaos.workflow_decide");
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn report_running_execution(
+    world: &mut SimWorld,
+    wf_host: &str,
+    enable_worktree_delivery: bool,
+    term_pick: usize,
+    state: &str,
+    seed: u64,
+    tag: u32,
+) -> Result<bool> {
+    if let Some(srv) = world.server(wf_host) {
+        let snap = srv.snapshot()?;
+        let mut running: Vec<_> = snap
+            .terminals
+            .iter()
+            .filter(|t| {
+                t.agent
+                    .as_ref()
+                    .is_some_and(|a| a.state == "running" && a.terminal.is_some())
+            })
+            .collect();
+        running.sort_by_key(|t| t.created_at);
+        if !running.is_empty() {
+            let t = running[term_pick % running.len()];
+            let mut finished_addr: Option<String> = None;
+            if state == "completed"
+                && enable_worktree_delivery
+                && let Some(agent) = t.agent.as_ref()
+            {
+                if let Some(wt_path) = snap
+                    .cards
+                    .iter()
+                    .find(|c| c.id == agent.card_id)
+                    .and_then(|c| c.worktree.as_deref())
+                    && Path::new(wt_path).is_dir()
+                    && let Some(exec) = world.exec_runner(wf_host)
+                {
+                    let _ = exec.commit_in_worktree(wt_path, &format!("feat: chaos commit {tag}"));
+                }
+                finished_addr = agent.terminal.clone();
+            }
+            let _ = check_expected_chaos_err(
+                "execution.report",
+                world.server_call(
+                    wf_host,
+                    "execution.report",
+                    json!({
+                        "terminal_id": t.id,
+                        "state": state,
+                        "message": format!("chaos report {tag}"),
+                        "request_key": format!("chaos-rep-{seed}-{tag}"),
+                    }),
+                ),
+            )?;
+            if let Some(addr) = finished_addr
+                && let Some(herdr) = world.herdr(wf_host)
+            {
+                herdr.finish_terminal(&addr, 0, "exited");
+            }
+            world.hit("chaos.execution_report");
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Observes real merge batch entries (`uses: deliver` -> `merge_batch` integration) on `wf_host`,
+/// recording persistent `MergeBatch` durability in `oracle` and hitting `chaos.delivery_batch_entered`
+/// strictly when a real merge batch enters integration (never on standalone worktree ops).
+fn observe_delivery_batches(
+    world: &SimWorld,
+    oracle: &mut InvariantOracle,
+    wf_host: &str,
+    seen_delivery_batches: &mut BTreeSet<String>,
+    archived_cards: &mut BTreeSet<String>,
+) {
+    let Some(srv) = world.server(wf_host) else {
+        return;
+    };
+    if let Ok(snap) = srv.snapshot() {
+        for batch in &snap.merge_batches {
+            if matches!(
+                batch.state.as_str(),
+                "queued" | "running" | "completed" | "failed"
+            ) {
+                oracle.record_committed_merge_batch(wf_host, &batch.id, &batch.project_id);
+                if seen_delivery_batches.insert(batch.id.clone()) {
+                    world.hit("chaos.delivery_batch_entered");
+                }
+            }
+        }
+        for card in &snap.cards {
+            if !card.active() {
+                archived_cards.insert(canban_types::qualify_host_id(wf_host, &card.id));
+            }
+        }
+    }
+    if let Ok(events) = srv.events() {
+        for ev in &events {
+            if matches!(
+                ev.kind.as_str(),
+                "review.merged" | "review.batch_test_failed" | "review.merge_conflict"
+            ) && let Some(bid) = ev.data["batch_id"].as_str()
+                && seen_delivery_batches.insert(bid.to_owned())
+            {
+                world.hit("chaos.delivery_batch_entered");
+            }
+        }
+    }
+}
+
+fn pick_worktree_card(
+    world: &SimWorld,
+    wf_host: &str,
+    wf_cards: &[&TrackedCard],
+    pick: usize,
+) -> Option<(String, String, String)> {
+    let snap = world.server(wf_host)?.snapshot().ok()?;
+    let eligible: Vec<(String, String, String)> = wf_cards
+        .iter()
+        .filter_map(|tc| {
+            let raw = unqualified_entity_id(&tc.cid);
+            let card = snap.cards.iter().find(|c| c.id == raw && c.active())?;
+            let wt = card.worktree.as_deref()?;
+            if Path::new(wt).is_dir() {
+                Some((tc.pid.clone(), tc.cid.clone(), wt.to_owned()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if eligible.is_empty() {
+        return None;
+    }
+    Some(eligible[pick % eligible.len()].clone())
 }
 
 fn server_key(host: &str) -> &str {
@@ -3013,8 +5461,6 @@ fn pick_active_card(
             if c.shared {
                 true
             } else {
-                // Unconfirmed optimistic temp ID: only usable by its creator while still
-                // present (un-rewritten) in that client's local merged snapshot.
                 c.creator == client_id
                     && client_snap
                         .as_ref()
@@ -3164,7 +5610,6 @@ where
                 best = candidate;
                 best_err = err;
                 progressed = true;
-                // Keep `start` at the same offset since elements shifted left.
             } else {
                 start = end;
             }
@@ -3179,4 +5624,56 @@ where
     }
 
     (best, attempts, best_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_profiles_cycle_deterministically_and_preserve_shrink_profile() {
+        let seen: BTreeSet<&str> = (0..6u64)
+            .map(|s| ChaosProfile::from_seed(s).sub_profile.snake_name())
+            .collect();
+        assert_eq!(seen.len(), 6);
+        for (idx, expected) in ChaosSubProfile::ALL.iter().enumerate() {
+            let (prof, ops) = generate_ops(idx as u64, 15);
+            assert_eq!(prof.sub_profile, *expected);
+            assert_eq!(ops.len(), 15);
+            // Replay of `generate_ops` yields identical profile and ops.
+            let (prof2, ops2) = generate_ops(idx as u64, 15);
+            assert_eq!(prof2.sub_profile, prof.sub_profile);
+            assert_eq!(ops2, ops);
+        }
+    }
+
+    #[test]
+    fn delivery_and_storage_sub_profile_hits_real_delivery_batch_and_storage_faults() {
+        crate::trace::reset_thread_coverage();
+        // Seed 600 % 6 == 0 -> DeliveryAndStorage
+        let d1 = run(600, 45).expect("DeliveryAndStorage seed 600 failed");
+        let cov = crate::trace::take_thread_coverage();
+        assert!(cov.count("chaos.profile.delivery_and_storage") > 0);
+        assert!(
+            cov.count("chaos.delivery_batch_entered") > 0,
+            "expected chaos.delivery_batch_entered > 0, got:\n{}",
+            cov.summary()
+        );
+        assert!(
+            cov.count("exec.shell_executed") > 0,
+            "expected exec.shell_executed > 0, got:\n{}",
+            cov.summary()
+        );
+        assert!(
+            cov.count("chaos.natural_quiesce_checked") > 0
+                && cov.count("chaos.natural_quiesce_recovered") > 0
+        );
+        assert!(
+            cov.vacuous_armed_faults().is_empty(),
+            "vacuous armed faults detected: {:?}",
+            cov.armed_vs_fired_report()
+        );
+        let d2 = run(600, 45).expect("DeliveryAndStorage seed 600 replay failed");
+        assert_eq!(d1, d2, "DeliveryAndStorage must replay deterministically");
+    }
 }
