@@ -19,6 +19,7 @@ use canban_client::{
     ClientCapabilities, ClientEvent, InlineHostsFileStore, LocalHostDriver, MultiHostClient,
     MultiHostClientOptions, RemoteClientConfig,
 };
+pub use canban_storage::{StorageFaultInjector, StorageFaultKind};
 use canban_transport::{ClientTransport, TailscalePeerIdentity, TailscalePeerVerifier};
 use canban_types::{
     Config, GlobalEnvSyncStatus, HostSummary, HostTransport, RuntimeState, SavedHost, Snapshot,
@@ -446,6 +447,7 @@ pub struct SimServerHandle {
     pub github: Arc<SimGitHubHost>,
     pub exec: Arc<SimExec>,
     pub clock: Arc<TurmoilClock>,
+    pub storage_faults: Arc<StorageFaultInjector>,
     pub tailscale_verifier: Arc<Mutex<Option<SimTailscaleVerifier>>>,
     pub desktop_api_override: Arc<Mutex<Option<u32>>>,
     pub server_slot: Arc<Mutex<Option<Arc<AppServer>>>>,
@@ -574,6 +576,12 @@ impl SimWorld {
                 for prof in &mut sim_cfg.profiles {
                     prof.preset = None;
                     prof.argv = Some(vec!["/bin/echo".into(), "{prompt}".into()]);
+                    prof.resume_argv = Some(vec![
+                        "/bin/echo".into(),
+                        "--resume".into(),
+                        "{session_id}".into(),
+                        "{prompt}".into(),
+                    ]);
                     prof.exit = Some(canban_types::ExitAction::Input {
                         text: "/exit\r".into(),
                     });
@@ -593,6 +601,7 @@ impl SimWorld {
             let herdr = SimHerdr::new(format!("core-{host_name}"), clock.clone());
             let host_github = github.for_host(host_name.clone());
             let exec = SimExec::new(host_name.clone());
+            let storage_faults = Arc::new(StorageFaultInjector::new());
             let tailscale_verifier_slot: Arc<Mutex<Option<SimTailscaleVerifier>>> = Arc::new(
                 Mutex::new(config.tailscale_verifiers.get(host_name).cloned()),
             );
@@ -611,6 +620,7 @@ impl SimWorld {
             let h_herdr = herdr.clone();
             let h_github = host_github.clone();
             let h_exec = exec.clone();
+            let h_storage_faults = Arc::clone(&storage_faults);
             let h_ts_verifier = Arc::clone(&tailscale_verifier_slot);
             let h_api_override = Arc::clone(&desktop_api_override_slot);
             let h_slot = Arc::clone(&server_slot);
@@ -639,6 +649,7 @@ impl SimWorld {
                 let herdr = h_herdr.clone();
                 let host_github = h_github.clone();
                 let exec = h_exec.clone();
+                let storage_faults = Arc::clone(&h_storage_faults);
                 let ts_verifier_slot = Arc::clone(&h_ts_verifier);
                 let api_override_slot = Arc::clone(&h_api_override);
                 let slot = Arc::clone(&h_slot);
@@ -673,7 +684,7 @@ impl SimWorld {
                         tailscale_verifier,
                         desktop_api_override,
                         script_execution_mode: h_script_mode,
-                        storage_faults: None,
+                        storage_faults: Some(storage_faults),
                     };
                     let server = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env)
                         .map_err(|e| format!("open_with_env({host_label}): {e:#}"))?;
@@ -718,6 +729,7 @@ impl SimWorld {
                     github: host_github,
                     exec,
                     clock,
+                    storage_faults,
                     tailscale_verifier: tailscale_verifier_slot,
                     desktop_api_override: desktop_api_override_slot,
                     server_slot,
@@ -859,6 +871,11 @@ impl SimWorld {
             let boot_gen = ui_boot_gen.fetch_add(1, Ordering::SeqCst);
             let client_id_gen =
                 canban_types::deterministic_id_gen(derive_host_seed(ui_seed, &ui_name, boot_gen));
+            let env_id_gen = canban_types::deterministic_id_gen(derive_host_seed(
+                ui_seed,
+                &format!("{ui_name}:global-env"),
+                boot_gen,
+            ));
             let local_info = local_info.clone();
             let remotes = initial_remotes.clone();
             let policy = ui_policy.clone();
@@ -889,7 +906,7 @@ impl SimWorld {
                     *local_driver_holder.lock().unwrap() = Some(Arc::clone(&concrete_driver));
                     let driver: Arc<dyn LocalHostDriver> = concrete_driver;
                     let env_provider: Arc<dyn canban_client::GlobalEnvSyncProvider> =
-                        Arc::new(DesktopGlobalEnvProvider::new(local_home));
+                        Arc::new(DesktopGlobalEnvProvider::new(local_home).with_id_gen(env_id_gen));
                     (
                         Some(driver),
                         Some(env_provider),
@@ -1199,6 +1216,12 @@ impl SimWorld {
 
     pub fn exec_runner(&self, name: &str) -> Option<Arc<SimExec>> {
         self.servers.get(name).map(|s| Arc::clone(&s.exec))
+    }
+
+    /// Returns the per-host [`StorageFaultInjector`] attached to `host_name` (persists across
+    /// `bounce_server` on the same host and is cleared by `heal_and_quiesce`).
+    pub fn storage_faults(&self, host_name: &str) -> Option<&Arc<StorageFaultInjector>> {
+        self.servers.get(host_name).map(|s| &s.storage_faults)
     }
 
     /// Traced direct RPC against a server host (`AppServer::call`), recording the actor in `trace`.
@@ -2112,6 +2135,9 @@ impl SimWorld {
         );
         self.repair_all();
         self.github.clear_injected_faults();
+        for h in self.servers.values() {
+            h.storage_faults.clear();
+        }
 
         let crashed_servers: Vec<String> = self
             .servers
@@ -2680,5 +2706,55 @@ mod tests {
         crate::oracle::InvariantOracle::default()
             .check_quiescent_invariants(&world)
             .expect("quiescent invariants after local-server bounce");
+    }
+
+    #[test]
+    fn storage_faults_persist_across_server_bounce_and_clear_on_heal() {
+        let cfg = SimWorldConfig::desktop_default(888_020, "unit_storage_faults");
+        let mut world = SimWorld::new(cfg).expect("world init");
+
+        for host in ["local-server", "remote-a", "remote-b"] {
+            assert!(
+                world.storage_faults(host).is_some(),
+                "expected storage_faults injector for {host}"
+            );
+        }
+        assert!(world.storage_faults("no-such-host").is_none());
+
+        let pre_ptr = Arc::clone(world.storage_faults("remote-a").unwrap());
+        world.bounce_server("remote-a").expect("bounce remote-a");
+        let post_ptr = Arc::clone(world.storage_faults("remote-a").unwrap());
+        assert!(
+            Arc::ptr_eq(&pre_ptr, &post_ptr),
+            "per-host StorageFaultInjector must persist across bounce_server"
+        );
+
+        let dir = world.project_dir("sf-unit").expect("dir");
+        post_ptr.inject_next(StorageFaultKind::Busy);
+        let err = world
+            .server_call(
+                "remote-a",
+                "project.create",
+                json!({ "name": "SF", "directory": dir }),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("SQLITE_BUSY"),
+            "expected SQLITE_BUSY after bounce, got {err:#}"
+        );
+        assert_eq!(post_ptr.triggered_count(), 1);
+
+        // Pending storage faults are cleared by heal_and_quiesce().
+        post_ptr.inject_next(StorageFaultKind::IoError);
+        world.heal_and_quiesce(10_000).expect("heal");
+        let ok = world
+            .server_call(
+                "remote-a",
+                "project.create",
+                json!({ "name": "SF-Clean", "directory": dir }),
+            )
+            .expect("write after heal_and_quiesce must succeed");
+        assert!(ok["id"].as_str().is_some());
+        assert_eq!(post_ptr.triggered_count(), 1);
     }
 }

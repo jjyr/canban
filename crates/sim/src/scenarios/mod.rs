@@ -10,6 +10,7 @@ pub mod project_import_export;
 pub mod reclaim;
 pub mod remote_faults;
 pub mod schedules_and_budget;
+pub mod sessions_and_adoption;
 pub mod transport_auth;
 pub mod workflow_faults;
 pub mod workspaces_delivery;
@@ -42,6 +43,7 @@ pub enum Scenario {
     TransportAuth,
     WorkspacesDelivery,
     ProjectImportExport,
+    SessionsAndAdoption,
     Chaos,
 }
 
@@ -61,6 +63,7 @@ impl Scenario {
         Scenario::TransportAuth,
         Scenario::WorkspacesDelivery,
         Scenario::ProjectImportExport,
+        Scenario::SessionsAndAdoption,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -79,6 +82,7 @@ impl Scenario {
             Scenario::TransportAuth => "transport_auth",
             Scenario::WorkspacesDelivery => "workspaces_delivery",
             Scenario::ProjectImportExport => "project_import_export",
+            Scenario::SessionsAndAdoption => "sessions_and_adoption",
             Scenario::Chaos => "chaos",
         }
     }
@@ -101,9 +105,10 @@ impl Scenario {
             "project_import_export" | "bundle" | "import_export" => {
                 Ok(Scenario::ProjectImportExport)
             }
+            "sessions_and_adoption" | "sessions" | "adoption" => Ok(Scenario::SessionsAndAdoption),
             "chaos" | "fuzz" => Ok(Scenario::Chaos),
             other => bail!(
-                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, transport_auth, workspaces_delivery, project_import_export, chaos"
+                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, transport_auth, workspaces_delivery, project_import_export, sessions_and_adoption, chaos"
             ),
         }
     }
@@ -125,6 +130,7 @@ pub fn run_scenario(scenario: Scenario, seed: u64, ops: usize) -> Result<u64> {
         Scenario::TransportAuth => transport_auth::run(seed),
         Scenario::WorkspacesDelivery => workspaces_delivery::run(seed),
         Scenario::ProjectImportExport => project_import_export::run(seed),
+        Scenario::SessionsAndAdoption => sessions_and_adoption::run(seed),
         Scenario::Chaos => chaos::run(seed, ops),
     }
 }

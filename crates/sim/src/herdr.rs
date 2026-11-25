@@ -42,6 +42,8 @@ struct SubEntry {
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
+type SendHook = Box<dyn FnOnce(&str, &str) + Send>;
+
 struct State {
     core_id: String,
     seq: u64,
@@ -63,6 +65,9 @@ struct State {
     next_interrupt_errors: VecDeque<String>,
     /// Optional scripted next fault for `terminal.run`.
     next_run_faults: VecDeque<RunFault>,
+    /// Optional one-shot hook invoked inside `terminal.send` after recording the send and
+    /// before returning `Ok` (e.g. to arm a storage fault mid-`Question` delivery).
+    on_next_send: Option<SendHook>,
     /// Terminals whose `/exit` send does not auto-finish (tests hung close & 30s timeout escalation).
     hang_exit_terminals: BTreeSet<String>,
     hang_all_exits: bool,
@@ -115,6 +120,7 @@ impl SimHerdr {
                 next_kill_errors: VecDeque::new(),
                 next_interrupt_errors: VecDeque::new(),
                 next_run_faults: VecDeque::new(),
+                on_next_send: None,
                 hang_exit_terminals: BTreeSet::new(),
                 hang_all_exits: false,
                 hang_kill_terminals: BTreeSet::new(),
@@ -648,6 +654,15 @@ impl SimHerdr {
             .push_back(err_msg.into());
     }
 
+    /// Registers a one-shot hook invoked on the next successful `terminal.send` call (after
+    /// recording the send and dropping `SimHerdr`'s mutex, right before returning `Ok`).
+    pub fn set_on_next_send<F>(&self, hook: F)
+    where
+        F: FnOnce(&str, &str) + Send + 'static,
+    {
+        self.state.lock().unwrap().on_next_send = Some(Box::new(hook));
+    }
+
     /// Queues a synthetic error response on the next `terminal.read` call.
     pub fn inject_next_read_error(&self, err_msg: impl Into<String>) {
         self.state
@@ -765,6 +780,7 @@ impl SimHerdr {
         st.next_kill_errors.clear();
         st.next_interrupt_errors.clear();
         st.next_run_faults.clear();
+        st.on_next_send = None;
         st.hang_exit_terminals.clear();
         st.hang_all_exits = false;
         st.hang_kill_terminals.clear();
@@ -1094,6 +1110,11 @@ impl HerdrBackend for SimHerdr {
                             }),
                         );
                     }
+                }
+                let hook = st.on_next_send.take();
+                drop(st);
+                if let Some(f) = hook {
+                    f(&addr, &text);
                 }
                 Ok(json!({ "sent": true }))
             }
