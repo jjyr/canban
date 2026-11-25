@@ -1752,13 +1752,14 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 ChaosOp::CreateCard { host_idx, tag } => {
                     let (host, pid) = &host_projects[*host_idx % host_projects.len()];
                     let rkey = format!("chaos-card-{seed}-{tag}");
+                    let card_title = format!("Chaos Card #{tag}");
                     if let Some(res) = check_expected_chaos_err(
                         "card.create",
                         world.client_call(
                             "card.create",
                             json!({
                                 "project_id": pid,
-                                "title": format!("Chaos Card #{tag}"),
+                                "title": card_title,
                                 "body": format!("seed-{seed}-tag-{tag}"),
                                 "request_key": rkey,
                             }),
@@ -1787,11 +1788,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         } else {
                             false
                         };
-                        oracle.record_request_key_attempt(
+                        oracle.record_request_key_attempt_with_marker(
                             srv_name,
                             &rkey,
                             "card.create",
                             !offline_q && confirmed,
+                            card_title,
                         );
                         cards.push(TrackedCard {
                             host: host.clone(),
@@ -3438,6 +3440,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                         == Some(batch.target_head.as_str());
                                                 if can_fire_fp4 {
                                                     let fp = world.failpoints(&wf_host);
+                                                    let before_fired = fp
+                                                        .stats_for(
+                                                            FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
+                                                        )
+                                                        .fired;
                                                     fp.arm(
                                                         FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
                                                         FailpointAction::FailOnce(format!(
@@ -3455,6 +3462,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                     fp.disarm(
                                                         FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
                                                     );
+                                                    let fp4_fired = fp
+                                                        .stats_for(
+                                                            FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
+                                                        )
+                                                        .fired
+                                                        > before_fired;
                                                     oracle.record_request_key_attempt(
                                                         &wf_host,
                                                         &rkey,
@@ -3476,6 +3489,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                             "batch.report",
                                                             retry.is_some(),
                                                         );
+                                                    }
+                                                    if fp4_fired {
                                                         world.hit("chaos.failpoint_git_after_push");
                                                     }
                                                 } else {
@@ -3871,6 +3886,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             faults.inject_next(fault_kind);
                             crate::trace::record_fault_armed(fault_name);
 
+                            let sf_card_title = format!("SF Card #{tag}");
                             let (method, client_params, server_params, comment_meta) =
                                 match mutate_kind % 3 {
                                     1 if host_card.is_some() => {
@@ -3915,13 +3931,13 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         "card.create",
                                         json!({
                                             "project_id": pid,
-                                            "title": format!("SF Card #{tag}"),
+                                            "title": sf_card_title,
                                             "body": format!("sf-rollback-{seed}-{tag}"),
                                             "request_key": req_key,
                                         }),
                                         json!({
                                             "project_id": raw_pid,
-                                            "title": format!("SF Card #{tag}"),
+                                            "title": sf_card_title,
                                             "body": format!("sf-rollback-{seed}-{tag}"),
                                             "request_key": req_key,
                                         }),
@@ -3960,11 +3976,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 });
                                 // Idempotent retry after clean SQLite rollback!
                                 if method == "card.create" {
-                                    oracle.record_request_key_attempt(
+                                    oracle.record_request_key_attempt_with_marker(
                                         &srv_name,
                                         &req_key,
                                         "card.create",
                                         first_res.as_ref().is_some_and(|v| !is_offline_queued(v)),
+                                        sf_card_title.clone(),
                                     );
                                 } else if method == "comment.add"
                                     && let Some((_, ref body)) = comment_meta
@@ -4001,11 +4018,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                     &val,
                                                 )?;
                                             }
-                                            oracle.record_request_key_attempt(
+                                            oracle.record_request_key_attempt_with_marker(
                                                 &srv_name,
                                                 &req_key,
                                                 "card.create",
                                                 acked,
+                                                sf_card_title.clone(),
                                             );
                                             let raw_cid = strip_host_id(cid);
                                             if let Some(srv_card) = world
@@ -5265,6 +5283,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     && !offline_herdr_hosts.contains(host)
                                 {
                                     let fp = world.failpoints(srv_name);
+                                    let before_fired =
+                                        fp.stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB).fired;
                                     let raw_pid = strip_host_id(pid);
                                     fp.arm(
                                         FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
@@ -5285,6 +5305,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         ),
                                     )?;
                                     fp.disarm(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB);
+                                    let fp1_fired =
+                                        fp.stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB).fired
+                                            > before_fired;
                                     if let Some(val) = res
                                         && let Some(tid) = val["id"].as_str()
                                     {
@@ -5299,6 +5322,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 }),
                                             ),
                                         )?;
+                                    }
+                                    if fp1_fired {
                                         world.hit("chaos.failpoint_herdr_terminal_run");
                                     }
                                 }
@@ -5486,6 +5511,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                     })
                                             {
                                                 let fp = world.failpoints(&wf_host);
+                                                let before_fired = fp
+                                                    .stats_for(FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB)
+                                                    .fired;
                                                 fp.arm(
                                                     FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB,
                                                     FailpointAction::FailOnce(format!(
@@ -5506,6 +5534,10 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                     ),
                                                 )?;
                                                 fp.disarm(FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB);
+                                                let fp3_fired = fp
+                                                    .stats_for(FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB)
+                                                    .fired
+                                                    > before_fired;
                                                 if pub_res.is_some() {
                                                     published_pr_branches.insert(branch);
                                                     let _ = check_expected_chaos_err(
@@ -5516,6 +5548,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                             json!({ "card_id": raw_cid }),
                                                         ),
                                                     )?;
+                                                }
+                                                if fp3_fired {
                                                     world.hit("chaos.failpoint_github_pr_write");
                                                 }
                                             }
@@ -5561,6 +5595,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             "request_key": rkey,
                                         });
                                         let fp = world.failpoints(&wf_host);
+                                        let before_fired = fp
+                                            .stats_for(FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE)
+                                            .fired;
                                         fp.arm(
                                             FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE,
                                             FailpointAction::FailOnce(format!(
@@ -5576,6 +5613,10 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             ),
                                         )?;
                                         fp.disarm(FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE);
+                                        let fp4_fired = fp
+                                            .stats_for(FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE)
+                                            .fired
+                                            > before_fired;
                                         oracle.record_request_key_attempt(
                                             &wf_host,
                                             &rkey,
@@ -5593,6 +5634,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 "batch.report",
                                                 retry.is_some(),
                                             );
+                                        }
+                                        if fp4_fired {
                                             world.hit("chaos.failpoint_git_after_push");
                                         }
                                     }
@@ -5654,6 +5697,8 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                             });
                                         if still_disconnected {
                                             let fp = world.client_failpoints(PRIMARY_CLIENT);
+                                            let before_fired =
+                                                fp.stats_for(FP_OUTBOX_MID_WRITE_TRUNCATE).fired;
                                             fp.arm(
                                                 FP_OUTBOX_MID_WRITE_TRUNCATE,
                                                 FailpointAction::FailOnce(format!(
@@ -5673,6 +5718,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 ),
                                             )?;
                                             fp.disarm(FP_OUTBOX_MID_WRITE_TRUNCATE);
+                                            let fp5_fired =
+                                                fp.stats_for(FP_OUTBOX_MID_WRITE_TRUNCATE).fired
+                                                    > before_fired;
                                             // Bounce primary client to quarantine torn `.outbox.json`.
                                             world.bounce_client()?;
                                             if auth_revoked {
@@ -5681,7 +5729,9 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                     auth_host.clone(),
                                                 ));
                                             }
-                                            world.hit("chaos.failpoint_outbox_truncate");
+                                            if fp5_fired {
+                                                world.hit("chaos.failpoint_outbox_truncate");
+                                            }
                                         }
                                         if !was_partitioned {
                                             world.repair(PRIMARY_CLIENT, &target);
@@ -6344,7 +6394,56 @@ pub fn shrink(seed: u64, max_ops: usize) -> Result<Option<ShrinkReport>> {
     }))
 }
 
+/// Extracts a stable error-class fingerprint prefix from a failure message so `shrink_ops`
+/// preserves the original failure class instead of drifting onto an unrelated error when deleting
+/// ops, while still matching when dynamic IDs, revisions, or counts shift across shrunk traces.
+fn error_class_fingerprint(err: &str) -> String {
+    fn strip_leading_brackets(mut s: &str) -> &str {
+        loop {
+            let trimmed = s.trim_start();
+            if let Some(rest) = trimmed.strip_prefix('[')
+                && let Some(end) = rest.find(']')
+            {
+                s = &rest[end + 1..];
+            } else {
+                return trimmed;
+            }
+        }
+    }
+
+    fn normalize_segment(seg: &str) -> String {
+        let stripped = strip_leading_brackets(seg);
+        let before_paren = stripped.split('(').next().unwrap_or(stripped).trim();
+        let mut out = Vec::new();
+        for tok in before_paren.split_whitespace() {
+            if tok.starts_with('\'') && tok.ends_with('\'')
+                || tok.starts_with('"') && tok.ends_with('"')
+            {
+                out.push("_");
+            } else if tok.chars().any(|c| c.is_ascii_digit()) {
+                out.push("#");
+            } else {
+                out.push(tok);
+            }
+        }
+        out.join(" ")
+    }
+
+    let first_line = err.lines().next().unwrap_or(err).trim();
+    let mut parts = first_line.split(": ");
+    let first = parts.next().map(normalize_segment).unwrap_or_default();
+    if let Some(second_raw) = parts.next() {
+        let second = normalize_segment(second_raw);
+        if !second.is_empty() {
+            return format!("{first}: {second}");
+        }
+    }
+    first
+}
+
 /// Generic deterministic shrinker (prefix binary search + bounded ddmin deletion).
+/// Pins the original failure's error-class fingerprint so shrinking cannot drift onto a
+/// different failure class.
 pub fn shrink_ops<T: Clone, F>(
     ops: Vec<T>,
     initial_error: String,
@@ -6356,16 +6455,19 @@ where
 {
     let mut best = ops;
     let mut best_err = initial_error;
+    let target_fp = error_class_fingerprint(&best_err);
     let mut attempts = 0usize;
 
-    // 1. Prefix binary search: find shortest failing prefix `best[..hi]`.
+    // 1. Prefix binary search: find shortest failing prefix `best[..hi]` preserving failure class.
     if !best.is_empty() && attempts < max_attempts {
         let mut lo = 0usize;
         let mut hi = best.len();
         while lo < hi && attempts < max_attempts {
             let mid = lo + (hi - lo) / 2;
             attempts += 1;
-            if let Some(err) = reproduces(&best[..mid]) {
+            if let Some(err) = reproduces(&best[..mid])
+                && error_class_fingerprint(&err) == target_fp
+            {
                 hi = mid;
                 best_err = err;
             } else {
@@ -6386,7 +6488,9 @@ where
             candidate.extend_from_slice(&best[..start]);
             candidate.extend_from_slice(&best[end..]);
             attempts += 1;
-            if let Some(err) = reproduces(&candidate) {
+            if let Some(err) = reproduces(&candidate)
+                && error_class_fingerprint(&err) == target_fp
+            {
                 best = candidate;
                 best_err = err;
                 progressed = true;
@@ -6455,5 +6559,35 @@ mod tests {
         );
         let d2 = run(606, 45).expect("DeliveryAndStorage seed 606 replay failed");
         assert_eq!(d1, d2, "DeliveryAndStorage must replay deterministically");
+    }
+
+    #[test]
+    fn shrink_ops_pins_error_class_fingerprint_and_prevents_drift() {
+        // Ops 0..10 fail with the target error iff op 3 and op 8 are present,
+        // while any subset containing op 1 without op 3 fails with a DIFFERENT error class.
+        let ops: Vec<usize> = (0..10).collect();
+        let initial_err =
+            "[primary][remote-a] RYW VIOLATION: Card c99 regressed to rev 2 < 5".to_owned();
+        let (minimized, _attempts, final_err) = shrink_ops(ops, initial_err, 64, |cand| {
+            if cand.contains(&3) && cand.contains(&8) {
+                Some(format!(
+                    "[primary][remote-b] RYW VIOLATION: Card c{} regressed to rev 1 < 3",
+                    cand.len()
+                ))
+            } else if cand.contains(&1) {
+                Some("[local-server] DURABILITY VIOLATION: committed Card c1 vanished!".into())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            minimized,
+            vec![3, 8],
+            "shrink_ops must not drift onto the shorter unrelated DURABILITY VIOLATION on [1]"
+        );
+        assert!(
+            final_err.contains("RYW VIOLATION"),
+            "final error must retain pinned class, got: {final_err}"
+        );
     }
 }

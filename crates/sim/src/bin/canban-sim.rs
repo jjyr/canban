@@ -1005,6 +1005,12 @@ fn run_suite(
     drop(watchdog);
 
     if !failures.is_empty() {
+        if let Err(violations) = total_coverage.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
+            eprintln!("\nWARNING: NEVER-PROPERTY VIOLATION(S) DETECTED:");
+            for (prop, count) in &violations {
+                eprintln!("  - {prop}: hit {count} time(s) (must be 0)");
+            }
+        }
         eprintln!(
             "\nSimulation suite finished with {passed} passed, {} failed in {:.2}s:",
             failures.len(),
@@ -1020,6 +1026,14 @@ fn run_suite(
         "\nAll {passed} deterministic simulation run(s) passed in {:.2}s.",
         started.elapsed().as_secs_f64()
     );
+    if !assert_coverage
+        && let Err(violations) = total_coverage.assert_never_zero(NEVER_COVERAGE_PROPERTIES)
+    {
+        eprintln!("\nWARNING: NEVER-PROPERTY VIOLATION(S) DETECTED:");
+        for (prop, count) in &violations {
+            eprintln!("  - {prop}: hit {count} time(s) (must be 0)");
+        }
+    }
     if assert_coverage {
         print_fault_telemetry_table(&total_coverage);
         print_cold_properties_table(&total_coverage, COLD_PROPERTIES_TOP_N);
@@ -1263,7 +1277,9 @@ fn run_random(
     );
     print_fault_telemetry_table(&cov);
     print_cold_properties_table(&cov, COLD_PROPERTIES_TOP_N);
-    if !assert_coverage && let Err(violations) = cov.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
+    if (!assert_coverage || !recorded.is_empty())
+        && let Err(violations) = cov.assert_never_zero(NEVER_COVERAGE_PROPERTIES)
+    {
         eprintln!("\nWARNING: NEVER-PROPERTY VIOLATION(S) DETECTED:");
         for (prop, count) in &violations {
             eprintln!("  - {prop}: hit {count} time(s) (must be 0)");
@@ -1566,13 +1582,27 @@ mod tests {
 
         let corpus_path = resolve_corpus_path(Path::new(DEFAULT_CORPUS_FILE));
         let entries = load_replay_file(&corpus_path, 40).expect("load corpus/regressions.txt");
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].seed, 6_581_024_343_186_838_594);
-        assert_eq!(entries[0].ops, 40);
-        assert_eq!(entries[1].seed, 14_542_862_646_255_385_444);
-        assert_eq!(entries[1].ops, 50);
-        assert_eq!(entries[2].seed, 13_580_682_392_153_143_971);
-        assert_eq!(entries[2].ops, 50);
+        assert!(
+            entries.len() >= 5,
+            "expected at least 5 corpus regression entries, got {}",
+            entries.len()
+        );
+        for (seed, ops) in [
+            (6_581_024_343_186_838_594_u64, 40_usize),
+            (14_542_862_646_255_385_444, 50),
+            (13_580_682_392_153_143_971, 50),
+            (10_298_014_112_690_665_752, 50),
+            (13_893_003_159_721_802_437, 50),
+            (7_015_526_293_144_434_493, 60),
+            (10_281_633_911_761_585_129, 60),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.scenario == Scenario::Chaos && e.seed == seed && e.ops == ops),
+                "expected regression entry chaos seed={seed} ops={ops} in corpus/regressions.txt"
+            );
+        }
     }
 
     #[test]

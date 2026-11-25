@@ -54,8 +54,14 @@ pub struct RequestKeyAttempt {
 pub struct InvariantOracle {
     /// Highest observed `Card.revision` per `(host_name, raw_card_id)`.
     pub max_card_revision: BTreeMap<(String, String), u64>,
-    /// Read-Your-Writes / monotonic-read floor per `(client_id, host_id, raw_card_id) -> min_seen_rev`.
+    /// Read-Your-Writes / monotonic-read floor per `(client_id, host_id, raw_card_id) -> min_seen_rev`
+    /// (includes non-blocking write receipts that converge into client `merged_snapshot` asynchronously).
     pub min_seen_rev: BTreeMap<(String, String, String), i64>,
+    /// Monotonic client-rendered snapshot floor per `(client_id, host_id, raw_card_id) -> min_snap_rev`,
+    /// tracking the highest `Card.revision` actually observed in `client.merged_snapshot()` so
+    /// mid-step checks immediately catch snapshot regressions/disappearances without false-positiving
+    /// on in-flight async refreshes after non-blocking write receipts (`card.move`/`card.create`).
+    pub min_snapshot_rev: BTreeMap<(String, String, String), i64>,
     /// Highest observed `CardRead.sequence` per `(host_name, raw_card_id)`.
     pub max_card_read_seq: BTreeMap<(String, String), u64>,
     /// Highest observed `WorkflowRun.visit` per `(host_name, raw_run_id)`.
@@ -92,6 +98,15 @@ pub struct InvariantOracle {
     /// Baseline `(dial_count, reconnect_count)` observed when a remote host enters `AuthFailed`,
     /// used to verify zero background reconnect dials while halted.
     pub auth_failed_baselines: BTreeMap<(String, String), (u64, u32)>,
+    /// Bound `(host_name, terminal_id, attempt_number)` agent runs observed with a verified
+    /// slot-releasing status (`"idle" | "done" | "blocked" | "error"`). Once an attempt releases
+    /// its scheduler admission slot, the scheduler may legitimately admit new runs up to
+    /// `max_agents`; if that same attempt later flips to `"unknown"` (Herdr offline/stale) or
+    /// resumes `"working"`/`"closing"`, `active_count_at` counts it to pause *further* admissions
+    /// without indicating scheduler over-admission. Keying by `attempt_number` ensures any later
+    /// re-admission on the same `TerminalEntry` (`promote_pending` / `continue_assignment`) is
+    /// still strictly checked against `max_agents`.
+    pub slot_released_terminals: BTreeSet<(String, String, u32)>,
 }
 
 impl InvariantOracle {
@@ -300,6 +315,11 @@ impl InvariantOracle {
             .retain(|(h, _), (pid, _)| !(h == host_name && *pid == raw_proj));
         self.committed_notes
             .retain(|(h, _), exp| !(h == host_name && exp.project_id == raw_proj));
+        let norm_host = normalize_client_host_id(host_name);
+        self.min_seen_rev
+            .retain(|(_, h, cid), _| !(h == &norm_host && removed_cards.contains(cid)));
+        self.min_snapshot_rev
+            .retain(|(_, h, cid), _| !(h == &norm_host && removed_cards.contains(cid)));
     }
 
     /// Records an observed `Card.revision` for `(client, host, card_id)` and immediately fails
@@ -359,7 +379,28 @@ impl InvariantOracle {
 
     /// Verifies Read-Your-Writes and monotonic-read invariants across every live simulated client
     /// `merged_snapshot` and every live server `snapshot`.
+    ///
+    /// At quiescence (`enforce_receipt_catchup = true`), every client's `merged_snapshot` must
+    /// also reflect every previously acknowledged write receipt (`min_seen_rev`). Mid-step
+    /// (`check_read_your_writes_step`), client snapshots are checked monotonically against
+    /// `min_snapshot_rev` while authoritative live servers are immediately checked against all
+    /// receipts in `min_seen_rev`, avoiding false positives while non-blocking remote write
+    /// refreshes (`wake_host`) are still in-flight over lossy/laggy links.
     pub fn check_read_your_writes(&mut self, world: &SimWorld) -> Result<()> {
+        self.check_read_your_writes_inner(world, true)
+    }
+
+    /// Step-level RYW / monotonic-read check safe to run after every chaos op even while
+    /// non-blocking remote mutation refreshes are still in-flight.
+    pub fn check_read_your_writes_step(&mut self, world: &SimWorld) -> Result<()> {
+        self.check_read_your_writes_inner(world, false)
+    }
+
+    fn check_read_your_writes_inner(
+        &mut self,
+        world: &SimWorld,
+        enforce_receipt_catchup: bool,
+    ) -> Result<()> {
         world.hit("oracle.read_your_writes_checked");
 
         // 1. Scan every live client's merged_snapshot for monotonic Card revisions and RYW visibility.
@@ -390,14 +431,37 @@ impl InvariantOracle {
                 let norm_host = normalize_client_host_id(host_id);
                 let raw_cid = strip_host_prefix(&card.id);
                 let rev = card.revision as i64;
-                self.observe_card_revision(&client_name, &norm_host, &raw_cid, rev)?;
+                let key = (client_name.clone(), norm_host.clone(), raw_cid.clone());
+                if let Some(&prev_snap) = self.min_snapshot_rev.get(&key) {
+                    ensure!(
+                        rev >= prev_snap,
+                        "[{client_name}][{norm_host}] MONOTONIC READ VIOLATION: Card {raw_cid} merged_snapshot revision regressed from {prev_snap} to {rev}"
+                    );
+                    if rev > prev_snap {
+                        self.min_snapshot_rev.insert(key.clone(), rev);
+                    }
+                } else {
+                    self.min_snapshot_rev.insert(key.clone(), rev);
+                }
+                if enforce_receipt_catchup {
+                    self.observe_card_revision(&client_name, &norm_host, &raw_cid, rev)?;
+                } else {
+                    self.min_seen_rev
+                        .entry(key)
+                        .and_modify(|prev| *prev = (*prev).max(rev))
+                        .or_insert(rev);
+                }
                 client_cards.insert((norm_host, raw_cid), rev);
             }
 
             // Ensure every card previously observed/written by this client on a connected live host
             // has not disappeared or regressed below its recorded floor.
-            let expected_for_client: Vec<(String, String, i64)> = self
-                .min_seen_rev
+            let floor_map = if enforce_receipt_catchup {
+                &self.min_seen_rev
+            } else {
+                &self.min_snapshot_rev
+            };
+            let expected_for_client: Vec<(String, String, i64)> = floor_map
                 .iter()
                 .filter(|((c, _, _), _)| c == &client_name)
                 .map(|((_, h, cid), &min_rev)| (h.clone(), cid.clone(), min_rev))
@@ -679,13 +743,21 @@ impl InvariantOracle {
                     }
 
                     if let Some(marker) = rec.effect_marker.as_deref() {
+                        let parsed_id = parsed_result
+                            .as_ref()
+                            .and_then(|r| r.get("id"))
+                            .and_then(serde_json::Value::as_str);
                         let materialized_count = match rec.kind.as_str() {
-                            "card.create" => {
-                                snap.cards.iter().filter(|c| c.title == marker).count()
-                            }
-                            "note.create" => {
-                                snap.notes.iter().filter(|n| n.title == marker).count()
-                            }
+                            "card.create" => snap
+                                .cards
+                                .iter()
+                                .filter(|c| c.title == marker || parsed_id == Some(c.id.as_str()))
+                                .count(),
+                            "note.create" => snap
+                                .notes
+                                .iter()
+                                .filter(|n| n.title == marker || parsed_id == Some(n.id.as_str()))
+                                .count(),
                             "comment.add" => events_opt
                                 .as_ref()
                                 .map(|evs| {
@@ -703,6 +775,7 @@ impl InvariantOracle {
                                 .iter()
                                 .filter(|t| t.name.as_deref() == Some(marker) || t.id == marker)
                                 .count(),
+                            "batch.report" => report_rows.len(),
                             _ => results.len(),
                         };
                         ensure!(
@@ -813,6 +886,19 @@ impl InvariantOracle {
         self.check_workflow_invariants(world)?;
         self.check_snapshot_boundedness(world)?;
         self.check_committed_durability(world)?;
+        if !self.min_seen_rev.is_empty() || !self.min_snapshot_rev.is_empty() {
+            self.check_read_your_writes_step(world)?;
+        }
+        if !self.auth_failed_baselines.is_empty()
+            || world.client_names().iter().any(|client_name| {
+                world
+                    .client_host_summaries_on(client_name)
+                    .iter()
+                    .any(|s| matches!(s.connection, HostConnectionState::AuthFailed { .. }))
+            })
+        {
+            self.check_auth_failed_zero_dials(world)?;
+        }
         Ok(())
     }
 
@@ -1217,7 +1303,7 @@ impl InvariantOracle {
     /// identically for both local and remote hosts across the UNION of computed & reported host keys
     /// on ALL live clients, cross-checked against `scheduler.max_agents`, Herdr terminal binding
     /// exclusivity, and `protected_terminals` safety!
-    fn check_herdr_runtime_parity(&self, world: &SimWorld) -> Result<()> {
+    fn check_herdr_runtime_parity(&mut self, world: &SimWorld) -> Result<()> {
         let local_now_ms = world
             .server("local-server")
             .map(|s| s.now_ms())
@@ -1315,30 +1401,54 @@ impl InvariantOracle {
             let srv_active = canban_scheduler::active_count_at(&srv_snap, srv_now);
             let max_agents = server.config().scheduler.max_agents;
             // Per `crates/scheduler/src/lib.rs:123`: `max_agents` is an automatic admission
-            // budget, not a hard cap on retained terminals. When a retained `completed`/`backlog`
-            // Card PTY temporarily releases its slot (e.g. `idle`/`blocked`), the scheduler may
-            // legitimately admit up to `max_agents` new runs; if that retained PTY later resumes
-            // `working` in Herdr (interactive follow-up), `active_count_at` counts it to pause
+            // budget, not a hard cap on retained/previously-idle terminals. When a bound Agent
+            // PTY (whether `running`, `completed`, or `backlog`) releases its admission slot via a
+            // verified `"idle" | "done" | "blocked" | "error"` status, the scheduler may
+            // legitimately admit up to `max_agents` new runs. If that previously slot-released PTY
+            // later flips to `"unknown"` (e.g. Herdr offline / stale observation) or resumes
+            // `"working"`/`"closing"`, `active_count_at` conservatively recounts it to pause
             // *further* admissions without implying the scheduler over-admitted.
-            let retained_resumed = srv_snap
-                .terminals
-                .iter()
-                .filter_map(|t| t.agent.as_ref())
-                .filter(|a| {
-                    matches!(a.state.as_str(), "completed" | "backlog")
-                        && a.terminal.is_some()
-                        && !a.finished()
-                        && (a.close_state == "closing"
-                            || !matches!(
-                                a.runtime_status_at(srv_now),
-                                "closed" | "blocked" | "idle" | "done" | "error"
-                            ))
-                })
-                .count();
-            let admitted_active = srv_active.saturating_sub(retained_resumed);
+            let mut slot_released_recounted = 0usize;
+            for t in &srv_snap.terminals {
+                let Some(a) = t.agent.as_ref() else {
+                    continue;
+                };
+                let key = (host_name.clone(), t.id.clone(), a.number);
+                if a.finished() {
+                    self.slot_released_terminals.remove(&key);
+                    continue;
+                }
+                if a.terminal.is_none() {
+                    continue;
+                }
+                let runtime_status = a.runtime_status_at(srv_now);
+                let observed_status = a
+                    .observed
+                    .as_ref()
+                    .and_then(|v| v["status"]["state"].as_str());
+                let is_slot_releasing =
+                    matches!(runtime_status, "blocked" | "idle" | "done" | "error")
+                        || observed_status
+                            .is_some_and(|s| matches!(s, "blocked" | "idle" | "done" | "error"));
+                if is_slot_releasing {
+                    self.slot_released_terminals.insert(key.clone());
+                }
+                let counts_as_bound_active = a.close_state == "closing"
+                    || !matches!(
+                        runtime_status,
+                        "closed" | "blocked" | "idle" | "done" | "error"
+                    );
+                if counts_as_bound_active
+                    && (matches!(a.state.as_str(), "completed" | "backlog")
+                        || self.slot_released_terminals.contains(&key))
+                {
+                    slot_released_recounted += 1;
+                }
+            }
+            let admitted_active = srv_active.saturating_sub(slot_released_recounted);
             ensure!(
                 admitted_active <= max_agents,
-                "[{host_name}] scheduler admitted active count ({admitted_active}, total active_count_at={srv_active}, retained_resumed={retained_resumed}) exceeded max_agents ({max_agents})"
+                "[{host_name}] scheduler admitted active count ({admitted_active}, total active_count_at={srv_active}, slot_released_recounted={slot_released_recounted}) exceeded max_agents ({max_agents})"
             );
 
             // Terminal binding exclusivity: at most 1 live non-finished AgentRun per (core_id, herdr_addr).
@@ -3109,6 +3219,215 @@ mod tests {
                 .copied()
                 .unwrap_or(0)
                 >= 2
+        );
+    }
+
+    #[test]
+    fn slot_released_running_terminal_flipping_to_unknown_is_exempt_while_fresh_overadmission_fails()
+     {
+        let mut cfg = SimWorldConfig::desktop_default(889_004, "unit_oracle_slot_released");
+        let mut world = SimWorld::new(cfg.clone()).expect("world init");
+        let dir = world.project_dir("slot-repo").expect("dir");
+        world
+            .exec_runner("local-server")
+            .unwrap()
+            .register_git_repo(&dir, crate::exec::SimGitRepo::default());
+        let proj = world
+            .server_call(
+                "local-server",
+                "project.create",
+                json!({ "name": "Slots", "directory": dir }),
+            )
+            .expect("project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+
+        let mut card_ids = Vec::new();
+        for i in 1..=2 {
+            let c = world
+                .server_call(
+                    "local-server",
+                    "card.create",
+                    json!({ "project_id": pid, "title": format!("Slot Card {i}") }),
+                )
+                .expect("card.create");
+            card_ids.push(c["id"].as_str().unwrap().to_owned());
+        }
+
+        // Configure max_agents = 1 so scheduler admits slot 1, then slot 1 releases to `idle`,
+        // scheduler legitimately admits slot 2, and then Herdr goes offline flipping slot 1 from
+        // `idle` -> `unknown` (`active_count_at == 2 > 1`).
+        let _ = world
+            .server_call(
+                "local-server",
+                "scheduler.configure",
+                json!({ "max_agents": 1 }),
+            )
+            .expect("scheduler.configure max_agents=1");
+        let _ = world
+            .server_call(
+                "local-server",
+                "agent.open",
+                json!({ "card_id": card_ids[0], "profile_id": "codex" }),
+            )
+            .expect("agent.open 1");
+        world
+            .wait_until(10_000, |w| {
+                let snap = w.server("local-server").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == card_ids[0] && a.terminal.is_some())
+                }))
+            })
+            .expect("first agent bound");
+
+        let t1_addr = world
+            .server("local-server")
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .terminals
+            .iter()
+            .find_map(|t| {
+                t.agent
+                    .as_ref()
+                    .filter(|a| a.card_id == card_ids[0])
+                    .and_then(|a| a.terminal.clone())
+            })
+            .expect("t1 herdr addr");
+
+        let mut oracle = InvariantOracle::default();
+        oracle
+            .check_step_invariants(&world)
+            .expect("1 active agent within max_agents=1");
+
+        // Transition running terminal t1 to verified `idle` (releasing its admission slot while remaining `running`).
+        world
+            .herdr("local-server")
+            .unwrap()
+            .set_status(&t1_addr, "idle", None);
+        world
+            .wait_until(10_000, |w| {
+                let srv = w.server("local-server").unwrap();
+                let snap = srv.snapshot()?;
+                let now = srv.now_ms();
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == card_ids[0]
+                            && a.state == "running"
+                            && a.runtime_status_at(now) == "idle"
+                    })
+                }))
+            })
+            .expect("t1 observed idle while running");
+        oracle
+            .check_step_invariants(&world)
+            .expect("idle running terminal records slot release");
+
+        // Now enqueue a second agent: scheduler legitimately admits it into the freed slot!
+        let _ = world
+            .server_call(
+                "local-server",
+                "agent.open",
+                json!({ "card_id": card_ids[1], "profile_id": "codex" }),
+            )
+            .expect("agent.open 2");
+        world
+            .wait_until(10_000, |w| {
+                let snap = w.server("local-server").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == card_ids[1] && a.terminal.is_some())
+                }))
+            })
+            .expect("second agent legitimately admitted");
+        oracle
+            .check_step_invariants(&world)
+            .expect("2 bound agents with 1 idle within max_agents=1");
+
+        // Take Herdr offline and advance >30s so t1's runtime_status_at flips `idle` -> `unknown`
+        // (active_count_at climbs 1 -> 2 > max_agents=1).
+        world.herdr("local-server").unwrap().set_offline(true);
+        world.advance(Duration::from_secs(35)).expect("advance");
+        let srv = world.server("local-server").unwrap();
+        let snap = srv.snapshot().unwrap();
+        assert_eq!(
+            canban_scheduler::active_count_at(&snap, srv.now_ms()),
+            2,
+            "both terminals should now count as active (unknown) under Herdr offline"
+        );
+        // Must pass BOTH on the tracking oracle AND on a brand-new oracle that only sees `observed.status.state == "idle"`!
+        oracle
+            .check_step_invariants(&world)
+            .expect("slot-released running terminal flipping to unknown must not false-positive");
+        let mut fresh_oracle = InvariantOracle::default();
+        fresh_oracle
+            .check_step_invariants(&world)
+            .expect("observed.status.state == idle before unknown must also exempt on first check");
+
+        // Verify that fresh working agents exceeding `max_agents` still strictly fail!
+        cfg.seed = 889_005;
+        let mut world2 = SimWorld::new(cfg).expect("world2 init");
+        let dir2 = world2.project_dir("over-repo").expect("dir2");
+        world2
+            .exec_runner("local-server")
+            .unwrap()
+            .register_git_repo(&dir2, crate::exec::SimGitRepo::default());
+        let proj2 = world2
+            .server_call(
+                "local-server",
+                "project.create",
+                json!({ "name": "Over", "directory": dir2 }),
+            )
+            .expect("project.create 2");
+        let pid2 = proj2["id"].as_str().unwrap().to_owned();
+        let _ = world2
+            .server_call(
+                "local-server",
+                "scheduler.configure",
+                json!({ "max_agents": 2 }),
+            )
+            .expect("max_agents=2");
+        let mut c2_ids = Vec::new();
+        for i in 1..=2 {
+            let c = world2
+                .server_call(
+                    "local-server",
+                    "card.create",
+                    json!({ "project_id": pid2, "title": format!("Over Card {i}") }),
+                )
+                .expect("card.create");
+            c2_ids.push(c["id"].as_str().unwrap().to_owned());
+            let _ = world2
+                .server_call(
+                    "local-server",
+                    "agent.open",
+                    json!({ "card_id": c2_ids[i - 1], "profile_id": "codex" }),
+                )
+                .expect("agent.open");
+        }
+        world2
+            .wait_until(10_000, |w| {
+                let srv = w.server("local-server").unwrap();
+                let snap = srv.snapshot()?;
+                Ok(canban_scheduler::active_count_at(&snap, srv.now_ms()) == 2)
+            })
+            .expect("2 fresh working agents active");
+        let _ = world2
+            .server_call(
+                "local-server",
+                "scheduler.configure",
+                json!({ "max_agents": 1 }),
+            )
+            .expect("lower max_agents to 1");
+        let mut strict_oracle = InvariantOracle::default();
+        let err = strict_oracle
+            .check_herdr_runtime_parity(&world2)
+            .expect_err("2 freshly working agents with max_agents=1 must strictly fail");
+        assert!(
+            format!("{err:#}").contains("exceeded max_agents (1)"),
+            "unexpected error: {err:#}"
         );
     }
 }
