@@ -43,26 +43,27 @@ All 8 product domains plus an interleaved chaos workload and a determinism self-
 ## Commands
 
 ```bash
-# Run all 8 deterministic scenarios with default seeds
+# Run one complete deterministic simulation round (all 8 scenarios + chaos)
 mise run sim
 
-# Run a single scenario across multiple seeds
-mise run sim -- --scenario remote_faults --seed 100 --seeds 5
+# Replay a specific seed / scenario deterministically
+mise run sim -- --seed 42 --scenario chaos
+mise run sim -- --seed 100 --scenario remote_faults --seeds 5
 
-# Run continuous random-seed chaos fuzzing (release mode, infinite by default)
-mise run sim-chaos
+# Continuously run random-seed DST in release mode until Ctrl-C
+# (prints every failing seed + replay command and keeps going)
+mise run random-sim
 
-# Run bounded parallel chaos fuzzing (e.g., 50 random seeds across 4 threads)
-mise run sim-chaos -- --seeds 50 --jobs 4
+# Stop immediately on the first failing seed (`--fail-fast` / `-x`)
+mise run random-sim -- --fail-fast
 
-# Run chaos for a fixed wall-clock budget (e.g., 5 minutes)
-mise run sim-chaos -- --duration 300 --jobs 4
-
-# Deterministically replay any failing seed from CI or `.local/sim-failures/seed-<N>.log`
-mise run sim-replay -- 42 --scenario chaos
+# Parallel / bounded random-seed runs (e.g. 4 workers, 50 seeds, or 5 minutes)
+mise run random-sim -- --jobs 4
+mise run random-sim -- --seeds 50 --jobs 4 --fail-fast
+mise run random-sim -- --duration 300 --jobs 4 --scenario all
 
 # Run the curated fast DST suite via nextest
 mise run test -- -E 'package(canban-sim)'
 ```
 
-When `mise run sim-chaos` encounters an invariant violation, it stops immediately, writes the error and exact replay command to `.local/sim-failures/seed-<N>.log`, and exits non-zero.
+When `mise run random-sim` hits an invariant violation, it immediately prints the failing `seed` and exact `mise run sim -- --seed <N> --scenario <name>` replay command, saves the failure log to `.local/sim-failures/seed-<N>.log` (and appends to `.local/sim-failures/failed-seeds.txt`), and keeps exploring new seeds until Ctrl-C (unless `--fail-fast` / `-x` is set). When stopped, it prints a full summary of any failed seeds and exits non-zero if any failed.

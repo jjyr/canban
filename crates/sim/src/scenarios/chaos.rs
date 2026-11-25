@@ -315,17 +315,116 @@ pub fn run(seed: u64, max_ops: usize) -> Result<ChaosSummary> {
                     }
                 }
             }
-            // 74..81: Notification center reads & page queries.
+            // 74..81: Notification center reads, page queries & visible-card completeness probes
+            //         (exercises reconnect-window & instant-disconnect card readability continuously!).
             74..=81 => {
-                if world.rng.random_bool(0.5) {
-                    let _ = world.client_call_all("notifications.read_all", json!({}));
-                } else {
-                    let _ = world.client_merged_snapshot();
-                    let _ = world.client_merged_runtime();
+                let sub: u32 = world.rng.random_range(0..3);
+                match sub {
+                    0 => {
+                        let _ = world.client_call_all("notifications.read_all", json!({}));
+                    }
+                    1 => {
+                        if let Ok(merged) = world.client_merged_snapshot()
+                            && !merged.cards.is_empty()
+                        {
+                            let c_idx = world.rng.random_range(0..merged.cards.len());
+                            let card = &merged.cards[c_idx];
+                            let cid = card.id.clone();
+                            let pid = card.project_id.clone();
+                            // Probe card.get & timeline.list on a visible card even mid-partition/reconnect!
+                            if let Ok(raw_card) = world.client_call(
+                                "card.get",
+                                json!({ "card_id": cid, "view": "full" }),
+                                Some(&pid),
+                            ) {
+                                let parsed: canban_types::Card = serde_json::from_value(raw_card)
+                                    .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "chaos card.get({cid}) returned incomplete Card: {e}"
+                                    )
+                                })?;
+                                ensure!(
+                                    parsed.id == cid
+                                        && !parsed.title.trim().is_empty()
+                                        && !parsed.stage.trim().is_empty(),
+                                    "chaos card.get({cid}) incomplete fields: {parsed:?}"
+                                );
+                            }
+                            if let Ok(tl) = world.client_call(
+                                "timeline.list",
+                                json!({ "card_id": cid, "tail": true, "limit": 50, "view": "full" }),
+                                Some(&pid),
+                            ) {
+                                ensure!(
+                                    tl.get("events").and_then(|v| v.as_array()).is_some(),
+                                    "chaos timeline.list({cid}) missing events array: {tl}"
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = world.client_merged_snapshot();
+                        let _ = world.client_merged_runtime();
+                    }
                 }
             }
-            // 82..94: Network & server faults via Turmoil!
-            82..=94 => {
+            // 82..86: Concurrent external server-side mutation + instant-disconnect-after-sync!
+            82..=86 => {
+                let target_host = if world.rng.random_bool(0.5) {
+                    "remote-a"
+                } else {
+                    "remote-b"
+                };
+                if let Some(srv) = world.server(target_host)
+                    && let Ok(snap) = srv.snapshot()
+                {
+                    let sub: u32 = world.rng.random_range(0..3);
+                    match sub {
+                        0 if !snap.projects.is_empty() => {
+                            // External server creates a card; let client observe it briefly then optionally partition!
+                            let raw_pid = snap.projects[0].id.clone();
+                            card_seq += 1;
+                            let _ = srv.call(
+                                "card.create",
+                                json!({
+                                    "view": "full",
+                                    "project_id": raw_pid,
+                                    "title": format!("Ext Server Card #{card_seq}"),
+                                    "body": format!("ext-op-{op_idx}"),
+                                    "stage": "backlog",
+                                }),
+                            );
+                            world.advance(Duration::from_millis(120))?;
+                            if target_host == "remote-a" && !partitioned_a {
+                                world.partition("ui-client", "remote-a");
+                                partitioned_a = true;
+                            }
+                        }
+                        1 if !snap.cards.is_empty() => {
+                            let c = &snap.cards[world.rng.random_range(0..snap.cards.len())];
+                            let _ = srv.call(
+                                "card.update",
+                                json!({
+                                    "view": "full",
+                                    "card_id": c.id,
+                                    "revision": c.revision,
+                                    "title": format!("Ext Updated #{} op{op_idx}", c.number),
+                                }),
+                            );
+                        }
+                        _ if snap.cards.len() > 2 => {
+                            let c = &snap.cards[world.rng.random_range(0..snap.cards.len())];
+                            let _ = srv.call(
+                                "card.archive",
+                                json!({ "card_id": c.id, "revision": c.revision }),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // 87..94: Network & server faults via Turmoil!
+            87..=94 => {
                 let sub: u32 = world.rng.random_range(0..6);
                 match sub {
                     0 => {
@@ -400,15 +499,36 @@ pub fn run(seed: u64, max_ops: usize) -> Result<ChaosSummary> {
         }
     }
 
-    // Heal every fault, resolve any conflicts that occurred during partitions, and check convergence!
+    // Heal every fault, resolve any cascading conflicts that occurred during partitions
+    // (bounded loop so a genuinely stuck outbox still fails loudly), and check convergence!
     world.heal_and_quiesce(30_000)?;
-    for item in world.client_sync_items() {
-        if matches!(item.state, SyncItemState::Conflict | SyncItemState::Failed) {
+    for _ in 0..16 {
+        let unresolved: Vec<_> = world
+            .client_sync_items()
+            .into_iter()
+            .filter(|item| matches!(item.state, SyncItemState::Conflict | SyncItemState::Failed))
+            .collect();
+        if unresolved.is_empty() {
+            break;
+        }
+        for item in unresolved {
             let _ = world.client_sync_action(&item.host_id, &item.mutation_id, SyncAction::Discard);
         }
+        world.heal_and_quiesce(20_000)?;
     }
-    world.heal_and_quiesce(20_000)?;
     oracle.check_quiescent_invariants(&world)?;
+
+    // Verify every active card visible in `merged_snapshot()` at quiescence is completely readable!
+    let merged = world.client_merged_snapshot()?;
+    let active_cards: Vec<(String, String)> = merged
+        .cards
+        .iter()
+        .filter(|c| c.active())
+        .map(|c| (c.id.clone(), c.project_id.clone()))
+        .collect();
+    for (cid, pid) in active_cards {
+        let _ = InvariantOracle::assert_card_complete_and_readable(&mut world, &cid, &pid)?;
+    }
 
     // Record deterministic structural summary into trace digest (no random UUIDs!).
     let merged = world.client_merged_snapshot()?;

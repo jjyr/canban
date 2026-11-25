@@ -2179,7 +2179,72 @@ impl MultiHostClient {
             return self.handle_resolve_preview_async(&host_id, &params).await;
         }
 
+        if matches!(method, "card.get" | "card.show") {
+            let requested_card_id = params["card_id"].as_str().unwrap_or("");
+            if !requested_card_id.is_empty()
+                && self.has_pending_create(&host_id, requested_card_id)
+                && let Some(mut val) = self.projected_card_get(&host_id, &params)
+            {
+                self.qualify_remote_response(&host_id, &mut val);
+                return Ok(val);
+            }
+            let (client_opt, client_gen) = {
+                let guard = self.hosts.read().unwrap();
+                let slot = guard
+                    .get(&host_id)
+                    .with_context(|| format!("Unknown host '{host_id}'"))?;
+                (slot.client.clone(), slot.conn_gen)
+            };
+            if let Some(client) = client_opt {
+                match client.call_async(method, &params).await {
+                    Ok(mut val) => {
+                        if params.get("view").and_then(Value::as_str) == Some("full")
+                            && !requested_card_id.is_empty()
+                            && self.has_pending_card_ops(&host_id, requested_card_id)
+                            && let Some(projected) = self.projected_card_get(&host_id, &params)
+                        {
+                            val = projected;
+                        }
+                        self.qualify_remote_response(&host_id, &mut val);
+                        return Ok(val);
+                    }
+                    Err(err) if is_connection_error(&err) => {
+                        self.mark_slot_disconnected(
+                            &host_id,
+                            Some(client_gen),
+                            err.to_string(),
+                            true,
+                        );
+                        if let Some(mut val) = self.projected_card_get(&host_id, &params) {
+                            self.qualify_remote_response(&host_id, &mut val);
+                            return Ok(val);
+                        }
+                        return Err(err);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            if let Some(mut val) = self.projected_card_get(&host_id, &params) {
+                self.qualify_remote_response(&host_id, &mut val);
+                return Ok(val);
+            }
+            return Err(anyhow!("Remote host is offline"));
+        }
+
         if canban_sync::is_read_cacheable_method(method) {
+            if method == "timeline.list"
+                && let Some(cid) = params["card_id"].as_str().filter(|s| !s.is_empty())
+                && self.has_pending_create(&host_id, cid)
+            {
+                let mut fallback = self.offline_fallback(
+                    &host_id,
+                    method,
+                    params,
+                    anyhow!("Card creation is still syncing"),
+                )?;
+                self.qualify_remote_response(&host_id, &mut fallback);
+                return Ok(fallback);
+            }
             let (client_opt, client_gen) = {
                 let guard = self.hosts.read().unwrap();
                 let slot = guard
@@ -2649,6 +2714,56 @@ impl MultiHostClient {
         let _ = reads.put(method, params, val, card_id, card_rev, self.now_ms());
     }
 
+    fn has_pending_create(&self, host_id: &str, card_id: &str) -> bool {
+        let guard = self.hosts.read().unwrap();
+        let Some(slot) = guard.get(host_id) else {
+            return false;
+        };
+        slot.outbox
+            .lock()
+            .unwrap()
+            .ops
+            .iter()
+            .any(|m| m.card_id == card_id && m.kind == MutationKind::CreateCard)
+    }
+
+    fn has_pending_card_ops(&self, host_id: &str, card_id: &str) -> bool {
+        let guard = self.hosts.read().unwrap();
+        let Some(slot) = guard.get(host_id) else {
+            return false;
+        };
+        slot.outbox.lock().unwrap().ops.iter().any(|m| {
+            m.card_id == card_id
+                && matches!(
+                    m.kind,
+                    MutationKind::CreateCard
+                        | MutationKind::UpdateCard
+                        | MutationKind::MoveCard
+                        | MutationKind::ResolveCard
+                )
+        })
+    }
+
+    fn projected_card_get(&self, host_id: &str, params: &Value) -> Option<Value> {
+        let guard = self.hosts.read().unwrap();
+        let slot = guard.get(host_id)?;
+        let outbox = slot.outbox.lock().unwrap();
+        let mut projected = slot.cached.snapshot.clone();
+        canban_sync::apply(&mut projected, host_id, &outbox.ops);
+        let card = if let Some(cid) = params["card_id"].as_str().filter(|s| !s.is_empty()) {
+            projected.cards.into_iter().find(|c| c.id == cid)
+        } else if let Some(num) = params["card"].as_u64() {
+            let pid = params["project_id"].as_str().unwrap_or("");
+            projected
+                .cards
+                .into_iter()
+                .find(|c| c.number == num && (pid.is_empty() || c.project_id == pid))
+        } else {
+            None
+        }?;
+        serde_json::to_value(card).ok()
+    }
+
     fn offline_fallback(
         &self,
         host_id: &str,
@@ -2680,12 +2795,13 @@ impl MultiHostClient {
                     .ops
                     .iter()
                     .any(|m| m.card_id == card_id && m.kind == MutationKind::CreateCard);
+                let in_cached_snapshot = slot.cached.snapshot.cards.iter().any(|c| c.id == card_id);
                 let pending = canban_sync::pending_comment_events(
                     &outbox.ops,
                     card_id,
                     &slot.cached.snapshot,
                 );
-                if is_created_offline || !pending.is_empty() {
+                if is_created_offline || !pending.is_empty() || in_cached_snapshot {
                     return Ok(cache_and_augment_timeline(
                         json!({
                             "events": [],
@@ -2694,6 +2810,7 @@ impl MultiHostClient {
                             "highwater": 0,
                             "has_more_before": false,
                             "oldest_sequence": Value::Null,
+                            "offline_partial": !is_created_offline,
                         }),
                         method,
                         &outbox,

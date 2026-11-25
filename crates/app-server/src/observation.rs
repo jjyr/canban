@@ -779,7 +779,12 @@ async fn delivery_worker_loop(
                 }
                 let current_ms = server.now_ms();
                 let mut due = |at: u64| {
-                    let duration = Duration::from_millis(at.saturating_sub(current_ms).max(1));
+                    let ms = if at <= current_ms {
+                        1_000
+                    } else {
+                        at.saturating_sub(current_ms).max(1)
+                    };
+                    let duration = Duration::from_millis(ms);
                     wait = Some(wait.map_or(duration, |w| w.min(duration)));
                 };
                 if s.workflow_runs
@@ -904,7 +909,15 @@ async fn runtime_worker_loop(
             let mut wait: Option<Duration> = None;
             let current_ms = server.now_ms();
             let mut due = |at: u64| {
-                let duration = Duration::from_millis(at.saturating_sub(current_ms).max(1));
+                // `server.tick()` just ran at `current_ms`. If a deadline is still overdue
+                // (e.g. Herdr is offline or a precondition is unmet), back off to 1s instead
+                // of busy-spinning on SQLite snapshots every 1ms.
+                let ms = if at <= current_ms {
+                    1_000
+                } else {
+                    at.saturating_sub(current_ms).max(1)
+                };
+                let duration = Duration::from_millis(ms);
                 wait = Some(wait.map_or(duration, |w| w.min(duration)));
             };
             if let Some(at) = server.event_deadline() {

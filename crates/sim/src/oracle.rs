@@ -155,6 +155,23 @@ impl InvariantOracle {
                 "duplicate Card ID {} in merged_snapshot",
                 c.id
             );
+            ensure!(
+                !c.id.trim().is_empty()
+                    && !c.project_id.trim().is_empty()
+                    && !c.title.trim().is_empty()
+                    && !c.stage.trim().is_empty(),
+                "Incomplete Card in merged_snapshot: id={:?} project_id={:?} title={:?} stage={:?}",
+                c.id,
+                c.project_id,
+                c.title,
+                c.stage
+            );
+            ensure!(
+                seen_projects.contains(&c.project_id),
+                "Card {} references missing project_id {} in merged_snapshot",
+                c.id,
+                c.project_id
+            );
         }
 
         // Reminders at the merged client boundary must have unique IDs and consistent unread count.
@@ -228,6 +245,47 @@ impl InvariantOracle {
             }
         }
         Ok(())
+    }
+
+    /// Verifies that a visible Card is completely readable via `MultiHostClient`
+    /// (`card.get` returns a complete deserializable `Card` + `timeline.list` returns a valid events array).
+    pub fn assert_card_complete_and_readable(
+        world: &mut SimWorld,
+        card_id: &str,
+        project_id: &str,
+    ) -> Result<Card> {
+        let raw_card = world.client_call(
+            "card.get",
+            serde_json::json!({ "card_id": card_id, "view": "full" }),
+            Some(project_id),
+        )?;
+        let card: Card = serde_json::from_value(raw_card.clone()).map_err(|e| {
+            anyhow::anyhow!(
+                "card.get({card_id}) returned incomplete/unparseable Card payload: {e}; raw={raw_card}"
+            )
+        })?;
+        ensure!(
+            card.id == card_id
+                && !card.project_id.trim().is_empty()
+                && !card.title.trim().is_empty()
+                && !card.stage.trim().is_empty(),
+            "card.get({card_id}) returned incomplete Card fields: {card:?}"
+        );
+        let timeline = world.client_call(
+            "timeline.list",
+            serde_json::json!({
+                "card_id": card_id,
+                "tail": true,
+                "limit": 50,
+                "view": "full",
+            }),
+            Some(project_id),
+        )?;
+        ensure!(
+            timeline.get("events").and_then(|v| v.as_array()).is_some(),
+            "timeline.list({card_id}) returned malformed payload without events array: {timeline}"
+        );
+        Ok(card)
     }
 
     /// #2 & #4: At quiescence, `client.merged_snapshot()` contains every active Card from every

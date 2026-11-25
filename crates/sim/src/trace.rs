@@ -84,7 +84,7 @@ impl EventTrace {
     pub fn format_failure(&self, reason: &str) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "=== CANBAN DST FAILURE ===\nScenario: {}\nSeed: {}\nDigest: {:#018x}\nReason: {}\nReplay: mise run sim-replay -- {} --scenario {}\n--- Recent Trace ({} total events) ---\n",
+            "=== CANBAN DST FAILURE ===\nScenario: {}\nSeed: {}\nDigest: {:#018x}\nReason: {}\nReplay: mise run sim -- --seed {} --scenario {}\n--- Recent Trace ({} total events) ---\n",
             self.scenario,
             self.seed,
             self.digest,
