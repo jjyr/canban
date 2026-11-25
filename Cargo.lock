@@ -578,6 +578,7 @@ dependencies = [
  "base64 0.22.1",
  "canban-app-server",
  "canban-context",
+ "canban-notifications",
  "canban-storage",
  "canban-sync",
  "canban-terminal",

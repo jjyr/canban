@@ -1854,6 +1854,7 @@ impl MultiHostClient {
                         if !ops.is_empty() {
                             canban_sync::apply(&mut s, &slot.saved.id, &ops);
                         }
+                        canban_notifications::reconcile_runtime_reminders_at(&mut s, self.now_ms());
                         s.register_host_entities(&slot.saved.id);
                         Some(s)
                     } else if !ops.is_empty() {
@@ -3945,6 +3946,10 @@ impl MultiHostClient {
                 return Ok(());
             };
             slot.cached.snapshot.apply_runtime_state(rt);
+            canban_notifications::reconcile_runtime_reminders_at(
+                &mut slot.cached.snapshot,
+                self.now_ms(),
+            );
             slot.cached.snapshot.register_host_entities(host_id);
             slot.last_synced_at = Some(self.now_ms());
             if let HostConnectionState::Connected {
@@ -5521,6 +5526,9 @@ mod tests {
                         "number": 1,
                         "provider": "claude",
                         "state": "working",
+                        "connection_state": "connected",
+                        "observed": { "state": "live", "status": { "state": "working" } },
+                        "lifecycle": { "observed_at": now() },
                         "instruction": "Do work",
                         "cwd": "/srv/durable",
                         "terminal": "t-rt-1",
@@ -5582,6 +5590,78 @@ mod tests {
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.cards.len(), 1);
         assert_eq!(snap.cards[0].id, "c-rt");
+        assert!(
+            !snap.reminders.iter().any(|r| r.id.starts_with("recovery:")),
+            "healthy connected runtime must not emit recovery reminder: {:?}",
+            snap.reminders
+        );
+
+        // Regression test: pushing a runtime delta with `connection_state: "unavailable"`
+        // must immediately reconcile `recovery:*` reminders into `merged_snapshot()` without
+        // waiting on a full `app.state` refresh, and clear them once reconnected!
+        *latest_runtime.lock().unwrap() = RuntimeState {
+            terminals: vec![
+                serde_json::from_value::<TerminalEntry>(json!({
+                    "id": "t-rt-1",
+                    "conversation_id": null,
+                    "number": 1,
+                    "name": "Agent 1",
+                    "origin_project_id": "p-rt",
+                    "origin_card_id": "c-rt",
+                    "agent_engine": null,
+                    "runtime": null,
+                    "agent": {
+                        "project_id": "p-rt",
+                        "card_id": "c-rt",
+                        "number": 1,
+                        "provider": "claude",
+                        "state": "running",
+                        "connection_state": "unavailable",
+                        "instruction": "Do work",
+                        "cwd": "/srv/durable",
+                        "terminal": "t-rt-1",
+                        "started_at": 1750000000123_u64,
+                    },
+                    "created_at": 1001,
+                }))
+                .unwrap(),
+            ],
+            terminal_hosts: BTreeMap::from([("t-rt-1".into(), "local".into())]),
+            host_active_agents: BTreeMap::from([("local".into(), 1)]),
+            ..Default::default()
+        };
+        let _ = push_tx.send((
+            "terminals".into(),
+            json!(["srv-runtime-mock", "i1", 3, 3, 0]),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for recovery runtime push"
+            );
+            if let Ok(Some(ClientEvent::Host {
+                host_id,
+                event: AppEvent::Changed { topic, .. },
+            })) = tokio::time::timeout(remaining, events.recv()).await
+            {
+                assert_eq!(host_id, "host-rt");
+                if topic == "terminals" {
+                    break;
+                }
+            }
+        }
+        assert_eq!(app_state_calls.load(Ordering::SeqCst), baseline_app_calls);
+        let snap_unavailable = client.merged_snapshot().unwrap();
+        assert!(
+            snap_unavailable
+                .reminders
+                .iter()
+                .any(|r| r.id.starts_with("recovery:") && r.card_id == "c-rt"),
+            "runtime.state delta must reconcile recovery reminder into merged_snapshot(); got {:?}",
+            snap_unavailable.reminders
+        );
 
         let _ = stop_tx.send(true);
     }
