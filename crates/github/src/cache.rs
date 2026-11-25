@@ -51,11 +51,13 @@ struct State {
     tick: u64,
     page_epochs: BTreeMap<String, u64>,
     disk_stored_at: BTreeMap<PathBuf, u64>,
+    last_fetch_seq: BTreeMap<String, u64>,
 }
 pub struct Cache {
     root: PathBuf,
     state: Mutex<State>,
     generation: AtomicU64,
+    fetch_seq: AtomicU64,
     clock: Arc<dyn Clock>,
     disk_limit: u64,
 }
@@ -68,9 +70,26 @@ impl Cache {
             root,
             state: Mutex::new(State::default()),
             generation: AtomicU64::new(0),
+            fetch_seq: AtomicU64::new(0),
             clock,
             disk_limit: DISK_LIMIT,
         })
+    }
+    pub(crate) fn next_fetch_seq(&self) -> u64 {
+        self.fetch_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+    #[cfg(test)]
+    pub(crate) fn fetch_seq_count(&self) -> u64 {
+        self.fetch_seq.load(Ordering::SeqCst)
+    }
+    pub(crate) fn last_fetch_seq(&self, key: &str) -> u64 {
+        self.state
+            .lock()
+            .unwrap()
+            .last_fetch_seq
+            .get(key)
+            .copied()
+            .unwrap_or(0)
     }
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.clock
@@ -114,6 +133,9 @@ impl Cache {
         state
             .entries
             .retain(|k, _| k == key || Self::page_family(k).is_none_or(|(f, _)| f != family));
+        state
+            .last_fetch_seq
+            .retain(|k, _| k == key || Self::page_family(k).is_none_or(|(f, _)| f != family));
         let prefix = format!("{:x}.", Sha256::digest(family.as_bytes()));
         let current = self.path(key);
         for (path, _) in self.files() {
@@ -154,6 +176,7 @@ impl Cache {
         let path = self.path(key);
         if std::fs::metadata(&path).ok()?.len() > 5 * 1024 * 1024 {
             state.disk_stored_at.remove(&path);
+            state.last_fetch_seq.remove(key);
             let _ = std::fs::remove_file(&path);
             return None;
         }
@@ -162,6 +185,7 @@ impl Cache {
             Ok(v) => v,
             Err(_) => {
                 state.disk_stored_at.remove(&path);
+                state.last_fetch_seq.remove(key);
                 let _ = std::fs::remove_file(path);
                 return None;
             }
@@ -194,7 +218,7 @@ impl Cache {
         }
     }
     pub fn put(&self, key: &str, response: &Response, generation: u64) -> Result<()> {
-        self.put_checked(key, response, generation, None)
+        self.put_checked(key, response, generation, None, None)
     }
     pub fn put_request(
         &self,
@@ -203,7 +227,17 @@ impl Cache {
         generation: u64,
         page_epoch: u64,
     ) -> Result<()> {
-        self.put_checked(key, response, generation, Some(page_epoch))
+        self.put_checked(key, response, generation, Some(page_epoch), None)
+    }
+    pub(crate) fn put_request_with_seq(
+        &self,
+        key: &str,
+        response: &Response,
+        generation: u64,
+        page_epoch: u64,
+        fetch_seq: u64,
+    ) -> Result<()> {
+        self.put_checked(key, response, generation, Some(page_epoch), Some(fetch_seq))
     }
     fn put_checked(
         &self,
@@ -211,6 +245,7 @@ impl Cache {
         response: &Response,
         generation: u64,
         page_epoch: Option<u64>,
+        fetch_seq: Option<u64>,
     ) -> Result<()> {
         // Clearing the cache fences in-flight writers as well as readers.
         let mut state_guard = self.state.lock().unwrap();
@@ -240,6 +275,11 @@ impl Cache {
         std::io::Write::write_all(&mut file, &bytes)?;
         file.persist(&path)?;
         state_guard.disk_stored_at.insert(path, stored_at);
+        if let Some(seq) = fetch_seq {
+            state_guard.last_fetch_seq.insert(key.into(), seq);
+        } else if response.fetched_at == 0 {
+            state_guard.last_fetch_seq.remove(key);
+        }
         Self::remember(&mut state_guard, key, response.clone(), bytes.len());
         self.trim(&mut state_guard)?;
         drop(state_guard);
@@ -331,6 +371,7 @@ impl Cache {
         state.entries.clear();
         state.page_epochs.clear();
         state.disk_stored_at.clear();
+        state.last_fetch_seq.clear();
         for (path, _) in self.files() {
             std::fs::remove_file(path)?;
         }
@@ -447,6 +488,7 @@ mod pagination_tests {
             root: dir.path().into(),
             state: Mutex::new(State::default()),
             generation: AtomicU64::new(0),
+            fetch_seq: AtomicU64::new(0),
             clock: clock.clone(),
             disk_limit: one_entry_bytes * 2 + 16,
         });

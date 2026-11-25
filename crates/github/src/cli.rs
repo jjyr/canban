@@ -70,22 +70,26 @@ impl Service {
         };
         let key = format!("github.com:gh:{}:{path}", user.id);
         let gate = self.cache.gate(&key);
-        let start = self.clock.now_ms();
+        let started_seq = self.cache.next_fetch_seq();
         let _guard = gate.lock().unwrap();
         let old = self.cache.get(&key);
+        let now = self.clock.now_ms();
         if let Some(old) = &old
             && (!refresh
-                || old.fetched_at > start
+                || old.fetched_at == u64::MAX
+                || self.cache.last_fetch_seq(&key) > started_seq
                 || (path.starts_with("/notifications?")
                     && old.poll_interval.is_some_and(|interval| {
-                        self.clock.now_ms()
-                            < old
-                                .validated_at
-                                .saturating_add(interval.saturating_mul(1000))
+                        now >= old.validated_at
+                            && now
+                                < old
+                                    .validated_at
+                                    .saturating_add(interval.saturating_mul(1000))
                     })))
         {
             return Ok(old.clone());
         }
+        let request_seq = self.cache.next_fetch_seq();
         let generation = self.cache.generation();
         let page_epoch = self.cache.page_epoch(&key);
         let live = self.identify()?;
@@ -108,7 +112,9 @@ impl Service {
         } else {
             page_epoch
         };
-        let _ = self.cache.put_request(&key, &response, generation, epoch);
+        let _ = self
+            .cache
+            .put_request_with_seq(&key, &response, generation, epoch, request_seq);
         Ok(response)
     }
     pub fn cached(&self, path: &str) -> Option<Response> {

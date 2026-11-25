@@ -379,6 +379,27 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
         || msg.contains("-32001")
 }
 
+/// Identifies transient server-side SQLite lock contention or I/O faults that should
+/// defer and retry queued outbox mutations rather than permanently failing the FIFO queue.
+fn is_transient_storage_error(err: &anyhow::Error) -> bool {
+    let lower = format!("{err:#}").to_ascii_lowercase();
+    lower.contains("sqlite_busy")
+        || lower.contains("sqlite_locked")
+        || lower.contains("database is locked")
+        || lower.contains("database file is locked")
+        || lower.contains("database table is locked")
+        || lower.contains("database schema is locked")
+        || lower.contains("sqlite_ioerr")
+        || lower.contains("disk i/o error")
+}
+
+/// Pure bounded exponential backoff (100ms..=2000ms) for deferred outbox retries after
+/// transient server storage errors.
+fn transient_storage_retry_delay_ms(attempts: u32) -> u64 {
+    let shift = attempts.saturating_sub(1).min(5);
+    100u64.saturating_mul(1u64 << shift).min(2_000)
+}
+
 fn auth_failed_error(host_name: &str, error: &str) -> anyhow::Error {
     let trimmed = error.trim();
     if trimmed.to_ascii_lowercase().contains("auth_failed") {
@@ -4188,7 +4209,7 @@ impl MultiHostClient {
         let mut report = DrainReport::default();
         let mut blocked = BTreeSet::new();
         let mut rebuild_counts: BTreeMap<String, u32> = BTreeMap::new();
-        let mut deferred_retry = false;
+        let mut deferred_retry_ms: Option<u64> = None;
         let mut active_client: Option<Arc<ClientTransport>> = None;
 
         loop {
@@ -4287,12 +4308,14 @@ impl MultiHostClient {
                     self.fs_durability,
                 );
             }
-            let (is_conn_err, refreshed) = match &result {
-                Ok(_) => (false, None),
+            let (is_conn_err, is_transient_storage, refreshed) = match &result {
+                Ok(_) => (false, false, None),
                 Err(err) => {
                     let mut conn = is_connection_error(err);
+                    let mut transient_storage = !conn && is_transient_storage_error(err);
                     let msg = format!("{err:#}");
                     let need_refresh = !conn
+                        && !transient_storage
                         && (msg.contains("revision_conflict")
                             || msg.contains("request_key_conflict"));
                     let snap = if need_refresh {
@@ -4301,6 +4324,8 @@ impl MultiHostClient {
                             Err(refresh_err) => {
                                 if is_connection_error(&refresh_err) {
                                     conn = true;
+                                } else if is_transient_storage_error(&refresh_err) {
+                                    transient_storage = true;
                                 }
                                 None
                             }
@@ -4308,9 +4333,14 @@ impl MultiHostClient {
                     } else {
                         None
                     };
-                    (conn, snap)
+                    (conn, transient_storage, snap)
                 }
             };
+
+            enum DrainStepOutcome {
+                Finish(FinishOutcome),
+                DeferredTransient { delay_ms: u64 },
+            }
 
             let outcome = {
                 let mut guard = self.hosts.write().unwrap();
@@ -4318,33 +4348,58 @@ impl MultiHostClient {
                     break;
                 };
                 let mut outbox = slot.outbox.lock().unwrap();
-                let mut snap = slot.cached.snapshot.clone();
-                let outcome = finish_step(
-                    &mut outbox,
-                    &mut snap,
-                    &mutation_id,
-                    result,
-                    was_retry_same_params,
-                    is_conn_err,
-                    refreshed,
-                    allow_rebuild,
-                    &mut blocked,
-                    &mut report,
-                );
-                let _ = outbox.save();
-                if is_global_env_sync && sync_succeeded {
-                    slot.global_env_synced_fingerprint = sync_fingerprint.clone();
+                if is_transient_storage && !is_conn_err {
+                    let err_msg = result
+                        .as_ref()
+                        .err()
+                        .map(|e| format!("{e:#}"))
+                        .unwrap_or_default();
+                    if let Some(pos) = outbox.ops.iter().position(|m| m.id == mutation_id) {
+                        let block_key = if outbox.ops[pos].kind == MutationKind::SyncGlobalEnv {
+                            "__global_env__".to_owned()
+                        } else {
+                            outbox.ops[pos].card_id.clone()
+                        };
+                        outbox.ops[pos].state = MutationState::Queued;
+                        outbox.ops[pos].retry_same_params = !err_msg.contains("revision_conflict");
+                        let attempts = outbox.ops[pos].attempts;
+                        let _ = outbox.save();
+                        blocked.insert(block_key);
+                        DrainStepOutcome::DeferredTransient {
+                            delay_ms: transient_storage_retry_delay_ms(attempts),
+                        }
+                    } else {
+                        DrainStepOutcome::Finish(FinishOutcome::Continue)
+                    }
+                } else {
+                    let mut snap = slot.cached.snapshot.clone();
+                    let outcome = finish_step(
+                        &mut outbox,
+                        &mut snap,
+                        &mutation_id,
+                        result,
+                        was_retry_same_params,
+                        is_conn_err,
+                        refreshed,
+                        allow_rebuild,
+                        &mut blocked,
+                        &mut report,
+                    );
+                    let _ = outbox.save();
+                    if is_global_env_sync && sync_succeeded {
+                        slot.global_env_synced_fingerprint = sync_fingerprint.clone();
+                    }
+                    snap.register_host_entities(host_id);
+                    slot.cached.snapshot = snap;
+                    slot.cached.saved_at = self.now_ms();
+                    save_cache_with_durability(
+                        &self.config.data_dir,
+                        host_id,
+                        &slot.cached,
+                        self.fs_durability,
+                    );
+                    DrainStepOutcome::Finish(outcome)
                 }
-                snap.register_host_entities(host_id);
-                slot.cached.snapshot = snap;
-                slot.cached.saved_at = self.now_ms();
-                save_cache_with_durability(
-                    &self.config.data_dir,
-                    host_id,
-                    &slot.cached,
-                    self.fs_durability,
-                );
-                outcome
             };
             if is_global_env_sync {
                 self.emit_host(
@@ -4357,14 +4412,19 @@ impl MultiHostClient {
             }
 
             match outcome {
-                FinishOutcome::Continue => {}
-                FinishOutcome::RetryImmediate => {
+                DrainStepOutcome::Finish(FinishOutcome::Continue) => {}
+                DrainStepOutcome::Finish(FinishOutcome::RetryImmediate) => {
                     *rebuild_counts.entry(mutation_id).or_insert(0) += 1;
                 }
-                FinishOutcome::Deferred => {
-                    deferred_retry = true;
+                DrainStepOutcome::Finish(FinishOutcome::Deferred) => {
+                    deferred_retry_ms = Some(deferred_retry_ms.map_or(100, |prev| prev.max(100)));
                 }
-                FinishOutcome::StopConnection => {
+                DrainStepOutcome::DeferredTransient { delay_ms } => {
+                    deferred_retry_ms =
+                        Some(deferred_retry_ms.map_or(delay_ms, |prev| prev.max(delay_ms)));
+                    break;
+                }
+                DrainStepOutcome::Finish(FinishOutcome::StopConnection) => {
                     self.mark_slot_disconnected(
                         host_id,
                         Some(client_gen),
@@ -4392,7 +4452,7 @@ impl MultiHostClient {
                 },
             );
         }
-        if deferred_retry
+        if let Some(delay_ms) = deferred_retry_ms
             && !report.aborted_by_connection
             && let Some(this) = self.upgrade_self()
         {
@@ -4402,7 +4462,7 @@ impl MultiHostClient {
                 tokio::select! {
                     biased;
                     _ = shutdown_rx.changed() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {
                         this.wake_host(&hid);
                     }
                 }
@@ -8307,5 +8367,463 @@ mod tests {
             .find(|s| s.id == "remote-fp")
             .expect("host reloaded");
         assert_eq!(sum.pending_mutations, 0);
+    }
+
+    #[test]
+    fn transient_storage_error_classification_and_backoff_bounds() {
+        for msg in [
+            "injected SQLITE_BUSY fault: Error code 5: The database file is locked",
+            "database is locked",
+            "Error code 5: The database file is locked",
+            "database table is locked",
+            "SQLITE_LOCKED: database schema is locked",
+            "injected SQLITE_IOERR fault: Error code 10: Some kind of disk I/O error occurred",
+            "disk I/O error",
+        ] {
+            assert!(
+                is_transient_storage_error(&anyhow!("{msg}")),
+                "expected transient storage error for: {msg}"
+            );
+        }
+        for msg in [
+            "Card is archived or removed; restore it before syncing edits",
+            "revision_conflict: expected revision 1, current revision 2",
+            "request_key_conflict: payload differs",
+            "Unknown card 'c-1'",
+            "auth_failed: token revoked",
+            "Card title is required",
+        ] {
+            assert!(
+                !is_transient_storage_error(&anyhow!("{msg}")),
+                "must NOT treat permanent error as transient storage error: {msg}"
+            );
+        }
+
+        assert_eq!(transient_storage_retry_delay_ms(0), 100);
+        assert_eq!(transient_storage_retry_delay_ms(1), 100);
+        assert_eq!(transient_storage_retry_delay_ms(2), 200);
+        assert_eq!(transient_storage_retry_delay_ms(3), 400);
+        assert_eq!(transient_storage_retry_delay_ms(4), 800);
+        assert_eq!(transient_storage_retry_delay_ms(5), 1_600);
+        assert_eq!(transient_storage_retry_delay_ms(6), 2_000);
+        assert_eq!(transient_storage_retry_delay_ms(u32::MAX), 2_000);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_outbox_transient_sqlite_busy_defers_preserves_fifo_and_recovers() {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
+        };
+        use canban_types::Workflow;
+        use std::sync::atomic::{AtomicU8, AtomicUsize};
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("mock-busy-server");
+        let client_dir = dir.path().join("client-busy-data");
+        std::fs::create_dir_all(&server_home).unwrap();
+        let store = Arc::new(DeviceTokenStore::open(&server_home));
+        let (_dev, token) = store.issue_device("busy-outbox-test").unwrap();
+
+        let mut initial_snap = Snapshot::default();
+        initial_snap.projects.push(
+            serde_json::from_value(json!({
+                "id": "p-busy",
+                "name": "Busy Project",
+                "directory": "/srv/busy",
+                "workflow": Workflow::default(),
+                "created_at": 1000,
+            }))
+            .unwrap(),
+        );
+        initial_snap.cards.push(
+            serde_json::from_value(json!({
+                "id": "c-busy",
+                "project_id": "p-busy",
+                "number": 1,
+                "title": "Busy Card",
+                "body": "Initial Body",
+                "stage": "backlog",
+                "revision": 1,
+                "created_at": 1000,
+            }))
+            .unwrap(),
+        );
+        initial_snap.cards.push(
+            serde_json::from_value(json!({
+                "id": "c-perm",
+                "project_id": "p-busy",
+                "number": 2,
+                "title": "Archived Card",
+                "body": "Perm Body",
+                "stage": "backlog",
+                "revision": 1,
+                "created_at": 1000,
+            }))
+            .unwrap(),
+        );
+
+        let server_snap = Arc::new(Mutex::new(initial_snap));
+        // 1 = SQLITE_BUSY, 2 = SQLITE_IOERR, 0 = healthy.
+        let fault_mode = Arc::new(AtomicU8::new(1));
+        let rpc_log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let comments = Arc::new(Mutex::new(Vec::<String>::new()));
+        let subscribed_notify = Arc::new(Notify::new());
+        let comment_committed = Arc::new(AtomicBool::new(false));
+        let comment_notify = Arc::new(Notify::new());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home.clone(),
+            server_id: "srv-busy".into(),
+            api_version: 90,
+            device_store: store,
+            pairing_codes: Arc::new(PairingCodeStore::open(&server_home)),
+            revocations: RevocationBus::new(),
+            active_tcp_connections: Arc::new(AtomicUsize::new(0)),
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let snap_ref = server_snap.clone();
+        let fault_ref = fault_mode.clone();
+        let log_ref = rpc_log.clone();
+        let comments_ref = comments.clone();
+        let sub_notify = subscribed_notify.clone();
+        let committed_flag = comment_committed.clone();
+        let committed_notify = comment_notify.clone();
+        spawn_tcp_listener(
+            &handle,
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let snap_ref = snap_ref.clone();
+                let fault_ref = fault_ref.clone();
+                let log_ref = log_ref.clone();
+                let comments_ref = comments_ref.clone();
+                let sub_notify = sub_notify.clone();
+                let committed_flag = committed_flag.clone();
+                let committed_notify = committed_notify.clone();
+                async move {
+                    let (read_half, mut writer) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(read_half);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("app.ping") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-busy",
+                                            "api_version": 90,
+                                            "version": "test",
+                                            "platform": "macos",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                let snap = snap_ref.lock().unwrap().clone();
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "changed": true,
+                                            "revision": ["srv-busy", "i1", 1, 1, 0],
+                                            "github_revision": 0,
+                                            "server_id": "srv-busy",
+                                            "snapshot": snap,
+                                            "config": Config::default(),
+                                            "home": "/tmp/srv-busy",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("card.update") => {
+                                let cid = req["params"]["card_id"].as_str().unwrap_or("");
+                                log_ref.lock().unwrap().push(format!("card.update:{cid}"));
+                                let resp = if cid == "c-perm" {
+                                    json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "error": {
+                                            "code": -32000,
+                                            "message": "Card is archived or removed; restore it before syncing edits"
+                                        }
+                                    })
+                                } else {
+                                    match fault_ref.load(Ordering::SeqCst) {
+                                        1 => json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "error": {
+                                                "code": -32000,
+                                                "message": "injected SQLITE_BUSY fault: Error code 5: The database file is locked"
+                                            }
+                                        }),
+                                        2 => json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "error": {
+                                                "code": -32000,
+                                                "message": "injected SQLITE_IOERR fault: Error code 10: Some kind of disk I/O error occurred"
+                                            }
+                                        }),
+                                        _ => {
+                                            let mut snap = snap_ref.lock().unwrap();
+                                            if let Some(b) = req["params"]["body"].as_str() {
+                                                snap.cards[0].body = b.to_owned();
+                                            }
+                                            snap.cards[0].revision += 1;
+                                            let card = snap.cards[0].clone();
+                                            json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "result": card,
+                                            })
+                                        }
+                                    }
+                                };
+                                let _ = write_json_line_async(&mut writer, &resp).await;
+                            }
+                            Some("comment.add") => {
+                                let cid = req["params"]["card_id"].as_str().unwrap_or("");
+                                log_ref.lock().unwrap().push(format!("comment.add:{cid}"));
+                                let body = req["params"]["body"].as_str().unwrap_or("").to_owned();
+                                comments_ref.lock().unwrap().push(body.clone());
+                                committed_flag.store(true, Ordering::SeqCst);
+                                committed_notify.notify_waiters();
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "id": "ev-busy-1",
+                                            "card_id": cid,
+                                            "body": body,
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.subscribe") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "subscribed": true,
+                                            "server_id": "srv-busy",
+                                            "api_version": 90,
+                                            "revision": ["srv-busy", "i1", 1, 1, 0],
+                                            "changed": false,
+                                            "github_revision": 0,
+                                            "heartbeat_ms": 5000,
+                                        }
+                                    }),
+                                )
+                                .await;
+                                sub_notify.notify_one();
+                                let mut buf = String::new();
+                                while matches!(reader.read_line(&mut buf).await, Ok(n) if n > 0) {
+                                    buf.clear();
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        client
+            .add_host_async(SavedHost {
+                id: "host-busy".into(),
+                name: "Busy Host".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-busy".into()),
+                enabled: true,
+                added_at: 1000,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), subscribed_notify.notified())
+            .await
+            .expect("supervisor subscribed before busy outbox test");
+
+        // Enqueue two FIFO mutations on `c-busy`: UpdateCard followed by AddComment.
+        {
+            let guard = client.hosts.read().unwrap();
+            let slot = guard.get("host-busy").unwrap();
+            let mut ob = slot.outbox.lock().unwrap();
+            ob.enqueue(Mutation {
+                id: "m-busy-1".into(),
+                host_id: "host-busy".into(),
+                card_id: "c-busy".into(),
+                kind: MutationKind::UpdateCard,
+                params: json!({"card_id": "c-busy", "title": "Busy Card", "body": "Updated After Busy"}),
+                base: UpdateBase {
+                    title: Some("Busy Card".into()),
+                    body: Some("Initial Body".into()),
+                },
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 1001,
+                attempts: 0,
+            })
+            .unwrap();
+            ob.enqueue(Mutation {
+                id: "m-busy-2".into(),
+                host_id: "host-busy".into(),
+                card_id: "c-busy".into(),
+                kind: MutationKind::AddComment,
+                params: json!({"card_id": "c-busy", "id": "ev-busy-1", "body": "Follow-up FIFO comment"}),
+                base: UpdateBase::default(),
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 1002,
+                attempts: 0,
+            })
+            .unwrap();
+        }
+
+        // 1. SQLITE_BUSY during drain must defer (keep Queued, stay Connected, never Failed, preserve FIFO).
+        let rep1 = client.drain_outbox_async("host-busy").await.unwrap();
+        assert_eq!(rep1.failed, 0, "SQLITE_BUSY must NOT mark edit Failed");
+        assert!(
+            !rep1.aborted_by_connection,
+            "SQLITE_BUSY must NOT disconnect healthy TCP transport"
+        );
+        assert!(
+            client
+                .host_summaries()
+                .iter()
+                .find(|s| s.id == "host-busy")
+                .is_some_and(|s| s.connection.is_connected()),
+            "host must stay Connected during transient SQLITE_BUSY"
+        );
+        let items1 = client.sync_items();
+        assert_eq!(items1.len(), 2);
+        assert!(
+            items1
+                .iter()
+                .all(|i| matches!(i.state, SyncItemState::Queued | SyncItemState::InFlight)),
+            "queued FIFO items must remain pending, got {items1:?}"
+        );
+        assert!(
+            !rpc_log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "comment.add:c-busy"),
+            "comment.add must NOT leapfrog deferred UpdateCard in FIFO order"
+        );
+
+        // 2. Transient SQLITE_IOERR during drain must likewise defer without marking Failed.
+        fault_mode.store(2, Ordering::SeqCst);
+        let rep2 = client.drain_outbox_async("host-busy").await.unwrap();
+        assert_eq!(rep2.failed, 0, "SQLITE_IOERR must NOT mark edit Failed");
+        assert!(!rep2.aborted_by_connection);
+        assert!(
+            !rpc_log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "comment.add:c-busy"),
+            "comment.add must stay behind UpdateCard after SQLITE_IOERR"
+        );
+
+        // 3. Once lock/I/O fault clears, queued FIFO edits drain cleanly in order.
+        fault_mode.store(0, Ordering::SeqCst);
+        let _ = client.drain_outbox_async("host-busy").await.unwrap();
+        if !comment_committed.load(Ordering::SeqCst) {
+            tokio::time::timeout(Duration::from_secs(5), comment_notify.notified())
+                .await
+                .expect("comment.add committed after fault cleared");
+        }
+        let _ = client.drain_outbox_async("host-busy").await.unwrap();
+        assert!(
+            client.sync_items().is_empty(),
+            "outbox must be empty after recovery; remaining={:?}",
+            client.sync_items()
+        );
+        assert_eq!(
+            server_snap.lock().unwrap().cards[0].body,
+            "Updated After Busy"
+        );
+        assert_eq!(
+            *comments.lock().unwrap(),
+            vec!["Follow-up FIFO comment".to_owned()]
+        );
+
+        // 4. Permanent server error still classifies accurately as SyncItemState::Failed.
+        {
+            let guard = client.hosts.read().unwrap();
+            let slot = guard.get("host-busy").unwrap();
+            let mut ob = slot.outbox.lock().unwrap();
+            ob.enqueue(Mutation {
+                id: "m-perm-1".into(),
+                host_id: "host-busy".into(),
+                card_id: "c-perm".into(),
+                kind: MutationKind::UpdateCard,
+                params: json!({"card_id": "c-perm", "title": "Archived Card", "body": "Edit archived"}),
+                base: UpdateBase {
+                    title: Some("Archived Card".into()),
+                    body: Some("Perm Body".into()),
+                },
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 1003,
+                attempts: 0,
+            })
+            .unwrap();
+        }
+        let rep_perm = client.drain_outbox_async("host-busy").await.unwrap();
+        assert_eq!(rep_perm.failed, 1);
+        let perm_items = client.sync_items();
+        assert_eq!(perm_items.len(), 1);
+        assert_eq!(perm_items[0].mutation_id, "m-perm-1");
+        assert_eq!(perm_items[0].state, SyncItemState::Failed);
+
+        let _ = stop_tx.send(true);
     }
 }

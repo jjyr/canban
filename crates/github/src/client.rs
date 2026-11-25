@@ -206,7 +206,7 @@ impl Client {
             let preserved_fetched_at = cache
                 .get(&path_key)
                 .map(|old| old.fetched_at)
-                .filter(|&ts| ts > now)
+                .filter(|&ts| ts == u64::MAX)
                 .unwrap_or(0);
             let value = crate::cache::Response {
                 data,
@@ -284,17 +284,30 @@ impl Client {
             .cache
             .as_ref()
             .map(|(cache, _)| cache.gate(key.as_deref().unwrap()));
-        let started = self.clock.now_ms();
+        let started_seq = self
+            .cache
+            .as_ref()
+            .map(|(cache, _)| cache.next_fetch_seq())
+            .unwrap_or(0);
         let _guard = gate.as_ref().map(|gate| gate.lock().unwrap());
         let old = self
             .cache
             .as_ref()
             .and_then(|(cache, _)| cache.get(key.as_deref().unwrap()));
+        let coalesced_fresh = self
+            .cache
+            .as_ref()
+            .is_some_and(|(cache, _)| cache.last_fetch_seq(key.as_deref().unwrap()) > started_seq);
         if let Some(old) = &old
-            && (!self.refresh || old.fetched_at > started)
+            && (!self.refresh || old.fetched_at == u64::MAX || coalesced_fresh)
         {
             return Ok(old.clone());
         }
+        let request_seq = self
+            .cache
+            .as_ref()
+            .map(|(cache, _)| cache.next_fetch_seq())
+            .unwrap_or(0);
         let fetched_at = self.clock.now_ms();
         let generation = self
             .cache
@@ -437,7 +450,7 @@ impl Client {
             } else {
                 page_epoch
             };
-            let _ = cache.put_request(key, &value, generation, epoch);
+            let _ = cache.put_request_with_seq(key, &value, generation, epoch, request_seq);
         }
         Ok(value)
     }
@@ -1341,5 +1354,208 @@ mod cache_tests {
         client.seed("/repos/o/r/issues/2", json!({"id": 2}));
         let seeded = client.cached_response("/repos/o/r/issues/2").unwrap();
         assert_eq!(seeded.validated_at, T0 + 5_000);
+    }
+
+    #[test]
+    fn backward_clock_jump_does_not_suppress_github_refresh() {
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicU64, AtomicUsize},
+        };
+
+        struct MockClock(AtomicU64);
+        impl Clock for MockClock {
+            fn now_ms(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        struct ScriptedTransport {
+            calls: AtomicUsize,
+            last_if_none_match: Mutex<Option<String>>,
+            next_title: Mutex<String>,
+            next_etag: Mutex<String>,
+        }
+        impl HttpTransport for ScriptedTransport {
+            fn send(&self, req: HttpRequest) -> Result<HttpResponse> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let inm = req
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("if-none-match"))
+                    .map(|(_, v)| v.clone());
+                *self.last_if_none_match.lock().unwrap() = inm;
+                let title = self.next_title.lock().unwrap().clone();
+                let etag = self.next_etag.lock().unwrap().clone();
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![("ETag".into(), etag)],
+                    body: serde_json::to_vec(&json!({"title": title}))?,
+                })
+            }
+        }
+
+        const T0: u64 = 1_700_000_100_000;
+        let path = "/repos/o/r/issues/42";
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(MockClock(AtomicU64::new(T0)));
+        let transport = Arc::new(ScriptedTransport {
+            calls: AtomicUsize::new(0),
+            last_if_none_match: Mutex::new(None),
+            next_title: Mutex::new("v1".into()),
+            next_etag: Mutex::new("\"v1\"".into()),
+        });
+        let cache = crate::cache::Cache::new_with_clock(dir.path().into(), clock.clone());
+        let client = Client::new(SecretString::from("fixture"))
+            .with_clock(clock.clone())
+            .with_transport(transport.clone())
+            .with_cache(cache, "acct".into());
+
+        // 1. Initial fetch populates cache at T0.
+        let r1 = client.response(path).unwrap();
+        assert_eq!(r1.data["title"], "v1");
+        assert_eq!(r1.fetched_at, T0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        // 2. Step wall clock backward by 1 hour (simulating an NTP backward jump).
+        let t_back_1 = T0 - 3_600_000;
+        clock.0.store(t_back_1, Ordering::SeqCst);
+
+        // Non-refreshing read still serves from cache without HTTP.
+        let cached = client.response(path).unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.data["title"], "v1");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        // Explicit refresh MUST NOT be suppressed by old.fetched_at (T0) > started (T0 - 1h).
+        *transport.next_title.lock().unwrap() = "v2".into();
+        *transport.next_etag.lock().unwrap() = "\"v2\"".into();
+        let r2 = client.clone().refreshing().response(path).unwrap();
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            transport.last_if_none_match.lock().unwrap().as_deref(),
+            Some("\"v1\"")
+        );
+        assert_eq!(r2.data["title"], "v2");
+        assert_eq!(r2.fetched_at, t_back_1);
+
+        // 3. Step clock backward again and seed a summary; refresh still issues HTTP.
+        let t_back_2 = T0 - 7_200_000;
+        clock.0.store(t_back_2, Ordering::SeqCst);
+        client.seed(path, json!({"title": "seeded-summary"}));
+        *transport.next_title.lock().unwrap() = "v3".into();
+        *transport.next_etag.lock().unwrap() = "\"v3\"".into();
+        let r3 = client.clone().refreshing().response(path).unwrap();
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(r3.data["title"], "v3");
+        assert_eq!(r3.fetched_at, t_back_2);
+
+        // 4. Reload cache from disk with a backward clock: cached read hits disk, refresh hits HTTP.
+        let reloaded_cache = crate::cache::Cache::new_with_clock(dir.path().into(), clock.clone());
+        let reloaded = Client::new(SecretString::from("fixture"))
+            .with_clock(clock.clone())
+            .with_transport(transport.clone())
+            .with_cache(reloaded_cache, "acct".into());
+        assert_eq!(reloaded.response(path).unwrap().data["title"], "v3");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 3);
+        *transport.next_title.lock().unwrap() = "v4".into();
+        let r4 = reloaded.clone().refreshing().response(path).unwrap();
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(r4.data["title"], "v4");
+
+        // 5. Explicitly pinned `fetched_at == u64::MAX` test fixtures still short-circuit.
+        let pinned_path = "/repos/o/r/issues/999";
+        reloaded.seed_response(
+            pinned_path,
+            &crate::cache::Response {
+                data: json!({"title": "pinned"}),
+                link: None,
+                etag: None,
+                modified: None,
+                poll_interval: None,
+                validated_at: 1,
+                fetched_at: u64::MAX,
+                cached: false,
+            },
+        );
+        let pinned = reloaded.clone().refreshing().response(pinned_path).unwrap();
+        assert_eq!(pinned.data["title"], "pinned");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn concurrent_refresh_waiters_coalesce_without_clock_advance() {
+        use std::sync::{Mutex, atomic::AtomicUsize};
+
+        struct ConstantClock(u64);
+        impl Clock for ConstantClock {
+            fn now_ms(&self) -> u64 {
+                self.0
+            }
+        }
+
+        struct GatedTransport {
+            calls: AtomicUsize,
+            entered_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+            release_rx: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        }
+        impl HttpTransport for GatedTransport {
+            fn send(&self, _req: HttpRequest) -> Result<HttpResponse> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 1 {
+                    if let Some(tx) = self.entered_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = self.release_rx.lock().unwrap().take() {
+                        let _ = rx.recv();
+                    }
+                }
+                let body = serde_json::to_vec(&json!({"seq": n}))?;
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body,
+                })
+            }
+        }
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(ConstantClock(1_700_000_000_000));
+        let transport = Arc::new(GatedTransport {
+            calls: AtomicUsize::new(0),
+            entered_tx: Mutex::new(Some(entered_tx)),
+            release_rx: Mutex::new(Some(release_rx)),
+        });
+        let cache = crate::cache::Cache::new_with_clock(dir.path().into(), clock.clone());
+        let client = Client::new(SecretString::from("fixture"))
+            .with_clock(clock)
+            .with_transport(transport.clone())
+            .with_cache(cache.clone(), "acct".into());
+
+        // Thread 1 enters and holds the per-key gate during HTTP call #1 (allocates seq 1 and 2).
+        let c1 = client.clone().refreshing();
+        let t1 = std::thread::spawn(move || c1.get::<Value>("/repos/o/r/pulls/7").unwrap());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // Threads 2 & 3 enter while HTTP #1 is in flight (allocate seq 3 and 4) and block on gate.
+        let c2 = client.clone().refreshing();
+        let t2 = std::thread::spawn(move || c2.get::<Value>("/repos/o/r/pulls/7").unwrap());
+        let c3 = client.clone().refreshing();
+        let t3 = std::thread::spawn(move || c3.get::<Value>("/repos/o/r/pulls/7").unwrap());
+        while cache.fetch_seq_count() < 4 {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+
+        let v1 = t1.join().unwrap();
+        let v2 = t2.join().unwrap();
+        let v3 = t3.join().unwrap();
+        assert_eq!(v1["seq"], 1);
+        // Both waiters must see HTTP #2 (never pre-mutation #1), coalescing into ONE follow-up call.
+        assert_eq!(v2["seq"], 2);
+        assert_eq!(v3["seq"], 2);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
     }
 }
