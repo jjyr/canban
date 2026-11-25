@@ -1,0 +1,8 @@
+# Canban DST Regression Corpus
+# Format: <scenario> <seed> [ops]
+# Replay all entries with:
+#   cargo run --release -p canban-sim --bin canban-sim -- corpus
+
+chaos 6581024343186838594 40  # Bug #5: Outbox revision_conflict + double-bump permanently marking edits Failed
+chaos 14542862646255385444 50 # Bug #9: Stale revoked connect_slot_async overwriting freshly re-paired session
+chaos 13580682392153143971 50 # Bug #10: Backward NTP clock jump breaking global_env LWW convergence

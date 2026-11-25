@@ -14,12 +14,11 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    task::{Context as TaskContext, Poll},
+    task::{Context as TaskContext, Poll, Waker},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    sync::Notify,
     time::Sleep,
 };
 
@@ -36,14 +35,89 @@ pub struct StreamFaultConfig {
     pub rst_after_read_bytes: Option<u64>,
     /// Return `io::ErrorKind::ConnectionReset` once this many bytes have been written.
     pub rst_after_write_bytes: Option<u64>,
-    /// Half-open read blackhole: parks `poll_read` until cleared.
+    /// Half-open read blackhole: parks `poll_read` until cleared (legacy alias of `blackhole_reads`).
     pub stall_reads: bool,
-    /// Half-open write blackhole: parks `poll_write` until cleared.
+    /// Half-open write blackhole: parks `poll_write` until cleared (legacy alias of `blackhole_writes`).
     pub stall_writes: bool,
+    /// Explicit half-open read blackhole: stops inbound bytes without closing or returning EOF/RST.
+    pub blackhole_reads: bool,
+    /// Explicit half-open write blackhole: stops outbound bytes without closing or returning RST.
+    pub blackhole_writes: bool,
+    /// Bidirectional half-open blackhole: stops both reads and writes without closing the stream.
+    pub half_open_blackhole: bool,
+    /// Optional bounded virtual-time read blackhole duration in milliseconds (e.g. 35_000..=60_000ms
+    /// to exceed keepalive/heartbeat timeouts without EOF/RST). Clearing/updating the policy wakes
+    /// parked readers immediately.
+    pub stall_read_ms: Option<u64>,
+    /// Optional bounded virtual-time write blackhole duration in milliseconds (e.g. 35_000..=60_000ms).
+    /// Clearing/updating the policy wakes parked writers immediately.
+    pub stall_write_ms: Option<u64>,
     /// Extra deterministic virtual latency injected before each read operation.
     pub extra_read_latency_ms: u64,
     /// Extra deterministic virtual latency injected before each write operation.
     pub extra_write_latency_ms: u64,
+}
+
+impl StreamFaultConfig {
+    /// Indefinite bidirectional half-open blackhole until cleared/healed on [`StreamFaultPolicy`].
+    pub fn half_open_blackhole() -> Self {
+        Self {
+            blackhole_reads: true,
+            blackhole_writes: true,
+            half_open_blackhole: true,
+            ..Self::default()
+        }
+    }
+
+    /// Bounded bidirectional half-open blackhole lasting `duration_ms` virtual milliseconds
+    /// (e.g. 35_000..=60_000ms to exceed keepalive/heartbeat deadlines without EOF/RST),
+    /// waking immediately if cleared earlier.
+    pub fn half_open_blackhole_for_ms(duration_ms: u64) -> Self {
+        Self {
+            blackhole_reads: true,
+            blackhole_writes: true,
+            half_open_blackhole: true,
+            stall_read_ms: Some(duration_ms),
+            stall_write_ms: Some(duration_ms),
+            ..Self::default()
+        }
+    }
+
+    /// Bounded read-only half-open blackhole lasting `duration_ms` virtual milliseconds.
+    pub fn blackhole_reads_for_ms(duration_ms: u64) -> Self {
+        Self {
+            blackhole_reads: true,
+            stall_read_ms: Some(duration_ms),
+            ..Self::default()
+        }
+    }
+
+    /// Bounded write-only half-open blackhole lasting `duration_ms` virtual milliseconds.
+    pub fn blackhole_writes_for_ms(duration_ms: u64) -> Self {
+        Self {
+            blackhole_writes: true,
+            stall_write_ms: Some(duration_ms),
+            ..Self::default()
+        }
+    }
+
+    /// Returns `true` when indefinite read blackholing is enabled.
+    pub fn reads_blackholed(&self) -> bool {
+        self.stall_reads || self.blackhole_reads || self.half_open_blackhole
+    }
+
+    /// Returns `true` when indefinite write blackholing is enabled.
+    pub fn writes_blackholed(&self) -> bool {
+        self.stall_writes || self.blackhole_writes || self.half_open_blackhole
+    }
+
+    /// Returns `true` when any half-open blackhole or timed stall is active.
+    pub fn is_half_open_blackhole(&self) -> bool {
+        self.reads_blackholed()
+            || self.writes_blackholed()
+            || self.stall_read_ms.is_some_and(|ms| ms > 0)
+            || self.stall_write_ms.is_some_and(|ms| ms > 0)
+    }
 }
 
 /// Shared, live-mutable controller for [`FaultyStream`] instances across one or more hosts.
@@ -53,70 +127,132 @@ pub struct StreamFaultPolicy {
 }
 
 #[derive(Debug, Default)]
+struct PolicyState {
+    default_cfg: StreamFaultConfig,
+    host_cfgs: BTreeMap<String, StreamFaultConfig>,
+    generation: u64,
+    wakers: BTreeMap<u64, Waker>,
+}
+
+impl PolicyState {
+    fn effective_config(&self, host_id: Option<&str>) -> StreamFaultConfig {
+        if let Some(hid) = host_id
+            && let Some(cfg) = self.host_cfgs.get(hid)
+        {
+            return cfg.clone();
+        }
+        self.default_cfg.clone()
+    }
+}
+
+#[derive(Debug)]
 struct PolicyInner {
-    default_cfg: Mutex<StreamFaultConfig>,
-    host_cfgs: Mutex<BTreeMap<String, StreamFaultConfig>>,
-    generation: AtomicU64,
-    wake: Arc<Notify>,
+    state: Mutex<PolicyState>,
+    next_waker_id: AtomicU64,
+}
+
+impl Default for PolicyInner {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(PolicyState::default()),
+            next_waker_id: AtomicU64::new(1),
+        }
+    }
 }
 
 impl StreamFaultPolicy {
     pub fn new(default_cfg: StreamFaultConfig) -> Self {
         Self {
             inner: Arc::new(PolicyInner {
-                default_cfg: Mutex::new(default_cfg),
-                host_cfgs: Mutex::new(BTreeMap::new()),
-                generation: AtomicU64::new(0),
-                wake: Arc::new(Notify::new()),
+                state: Mutex::new(PolicyState {
+                    default_cfg,
+                    host_cfgs: BTreeMap::new(),
+                    generation: 0,
+                    wakers: BTreeMap::new(),
+                }),
+                next_waker_id: AtomicU64::new(1),
             }),
+        }
+    }
+
+    fn alloc_waker_id(&self) -> u64 {
+        self.inner.next_waker_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn unregister_waker(&self, waker_id: u64) {
+        if let Ok(mut st) = self.inner.state.lock() {
+            st.wakers.remove(&waker_id);
+        }
+    }
+
+    fn update_and_wake<F>(&self, mutate: F)
+    where
+        F: FnOnce(&mut PolicyState),
+    {
+        let wakers: Vec<Waker> = {
+            let mut st = self.inner.state.lock().unwrap();
+            mutate(&mut st);
+            st.generation = st.generation.wrapping_add(1);
+            std::mem::take(&mut st.wakers).into_values().collect()
+        };
+        for waker in wakers {
+            waker.wake();
         }
     }
 
     /// Monotonic counter incremented whenever the fault policy is updated or cleared.
     pub fn generation(&self) -> u64 {
-        self.inner.generation.load(Ordering::SeqCst)
+        self.inner.state.lock().unwrap().generation
     }
 
     pub fn set_default(&self, cfg: StreamFaultConfig) {
-        *self.inner.default_cfg.lock().unwrap() = cfg;
-        self.inner.generation.fetch_add(1, Ordering::SeqCst);
-        self.inner.wake.notify_waiters();
+        self.update_and_wake(|st| {
+            st.default_cfg = cfg;
+        });
     }
 
     pub fn set_for_host(&self, host_id: impl Into<String>, cfg: StreamFaultConfig) {
-        self.inner
-            .host_cfgs
-            .lock()
-            .unwrap()
-            .insert(host_id.into(), cfg);
-        self.inner.generation.fetch_add(1, Ordering::SeqCst);
-        self.inner.wake.notify_waiters();
+        let host_id = host_id.into();
+        self.update_and_wake(|st| {
+            st.host_cfgs.insert(host_id, cfg);
+        });
+    }
+
+    /// Arms a bidirectional half-open blackhole on `host_id` (indefinite if `duration_ms` is `None`,
+    /// or bounded to `duration_ms` virtual milliseconds if `Some(ms)`).
+    pub fn arm_half_open_blackhole(&self, host_id: impl Into<String>, duration_ms: Option<u64>) {
+        let cfg = match duration_ms {
+            Some(ms) => StreamFaultConfig::half_open_blackhole_for_ms(ms),
+            None => StreamFaultConfig::half_open_blackhole(),
+        };
+        self.set_for_host(host_id, cfg);
     }
 
     pub fn clear_for_host(&self, host_id: &str) {
-        self.inner.host_cfgs.lock().unwrap().remove(host_id);
-        self.inner.generation.fetch_add(1, Ordering::SeqCst);
-        self.inner.wake.notify_waiters();
+        self.update_and_wake(|st| {
+            st.host_cfgs.remove(host_id);
+        });
+    }
+
+    /// Clears all faults for `host_id` and wakes any parked read/write wakers.
+    pub fn heal_host(&self, host_id: &str) {
+        self.clear_for_host(host_id);
     }
 
     pub fn clear_all(&self) {
-        *self.inner.default_cfg.lock().unwrap() = StreamFaultConfig::default();
-        self.inner.host_cfgs.lock().unwrap().clear();
-        self.inner.generation.fetch_add(1, Ordering::SeqCst);
-        self.inner.wake.notify_waiters();
+        self.update_and_wake(|st| {
+            st.default_cfg = StreamFaultConfig::default();
+            st.host_cfgs.clear();
+        });
     }
 
     pub fn effective_config(&self, host_id: Option<&str>) -> StreamFaultConfig {
-        if let Some(hid) = host_id
-            && let Some(cfg) = self.inner.host_cfgs.lock().unwrap().get(hid)
-        {
-            return cfg.clone();
-        }
-        self.inner.default_cfg.lock().unwrap().clone()
+        self.inner.state.lock().unwrap().effective_config(host_id)
     }
 
-    fn wake_handle(&self) -> Arc<Notify> {
-        Arc::clone(&self.inner.wake)
+    /// Number of currently parked stream read/write wakers awaiting policy heal/change.
+    pub fn parked_waker_count(&self) -> usize {
+        self.inner.state.lock().unwrap().wakers.len()
     }
 }
 
@@ -129,15 +265,30 @@ pub struct FaultyStream<S> {
     policy_gen: u64,
     bytes_read: u64,
     bytes_written: u64,
+    read_waker_id: u64,
+    write_waker_id: u64,
     read_sleep: Option<Pin<Box<Sleep>>>,
     write_sleep: Option<Pin<Box<Sleep>>>,
-    read_stall: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    write_stall: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    read_stall_sleep: Option<Pin<Box<Sleep>>>,
+    write_stall_sleep: Option<Pin<Box<Sleep>>>,
+    read_stall_completed: bool,
+    write_stall_completed: bool,
+    read_blackhole_recorded: bool,
+    write_blackhole_recorded: bool,
+}
+
+impl<S> Drop for FaultyStream<S> {
+    fn drop(&mut self) {
+        self.policy.unregister_waker(self.read_waker_id);
+        self.policy.unregister_waker(self.write_waker_id);
+    }
 }
 
 impl<S> FaultyStream<S> {
     pub fn new(inner: S, policy: StreamFaultPolicy, host_id: Option<String>) -> Self {
         let policy_gen = policy.generation();
+        let read_waker_id = policy.alloc_waker_id();
+        let write_waker_id = policy.alloc_waker_id();
         Self {
             inner,
             host_id,
@@ -145,10 +296,16 @@ impl<S> FaultyStream<S> {
             policy_gen,
             bytes_read: 0,
             bytes_written: 0,
+            read_waker_id,
+            write_waker_id,
             read_sleep: None,
             write_sleep: None,
-            read_stall: None,
-            write_stall: None,
+            read_stall_sleep: None,
+            write_stall_sleep: None,
+            read_stall_completed: false,
+            write_stall_completed: false,
+            read_blackhole_recorded: false,
+            write_blackhole_recorded: false,
         }
     }
 
@@ -164,19 +321,150 @@ impl<S> FaultyStream<S> {
         self.bytes_written
     }
 
-    fn current_cfg(&self) -> StreamFaultConfig {
-        self.policy.effective_config(self.host_id.as_deref())
+    pub fn inner(&self) -> &S {
+        &self.inner
     }
 
-    /// Resets per-arm read/write byte budgets whenever [`StreamFaultPolicy`] changes generation,
-    /// so injecting e.g. `rst_after_write_bytes: Some(32)` mid-session fires after 32 new bytes
-    /// rather than immediately at byte 0 on an already-warm multiplexed connection.
-    fn sync_policy_gen(&mut self) {
-        let current_gen = self.policy.generation();
+    pub fn inner_mut(&mut self) -> &mut S {
+        &mut self.inner
+    }
+
+    /// Resets per-arm read/write byte budgets and stall timers whenever [`StreamFaultPolicy`]
+    /// changes generation, so injecting e.g. `rst_after_write_bytes: Some(32)` mid-session fires
+    /// after 32 new bytes and clearing a blackhole immediately cancels any pending stall timer.
+    fn sync_policy_gen_with(&mut self, current_gen: u64) {
         if current_gen != self.policy_gen {
             self.policy_gen = current_gen;
             self.bytes_read = 0;
             self.bytes_written = 0;
+            self.read_sleep = None;
+            self.write_sleep = None;
+            self.read_stall_sleep = None;
+            self.write_stall_sleep = None;
+            self.read_stall_completed = false;
+            self.write_stall_completed = false;
+            self.read_blackhole_recorded = false;
+            self.write_blackhole_recorded = false;
+        }
+    }
+
+    /// Registers `waker_id` iff the policy generation still matches `expected_gen`.
+    /// Returns `false` if the policy already changed (caller should re-evaluate immediately).
+    fn register_waker_if_gen(
+        &self,
+        waker_id: u64,
+        expected_gen: u64,
+        cx: &TaskContext<'_>,
+    ) -> bool {
+        let mut st = self.policy.inner.state.lock().unwrap();
+        if st.generation != expected_gen {
+            return false;
+        }
+        st.wakers.insert(waker_id, cx.waker().clone());
+        true
+    }
+
+    /// Enforces half-open read blackhole (indefinite or timed `stall_read_ms`) without closing the
+    /// stream or returning EOF/RST. Returns `Poll::Ready((cfg, gen))` once reads are unblocked.
+    fn poll_read_blackhole(&mut self, cx: &mut TaskContext<'_>) -> Poll<(StreamFaultConfig, u64)> {
+        loop {
+            let (cfg, current_gen) = {
+                let policy_inner = Arc::clone(&self.policy.inner);
+                let mut st = policy_inner.state.lock().unwrap();
+                let current_gen = st.generation;
+                self.sync_policy_gen_with(current_gen);
+                let cfg = st.effective_config(self.host_id.as_deref());
+                let timed_ms = cfg.stall_read_ms.filter(|&ms| ms > 0);
+                if timed_ms.is_some() && !self.read_stall_completed {
+                    st.wakers.insert(self.read_waker_id, cx.waker().clone());
+                    (cfg, current_gen)
+                } else if timed_ms.is_none() && cfg.reads_blackholed() {
+                    st.wakers.insert(self.read_waker_id, cx.waker().clone());
+                    if !self.read_blackhole_recorded {
+                        self.read_blackhole_recorded = true;
+                        crate::trace::record_coverage_hit("net.fault.read_blackhole");
+                    }
+                    return Poll::Pending;
+                } else {
+                    st.wakers.remove(&self.read_waker_id);
+                    self.read_stall_sleep = None;
+                    return Poll::Ready((cfg, current_gen));
+                }
+            };
+
+            let ms = cfg.stall_read_ms.unwrap_or(0);
+            if !self.read_blackhole_recorded {
+                self.read_blackhole_recorded = true;
+                crate::trace::record_coverage_hit("net.fault.read_blackhole");
+            }
+            if self.read_stall_sleep.is_none() {
+                self.read_stall_sleep =
+                    Some(Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+            }
+            match self.read_stall_sleep.as_mut().unwrap().as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => {
+                    self.read_stall_sleep = None;
+                    self.read_stall_completed = true;
+                    self.policy.unregister_waker(self.read_waker_id);
+                    if self.policy.generation() != current_gen {
+                        continue;
+                    }
+                    return Poll::Ready((cfg, current_gen));
+                }
+            }
+        }
+    }
+
+    /// Enforces half-open write blackhole (indefinite or timed `stall_write_ms`) without closing the
+    /// stream or returning RST. Returns `Poll::Ready((cfg, gen))` once writes are unblocked.
+    fn poll_write_blackhole(&mut self, cx: &mut TaskContext<'_>) -> Poll<(StreamFaultConfig, u64)> {
+        loop {
+            let (cfg, current_gen) = {
+                let policy_inner = Arc::clone(&self.policy.inner);
+                let mut st = policy_inner.state.lock().unwrap();
+                let current_gen = st.generation;
+                self.sync_policy_gen_with(current_gen);
+                let cfg = st.effective_config(self.host_id.as_deref());
+                let timed_ms = cfg.stall_write_ms.filter(|&ms| ms > 0);
+                if timed_ms.is_some() && !self.write_stall_completed {
+                    st.wakers.insert(self.write_waker_id, cx.waker().clone());
+                    (cfg, current_gen)
+                } else if timed_ms.is_none() && cfg.writes_blackholed() {
+                    st.wakers.insert(self.write_waker_id, cx.waker().clone());
+                    if !self.write_blackhole_recorded {
+                        self.write_blackhole_recorded = true;
+                        crate::trace::record_coverage_hit("net.fault.write_blackhole");
+                    }
+                    return Poll::Pending;
+                } else {
+                    st.wakers.remove(&self.write_waker_id);
+                    self.write_stall_sleep = None;
+                    return Poll::Ready((cfg, current_gen));
+                }
+            };
+
+            let ms = cfg.stall_write_ms.unwrap_or(0);
+            if !self.write_blackhole_recorded {
+                self.write_blackhole_recorded = true;
+                crate::trace::record_coverage_hit("net.fault.write_blackhole");
+            }
+            if self.write_stall_sleep.is_none() {
+                self.write_stall_sleep =
+                    Some(Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+            }
+            match self.write_stall_sleep.as_mut().unwrap().as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => {
+                    self.write_stall_sleep = None;
+                    self.write_stall_completed = true;
+                    self.policy.unregister_waker(self.write_waker_id);
+                    if self.policy.generation() != current_gen {
+                        continue;
+                    }
+                    return Poll::Ready((cfg, current_gen));
+                }
+            }
         }
     }
 }
@@ -188,49 +476,35 @@ impl<S: AsyncRead + Unpin> AsyncRead for FaultyStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.sync_policy_gen();
-        let cfg = this.current_cfg();
 
-        // 1. Half-open blackhole stall.
-        if cfg.stall_reads {
-            loop {
-                if this.read_stall.is_none() {
-                    let notify = this.policy.wake_handle();
-                    this.read_stall = Some(Box::pin(async move {
-                        notify.notified().await;
-                    }));
+        // 1. Half-open read blackhole / timed stall + 2. Extra virtual read latency.
+        let cfg = loop {
+            let (cfg, current_gen) = match this.poll_read_blackhole(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(pair) => pair,
+            };
+
+            if cfg.extra_read_latency_ms > 0 {
+                if this.read_sleep.is_none() {
+                    this.read_sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                        cfg.extra_read_latency_ms,
+                    ))));
                 }
-                match this.read_stall.as_mut().unwrap().as_mut().poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(()) => {
-                        this.read_stall = None;
-                        if !this.current_cfg().stall_reads {
-                            break;
+                match this.read_sleep.as_mut().unwrap().as_mut().poll(cx) {
+                    Poll::Pending => {
+                        if this.register_waker_if_gen(this.read_waker_id, current_gen, cx) {
+                            return Poll::Pending;
                         }
+                        continue;
+                    }
+                    Poll::Ready(()) => {
+                        this.read_sleep = None;
+                        this.policy.unregister_waker(this.read_waker_id);
                     }
                 }
             }
-        } else {
-            this.read_stall = None;
-        }
-
-        this.sync_policy_gen();
-        let cfg = this.current_cfg();
-
-        // 2. Deterministic virtual latency spike.
-        if cfg.extra_read_latency_ms > 0 {
-            if this.read_sleep.is_none() {
-                this.read_sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                    cfg.extra_read_latency_ms,
-                ))));
-            }
-            match this.read_sleep.as_mut().unwrap().as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(()) => {
-                    this.read_sleep = None;
-                }
-            }
-        }
+            break cfg;
+        };
 
         // 3. RST / EOF truncation limits.
         if let Some(limit) = cfg.rst_after_read_bytes
@@ -301,49 +575,35 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FaultyStream<S> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.sync_policy_gen();
-        let cfg = this.current_cfg();
 
-        // 1. Half-open write stall.
-        if cfg.stall_writes {
-            loop {
-                if this.write_stall.is_none() {
-                    let notify = this.policy.wake_handle();
-                    this.write_stall = Some(Box::pin(async move {
-                        notify.notified().await;
-                    }));
+        // 1. Half-open write blackhole / timed stall + 2. Extra virtual write latency.
+        let cfg = loop {
+            let (cfg, current_gen) = match this.poll_write_blackhole(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(pair) => pair,
+            };
+
+            if cfg.extra_write_latency_ms > 0 {
+                if this.write_sleep.is_none() {
+                    this.write_sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                        cfg.extra_write_latency_ms,
+                    ))));
                 }
-                match this.write_stall.as_mut().unwrap().as_mut().poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(()) => {
-                        this.write_stall = None;
-                        if !this.current_cfg().stall_writes {
-                            break;
+                match this.write_sleep.as_mut().unwrap().as_mut().poll(cx) {
+                    Poll::Pending => {
+                        if this.register_waker_if_gen(this.write_waker_id, current_gen, cx) {
+                            return Poll::Pending;
                         }
+                        continue;
+                    }
+                    Poll::Ready(()) => {
+                        this.write_sleep = None;
+                        this.policy.unregister_waker(this.write_waker_id);
                     }
                 }
             }
-        } else {
-            this.write_stall = None;
-        }
-
-        this.sync_policy_gen();
-        let cfg = this.current_cfg();
-
-        // 2. Deterministic virtual latency spike.
-        if cfg.extra_write_latency_ms > 0 {
-            if this.write_sleep.is_none() {
-                this.write_sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                    cfg.extra_write_latency_ms,
-                ))));
-            }
-            match this.write_sleep.as_mut().unwrap().as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(()) => {
-                    this.write_sleep = None;
-                }
-            }
-        }
+            break cfg;
+        };
 
         // 3. RST limit on write.
         if let Some(limit) = cfg.rst_after_write_bytes
@@ -376,7 +636,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FaultyStream<S> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        let this = self.get_mut();
+        if this.poll_write_blackhole(cx).is_pending() {
+            return Poll::Pending;
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
@@ -403,6 +667,46 @@ impl Drop for ActiveTcpConnGuard {
     }
 }
 
+/// Connects a framed `yamux/1` + JSON-RPC [`ClientTransport`] over `turmoil::net::TcpStream`,
+/// optionally wrapped in [`FaultyStream`] when `policy` is provided.
+///
+/// Both remote host connectors and local framed desktop transports (e.g. `SimLocalHostDriver`)
+/// can reuse this helper to route all JSON-RPC calls over real framed `turmoil::net` streams.
+pub async fn connect_turmoil_client_transport(
+    addr: &str,
+    token: impl Into<String>,
+    device_name: impl Into<String>,
+    policy: Option<StreamFaultPolicy>,
+    host_id: Option<String>,
+) -> Result<Arc<ClientTransport>> {
+    let normalized = canban_types::normalize_daemon_addr(addr);
+    let raw_stream = tokio::time::timeout(
+        Duration::from_secs(10),
+        turmoil::net::TcpStream::connect(normalized.as_str()),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("Timed out connecting to {normalized}"),
+        )
+    })?
+    .with_context(|| format!("Canban is not reachable at {normalized}"))?;
+    let token = token.into();
+    let device_name = device_name.into();
+    let client = match policy {
+        Some(pol) => {
+            let wrapped = FaultyStream::new(raw_stream, pol, host_id);
+            ClientTransport::connect_stream_async(wrapped, normalized, token, device_name).await?
+        }
+        None => {
+            ClientTransport::connect_stream_async(raw_stream, normalized, token, device_name)
+                .await?
+        }
+    };
+    Ok(Arc::new(client))
+}
+
 /// [`HostConnector`] establishing real `yamux/1` + JSON-RPC sessions over `turmoil::net::TcpStream`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TurmoilConnector;
@@ -424,22 +728,7 @@ impl HostConnector for TurmoilConnector {
             let HostTransport::Tcp { addr, token } = transport_owned else {
                 bail!("TurmoilConnector only supports TCP hosts");
             };
-            let normalized = canban_types::normalize_daemon_addr(&addr);
-            let stream = tokio::time::timeout(
-                Duration::from_secs(10),
-                turmoil::net::TcpStream::connect(normalized.as_str()),
-            )
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("Timed out connecting to {normalized}"),
-                )
-            })?
-            .with_context(|| format!("Canban is not reachable at {normalized}"))?;
-            let client = Arc::new(
-                ClientTransport::connect_stream_async(stream, normalized, token, device).await?,
-            );
+            let client = connect_turmoil_client_transport(&addr, token, device, None, None).await?;
             Ok(ConnectedTransport::new(client))
         })
     }
@@ -480,23 +769,9 @@ impl HostConnector for FaultyTurmoilConnector {
             let HostTransport::Tcp { addr, token } = transport_owned else {
                 bail!("FaultyTurmoilConnector only supports TCP hosts");
             };
-            let normalized = canban_types::normalize_daemon_addr(&addr);
-            let raw_stream = tokio::time::timeout(
-                Duration::from_secs(10),
-                turmoil::net::TcpStream::connect(normalized.as_str()),
-            )
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("Timed out connecting to {normalized}"),
-                )
-            })?
-            .with_context(|| format!("Canban is not reachable at {normalized}"))?;
-            let stream = FaultyStream::new(raw_stream, policy, Some(host));
-            let client = Arc::new(
-                ClientTransport::connect_stream_async(stream, normalized, token, device).await?,
-            );
+            let client =
+                connect_turmoil_client_transport(&addr, token, device, Some(policy), Some(host))
+                    .await?;
             Ok(ConnectedTransport::new(client))
         })
     }
@@ -683,5 +958,194 @@ mod tests {
         assert_eq!(faulty.bytes_written(), 16);
         let werr = faulty.write(&payload[wn..]).await.unwrap_err();
         assert_eq!(werr.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    #[test]
+    fn half_open_blackhole_blocks_past_keepalive_without_eof_and_heals_cleanly() {
+        let mut sim = turmoil::Builder::new()
+            .simulation_duration(Duration::from_secs(300))
+            .tick_duration(Duration::from_millis(50))
+            .build();
+
+        let policy = StreamFaultPolicy::default();
+        let read_policy = policy.clone();
+        let write_policy = policy.clone();
+        let ctrl_policy = policy.clone();
+
+        sim.client("blackhole-test", async move {
+            // 1. Timed bidirectional half-open blackhole (45s > 30s keepalive) blocks reads and
+            //    writes past the keepalive window WITHOUT returning EOF/RST, then resumes once
+            //    the virtual stall expires.
+            ctrl_policy.arm_half_open_blackhole("remote-a", Some(45_000));
+
+            let (mut peer_w, client_r) = tokio::io::duplex(64);
+            let (client_w, mut peer_r) = tokio::io::duplex(64);
+            peer_w.write_all(b"alive").await.unwrap();
+
+            let mut faulty_r = FaultyStream::new(client_r, read_policy.clone(), Some("remote-a".into()));
+            let mut faulty_w = FaultyStream::new(client_w, write_policy.clone(), Some("remote-a".into()));
+
+            let mut rbuf = [0u8; 5];
+            let read_keepalive =
+                tokio::time::timeout(Duration::from_millis(35_000), faulty_r.read(&mut rbuf)).await;
+            assert!(
+                read_keepalive.is_err(),
+                "timed half-open read blackhole must stay pending past 35s keepalive without EOF/RST"
+            );
+
+            let write_keepalive =
+                tokio::time::timeout(Duration::from_millis(35_000), faulty_w.write(b"ping")).await;
+            assert!(
+                write_keepalive.is_err(),
+                "timed half-open write blackhole must stay pending past 35s keepalive without RST"
+            );
+
+            // Advance past remaining 10s of the 45s read blackhole: bytes flow cleanly without EOF.
+            let n = tokio::time::timeout(Duration::from_millis(15_000), faulty_r.read(&mut rbuf))
+                .await
+                .expect("timed read blackhole should unblock after 45s virtual time")
+                .unwrap();
+            assert_eq!(&rbuf[..n], b"alive");
+
+            let wn = tokio::time::timeout(Duration::from_millis(15_000), faulty_w.write(b"ping"))
+                .await
+                .expect("timed write blackhole should unblock after 45s virtual time")
+                .unwrap();
+            assert_eq!(wn, 4);
+            let mut got = [0u8; 4];
+            peer_r.read_exact(&mut got).await.unwrap();
+            assert_eq!(&got, b"ping");
+
+            // 2. Indefinite half-open blackhole holds parked read & write tasks past 60s virtual
+            //    time and wakes BOTH immediately when healed via `heal_host`.
+            ctrl_policy.arm_half_open_blackhole("remote-a", None);
+            peer_w.write_all(b"healed").await.unwrap();
+
+            let read_task = tokio::spawn(async move {
+                let mut out = [0u8; 6];
+                faulty_r.read_exact(&mut out).await.unwrap();
+                out
+            });
+            let write_task = tokio::spawn(async move {
+                faulty_w.write_all(b"pong").await.unwrap();
+                faulty_w.flush().await.unwrap();
+            });
+
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            assert!(
+                !read_task.is_finished(),
+                "indefinite blackholed reader must stay parked across 60s keepalive window"
+            );
+            assert!(
+                !write_task.is_finished(),
+                "indefinite blackholed writer must stay parked across 60s keepalive window"
+            );
+            assert!(
+                ctrl_policy.parked_waker_count() >= 2,
+                "expected both read and write wakers registered in policy"
+            );
+
+            ctrl_policy.heal_host("remote-a");
+
+            let read_out = tokio::time::timeout(Duration::from_millis(500), read_task)
+                .await
+                .expect("healing policy must wake parked reader immediately")
+                .unwrap();
+            assert_eq!(&read_out, b"healed");
+
+            tokio::time::timeout(Duration::from_millis(500), write_task)
+                .await
+                .expect("healing policy must wake parked writer immediately")
+                .unwrap();
+            let mut got2 = [0u8; 4];
+            peer_r.read_exact(&mut got2).await.unwrap();
+            assert_eq!(&got2, b"pong");
+            assert_eq!(ctrl_policy.parked_waker_count(), 0);
+            Ok(())
+        });
+
+        sim.run().expect("turmoil blackhole test failed");
+    }
+
+    #[test]
+    fn clearing_long_timed_blackhole_wakes_parked_streams_immediately_and_drop_unregisters() {
+        let mut sim = turmoil::Builder::new()
+            .simulation_duration(Duration::from_secs(120))
+            .tick_duration(Duration::from_millis(50))
+            .build();
+
+        let policy = StreamFaultPolicy::default();
+        let stream_policy = policy.clone();
+
+        sim.client("early-heal-test", async move {
+            // Arm a 60s timed blackhole, park both reader and writer, then heal at t=5s.
+            policy.set_for_host(
+                "remote-b",
+                StreamFaultConfig {
+                    stall_read_ms: Some(60_000),
+                    stall_write_ms: Some(60_000),
+                    ..StreamFaultConfig::default()
+                },
+            );
+            let (mut peer_w, client_r) = tokio::io::duplex(64);
+            let (client_w, mut peer_r) = tokio::io::duplex(64);
+            peer_w.write_all(b"fast").await.unwrap();
+
+            let mut faulty_r =
+                FaultyStream::new(client_r, stream_policy.clone(), Some("remote-b".into()));
+            let mut faulty_w =
+                FaultyStream::new(client_w, stream_policy.clone(), Some("remote-b".into()));
+
+            let r_task = tokio::spawn(async move {
+                let mut b = [0u8; 4];
+                faulty_r.read_exact(&mut b).await.unwrap();
+                b
+            });
+            let w_task = tokio::spawn(async move {
+                faulty_w.write_all(b"wake").await.unwrap();
+            });
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            assert!(!r_task.is_finished());
+            assert!(!w_task.is_finished());
+
+            let before_heal = tokio::time::Instant::now();
+            policy.clear_for_host("remote-b");
+
+            let r_bytes = tokio::time::timeout(Duration::from_millis(500), r_task)
+                .await
+                .expect("clearing 60s timed blackhole must wake reader immediately")
+                .unwrap();
+            tokio::time::timeout(Duration::from_millis(500), w_task)
+                .await
+                .expect("clearing 60s timed blackhole must wake writer immediately")
+                .unwrap();
+            assert!(
+                before_heal.elapsed() < Duration::from_secs(1),
+                "woke after {:?} instead of immediately upon clear",
+                before_heal.elapsed()
+            );
+            assert_eq!(&r_bytes, b"fast");
+            let mut wb = [0u8; 4];
+            peer_r.read_exact(&mut wb).await.unwrap();
+            assert_eq!(&wb, b"wake");
+
+            // Dropping a parked stream cleanly removes its waker from the policy.
+            policy.arm_half_open_blackhole("remote-b", None);
+            let (_pw2, cr2) = tokio::io::duplex(64);
+            let mut parked = FaultyStream::new(cr2, stream_policy.clone(), Some("remote-b".into()));
+            let mut tmp = [0u8; 4];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), parked.read(&mut tmp))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(policy.parked_waker_count(), 1);
+            drop(parked);
+            assert_eq!(policy.parked_waker_count(), 0);
+            Ok(())
+        });
+
+        sim.run().expect("turmoil early-heal test failed");
     }
 }

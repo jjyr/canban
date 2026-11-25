@@ -15,12 +15,17 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 static FAILED_SEEDS_LOCK: Mutex<()> = Mutex::new(());
+const DEFAULT_CORPUS_FILE: &str = "crates/sim/corpus/regressions.txt";
+const AUTO_SHRINK_MAX_ATTEMPTS: usize = 32;
+const AUTO_SHRINK_TIME_BUDGET: Duration = Duration::from_secs(30);
+const COLD_PROPERTIES_TOP_N: usize = 10;
+const NEVER_COVERAGE_PROPERTIES: &[&str] = &["exec.blocked_command"];
 
 #[derive(Parser)]
 #[command(
@@ -114,6 +119,28 @@ enum Command {
         /// Additional required coverage property names to verify (repeatable).
         #[arg(long)]
         require_coverage: Vec<String>,
+        /// Automatically shrink failing `chaos` seeds (with bounded step/time budget) and print
+        /// the minimized op sequence + exact repro command.
+        #[arg(long)]
+        auto_shrink: bool,
+        /// Directory where failure logs and `failed-seeds.txt` are persisted.
+        #[arg(long, default_value = ".local/sim-failures")]
+        trace_dir: PathBuf,
+    },
+    /// Replay every regression seed recorded in a corpus file (`<scenario> <seed> [ops]`).
+    Corpus {
+        /// Path to the corpus file (default: `crates/sim/corpus/regressions.txt`).
+        #[arg(long, default_value = DEFAULT_CORPUS_FILE)]
+        file: PathBuf,
+        /// Parallel worker threads (default: 1; e.g. `--jobs 4`).
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+        /// Default operations count when a corpus line omits `[ops]`.
+        #[arg(long, default_value_t = 40)]
+        ops: usize,
+        /// Optional per-seed wall-clock watchdog timeout in seconds (aborts & logs hung seeds).
+        #[arg(long)]
+        seed_timeout: Option<u64>,
         /// Directory where failure logs and `failed-seeds.txt` are persisted.
         #[arg(long, default_value = ".local/sim-failures")]
         trace_dir: PathBuf,
@@ -291,9 +318,21 @@ fn execute_seed_caught(sc: Scenario, seed: u64, ops: usize) -> (Result<u64>, Cov
     (outcome, cov)
 }
 
+fn strip_inline_comment(line: &str) -> &str {
+    let mut in_quotes = false;
+    for (idx, ch) in line.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '#' if !in_quotes => return &line[..idx],
+            _ => {}
+        }
+    }
+    line
+}
+
 fn parse_replay_line(line: &str, default_ops: usize) -> Result<Option<ReplayEntry>> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
+    let trimmed = strip_inline_comment(line).trim();
+    if trimmed.is_empty() {
         return Ok(None);
     }
     if trimmed.contains("seed=") || trimmed.contains("scenario=") {
@@ -456,6 +495,63 @@ const CHAOS_RANDOM_REQUIRED_COVERAGE: &[&str] = &[
     "chaos.project_archive_restore",
 ];
 
+fn print_fault_telemetry_table(tracker: &CoverageTracker) {
+    let rows = tracker.armed_vs_fired_report();
+    if rows.is_empty() {
+        println!("\nArmed vs Fired Faults: (none recorded)");
+        return;
+    }
+    let vacuous_count = rows.iter().filter(|r| r.vacuous).count();
+    println!(
+        "\nArmed vs Fired Faults ({} fault(s), {} vacuous):",
+        rows.len(),
+        vacuous_count
+    );
+    println!("  {:<44} {:>8} {:>8}  STATUS", "FAULT", "ARMED", "FIRED");
+    println!("  {:-<44} {:-<8} {:-<8}  {:-<28}", "", "", "", "");
+    for row in &rows {
+        let status = if row.vacuous {
+            "VACUOUS (armed > 0, fired == 0)"
+        } else {
+            "OK"
+        };
+        println!(
+            "  {:<44} {:>8} {:>8}  {status}",
+            row.name, row.armed, row.fired
+        );
+    }
+}
+
+fn print_cold_properties_table(tracker: &CoverageTracker, limit: usize) {
+    let cold = tracker.cold_properties(limit);
+    if cold.is_empty() {
+        println!("\nCold / Rare Properties (Top {limit}): (none recorded)");
+        return;
+    }
+    println!("\nCold / Rare Properties (Top {}):", cold.len());
+    for (idx, (prop, count)) in cold.iter().enumerate() {
+        println!("  {:>2}. {:<42} {count}", idx + 1, prop);
+    }
+}
+
+fn check_never_zero_gate(tracker: &CoverageTracker) -> Result<()> {
+    if let Err(violations) = tracker.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
+        eprintln!("\nNEVER-PROPERTY VIOLATION(S) DETECTED:");
+        for (prop, count) in &violations {
+            eprintln!("  - {prop}: hit {count} time(s) (must be 0)");
+        }
+        let summary: Vec<String> = violations
+            .into_iter()
+            .map(|(prop, count)| format!("{prop}={count}"))
+            .collect();
+        bail!(
+            "Never-property coverage gate failed; forbidden properties hit: [{}]",
+            summary.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn verify_coverage(
     tracker: &CoverageTracker,
     assert_coverage: bool,
@@ -479,8 +575,25 @@ fn verify_coverage(
         required.push(prop.as_str());
     }
     tracker.assert_required(&required)?;
+    if assert_coverage {
+        check_never_zero_gate(tracker)?;
+        let vacuous = tracker.vacuous_armed_faults();
+        if !vacuous.is_empty() {
+            eprintln!("\nVACUOUS ARMED FAULT(S) DETECTED (armed > 0, fired == 0):");
+            for name in &vacuous {
+                eprintln!(
+                    "  - {name} (armed={}, fired=0)",
+                    tracker.fault_armed_count(name)
+                );
+            }
+            bail!(
+                "Coverage gate failed; vacuous armed faults never fired: [{}]",
+                vacuous.join(", ")
+            );
+        }
+    }
     println!(
-        "Coverage gate PASSED: {}/{} required properties verified ({} total distinct properties hit).",
+        "Coverage gate PASSED: {}/{} required properties verified ({} total distinct properties hit; never-gate clean).",
         required.len(),
         required.len(),
         tracker.counts().len(),
@@ -488,14 +601,220 @@ fn verify_coverage(
     Ok(())
 }
 
-fn print_shrink_report(report: &scenarios::chaos::ShrinkReport) {
-    eprintln!(
-        "\n=== CHAOS SHRINK RESULT ===\nSeed:      {}\nMinimized: {} -> {} ops ({} attempts)\nError:     {}\nMinimal op sequence:",
-        report.seed, report.original_len, report.minimized_len, report.attempts, report.error
+fn format_shrink_report(
+    report: &scenarios::chaos::ShrinkReport,
+    orig_ops: usize,
+    timed_out: bool,
+) -> String {
+    let replay = replay_cmd(report.seed, "chaos", orig_ops);
+    let mut out = format!(
+        "\n=== CHAOS SHRINK RESULT ===\nSeed:      {}\nMinimized: {} -> {} ops ({} attempts{})\nReplay:    {replay}\nShrink:    cargo run --release -p canban-sim --bin canban-sim -- shrink --seed {} --ops {}\nError:     {}\nMinimal op sequence:\n",
+        report.seed,
+        report.original_len,
+        report.minimized_len,
+        report.attempts,
+        if timed_out {
+            ", time budget reached"
+        } else {
+            ""
+        },
+        report.seed,
+        orig_ops,
+        report.error,
     );
     for (idx, op) in report.ops.iter().enumerate() {
-        eprintln!("  [{idx:02}] {op:?}");
+        out.push_str(&format!("  [{idx:02}] {op:?}\n"));
     }
+    out
+}
+
+fn print_shrink_report(report: &scenarios::chaos::ShrinkReport) {
+    eprint!(
+        "{}",
+        format_shrink_report(report, report.original_len, false)
+    );
+}
+
+fn auto_shrink_chaos_bounded(
+    seed: u64,
+    ops: usize,
+    initial_error: String,
+    max_attempts: usize,
+    time_budget: Duration,
+) -> (scenarios::chaos::ShrinkReport, bool) {
+    let started = Instant::now();
+    let (profile, generated) = scenarios::chaos::generate_ops(seed, ops);
+    let original_len = generated.len();
+    let mut timed_out = false;
+    let (minimized, attempts, final_err) =
+        scenarios::chaos::shrink_ops(generated, initial_error, max_attempts, |candidate| {
+            if started.elapsed() >= time_budget {
+                timed_out = true;
+                return None;
+            }
+            trace::reset_thread_coverage();
+            let outcome = match catch_unwind(AssertUnwindSafe(|| {
+                scenarios::chaos::run_ops(seed, &profile, candidate)
+            })) {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(format!("{e:#}")),
+                Err(payload) => Some(format!("PANIC: {}", format_panic_payload(payload.as_ref()))),
+            };
+            let _ = trace::take_thread_coverage();
+            outcome
+        });
+    (
+        scenarios::chaos::ShrinkReport {
+            seed,
+            original_len,
+            minimized_len: minimized.len(),
+            attempts,
+            ops: minimized,
+            error: final_err,
+        },
+        timed_out,
+    )
+}
+
+fn resolve_corpus_path(file: &Path) -> PathBuf {
+    if file.exists() {
+        return file.to_path_buf();
+    }
+    if file == Path::new(DEFAULT_CORPUS_FILE) {
+        let fallback = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("corpus")
+            .join("regressions.txt");
+        if fallback.exists() {
+            return fallback;
+        }
+    }
+    file.to_path_buf()
+}
+
+fn run_corpus(
+    file: PathBuf,
+    jobs: usize,
+    default_ops: usize,
+    seed_timeout: Option<u64>,
+    trace_dir: PathBuf,
+) -> Result<()> {
+    let resolved = resolve_corpus_path(&file);
+    let entries = load_replay_file(&resolved, default_ops)?;
+    let total = entries.len();
+    let workers = jobs.max(1).min(total.max(1));
+
+    println!(
+        "Replaying {} corpus regression seed(s) from {} (jobs={workers}, seed_timeout={})...",
+        total,
+        resolved.display(),
+        seed_timeout
+            .map(|s| format!("{s}s"))
+            .unwrap_or_else(|| "none".into()),
+    );
+    let _ = io::stdout().flush();
+
+    let watchdog = Arc::new(WatchdogHandle::start(seed_timeout, trace_dir.clone()));
+    let next_idx = Arc::new(AtomicUsize::new(0));
+    let passed_count = Arc::new(AtomicU64::new(0));
+    let failed_count = Arc::new(AtomicU64::new(0));
+    let failures: Arc<Mutex<Vec<(usize, ReplayEntry, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let entries_ref = Arc::new(entries);
+    let started = Instant::now();
+
+    std::thread::scope(|scope| {
+        for worker_id in 0..workers {
+            let entries = Arc::clone(&entries_ref);
+            let next_idx = Arc::clone(&next_idx);
+            let passed_count = Arc::clone(&passed_count);
+            let failed_count = Arc::clone(&failed_count);
+            let failures = Arc::clone(&failures);
+            let watchdog = Arc::clone(&watchdog);
+            let trace_dir = trace_dir.clone();
+            scope.spawn(move || {
+                loop {
+                    let idx = next_idx.fetch_add(1, Ordering::SeqCst);
+                    let Some(entry) = entries.get(idx) else {
+                        break;
+                    };
+                    let n = idx + 1;
+                    println!(
+                        "[{n}/{total} w{worker_id}] START {:<15} seed={} ops={}",
+                        entry.scenario.name(),
+                        entry.seed,
+                        entry.ops,
+                    );
+                    let _ = io::stdout().flush();
+
+                    watchdog.begin_seed(worker_id, entry.scenario, entry.seed, entry.ops);
+                    let t0 = Instant::now();
+                    let (res, _cov) = execute_seed_caught(entry.scenario, entry.seed, entry.ops);
+                    watchdog.end_seed(worker_id);
+
+                    match res {
+                        Ok(digest) => {
+                            passed_count.fetch_add(1, Ordering::Relaxed);
+                            println!(
+                                "[{n}/{total} w{worker_id}] PASS  {:<15} seed={:<20} ops={:<4} digest={:#018x} ({:.2}s)",
+                                entry.scenario.name(),
+                                entry.seed,
+                                entry.ops,
+                                digest,
+                                t0.elapsed().as_secs_f64(),
+                            );
+                        }
+                        Err(e) => {
+                            failed_count.fetch_add(1, Ordering::Relaxed);
+                            let saved = write_failure_log(
+                                &trace_dir,
+                                entry.seed,
+                                entry.scenario.name(),
+                                entry.ops,
+                                &e,
+                            );
+                            let replay =
+                                replay_cmd(entry.seed, entry.scenario.name(), entry.ops);
+                            eprintln!(
+                                "[{n}/{total} w{worker_id}] FAIL  {:<15} seed={} ops={}\n  Replay: {replay}\n{}  Error:  {e:#}",
+                                entry.scenario.name(),
+                                entry.seed,
+                                entry.ops,
+                                saved
+                                    .map(|p| format!("  Log:    {}\n", p.display()))
+                                    .unwrap_or_default(),
+                            );
+                            failures.lock().unwrap().push((n, entry.clone(), replay));
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    drop(watchdog);
+
+    let passed = passed_count.load(Ordering::Relaxed);
+    let failed = failed_count.load(Ordering::Relaxed);
+    let elapsed = started.elapsed().as_secs_f64();
+    let mut recorded = failures.lock().unwrap();
+    recorded.sort_by_key(|(idx, _, _)| *idx);
+
+    println!(
+        "\nCorpus summary ({}): {passed} passed, {failed} failed ({total} total) in {elapsed:.2}s.",
+        resolved.display(),
+    );
+    if !recorded.is_empty() {
+        eprintln!("Failed corpus seed(s):");
+        for (n, entry, replay) in recorded.iter() {
+            eprintln!(
+                "  - #{n} {} seed={} ops={} -> {replay}",
+                entry.scenario.name(),
+                entry.seed,
+                entry.ops
+            );
+        }
+        bail!("{failed} corpus regression seed(s) failed");
+    }
+    Ok(())
 }
 
 fn run_shrink_cmd(seed: u64, ops: usize) -> Result<()> {
@@ -707,6 +1026,7 @@ fn run_random(
     seed_timeout: Option<u64>,
     assert_coverage: bool,
     require_coverage: Vec<String>,
+    auto_shrink: bool,
     trace_dir: PathBuf,
 ) -> Result<()> {
     let target = Arc::new(RandomTarget::parse(&scenario_arg)?);
@@ -721,12 +1041,13 @@ fn run_random(
     let stop = Arc::new(AtomicBool::new(false));
     let failures: Arc<Mutex<Vec<(u64, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let total_coverage: Arc<Mutex<CoverageTracker>> = Arc::new(Mutex::new(CoverageTracker::new()));
+    let shrink_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     let watchdog = Arc::new(WatchdogHandle::start(seed_timeout, trace_dir.clone()));
     spawn_ctrlc_watcher(Arc::clone(&stop));
 
     println!(
-        "Starting Canban random-sim (scenario={scenario_arg}, jobs={workers}, ops={ops}, master_seed={resolved_master_seed}, fail_fast={fail_fast}, seeds={}, duration={}, seed_timeout={})...",
+        "Starting Canban random-sim (scenario={scenario_arg}, jobs={workers}, ops={ops}, master_seed={resolved_master_seed}, fail_fast={fail_fast}, auto_shrink={auto_shrink}, seeds={}, duration={}, seed_timeout={})...",
         max_seeds
             .map(|n| n.to_string())
             .unwrap_or_else(|| "infinite (Ctrl-C to stop)".into()),
@@ -749,6 +1070,7 @@ fn run_random(
             let stop = Arc::clone(&stop);
             let failures = Arc::clone(&failures);
             let total_coverage = Arc::clone(&total_coverage);
+            let shrink_lock = Arc::clone(&shrink_lock);
             let watchdog = Arc::clone(&watchdog);
             let trace_dir = trace_dir.clone();
             scope.spawn(move || {
@@ -806,6 +1128,7 @@ fn run_random(
                                 "\n[w{worker_id} #{n:<5}] FAIL {:<15} seed={seed} ops={ops}\n  Replay: {replay}\n{}  Error:  {e:#}\n",
                                 sc.name(),
                                 saved
+                                    .as_ref()
                                     .map(|p| format!("  Log:    {}\n", p.display()))
                                     .unwrap_or_default()
                             );
@@ -816,6 +1139,29 @@ fn run_random(
                             ));
                             if fail_fast {
                                 stop.store(true, Ordering::SeqCst);
+                            }
+                            if auto_shrink && sc == Scenario::Chaos {
+                                let _shrink_guard = shrink_lock.lock().unwrap();
+                                eprintln!(
+                                    "[w{worker_id} #{n:<5}] AUTO-SHRINK chaos seed={seed} ops={ops} (max_attempts={AUTO_SHRINK_MAX_ATTEMPTS}, budget={}s)...",
+                                    AUTO_SHRINK_TIME_BUDGET.as_secs()
+                                );
+                                let (report, timed_out) = auto_shrink_chaos_bounded(
+                                    seed,
+                                    ops,
+                                    format!("{e:#}"),
+                                    AUTO_SHRINK_MAX_ATTEMPTS,
+                                    AUTO_SHRINK_TIME_BUDGET,
+                                );
+                                let formatted = format_shrink_report(&report, ops, timed_out);
+                                eprint!("{formatted}");
+                                if let Some(ref log_path) = saved
+                                    && let Ok(mut f) = OpenOptions::new().append(true).open(log_path)
+                                {
+                                    let _ = f.write_all(formatted.as_bytes());
+                                }
+                            }
+                            if fail_fast {
                                 break;
                             }
                         }
@@ -831,19 +1177,28 @@ fn run_random(
     let failed = failed_count.load(Ordering::Relaxed);
     let elapsed = started.elapsed().as_secs_f64();
     let recorded = failures.lock().unwrap();
+    let cov = total_coverage.lock().unwrap();
 
     println!(
         "\nrandom-sim summary: {passed} passed, {failed} failed ({} total, master_seed={resolved_master_seed}) in {elapsed:.2}s.",
         passed + failed
     );
+    print_fault_telemetry_table(&cov);
+    print_cold_properties_table(&cov, COLD_PROPERTIES_TOP_N);
+    if !assert_coverage && let Err(violations) = cov.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
+        eprintln!("\nWARNING: NEVER-PROPERTY VIOLATION(S) DETECTED:");
+        for (prop, count) in &violations {
+            eprintln!("  - {prop}: hit {count} time(s) (must be 0)");
+        }
+    }
+
     if !recorded.is_empty() {
-        eprintln!("Failed seed(s):");
+        eprintln!("\nFailed seed(s):");
         for (seed, sc, replay) in recorded.iter() {
             eprintln!("  - seed={seed} ({sc}) -> {replay}");
         }
         bail!("{failed} random-sim seed(s) failed");
     }
-    let cov = total_coverage.lock().unwrap();
     let mut random_req: Vec<&str> = Vec::new();
     if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
         random_req.extend_from_slice(CHAOS_RANDOM_REQUIRED_COVERAGE);
@@ -919,6 +1274,7 @@ fn main() -> Result<()> {
             seed_timeout,
             assert_coverage,
             require_coverage,
+            auto_shrink,
             trace_dir,
         }) => run_random(
             fail_fast,
@@ -931,8 +1287,16 @@ fn main() -> Result<()> {
             seed_timeout,
             assert_coverage,
             require_coverage,
+            auto_shrink,
             trace_dir,
         ),
+        Some(Command::Corpus {
+            file,
+            jobs,
+            ops,
+            seed_timeout,
+            trace_dir,
+        }) => run_corpus(file, jobs, ops, seed_timeout, trace_dir),
     }
 }
 
@@ -1053,6 +1417,70 @@ mod tests {
         }
         assert!(
             verify_coverage(&chaos_incomplete, true, &[], CHAOS_RANDOM_REQUIRED_COVERAGE).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_replay_lines_handles_inline_comments_and_corpus_file() {
+        let e1 = parse_replay_line("chaos 6581024343186838594 40  # Bug #5: outbox", 40)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            e1,
+            ReplayEntry {
+                scenario: Scenario::Chaos,
+                seed: 6_581_024_343_186_838_594,
+                ops: 40,
+            }
+        );
+
+        let e2 = parse_replay_line("remote_faults 99 # no explicit ops", 55)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            e2,
+            ReplayEntry {
+                scenario: Scenario::RemoteFaults,
+                seed: 99,
+                ops: 55,
+            }
+        );
+
+        let corpus_path = resolve_corpus_path(Path::new(DEFAULT_CORPUS_FILE));
+        let entries = load_replay_file(&corpus_path, 40).expect("load corpus/regressions.txt");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].seed, 6_581_024_343_186_838_594);
+        assert_eq!(entries[0].ops, 40);
+        assert_eq!(entries[1].seed, 14_542_862_646_255_385_444);
+        assert_eq!(entries[1].ops, 50);
+        assert_eq!(entries[2].seed, 13_580_682_392_153_143_971);
+        assert_eq!(entries[2].ops, 50);
+    }
+
+    #[test]
+    fn verify_coverage_enforces_never_zero_and_vacuous_fault_gates() {
+        let mut tracker = CoverageTracker::new();
+        for key in BASE_REQUIRED_COVERAGE {
+            tracker.hit(key);
+        }
+        tracker.add_fault_counts("herdr.after_terminal_run_before_db_commit", 2, 2);
+        verify_coverage(&tracker, true, &[], &[]).expect("clean tracker passes");
+
+        // Hitting `exec.blocked_command` must fail the `never!` gate.
+        let mut with_blocked = tracker.clone();
+        with_blocked.hit("exec.blocked_command");
+        let err = verify_coverage(&with_blocked, true, &[], &[])
+            .expect_err("exec.blocked_command > 0 must fail --assert-coverage");
+        assert!(err.to_string().contains("exec.blocked_command"));
+
+        // An armed-but-never-fired fault must fail the vacuous fault gate under `--assert-coverage`.
+        let with_vacuous = tracker.clone();
+        with_vacuous.arm_fault("git.after_push_before_batch_finalize");
+        let err = verify_coverage(&with_vacuous, true, &[], &[])
+            .expect_err("vacuous armed fault must fail --assert-coverage");
+        assert!(
+            err.to_string()
+                .contains("git.after_push_before_batch_finalize")
         );
     }
 }

@@ -2,7 +2,8 @@
 use anyhow::{Result, bail};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::Mutex,
 };
 
 const MAX_TRACE_ENTRIES: usize = 512;
@@ -208,11 +209,161 @@ impl EventTrace {
     }
 }
 
-/// Property-coverage (`sometimes`) counter tracker to detect silent test rot.
+/// Per-fault Armed vs Fired telemetry row for detecting vacuous / dead fault injections.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaultTelemetryRow {
+    pub name: String,
+    pub armed: u64,
+    pub fired: u64,
+    /// `true` when `armed > 0 && fired == 0` (the fault was armed but never actually exercised).
+    pub vacuous: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FaultTelemetry {
+    armed: BTreeMap<String, u64>,
+    fired: BTreeMap<String, u64>,
+}
+
+impl FaultTelemetry {
+    fn is_empty(&self) -> bool {
+        self.armed.is_empty() && self.fired.is_empty()
+    }
+
+    fn merge(&mut self, other: &FaultTelemetry) {
+        for (k, &v) in &other.armed {
+            *self.armed.entry(k.clone()).or_insert(0) += v;
+        }
+        for (k, &v) in &other.fired {
+            *self.fired.entry(k.clone()).or_insert(0) += v;
+        }
+    }
+
+    fn report(&self) -> Vec<FaultTelemetryRow> {
+        let mut names = BTreeSet::new();
+        names.extend(self.armed.keys().cloned());
+        names.extend(self.fired.keys().cloned());
+        names
+            .into_iter()
+            .map(|name| {
+                let armed = self.armed.get(&name).copied().unwrap_or(0);
+                let fired = self.fired.get(&name).copied().unwrap_or(0);
+                FaultTelemetryRow {
+                    name,
+                    armed,
+                    fired,
+                    vacuous: armed > 0 && fired == 0,
+                }
+            })
+            .collect()
+    }
+
+    fn vacuous(&self) -> Vec<String> {
+        self.report()
+            .into_iter()
+            .filter(|row| row.vacuous)
+            .map(|row| row.name)
+            .collect()
+    }
+}
+
+/// Snapshot / aggregated summary of property-coverage counts and Armed vs Fired fault telemetry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoverageSummary {
+    pub counts: BTreeMap<String, u64>,
+    pub fault_armed: BTreeMap<String, u64>,
+    pub fault_fired: BTreeMap<String, u64>,
+}
+
+impl CoverageSummary {
+    pub fn merge(&mut self, other: &CoverageSummary) {
+        for (k, &v) in &other.counts {
+            *self.counts.entry(k.clone()).or_insert(0) += v;
+        }
+        for (k, &v) in &other.fault_armed {
+            *self.fault_armed.entry(k.clone()).or_insert(0) += v;
+        }
+        for (k, &v) in &other.fault_fired {
+            *self.fault_fired.entry(k.clone()).or_insert(0) += v;
+        }
+    }
+
+    pub fn armed_vs_fired_report(&self) -> Vec<FaultTelemetryRow> {
+        FaultTelemetry {
+            armed: self.fault_armed.clone(),
+            fired: self.fault_fired.clone(),
+        }
+        .report()
+    }
+
+    pub fn vacuous_armed_faults(&self) -> Vec<String> {
+        self.armed_vs_fired_report()
+            .into_iter()
+            .filter(|row| row.vacuous)
+            .map(|row| row.name)
+            .collect()
+    }
+
+    pub fn cold_properties(&self, limit: usize) -> Vec<(String, u64)> {
+        cold_properties_from_map(&self.counts, limit)
+    }
+}
+
+fn cold_properties_from_map(counts: &BTreeMap<String, u64>, limit: usize) -> Vec<(String, u64)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut rows: Vec<(String, u64)> = counts.iter().map(|(k, &v)| (k.clone(), v)).collect();
+    rows.sort_by(|(name_a, count_a), (name_b, count_b)| {
+        count_a.cmp(count_b).then_with(|| name_a.cmp(name_b))
+    });
+    rows.truncate(limit);
+    rows
+}
+
+/// Property-coverage (`sometimes`) and Armed vs Fired fault telemetry tracker to detect silent
+/// test rot and vacuous fault injection.
+#[derive(Default)]
 pub struct CoverageTracker {
     counts: BTreeMap<String, u64>,
+    faults: Mutex<FaultTelemetry>,
 }
+
+impl Clone for CoverageTracker {
+    fn clone(&self) -> Self {
+        Self {
+            counts: self.counts.clone(),
+            faults: Mutex::new(self.faults.lock().unwrap().clone()),
+        }
+    }
+}
+
+impl std::fmt::Debug for CoverageTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let faults = self.faults.lock().unwrap();
+        f.debug_struct("CoverageTracker")
+            .field("counts", &self.counts)
+            .field("fault_armed", &faults.armed)
+            .field("fault_fired", &faults.fired)
+            .finish()
+    }
+}
+
+impl PartialEq for CoverageTracker {
+    fn eq(&self, other: &Self) -> bool {
+        if std::ptr::eq(self, other) {
+            return true;
+        }
+        if self.counts != other.counts {
+            return false;
+        }
+        let a = self.faults.lock().unwrap().clone();
+        let b = other.faults.lock().unwrap().clone();
+        a == b
+    }
+}
+
+impl Eq for CoverageTracker {}
 
 impl CoverageTracker {
     pub fn new() -> Self {
@@ -238,14 +389,118 @@ impl CoverageTracker {
         &self.counts
     }
 
+    /// Records that `fault` was armed once (interior-mutable so callers with `&CoverageTracker`
+    /// or `&mut CoverageTracker` can both record fault telemetry).
+    pub fn arm_fault(&self, fault: impl Into<String>) {
+        self.add_fault_counts(fault, 1, 0);
+    }
+
+    /// Records that `fault` fired once.
+    pub fn fire_fault(&self, fault: impl Into<String>) {
+        self.add_fault_counts(fault, 0, 1);
+    }
+
+    /// Adds aggregated `armed` and `fired` counts for `fault` (e.g. from `Failpoints::stats()`).
+    pub fn add_fault_counts(&self, fault: impl Into<String>, armed: u64, fired: u64) {
+        if armed == 0 && fired == 0 {
+            return;
+        }
+        let name = fault.into();
+        let mut st = self.faults.lock().unwrap();
+        if armed > 0 {
+            *st.armed.entry(name.clone()).or_insert(0) += armed;
+        }
+        if fired > 0 {
+            *st.fired.entry(name).or_insert(0) += fired;
+        }
+    }
+
+    pub fn fault_armed(&self) -> BTreeMap<String, u64> {
+        self.faults.lock().unwrap().armed.clone()
+    }
+
+    pub fn fault_fired(&self) -> BTreeMap<String, u64> {
+        self.faults.lock().unwrap().fired.clone()
+    }
+
+    pub fn fault_armed_count(&self, fault: &str) -> u64 {
+        self.faults
+            .lock()
+            .unwrap()
+            .armed
+            .get(fault)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn fault_fired_count(&self, fault: &str) -> u64 {
+        self.faults
+            .lock()
+            .unwrap()
+            .fired
+            .get(fault)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Returns a deterministic snapshot combining property hits and Armed vs Fired fault maps.
+    pub fn to_summary(&self) -> CoverageSummary {
+        let faults = self.faults.lock().unwrap();
+        CoverageSummary {
+            counts: self.counts.clone(),
+            fault_armed: faults.armed.clone(),
+            fault_fired: faults.fired.clone(),
+        }
+    }
+
+    /// Returns Armed vs Fired fault rows sorted deterministically by fault name.
+    pub fn armed_vs_fired_report(&self) -> Vec<FaultTelemetryRow> {
+        self.faults.lock().unwrap().report()
+    }
+
+    /// Returns sorted names of all faults with `armed > 0 && fired == 0`.
+    pub fn vacuous_armed_faults(&self) -> Vec<String> {
+        self.faults.lock().unwrap().vacuous()
+    }
+
+    /// Returns up to `limit` lowest hit-count properties sorted by `(count, name)`.
+    pub fn cold_properties(&self, limit: usize) -> Vec<(String, u64)> {
+        cold_properties_from_map(&self.counts, limit)
+    }
+
+    /// Negative (`never!`) gate: fails with all `(property, count)` pairs for keys in `forbidden`
+    /// that were hit at least once (`count > 0`), sorted deterministically by property name.
+    pub fn assert_never_zero(
+        &self,
+        forbidden: &[&str],
+    ) -> std::result::Result<(), Vec<(String, u64)>> {
+        let mut violations: BTreeMap<String, u64> = BTreeMap::new();
+        for &prop in forbidden {
+            let count = self.count(prop);
+            if count > 0 {
+                violations.insert(prop.to_owned(), count);
+            }
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations.into_iter().collect())
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.counts.is_empty()
+        self.counts.is_empty() && self.faults.lock().unwrap().is_empty()
     }
 
     pub fn merge(&mut self, other: &CoverageTracker) {
+        if std::ptr::eq(self, other) {
+            return;
+        }
         for (k, &v) in &other.counts {
             *self.counts.entry(k.clone()).or_insert(0) += v;
         }
+        let other_faults = other.faults.lock().unwrap().clone();
+        self.faults.lock().unwrap().merge(&other_faults);
     }
 
     pub fn summary(&self) -> String {
@@ -291,6 +546,27 @@ pub fn reset_thread_coverage() {
 pub fn record_coverage_hit(property: &str) {
     THREAD_COVERAGE.with(|cell| {
         cell.borrow_mut().hit(property);
+    });
+}
+
+/// Records an armed fault on the current simulation worker thread.
+pub fn record_fault_armed(fault: &str) {
+    THREAD_COVERAGE.with(|cell| {
+        cell.borrow().arm_fault(fault);
+    });
+}
+
+/// Records a fired fault on the current simulation worker thread.
+pub fn record_fault_fired(fault: &str) {
+    THREAD_COVERAGE.with(|cell| {
+        cell.borrow().fire_fault(fault);
+    });
+}
+
+/// Adds aggregated `(armed, fired)` fault counts on the current simulation worker thread.
+pub fn record_fault_counts(fault: &str, armed: u64, fired: u64) {
+    THREAD_COVERAGE.with(|cell| {
+        cell.borrow().add_fault_counts(fault, armed, fired);
     });
 }
 
@@ -364,13 +640,126 @@ mod tests {
         reset_thread_coverage();
         record_coverage_hit("test.alpha");
         record_coverage_hit("test.alpha");
+        record_fault_armed("fp.a");
+        record_fault_fired("fp.a");
+        record_fault_counts("fp.b", 2, 0);
         let mut extra = CoverageTracker::new();
         extra.hit("test.beta");
+        extra.add_fault_counts("fp.b", 1, 1);
         merge_into_thread_coverage(&extra);
 
         let taken = take_thread_coverage();
         assert_eq!(taken.count("test.alpha"), 2);
         assert_eq!(taken.count("test.beta"), 1);
+        assert_eq!(taken.fault_armed_count("fp.a"), 1);
+        assert_eq!(taken.fault_fired_count("fp.a"), 1);
+        assert_eq!(taken.fault_armed_count("fp.b"), 3);
+        assert_eq!(taken.fault_fired_count("fp.b"), 1);
         assert!(take_thread_coverage().is_empty());
+    }
+
+    #[test]
+    fn armed_vs_fired_aggregation_and_vacuous_detection() {
+        let mut w1 = CoverageTracker::new();
+        w1.arm_fault("zeta.fault");
+        w1.arm_fault("alpha.fault");
+        w1.fire_fault("alpha.fault");
+        w1.add_fault_counts("mid.fault", 3, 2);
+        w1.add_fault_counts("noop.fault", 0, 0);
+        assert!(!w1.is_empty());
+
+        let w2 = CoverageTracker::new();
+        w2.arm_fault("zeta.fault");
+        w2.add_fault_counts("mid.fault", 1, 2);
+        w2.fire_fault("fired_only.fault");
+
+        w1.merge(&w2);
+        let report = w1.armed_vs_fired_report();
+        assert_eq!(
+            report,
+            vec![
+                FaultTelemetryRow {
+                    name: "alpha.fault".into(),
+                    armed: 1,
+                    fired: 1,
+                    vacuous: false,
+                },
+                FaultTelemetryRow {
+                    name: "fired_only.fault".into(),
+                    armed: 0,
+                    fired: 1,
+                    vacuous: false,
+                },
+                FaultTelemetryRow {
+                    name: "mid.fault".into(),
+                    armed: 4,
+                    fired: 4,
+                    vacuous: false,
+                },
+                FaultTelemetryRow {
+                    name: "zeta.fault".into(),
+                    armed: 2,
+                    fired: 0,
+                    vacuous: true,
+                },
+            ]
+        );
+        assert_eq!(w1.vacuous_armed_faults(), vec!["zeta.fault".to_owned()]);
+
+        // CoverageSummary merges identically.
+        let mut sum = CoverageSummary::default();
+        sum.merge(&w1.to_summary());
+        assert_eq!(sum.armed_vs_fired_report(), report);
+        assert_eq!(sum.vacuous_armed_faults(), vec!["zeta.fault".to_owned()]);
+    }
+
+    #[test]
+    fn cold_properties_orders_by_count_then_name() {
+        let mut tracker = CoverageTracker::new();
+        tracker.hit_n("hot.prop", 50);
+        tracker.hit_n("warm.prop", 5);
+        tracker.hit_n("cold.b", 1);
+        tracker.hit_n("cold.a", 1);
+        tracker.hit_n("cool.prop", 2);
+
+        assert_eq!(
+            tracker.cold_properties(3),
+            vec![
+                ("cold.a".into(), 1),
+                ("cold.b".into(), 1),
+                ("cool.prop".into(), 2),
+            ]
+        );
+        assert!(tracker.cold_properties(0).is_empty());
+        assert_eq!(tracker.cold_properties(20).len(), 5);
+    }
+
+    #[test]
+    fn assert_never_zero_checks_forbidden_properties() {
+        let mut tracker = CoverageTracker::new();
+        tracker.hit("sim.scenario.passed");
+
+        assert_eq!(
+            tracker.assert_never_zero(&["exec.blocked_command", "invariant.corrupt"]),
+            Ok(())
+        );
+
+        tracker.hit_n("exec.blocked_command", 3);
+        tracker.hit("invariant.corrupt");
+        let violations = tracker
+            .assert_never_zero(&[
+                "exec.blocked_command",
+                "unused.never",
+                "invariant.corrupt",
+                "exec.blocked_command",
+            ])
+            .expect_err("hit forbidden properties must fail");
+        assert_eq!(
+            violations,
+            vec![
+                ("exec.blocked_command".into(), 3),
+                ("invariant.corrupt".into(), 1),
+            ]
+        );
     }
 }
