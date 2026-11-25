@@ -19,6 +19,21 @@ pub struct CommittedCardExpectation {
     pub min_revision: u64,
 }
 
+/// Durable expectation recorded after a `WorkflowRun` commits on a server.
+#[derive(Clone, Debug)]
+pub struct CommittedWorkflowRunExpectation {
+    pub project_id: String,
+    pub workflow_id: String,
+    pub min_visit: u32,
+}
+
+/// Durable expectation recorded after a Project `Note` commits on a server.
+#[derive(Clone, Debug)]
+pub struct CommittedNoteExpectation {
+    pub project_id: String,
+    pub min_revision: u64,
+}
+
 /// Tracks historical observations across simulation steps to detect regressions
 /// (e.g., revision rollback, `CardRead` regression, lost durable writes, resurrected read
 /// notifications, plaintext secret leaks, or unsafe idle reclamation).
@@ -28,6 +43,8 @@ pub struct InvariantOracle {
     pub max_card_revision: BTreeMap<(String, String), u64>,
     /// Highest observed `CardRead.sequence` per `(host_name, raw_card_id)`.
     pub max_card_read_seq: BTreeMap<(String, String), u64>,
+    /// Highest observed `WorkflowRun.visit` per `(host_name, raw_run_id)`.
+    pub max_workflow_visit: BTreeMap<(String, String), u32>,
     /// Secret plaintext strings generated during the run that must NEVER leak to disk, snapshots, or PTYs.
     pub tracked_secrets: Vec<String>,
     /// Opt-in assertion flag: when true, quiescence requires at least one `.outbox.json` scan.
@@ -47,6 +64,14 @@ pub struct InvariantOracle {
     pub committed_comments: BTreeMap<(String, String), BTreeSet<String>>,
     /// Committed global env entries per `(host_name, key)` that must survive restarts.
     pub committed_env: BTreeMap<(String, String), EnvEntryMeta>,
+    /// Committed `WorkflowRun`s that must survive crashes/bounces with monotonic `visit`.
+    pub committed_workflow_runs: BTreeMap<(String, String), CommittedWorkflowRunExpectation>,
+    /// Committed persistent `MergeBatch`es (`@merger` batches) per `(host_name, raw_batch_id)` -> `raw_project_id`.
+    pub committed_merge_batches: BTreeMap<(String, String), String>,
+    /// Committed `ScheduledRun`s per `(host_name, raw_run_id)` -> `(raw_project_id, rule_id)`.
+    pub committed_scheduled_runs: BTreeMap<(String, String), (String, String)>,
+    /// Committed Project `Note`s per `(host_name, raw_note_id)` that must survive restarts.
+    pub committed_notes: BTreeMap<(String, String), CommittedNoteExpectation>,
 }
 
 impl InvariantOracle {
@@ -153,6 +178,108 @@ impl InvariantOracle {
     pub fn remove_committed_env(&mut self, host_name: &str, key: &str) {
         self.committed_env
             .remove(&(host_name.to_owned(), key.to_owned()));
+    }
+
+    /// Records a committed `WorkflowRun` that must remain durable across server bounces.
+    pub fn record_committed_workflow_run(
+        &mut self,
+        host_name: &str,
+        run_id: &str,
+        project_id: &str,
+        workflow_id: &str,
+        visit: u32,
+    ) {
+        let raw_run = strip_host_prefix(run_id);
+        let raw_proj = strip_host_prefix(project_id);
+        self.committed_workflow_runs
+            .entry((host_name.to_owned(), raw_run))
+            .and_modify(|e| {
+                e.min_visit = e.min_visit.max(visit);
+                if e.project_id.is_empty() {
+                    e.project_id = raw_proj.clone();
+                }
+            })
+            .or_insert(CommittedWorkflowRunExpectation {
+                project_id: raw_proj,
+                workflow_id: workflow_id.to_owned(),
+                min_visit: visit,
+            });
+    }
+
+    /// Records a committed persistent `MergeBatch` (`@merger` batch) that must survive bounces.
+    pub fn record_committed_merge_batch(
+        &mut self,
+        host_name: &str,
+        batch_id: &str,
+        project_id: &str,
+    ) {
+        let raw_batch = strip_host_prefix(batch_id);
+        let raw_proj = strip_host_prefix(project_id);
+        self.committed_merge_batches
+            .insert((host_name.to_owned(), raw_batch), raw_proj);
+    }
+
+    /// Records a committed `ScheduledRun` that must survive bounces.
+    pub fn record_committed_scheduled_run(
+        &mut self,
+        host_name: &str,
+        run_id: &str,
+        project_id: &str,
+        rule_id: &str,
+    ) {
+        let raw_run = strip_host_prefix(run_id);
+        let raw_proj = strip_host_prefix(project_id);
+        self.committed_scheduled_runs.insert(
+            (host_name.to_owned(), raw_run),
+            (raw_proj, rule_id.to_owned()),
+        );
+    }
+
+    /// Records a committed Project `Note` that must remain durable across bounces.
+    pub fn record_committed_note(
+        &mut self,
+        host_name: &str,
+        note_id: &str,
+        project_id: &str,
+        revision: u64,
+    ) {
+        let raw_note = strip_host_prefix(note_id);
+        let raw_proj = strip_host_prefix(project_id);
+        self.committed_notes
+            .entry((host_name.to_owned(), raw_note))
+            .and_modify(|e| {
+                e.min_revision = e.min_revision.max(revision);
+                if e.project_id.is_empty() {
+                    e.project_id = raw_proj.clone();
+                }
+            })
+            .or_insert(CommittedNoteExpectation {
+                project_id: raw_proj,
+                min_revision: revision,
+            });
+    }
+
+    /// Clears committed durability expectations belonging to a project intentionally archived via `project.archive`.
+    pub fn clear_committed_project(&mut self, host_name: &str, project_id: &str) {
+        let raw_proj = strip_host_prefix(project_id);
+        let removed_cards: BTreeSet<String> = self
+            .committed_cards
+            .iter()
+            .filter(|((h, _), exp)| h == host_name && exp.project_id == raw_proj)
+            .map(|((_, cid), _)| cid.clone())
+            .collect();
+        self.committed_cards
+            .retain(|(h, _), exp| !(h == host_name && exp.project_id == raw_proj));
+        self.committed_comments
+            .retain(|(h, cid), _| !(h == host_name && removed_cards.contains(cid)));
+        self.committed_workflow_runs
+            .retain(|(h, _), exp| !(h == host_name && exp.project_id == raw_proj));
+        self.committed_merge_batches
+            .retain(|(h, _), pid| !(h == host_name && *pid == raw_proj));
+        self.committed_scheduled_runs
+            .retain(|(h, _), (pid, _)| !(h == host_name && *pid == raw_proj));
+        self.committed_notes
+            .retain(|(h, _), exp| !(h == host_name && exp.project_id == raw_proj));
     }
 
     /// Runs invariants that MUST hold at every step (even mid-partition or mid-chaos).
@@ -316,6 +443,52 @@ impl InvariantOracle {
                 ensure!(
                     seen_sounds.insert(sid.clone()),
                     "[{host_name}] duplicate sound_event_id {sid} in server snapshot"
+                );
+            }
+
+            // Monotonic WorkflowRun.visit + unique WorkflowRun / MergeBatch / ScheduledRun / Note IDs.
+            let mut seen_runs = BTreeSet::new();
+            for run in &snap.workflow_runs {
+                ensure!(
+                    seen_runs.insert(run.id.clone()),
+                    "[{host_name}] duplicate WorkflowRun ID {} in server snapshot",
+                    run.id
+                );
+                let key = (host_name.clone(), run.id.clone());
+                let prev = self.max_workflow_visit.get(&key).copied().unwrap_or(0);
+                ensure!(
+                    run.visit >= prev,
+                    "[{host_name}] WorkflowRun {} visit regressed from {prev} to {}",
+                    run.id,
+                    run.visit
+                );
+                self.max_workflow_visit.insert(key, run.visit);
+            }
+
+            let mut seen_batches = BTreeSet::new();
+            for batch in &snap.merge_batches {
+                ensure!(
+                    seen_batches.insert(batch.id.clone()),
+                    "[{host_name}] duplicate MergeBatch ID {} in server snapshot",
+                    batch.id
+                );
+            }
+
+            let mut seen_sched_runs = BTreeSet::new();
+            for sr in &snap.scheduled_runs {
+                ensure!(
+                    seen_sched_runs.insert(sr.id.clone()),
+                    "[{host_name}] duplicate ScheduledRun ID {} in server snapshot",
+                    sr.id
+                );
+            }
+
+            let mut seen_notes = BTreeSet::new();
+            for note in &snap.notes {
+                ensure!(
+                    seen_notes.insert(note.id.clone()),
+                    "[{host_name}] duplicate Note ID {} in server snapshot",
+                    note.id
                 );
             }
         }
@@ -762,6 +935,58 @@ impl InvariantOracle {
                     );
                 }
             }
+
+            const VALID_BATCH_STATES: &[&str] = &[
+                "integrating",
+                "testing",
+                "queued",
+                "running",
+                "completed",
+                "blocked",
+                "failed",
+                "cancelled",
+            ];
+            const VALID_SCHED_STATES: &[&str] = &[
+                "queued",
+                "starting",
+                "unknown",
+                "running",
+                "working",
+                "completed",
+                "blocked",
+                "failed",
+                "skipped",
+                "cancelled",
+            ];
+            let proj_ids: BTreeSet<&str> = snap.projects.iter().map(|p| p.id.as_str()).collect();
+            for batch in &snap.merge_batches {
+                ensure!(
+                    VALID_BATCH_STATES.contains(&batch.state.as_str()),
+                    "[{host_name}] MergeBatch {} has invalid state {:?}",
+                    batch.id,
+                    batch.state
+                );
+                ensure!(
+                    proj_ids.contains(batch.project_id.as_str()),
+                    "[{host_name}] MergeBatch {} references missing project {}",
+                    batch.id,
+                    batch.project_id
+                );
+            }
+            for sr in &snap.scheduled_runs {
+                ensure!(
+                    VALID_SCHED_STATES.contains(&sr.state.as_str()),
+                    "[{host_name}] ScheduledRun {} has invalid state {:?}",
+                    sr.id,
+                    sr.state
+                );
+                ensure!(
+                    proj_ids.contains(sr.project_id.as_str()),
+                    "[{host_name}] ScheduledRun {} references missing project {}",
+                    sr.id,
+                    sr.project_id
+                );
+            }
         }
         Ok(())
     }
@@ -834,12 +1059,17 @@ impl InvariantOracle {
         Ok(())
     }
 
-    /// Verifies that all recorded committed writes (cards, comments, global env) remain durable
-    /// on every live server (including after crashes and bounces).
+    /// Verifies that all recorded committed writes (cards, comments, global env, workflow runs,
+    /// persistent merge batches, scheduled runs, and notes) remain durable on every live server
+    /// (including after crashes and bounces).
     pub fn check_committed_durability(&self, world: &SimWorld) -> Result<()> {
         if self.committed_cards.is_empty()
             && self.committed_comments.is_empty()
             && self.committed_env.is_empty()
+            && self.committed_workflow_runs.is_empty()
+            && self.committed_merge_batches.is_empty()
+            && self.committed_scheduled_runs.is_empty()
+            && self.committed_notes.is_empty()
         {
             return Ok(());
         }
@@ -908,6 +1138,117 @@ impl InvariantOracle {
                     "[{host_name}] DURABILITY VIOLATION: committed global_env[{key}] expected={exp_meta:?} got={got:?}"
                 );
             }
+
+            for ((h, rid), exp) in &self.committed_workflow_runs {
+                if h != host_name {
+                    continue;
+                }
+                let run = snap
+                    .workflow_runs
+                    .iter()
+                    .find(|r| r.id == *rid)
+                    .with_context(|| {
+                        format!(
+                            "[{host_name}] DURABILITY VIOLATION: committed WorkflowRun {rid} vanished!"
+                        )
+                    })?;
+                ensure!(
+                    run.visit >= exp.min_visit,
+                    "[{host_name}] DURABILITY VIOLATION: committed WorkflowRun {rid} regressed to visit {} < {}",
+                    run.visit,
+                    exp.min_visit
+                );
+                if !exp.project_id.is_empty() {
+                    ensure!(
+                        run.project_id == exp.project_id,
+                        "[{host_name}] committed WorkflowRun {rid} project_id changed from {} to {}",
+                        exp.project_id,
+                        run.project_id
+                    );
+                }
+                if !exp.workflow_id.is_empty() {
+                    ensure!(
+                        run.workflow_id == exp.workflow_id,
+                        "[{host_name}] committed WorkflowRun {rid} workflow_id changed from {} to {}",
+                        exp.workflow_id,
+                        run.workflow_id
+                    );
+                }
+            }
+
+            for ((h, bid), exp_pid) in &self.committed_merge_batches {
+                if h != host_name {
+                    continue;
+                }
+                let batch = snap
+                    .merge_batches
+                    .iter()
+                    .find(|b| b.id == *bid)
+                    .with_context(|| {
+                        format!(
+                            "[{host_name}] DURABILITY VIOLATION: committed MergeBatch {bid} vanished!"
+                        )
+                    })?;
+                if !exp_pid.is_empty() {
+                    ensure!(
+                        batch.project_id == *exp_pid,
+                        "[{host_name}] committed MergeBatch {bid} project_id changed from {exp_pid} to {}",
+                        batch.project_id
+                    );
+                }
+            }
+
+            for ((h, srid), (exp_pid, exp_rule)) in &self.committed_scheduled_runs {
+                if h != host_name {
+                    continue;
+                }
+                let sr = snap
+                    .scheduled_runs
+                    .iter()
+                    .find(|r| r.id == *srid)
+                    .with_context(|| {
+                        format!(
+                            "[{host_name}] DURABILITY VIOLATION: committed ScheduledRun {srid} vanished!"
+                        )
+                    })?;
+                if !exp_pid.is_empty() {
+                    ensure!(
+                        sr.project_id == *exp_pid,
+                        "[{host_name}] committed ScheduledRun {srid} project_id changed from {exp_pid} to {}",
+                        sr.project_id
+                    );
+                }
+                if !exp_rule.is_empty() {
+                    ensure!(
+                        sr.rule_id == *exp_rule,
+                        "[{host_name}] committed ScheduledRun {srid} rule_id changed from {exp_rule} to {}",
+                        sr.rule_id
+                    );
+                }
+            }
+
+            for ((h, nid), exp) in &self.committed_notes {
+                if h != host_name {
+                    continue;
+                }
+                let note = snap.notes.iter().find(|n| n.id == *nid).with_context(|| {
+                    format!("[{host_name}] DURABILITY VIOLATION: committed Note {nid} vanished!")
+                })?;
+                ensure!(
+                    note.revision >= exp.min_revision,
+                    "[{host_name}] DURABILITY VIOLATION: committed Note {nid} regressed to rev {} < {}",
+                    note.revision,
+                    exp.min_revision
+                );
+                if !exp.project_id.is_empty() {
+                    ensure!(
+                        note.project_id == exp.project_id,
+                        "[{host_name}] committed Note {nid} project_id changed from {} to {}",
+                        exp.project_id,
+                        note.project_id
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -966,6 +1307,11 @@ impl InvariantOracle {
                 "[{host_name}] SQLite table github_issues must remain empty, found {gh_rows} rows"
             );
             world.hit("oracle.sqlite_integrity_checked");
+            if world.config.fs_durability == crate::world::FsDurability::Full
+                && !world.config.sqlite_synchronous_off
+            {
+                world.hit("oracle.full_durability_checked");
+            }
         }
         Ok(())
     }
@@ -1583,6 +1929,111 @@ fn assert_host_converged(
         }
     }
 
+    // 8. MergeBatches convergence.
+    let srv_batches: BTreeMap<&str, &canban_types::MergeBatch> = server_snap
+        .merge_batches
+        .iter()
+        .map(|b| (b.id.as_str(), b))
+        .collect();
+    let mut merged_batches: BTreeMap<String, &canban_types::MergeBatch> = BTreeMap::new();
+    for b in &merged.merge_batches {
+        if owner_of(&b.id) == host_id {
+            merged_batches.insert(strip_host_prefix(&b.id), b);
+        }
+    }
+    ensure!(
+        srv_batches.len() == merged_batches.len(),
+        "[{host_id}] merge_batches count mismatch: server={} client={}",
+        srv_batches.len(),
+        merged_batches.len()
+    );
+    for (raw_id, sb) in &srv_batches {
+        let Some(mb) = merged_batches.get(*raw_id) else {
+            bail!("[{host_id}] MergeBatch {raw_id} missing from client merged_snapshot");
+        };
+        ensure!(
+            mb.state == sb.state
+                && mb.failure_kind == sb.failure_kind
+                && mb.items.len() == sb.items.len(),
+            "[{host_id}] MergeBatch {raw_id} diverged: server=({},{:?},{}) client=({},{:?},{})",
+            sb.state,
+            sb.failure_kind,
+            sb.items.len(),
+            mb.state,
+            mb.failure_kind,
+            mb.items.len()
+        );
+    }
+
+    // 9. ScheduledRuns convergence.
+    let srv_scheds: BTreeMap<&str, &canban_types::ScheduledRun> = server_snap
+        .scheduled_runs
+        .iter()
+        .map(|r| (r.id.as_str(), r))
+        .collect();
+    let mut merged_scheds: BTreeMap<String, &canban_types::ScheduledRun> = BTreeMap::new();
+    for r in &merged.scheduled_runs {
+        let owner = if !r.host_id.is_empty() {
+            r.host_id.as_str()
+        } else {
+            owner_of(&r.id)
+        };
+        if owner == host_id {
+            merged_scheds.insert(strip_host_prefix(&r.id), r);
+        }
+    }
+    ensure!(
+        srv_scheds.len() == merged_scheds.len(),
+        "[{host_id}] scheduled_runs count mismatch: server={} client={}",
+        srv_scheds.len(),
+        merged_scheds.len()
+    );
+    for (raw_id, sr) in &srv_scheds {
+        let Some(mr) = merged_scheds.get(*raw_id) else {
+            bail!("[{host_id}] ScheduledRun {raw_id} missing from client merged_snapshot");
+        };
+        ensure!(
+            mr.state == sr.state && mr.rule_id == sr.rule_id,
+            "[{host_id}] ScheduledRun {raw_id} diverged: server=({},{}) client=({},{})",
+            sr.state,
+            sr.rule_id,
+            mr.state,
+            mr.rule_id
+        );
+    }
+
+    // 10. Project Notes convergence.
+    let srv_notes: BTreeMap<&str, &canban_types::Note> = server_snap
+        .notes
+        .iter()
+        .map(|n| (n.id.as_str(), n))
+        .collect();
+    let mut merged_notes: BTreeMap<String, &canban_types::Note> = BTreeMap::new();
+    for n in &merged.notes {
+        if owner_of(&n.id) == host_id {
+            merged_notes.insert(strip_host_prefix(&n.id), n);
+        }
+    }
+    ensure!(
+        srv_notes.len() == merged_notes.len(),
+        "[{host_id}] notes count mismatch: server={} client={}",
+        srv_notes.len(),
+        merged_notes.len()
+    );
+    for (raw_id, sn) in &srv_notes {
+        let Some(mn) = merged_notes.get(*raw_id) else {
+            bail!("[{host_id}] Note {raw_id} missing from client merged_snapshot");
+        };
+        ensure!(
+            mn.title == sn.title && mn.body == sn.body && mn.revision == sn.revision,
+            "[{host_id}] Note {raw_id} diverged: server=({:?},rev={}) client=({:?},rev={})",
+            sn.title,
+            sn.revision,
+            mn.title,
+            mn.revision
+        );
+    }
+
     Ok(())
 }
 
@@ -1806,6 +2257,71 @@ pub fn canonical_state_digest(world: &SimWorld) -> u64 {
                     mix_u64(&mut h, 3);
                 }
             }
+        }
+
+        let mut batch_rows: Vec<(usize, &str, &str, usize)> = snap
+            .merge_batches
+            .iter()
+            .map(|b| {
+                let pidx = proj_idx_map
+                    .get(b.project_id.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                (
+                    pidx,
+                    b.state.as_str(),
+                    b.failure_kind.as_deref().unwrap_or(""),
+                    b.items.len(),
+                )
+            })
+            .collect();
+        batch_rows.sort();
+        mix_u64(&mut h, batch_rows.len() as u64);
+        for (pidx, state, fail_kind, items_len) in batch_rows {
+            mix_u64(&mut h, pidx as u64);
+            mix_str(&mut h, state);
+            mix_str(&mut h, fail_kind);
+            mix_u64(&mut h, items_len as u64);
+        }
+
+        let mut sched_rows: Vec<(usize, &str, u64, &str)> = snap
+            .scheduled_runs
+            .iter()
+            .map(|r| {
+                let pidx = proj_idx_map
+                    .get(r.project_id.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                (pidx, r.rule_id.as_str(), r.number, r.state.as_str())
+            })
+            .collect();
+        sched_rows.sort();
+        mix_u64(&mut h, sched_rows.len() as u64);
+        for (pidx, rule_id, num, state) in sched_rows {
+            mix_u64(&mut h, pidx as u64);
+            mix_str(&mut h, rule_id);
+            mix_u64(&mut h, num);
+            mix_str(&mut h, state);
+        }
+
+        let mut note_rows: Vec<(usize, &str, u64, &str)> = snap
+            .notes
+            .iter()
+            .map(|n| {
+                let pidx = proj_idx_map
+                    .get(n.project_id.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                (pidx, n.title.as_str(), n.revision, n.body.as_str())
+            })
+            .collect();
+        note_rows.sort();
+        mix_u64(&mut h, note_rows.len() as u64);
+        for (pidx, title, rev, body) in note_rows {
+            mix_u64(&mut h, pidx as u64);
+            mix_str(&mut h, title);
+            mix_u64(&mut h, rev);
+            mix_str(&mut h, body);
         }
     }
     h
