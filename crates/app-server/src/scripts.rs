@@ -584,7 +584,14 @@ impl AppServer {
     }
 
     pub(crate) fn pump_scripts(&self) -> Result<bool> {
-        if self.observer_running.load(Ordering::SeqCst) && self.exec_runner.is_system() {
+        let use_herdr = match self.script_execution_mode {
+            ScriptExecutionMode::Auto => {
+                self.observer_running.load(Ordering::SeqCst) && self.exec_runner.is_system()
+            }
+            ScriptExecutionMode::Inline => false,
+            ScriptExecutionMode::Herdr => true,
+        };
+        if use_herdr {
             self.pump_scripts_herdr()
         } else {
             self.pump_scripts_inline()
@@ -1513,5 +1520,256 @@ pub(crate) fn run_local_process_with_policy_unset_and_runner(
             return Ok((None, true));
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    struct ManualClock(AtomicU64);
+    impl canban_types::Clock for ManualClock {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    struct MockScriptHerdr {
+        terminals: Mutex<BTreeMap<String, Value>>,
+        scrollback: Mutex<BTreeMap<String, String>>,
+        next_num: AtomicU64,
+        killed: Mutex<Vec<String>>,
+    }
+
+    impl MockScriptHerdr {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                terminals: Mutex::new(BTreeMap::new()),
+                scrollback: Mutex::new(BTreeMap::new()),
+                next_num: AtomicU64::new(1),
+                killed: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn finish(&self, addr: &str, text: &str, exit_code: i64) {
+            self.scrollback
+                .lock()
+                .unwrap()
+                .insert(addr.to_owned(), text.to_owned());
+            if let Some(rec) = self.terminals.lock().unwrap().get_mut(addr) {
+                rec["state"] = json!("finished");
+                rec["exit_code"] = json!(exit_code);
+            }
+        }
+    }
+
+    impl canban_herdr::HerdrBackend for MockScriptHerdr {
+        fn call(&self, method: &str, params: Value) -> Result<Value> {
+            match method {
+                "server.status" => {
+                    Ok(json!({ "core": { "id": "core-script-test" }, "ready": true }))
+                }
+                "terminal.run" => {
+                    let n = self.next_num.fetch_add(1, Ordering::SeqCst);
+                    let addr = format!("mock-pty-{n}");
+                    let rec = json!({
+                        "address": addr,
+                        "terminal": addr,
+                        "state": "live",
+                        "cwd": params["cwd"],
+                        "labels": params["labels"],
+                    });
+                    self.terminals.lock().unwrap().insert(addr, rec.clone());
+                    Ok(rec)
+                }
+                "terminal.get" => {
+                    let addr = params["terminal"].as_str().unwrap_or("");
+                    self.terminals
+                        .lock()
+                        .unwrap()
+                        .get(addr)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("missing terminal {addr}"))
+                }
+                "terminal.read" => {
+                    let addr = params["terminal"].as_str().unwrap_or("");
+                    let text = self
+                        .scrollback
+                        .lock()
+                        .unwrap()
+                        .get(addr)
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok(json!({ "text": text }))
+                }
+                "terminal.kill" => {
+                    let addr = params["terminal"].as_str().unwrap_or("").to_owned();
+                    self.killed.lock().unwrap().push(addr.clone());
+                    if let Some(rec) = self.terminals.lock().unwrap().get_mut(&addr) {
+                        rec["state"] = json!("finished");
+                    }
+                    Ok(json!({ "killed": true }))
+                }
+                other => bail!("unexpected herdr method {other}"),
+            }
+        }
+
+        fn subscribe(
+            &self,
+            _wake: Arc<dyn Fn() + Send + Sync>,
+        ) -> Result<canban_herdr::BackendSubscription> {
+            let (_tx, rx) = std::sync::mpsc::channel();
+            Ok(canban_herdr::BackendSubscription {
+                core: "core-script-test".into(),
+                snapshot: json!({ "seq": 1, "terminals": [] }),
+                receiver: rx,
+            })
+        }
+
+        fn activity(&self, _core: &str, _terminal: &str) -> canban_herdr::activity::Activity {
+            Default::default()
+        }
+    }
+
+    struct NoSpawnRunner;
+    impl canban_exec::CommandRunner for NoSpawnRunner {
+        fn run(&self, spec: &canban_exec::CommandSpec) -> Result<canban_exec::ExecOutput> {
+            bail!("unexpected OS spawn: {} {:?}", spec.program, spec.args);
+        }
+        fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+            None
+        }
+        fn find_executable_with_env(
+            &self,
+            _name: &str,
+            _extra_env: &BTreeMap<String, String>,
+        ) -> Option<PathBuf> {
+            None
+        }
+        fn shell_env(&self) -> canban_exec::ShellEnvSnapshot {
+            canban_exec::ShellEnvSnapshot {
+                shell: "/bin/sh".into(),
+                vars: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+                path_entries: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+                full_env_captured: true,
+            }
+        }
+        fn hostname(&self) -> String {
+            "script-test-host".into()
+        }
+        fn is_system(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn script_execution_mode_herdr_survives_restart_and_reads_pty_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let clock = Arc::new(ManualClock(AtomicU64::new(1_700_000_000_000)));
+        let herdr = MockScriptHerdr::new();
+        let make_env = || ServerRuntimeEnv {
+            clock: clock.clone(),
+            id_gen: canban_types::DeterministicIdGen::arc(42),
+            herdr_backend: Some(herdr.clone()),
+            exec_runner: Arc::new(NoSpawnRunner),
+            inline_workers: true,
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            script_execution_mode: ScriptExecutionMode::Herdr,
+            ..Default::default()
+        };
+
+        let yaml = r#"schema: 12
+id: herdr-script-unit
+name: Herdr Script Unit
+workspace:
+  create_worktree: false
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+on:
+  start:
+    event: manual
+    start_at: check
+steps:
+  - id: check
+    stage: backlog
+    uses: script
+    with:
+      run: echo hi
+      timeout_seconds: 30
+    next: done
+  - id: done
+    stage: backlog
+    uses: complete
+"#;
+
+        let app1 =
+            AppServer::open_with_env(home.clone(), PathBuf::from("/bin/echo"), make_env()).unwrap();
+        let proj = app1
+            .call(
+                "project.create",
+                json!({ "name": "P", "directory": repo, "workflow_yaml": yaml }),
+            )
+            .unwrap();
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let card = app1
+            .call("card.create", json!({ "project_id": pid, "title": "C1" }))
+            .unwrap();
+        let cid = card["id"].as_str().unwrap().to_owned();
+
+        // Starting the workflow launches the script PTY synchronously (no script_wake installed).
+        app1.call(
+            "workflow.start",
+            json!({ "workflow_id": "herdr-script-unit", "card_id": cid, "entry": "start" }),
+        )
+        .unwrap();
+        let snap1 = app1.snapshot().unwrap();
+        let run1 = snap1.workflow_runs.first().unwrap();
+        assert_eq!(run1.state, "waiting_script");
+        let meta = &run1.inputs["script_terminal"];
+        let addr = meta["address"].as_str().unwrap().to_owned();
+        let env_file = meta["env_file"].as_str().unwrap().to_owned();
+        let out_file = meta["output_file"].as_str().unwrap().to_owned();
+        assert_eq!(herdr.terminals.lock().unwrap().len(), 1);
+
+        // Simulate abrupt server crash & restart on the same SQLite home while PTY is still live.
+        drop(app1);
+        let app2 =
+            AppServer::open_with_env(home.clone(), PathBuf::from("/bin/echo"), make_env()).unwrap();
+        assert!(app2.pump_scripts().unwrap());
+        assert_eq!(
+            herdr.terminals.lock().unwrap().len(),
+            1,
+            "restart must reattach to existing script_terminal without launching a duplicate PTY"
+        );
+
+        // PTY writes $CANBAN_ENV / $CANBAN_OUTPUT and finishes with scrollback text.
+        std::fs::write(&env_file, "HERDR_UNIT_ENV=yes\n").unwrap();
+        std::fs::write(&out_file, "status=green\n").unwrap();
+        herdr.finish(&addr, "pty scrollback line\n", 0);
+        assert!(!app2.pump_scripts().unwrap());
+
+        let snap2 = app2.snapshot().unwrap();
+        let run2 = snap2.workflow_runs.first().unwrap();
+        assert_eq!(run2.state, "completed");
+        assert_eq!(run2.outputs["check"]["outcome"], "success");
+        assert_eq!(run2.outputs["check"]["status"], "green");
+        assert_eq!(
+            run2.custom_env_for_step(None)
+                .get("HERDR_UNIT_ENV")
+                .map(String::as_str),
+            Some("yes")
+        );
+        let log_rel = run2.outputs["check"]["path"].as_str().unwrap();
+        let saved_log = std::fs::read_to_string(home.join(log_rel)).unwrap();
+        assert!(saved_log.contains("pty scrollback line"), "log={saved_log}");
     }
 }

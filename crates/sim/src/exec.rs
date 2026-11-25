@@ -59,12 +59,16 @@ impl SimShellOutcome {
 #[derive(Clone, Debug)]
 struct SimWorktree {
     path: PathBuf,
+    git_dir: PathBuf,
     branch: Option<String>,
     head_sha: String,
     dirty: bool,
     staged: bool,
     in_merge: bool,
+    merge_head: Option<String>,
     in_cherry_pick: bool,
+    in_rebase: bool,
+    rebase_onto: Option<String>,
     conflict_files: Vec<String>,
 }
 
@@ -83,13 +87,19 @@ pub struct SimGitRepo {
     /// Commit graph (`sha -> parent SHAs`) supporting `merge-base`, `--is-ancestor`, and `rev-list`.
     commits: BTreeMap<String, Vec<String>>,
     next_commit_seq: u64,
+    next_worktree_seq: u64,
     worktrees: BTreeMap<PathBuf, SimWorktree>,
     staged: bool,
     in_merge: bool,
+    merge_head: Option<String>,
     in_cherry_pick: bool,
+    in_rebase: bool,
+    rebase_onto: Option<String>,
     conflict_files: Vec<String>,
-    /// FIFO queue of injected merge/cherry-pick conflict file lists.
+    /// FIFO queue of injected merge/cherry-pick/rebase conflict file lists.
     inject_conflicts: VecDeque<Vec<String>>,
+    /// Targeted injected conflict file lists keyed by commit SHA or ref name.
+    inject_conflicts_by_ref: BTreeMap<String, Vec<String>>,
     user_name: String,
     user_email: String,
 }
@@ -122,12 +132,17 @@ impl Default for SimGitRepo {
             custom_refs: BTreeMap::new(),
             commits,
             next_commit_seq: 1,
+            next_worktree_seq: 0,
             worktrees: BTreeMap::new(),
             staged: false,
             in_merge: false,
+            merge_head: None,
             in_cherry_pick: false,
+            in_rebase: false,
+            rebase_onto: None,
             conflict_files: Vec::new(),
             inject_conflicts: VecDeque::new(),
+            inject_conflicts_by_ref: BTreeMap::new(),
             user_name: "Sim".into(),
             user_email: "sim@canban.local".into(),
         }
@@ -289,6 +304,30 @@ impl SimGitRepo {
             }
         }
     }
+
+    fn pop_injected_conflict(&mut self, keys: &[Option<&str>]) -> Option<Vec<String>> {
+        for key in keys.iter().flatten() {
+            if let Some(files) = self.inject_conflicts_by_ref.remove(*key) {
+                return Some(files);
+            }
+        }
+        self.inject_conflicts.pop_front()
+    }
+
+    fn write_rebase_sentinel(git_dir: &Path, onto_sha: &str, branch: Option<&str>) {
+        let dir = git_dir.join("rebase-merge");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(dir.join("onto"), format!("{onto_sha}\n"));
+            if let Some(b) = branch.filter(|b| !b.is_empty()) {
+                let _ = std::fs::write(dir.join("head-name"), format!("refs/heads/{b}\n"));
+            }
+        }
+    }
+
+    fn clear_rebase_sentinel(git_dir: &Path) {
+        let _ = std::fs::remove_dir_all(git_dir.join("rebase-merge"));
+        let _ = std::fs::remove_dir_all(git_dir.join("rebase-apply"));
+    }
 }
 
 struct State {
@@ -407,14 +446,22 @@ impl SimExec {
             wt.dirty = false;
             wt.staged = false;
             wt.in_merge = false;
+            wt.merge_head = None;
             wt.in_cherry_pick = false;
+            wt.in_rebase = false;
+            wt.rebase_onto = None;
             wt.conflict_files.clear();
+            SimGitRepo::clear_rebase_sentinel(&wt.git_dir);
         } else {
             repo.dirty = false;
             repo.staged = false;
             repo.in_merge = false;
+            repo.merge_head = None;
             repo.in_cherry_pick = false;
+            repo.in_rebase = false;
+            repo.rebase_onto = None;
             repo.conflict_files.clear();
+            SimGitRepo::clear_rebase_sentinel(&repo_root.join(".git"));
         }
         Ok(new_sha)
     }
@@ -436,7 +483,7 @@ impl SimExec {
         Ok(())
     }
 
-    /// Queues a merge/cherry-pick conflict for the next integration operation on `repo_dir`.
+    /// Queues a merge/cherry-pick/rebase conflict for the next integration operation on `repo_dir`.
     pub fn inject_merge_conflict(&self, repo_dir: impl AsRef<Path>, files: Vec<String>) {
         let mut st = self.state.lock().unwrap();
         if let Some((root, _)) = Self::resolve_repo_and_worktree(&st, Some(repo_dir.as_ref()))
@@ -444,6 +491,59 @@ impl SimExec {
         {
             repo.inject_conflicts.push_back(files);
         }
+    }
+
+    /// Queues a merge/cherry-pick/rebase conflict triggered specifically when integrating
+    /// `commit_or_ref` (exact commit SHA or ref name), leaving earlier cards in a multi-card
+    /// batch unaffected.
+    pub fn inject_merge_conflict_for_commit(
+        &self,
+        repo_dir: impl AsRef<Path>,
+        commit_or_ref: impl Into<String>,
+        files: Vec<String>,
+    ) {
+        let mut st = self.state.lock().unwrap();
+        if let Some((root, _)) = Self::resolve_repo_and_worktree(&st, Some(repo_dir.as_ref()))
+            && let Some(repo) = st.git_repos.get_mut(&root)
+        {
+            repo.inject_conflicts_by_ref
+                .insert(commit_or_ref.into(), files);
+        }
+    }
+
+    /// Aborts any in-progress cherry-pick, merge, or rebase conflict inside `dir` (restoring a
+    /// clean checkout at the last integrated commit without creating an extra commit; simulates
+    /// `@merger` running `git cherry-pick --abort` before evicting a conflicting Card).
+    pub fn abort_worktree_conflict(&self, dir: impl AsRef<Path>) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        let (repo_root, wt_key) = Self::resolve_repo_and_worktree(&st, Some(dir.as_ref()))
+            .with_context(|| format!("No SimGitRepo found for {}", dir.as_ref().display()))?;
+        let repo = st
+            .git_repos
+            .get_mut(&repo_root)
+            .context("owning repo disappeared")?;
+        if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
+            wt.dirty = false;
+            wt.staged = false;
+            wt.in_merge = false;
+            wt.merge_head = None;
+            wt.in_cherry_pick = false;
+            wt.in_rebase = false;
+            wt.rebase_onto = None;
+            wt.conflict_files.clear();
+            SimGitRepo::clear_rebase_sentinel(&wt.git_dir);
+        } else {
+            repo.dirty = false;
+            repo.staged = false;
+            repo.in_merge = false;
+            repo.merge_head = None;
+            repo.in_cherry_pick = false;
+            repo.in_rebase = false;
+            repo.rebase_onto = None;
+            repo.conflict_files.clear();
+            SimGitRepo::clear_rebase_sentinel(&repo_root.join(".git"));
+        }
+        Ok(())
     }
 
     /// Clears any unresolved conflict state in `dir` and creates a resolution commit (simulates
@@ -464,6 +564,56 @@ impl SimExec {
                 .map(|w| w.head_sha.clone())
                 .unwrap_or_else(|| repo.head_sha.clone()),
         )
+    }
+
+    /// Returns the recorded remote tracking ref SHA (`refs/remotes/<remote>/<branch>`).
+    pub fn remote_ref_sha(
+        &self,
+        repo_dir: impl AsRef<Path>,
+        remote: &str,
+        branch: &str,
+    ) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        let (root, _) = Self::resolve_repo_and_worktree(&st, Some(repo_dir.as_ref()))?;
+        let repo = st.git_repos.get(&root)?;
+        repo.remote_refs
+            .get(&format!("refs/remotes/{remote}/{branch}"))
+            .cloned()
+    }
+
+    /// Advances `refs/remotes/<remote>/<branch>` by one deterministic upstream commit (useful for
+    /// verifying `sync_upstream: true` `sync_target` fast-forwards local `main` before merging).
+    pub fn advance_remote_ref(
+        &self,
+        repo_dir: impl AsRef<Path>,
+        remote: &str,
+        branch: &str,
+    ) -> Result<String> {
+        let mut st = self.state.lock().unwrap();
+        let (root, _) = Self::resolve_repo_and_worktree(&st, Some(repo_dir.as_ref()))
+            .with_context(|| format!("No SimGitRepo found for {}", repo_dir.as_ref().display()))?;
+        let repo = st
+            .git_repos
+            .get_mut(&root)
+            .context("owning repo disappeared")?;
+        let key = format!("refs/remotes/{remote}/{branch}");
+        let parent = repo
+            .remote_refs
+            .get(&key)
+            .cloned()
+            .or_else(|| repo.branch_heads.get(branch).cloned())
+            .unwrap_or_else(|| repo.head_sha.clone());
+        let new_sha = repo.alloc_commit(vec![parent]);
+        repo.remote_refs.insert(key, new_sha.clone());
+        Ok(new_sha)
+    }
+
+    /// Returns the recorded parent commit SHAs for `sha` in `repo_dir`'s commit DAG.
+    pub fn commit_parents(&self, repo_dir: impl AsRef<Path>, sha: &str) -> Option<Vec<String>> {
+        let st = self.state.lock().unwrap();
+        let (root, _) = Self::resolve_repo_and_worktree(&st, Some(repo_dir.as_ref()))?;
+        let repo = st.git_repos.get(&root)?;
+        repo.commits.get(sha).cloned()
     }
 
     /// Returns all currently registered worktree paths for `repo_dir`.
@@ -703,44 +853,68 @@ impl SimExec {
         };
 
         let checkout_root = wt_key.as_deref().unwrap_or(root.as_path());
-        let (cur_branch, cur_head, cur_dirty, cur_staged, cur_in_merge, cur_in_cp, cur_conflicts) =
-            if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get(p)) {
-                (
-                    wt.branch.clone(),
-                    wt.head_sha.clone(),
-                    wt.dirty,
-                    wt.staged,
-                    wt.in_merge,
-                    wt.in_cherry_pick,
-                    wt.conflict_files.clone(),
-                )
-            } else {
-                (
-                    (!repo.current_branch.is_empty()).then(|| repo.current_branch.clone()),
-                    repo.head_sha.clone(),
-                    repo.dirty,
-                    repo.staged,
-                    repo.in_merge,
-                    repo.in_cherry_pick,
-                    repo.conflict_files.clone(),
-                )
-            };
+        let checkout_git_dir = wt_key
+            .as_deref()
+            .and_then(|p| repo.worktrees.get(p))
+            .map(|w| w.git_dir.clone())
+            .unwrap_or_else(|| root.join(".git"));
+        let (
+            cur_branch,
+            cur_head,
+            cur_dirty,
+            cur_staged,
+            cur_in_merge,
+            cur_merge_head,
+            cur_in_cp,
+            cur_conflicts,
+        ) = if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get(p)) {
+            (
+                wt.branch.clone(),
+                wt.head_sha.clone(),
+                wt.dirty,
+                wt.staged,
+                wt.in_merge,
+                wt.merge_head.clone(),
+                wt.in_cherry_pick,
+                wt.conflict_files.clone(),
+            )
+        } else {
+            (
+                (!repo.current_branch.is_empty()).then(|| repo.current_branch.clone()),
+                repo.head_sha.clone(),
+                repo.dirty,
+                repo.staged,
+                repo.in_merge,
+                repo.merge_head.clone(),
+                repo.in_cherry_pick,
+                repo.conflict_files.clone(),
+            )
+        };
 
         match sub {
             "rev-parse" => {
                 let flags = &sub_args[1..];
                 if flags.iter().any(|f| f == "--is-inside-work-tree") {
                     ok_out("true\n")
+                } else if flags.iter().any(|f| f == "--git-common-dir")
+                    && flags.iter().any(|f| f == "--git-dir")
+                    && flags.iter().any(|f| f == "--show-toplevel")
+                {
+                    ok_out(&format!(
+                        "{}\n{}\n{}\n",
+                        root.join(".git").display(),
+                        checkout_git_dir.display(),
+                        checkout_root.display()
+                    ))
                 } else if flags.iter().any(|f| f == "--show-toplevel") {
                     ok_out(&format!("{}\n", checkout_root.display()))
-                } else if flags
-                    .iter()
-                    .any(|f| f == "--git-common-dir" || f == "--git-dir")
-                {
+                } else if flags.iter().any(|f| f == "--git-common-dir") {
                     ok_out(&format!("{}\n", root.join(".git").display()))
+                } else if flags.iter().any(|f| f == "--git-dir") {
+                    ok_out(&format!("{}\n", checkout_git_dir.display()))
                 } else if let Some(pos) = flags.iter().position(|f| f == "--git-path") {
                     let rel = flags.get(pos + 1).map(String::as_str).unwrap_or("");
-                    ok_out(&format!("{}\n", root.join(".git").join(rel).display()))
+                    ok_out(&format!("{}\n", checkout_git_dir.join(rel).display()))
                 } else if flags.iter().any(|f| f == "@{upstream}") {
                     err_out(128, "fatal: no upstream configured\n")
                 } else if flags.iter().any(|f| f == "--abbrev-ref") {
@@ -748,7 +922,8 @@ impl SimExec {
                     ok_out(&format!("{name}\n"))
                 } else if flags.iter().any(|f| f == "MERGE_HEAD") {
                     if cur_in_merge {
-                        ok_out(&format!("{}\n", repo.head_sha))
+                        let mh = cur_merge_head.as_deref().unwrap_or(&repo.head_sha);
+                        ok_out(&format!("{mh}\n"))
                     } else {
                         err_out(128, "fatal: Needed a single revision (MERGE_HEAD)\n")
                     }
@@ -1164,18 +1339,25 @@ impl SimExec {
                 ok_out("")
             }
             "commit" => {
-                let new_sha = repo.alloc_commit(vec![cur_head]);
+                let parents = if cur_in_merge && let Some(mh) = cur_merge_head {
+                    vec![cur_head, mh]
+                } else {
+                    vec![cur_head]
+                };
+                let new_sha = repo.alloc_commit(parents);
                 repo.set_checkout_head(wt_key.as_deref(), new_sha);
                 if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
                     wt.dirty = false;
                     wt.staged = false;
                     wt.in_merge = false;
+                    wt.merge_head = None;
                     wt.in_cherry_pick = false;
                     wt.conflict_files.clear();
                 } else {
                     repo.dirty = false;
                     repo.staged = false;
                     repo.in_merge = false;
+                    repo.merge_head = None;
                     repo.in_cherry_pick = false;
                     repo.conflict_files.clear();
                 }
@@ -1185,10 +1367,12 @@ impl SimExec {
                 if sub_args.iter().any(|a| a == "--abort") {
                     if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
                         wt.in_merge = false;
+                        wt.merge_head = None;
                         wt.staged = false;
                         wt.conflict_files.clear();
                     } else {
                         repo.in_merge = false;
+                        repo.merge_head = None;
                         repo.staged = false;
                         repo.conflict_files.clear();
                     }
@@ -1213,12 +1397,16 @@ impl SimExec {
                     } else {
                         err_out(128, "fatal: Not possible to fast-forward, aborting.\n")
                     }
-                } else if let Some(conflict_files) = repo.inject_conflicts.pop_front() {
+                } else if let Some(conflict_files) =
+                    repo.pop_injected_conflict(&[Some(target_sha.as_str()), Some(target)])
+                {
                     if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
                         wt.in_merge = true;
+                        wt.merge_head = Some(target_sha);
                         wt.conflict_files = conflict_files.clone();
                     } else {
                         repo.in_merge = true;
+                        repo.merge_head = Some(target_sha);
                         repo.conflict_files = conflict_files.clone();
                     }
                     err_out(
@@ -1236,9 +1424,11 @@ impl SimExec {
                         {
                             wt.staged = true;
                             wt.in_merge = !is_squash;
+                            wt.merge_head = (!is_squash).then_some(target_sha);
                         } else {
                             repo.staged = true;
                             repo.in_merge = !is_squash;
+                            repo.merge_head = (!is_squash).then_some(target_sha);
                         }
                     } else {
                         let merged = repo.alloc_commit(vec![cur_head, target_sha]);
@@ -1276,7 +1466,15 @@ impl SimExec {
                     }
                     return ok_out("");
                 }
-                if let Some(conflict_files) = repo.inject_conflicts.pop_front() {
+                let target_ref = sub_args
+                    .iter()
+                    .skip(1)
+                    .find(|a| !a.starts_with('-'))
+                    .map(String::as_str);
+                let target_sha = target_ref.and_then(|r| repo.resolve_ref(wt_key.as_deref(), r));
+                if let Some(conflict_files) =
+                    repo.pop_injected_conflict(&[target_sha.as_deref(), target_ref])
+                {
                     if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
                         wt.in_cherry_pick = true;
                         wt.conflict_files = conflict_files.clone();
@@ -1299,6 +1497,37 @@ impl SimExec {
             }
             "rebase" => {
                 if sub_args.iter().any(|a| a == "--abort" || a == "--skip") {
+                    if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
+                        wt.in_rebase = false;
+                        wt.rebase_onto = None;
+                        wt.staged = false;
+                        wt.conflict_files.clear();
+                    } else {
+                        repo.in_rebase = false;
+                        repo.rebase_onto = None;
+                        repo.staged = false;
+                        repo.conflict_files.clear();
+                    }
+                    SimGitRepo::clear_rebase_sentinel(&checkout_git_dir);
+                    return ok_out("");
+                }
+                if sub_args.iter().any(|a| a == "--continue") {
+                    let new_sha = repo.alloc_commit(vec![cur_head]);
+                    repo.set_checkout_head(wt_key.as_deref(), new_sha);
+                    if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
+                        wt.dirty = false;
+                        wt.staged = false;
+                        wt.in_rebase = false;
+                        wt.rebase_onto = None;
+                        wt.conflict_files.clear();
+                    } else {
+                        repo.dirty = false;
+                        repo.staged = false;
+                        repo.in_rebase = false;
+                        repo.rebase_onto = None;
+                        repo.conflict_files.clear();
+                    }
+                    SimGitRepo::clear_rebase_sentinel(&checkout_git_dir);
                     return ok_out("");
                 }
                 let onto = sub_args
@@ -1310,12 +1539,25 @@ impl SimExec {
                 let Some(onto_sha) = repo.resolve_ref(wt_key.as_deref(), onto) else {
                     return err_out(128, &format!("fatal: invalid upstream '{onto}'\n"));
                 };
-                if let Some(conflict_files) = repo.inject_conflicts.pop_front() {
+                if let Some(conflict_files) = repo.pop_injected_conflict(&[
+                    Some(cur_head.as_str()),
+                    Some(onto_sha.as_str()),
+                    Some(onto),
+                ]) {
                     if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
+                        wt.in_rebase = true;
+                        wt.rebase_onto = Some(onto_sha.clone());
                         wt.conflict_files = conflict_files.clone();
                     } else {
+                        repo.in_rebase = true;
+                        repo.rebase_onto = Some(onto_sha.clone());
                         repo.conflict_files = conflict_files.clone();
                     }
+                    SimGitRepo::write_rebase_sentinel(
+                        &checkout_git_dir,
+                        &onto_sha,
+                        cur_branch.as_deref(),
+                    );
                     err_out(
                         1,
                         &format!(
@@ -1344,15 +1586,22 @@ impl SimExec {
                     wt.dirty = false;
                     wt.staged = false;
                     wt.in_merge = false;
+                    wt.merge_head = None;
                     wt.in_cherry_pick = false;
+                    wt.in_rebase = false;
+                    wt.rebase_onto = None;
                     wt.conflict_files.clear();
                 } else {
                     repo.dirty = false;
                     repo.staged = false;
                     repo.in_merge = false;
+                    repo.merge_head = None;
                     repo.in_cherry_pick = false;
+                    repo.in_rebase = false;
+                    repo.rebase_onto = None;
                     repo.conflict_files.clear();
                 }
+                SimGitRepo::clear_rebase_sentinel(&checkout_git_dir);
                 ok_out("")
             }
             "clean" => {
@@ -1407,9 +1656,11 @@ impl SimExec {
                     let sha = repo
                         .resolve_ref(wt_key.as_deref(), src)
                         .unwrap_or_else(|| cur_head.clone());
-                    if let Some(branch) = dst.strip_prefix("refs/heads/") {
+                    let branch = dst.strip_prefix("refs/heads/").unwrap_or(dst);
+                    if !branch.is_empty() {
                         repo.remote_refs
                             .insert(format!("refs/remotes/{remote}/{branch}"), sha);
+                        crate::trace::record_coverage_hit("exec.git_pushed");
                     }
                 }
                 ok_out("")
@@ -1585,16 +1836,25 @@ impl SimExec {
                     );
                 }
                 let norm_wt = normalize_path(&wt_path);
+                repo.next_worktree_seq += 1;
+                let wt_git_dir = root
+                    .join(".git")
+                    .join("worktrees")
+                    .join(format!("wt-{}", repo.next_worktree_seq));
                 repo.worktrees.insert(
                     norm_wt.clone(),
                     SimWorktree {
                         path: wt_path,
+                        git_dir: wt_git_dir,
                         branch: branch_opt,
                         head_sha,
                         dirty: false,
                         staged: false,
                         in_merge: false,
+                        merge_head: None,
                         in_cherry_pick: false,
+                        in_rebase: false,
+                        rebase_onto: None,
                         conflict_files: Vec::new(),
                     },
                 );
@@ -1616,8 +1876,10 @@ impl SimExec {
                 if wt_path.exists() {
                     let _ = std::fs::remove_dir_all(&wt_path);
                 }
-                if let Some(repo) = st.git_repos.get_mut(root) {
-                    repo.worktrees.remove(&norm_wt);
+                if let Some(repo) = st.git_repos.get_mut(root)
+                    && let Some(removed) = repo.worktrees.remove(&norm_wt)
+                {
+                    let _ = std::fs::remove_dir_all(&removed.git_dir);
                 }
                 st.worktree_to_repo.remove(&norm_wt);
                 crate::trace::record_coverage_hit("exec.worktree_removed");
@@ -1780,5 +2042,314 @@ impl CommandRunner for SimExec {
 
     fn is_system(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(exec: &SimExec, dir: &Path, args: &[&str]) -> ExecOutput {
+        let mut full = vec!["-C".to_owned(), dir.to_string_lossy().into_owned()];
+        full.extend(args.iter().map(|s| (*s).to_owned()));
+        exec.run(&CommandSpec {
+            program: "git".into(),
+            args: full,
+            cwd: Some(PathBuf::from("/")),
+            env_set: BTreeMap::new(),
+            env_remove: Vec::new(),
+            stdin: None,
+        })
+        .unwrap()
+    }
+
+    fn git_ok(exec: &SimExec, dir: &Path, args: &[&str]) -> String {
+        let out = git(exec, dir, args);
+        assert_eq!(
+            out.status_code,
+            0,
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn targeted_conflict_targets_second_commit_and_abort_preserves_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt1 = tmp.path().join("wt1");
+        let wt2 = tmp.path().join("wt2");
+        let mq = tmp.path().join("mq");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let exec = SimExec::new("test-host");
+        exec.register_git_repo(&repo, SimGitRepo::default());
+        let base_head = exec.head_sha(&repo).unwrap();
+
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "card/1",
+                wt1.to_str().unwrap(),
+                &base_head,
+            ],
+        );
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "card/2",
+                wt2.to_str().unwrap(),
+                &base_head,
+            ],
+        );
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                mq.to_str().unwrap(),
+                &base_head,
+            ],
+        );
+
+        let c1_sha = exec.commit_in_worktree(&wt1, "card 1").unwrap();
+        let c2_sha = exec.commit_in_worktree(&wt2, "card 2").unwrap();
+
+        // Inject conflict specifically for c2_sha: c1_sha must cherry-pick cleanly!
+        exec.inject_merge_conflict_for_commit(&repo, &c2_sha, vec!["conflict.rs".into()]);
+        git_ok(&exec, &mq, &["cherry-pick", &c1_sha]);
+        let after_c1 = git_ok(&exec, &mq, &["rev-parse", "HEAD"]);
+        assert_ne!(after_c1, base_head);
+
+        let cp2 = git(&exec, &mq, &["cherry-pick", &c2_sha]);
+        assert_eq!(cp2.status_code, 1);
+        assert_eq!(
+            git_ok(&exec, &mq, &["diff", "--name-only", "--diff-filter=U"]),
+            "conflict.rs"
+        );
+        assert_eq!(
+            git(&exec, &mq, &["rev-parse", "--verify", "CHERRY_PICK_HEAD"]).status_code,
+            0
+        );
+
+        exec.abort_worktree_conflict(&mq).unwrap();
+        assert_ne!(
+            git(&exec, &mq, &["rev-parse", "--verify", "CHERRY_PICK_HEAD"]).status_code,
+            0
+        );
+        assert_eq!(git_ok(&exec, &mq, &["rev-parse", "HEAD"]), after_c1);
+        assert!(exec.blocked_commands().is_empty());
+    }
+
+    #[test]
+    fn squash_merge_and_sync_upstream_preserve_dag_parents_and_remote_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt1 = tmp.path().join("wt1");
+        let wt2 = tmp.path().join("wt2");
+        let mq = tmp.path().join("mq");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let exec = SimExec::new("test-host");
+        exec.register_git_repo(&repo, SimGitRepo::default());
+        let base_head = exec.head_sha(&repo).unwrap();
+
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "card/1",
+                wt1.to_str().unwrap(),
+                &base_head,
+            ],
+        );
+        let _ = exec.commit_in_worktree(&wt1, "card 1 part 1").unwrap();
+        let c1_head = exec.commit_in_worktree(&wt1, "card 1 part 2").unwrap();
+
+        // Advance remote origin/main -> fetch -> fast-forward local main.
+        let upstream_sha = exec.advance_remote_ref(&repo, "origin", "main").unwrap();
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "fetch",
+                "--",
+                "origin",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+        git_ok(&exec, &repo, &["merge", "--ff-only", &upstream_sha]);
+        assert_eq!(exec.head_sha(&repo).as_deref(), Some(upstream_sha.as_str()));
+
+        // Squash strategy produces a 1-parent commit on top of upstream_sha.
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                mq.to_str().unwrap(),
+                &upstream_sha,
+            ],
+        );
+        git_ok(&exec, &mq, &["merge", "--squash", "--no-commit", &c1_head]);
+        assert_eq!(
+            git(&exec, &mq, &["diff", "--cached", "--quiet"]).status_code,
+            1
+        );
+        assert_ne!(
+            git(&exec, &mq, &["rev-parse", "--verify", "MERGE_HEAD"]).status_code,
+            0
+        );
+        git_ok(&exec, &mq, &["commit", "-m", "Canban #1: squash"]);
+        let squash_sha = git_ok(&exec, &mq, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            exec.commit_parents(&repo, &squash_sha),
+            Some(vec![upstream_sha])
+        );
+        git_ok(&exec, &repo, &["merge", "--ff-only", &squash_sha]);
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "push",
+                "--porcelain",
+                "origin",
+                "refs/heads/main:refs/heads/main",
+            ],
+        );
+        assert_eq!(
+            exec.remote_ref_sha(&repo, "origin", "main"),
+            Some(squash_sha.clone())
+        );
+
+        // Merge strategy preserves MERGE_HEAD and produces a 2-parent commit [squash_sha, c2_head].
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "card/2",
+                wt2.to_str().unwrap(),
+                &squash_sha,
+            ],
+        );
+        let c2_head = exec.commit_in_worktree(&wt2, "card 2").unwrap();
+        git_ok(&exec, &mq, &["checkout", "--detach", &squash_sha]);
+        git_ok(&exec, &mq, &["merge", "--no-ff", "--no-commit", &c2_head]);
+        assert_eq!(
+            git_ok(&exec, &mq, &["rev-parse", "--verify", "MERGE_HEAD"]),
+            c2_head
+        );
+        git_ok(&exec, &mq, &["commit", "-m", "Merge card #2"]);
+        let merge_sha = git_ok(&exec, &mq, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            exec.commit_parents(&repo, &merge_sha),
+            Some(vec![squash_sha, c2_head])
+        );
+        assert!(exec.blocked_commands().is_empty());
+    }
+
+    #[test]
+    fn rebase_conflict_materializes_and_cleans_per_worktree_in_rebase_sentinel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt1 = tmp.path().join("wt1");
+        let wt2 = tmp.path().join("wt2");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let exec = SimExec::new("test-host");
+        exec.register_git_repo(&repo, SimGitRepo::default());
+        let base_head = exec.head_sha(&repo).unwrap();
+
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "card/1",
+                wt1.to_str().unwrap(),
+                &base_head,
+            ],
+        );
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "card/2",
+                wt2.to_str().unwrap(),
+                &base_head,
+            ],
+        );
+        let _ = exec.commit_in_worktree(&wt1, "card 1").unwrap();
+        let main_new = exec.commit_in_worktree(&repo, "main advance").unwrap();
+
+        let wt1_sentinel = PathBuf::from(git_ok(
+            &exec,
+            &wt1,
+            &["rev-parse", "--git-path", "rebase-merge"],
+        ));
+        let wt2_sentinel = PathBuf::from(git_ok(
+            &exec,
+            &wt2,
+            &["rev-parse", "--git-path", "rebase-merge"],
+        ));
+        assert_ne!(wt1_sentinel, wt2_sentinel);
+        assert!(!wt1_sentinel.exists());
+        assert!(!wt2_sentinel.exists());
+
+        exec.inject_merge_conflict(&repo, vec!["shared.txt".into()]);
+        let rb = git(&exec, &wt1, &["rebase", &main_new]);
+        assert_eq!(rb.status_code, 1);
+        assert!(
+            wt1_sentinel.exists(),
+            "rebase conflict must create rebase-merge sentinel"
+        );
+        assert!(
+            !wt2_sentinel.exists(),
+            "sibling worktree must NOT appear in rebase"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt1_sentinel.join("onto"))
+                .unwrap()
+                .trim(),
+            main_new
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt1_sentinel.join("head-name"))
+                .unwrap()
+                .trim(),
+            "refs/heads/card/1"
+        );
+
+        git_ok(&exec, &wt1, &["rebase", "--abort"]);
+        assert!(
+            !wt1_sentinel.exists(),
+            "rebase --abort must remove rebase-merge sentinel"
+        );
+        assert!(exec.blocked_commands().is_empty());
     }
 }

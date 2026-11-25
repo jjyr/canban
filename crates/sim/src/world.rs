@@ -13,8 +13,8 @@ use crate::{
     trace::{CoverageTracker, EventTrace},
 };
 use anyhow::{Context, Result, anyhow, bail};
-pub use canban_app_server::FsDurability;
 use canban_app_server::{AppServer, ServerRuntimeEnv, hosts::DesktopGlobalEnvProvider};
+pub use canban_app_server::{FsDurability, ScriptExecutionMode};
 use canban_client::{
     ClientCapabilities, ClientEvent, InlineHostsFileStore, LocalHostDriver, MultiHostClient,
     MultiHostClientOptions, RemoteClientConfig,
@@ -188,6 +188,10 @@ pub struct SimWorldConfig {
     pub tailscale_verifiers: BTreeMap<String, SimTailscaleVerifier>,
     /// Optional per-host API version override injected into `ServerRuntimeEnv::desktop_api_override`.
     pub desktop_api_overrides: BTreeMap<String, u32>,
+    /// Default script execution mode injected into `ServerRuntimeEnv::script_execution_mode`.
+    pub script_execution_mode: ScriptExecutionMode,
+    /// Optional per-host override for `ServerRuntimeEnv::script_execution_mode`.
+    pub host_script_execution_modes: BTreeMap<String, ScriptExecutionMode>,
 }
 
 impl SimWorldConfig {
@@ -210,6 +214,8 @@ impl SimWorldConfig {
             extra_clients: Vec::new(),
             tailscale_verifiers: BTreeMap::new(),
             desktop_api_overrides: BTreeMap::new(),
+            script_execution_mode: ScriptExecutionMode::Auto,
+            host_script_execution_modes: BTreeMap::new(),
         }
     }
 
@@ -232,6 +238,8 @@ impl SimWorldConfig {
             extra_clients: Vec::new(),
             tailscale_verifiers: BTreeMap::new(),
             desktop_api_overrides: BTreeMap::new(),
+            script_execution_mode: ScriptExecutionMode::Auto,
+            host_script_execution_modes: BTreeMap::new(),
         }
     }
 }
@@ -614,6 +622,11 @@ impl SimWorld {
             let h_durability = config.fs_durability;
             let h_sqlite_sync_off = config.sqlite_synchronous_off;
             let h_disable_watchers = config.disable_os_watchers;
+            let h_script_mode = config
+                .host_script_execution_modes
+                .get(host_name)
+                .copied()
+                .unwrap_or(config.script_execution_mode);
             let h_stream_policy = if host_name == "local-server" {
                 None
             } else {
@@ -659,6 +672,7 @@ impl SimWorld {
                         disable_os_watchers: h_disable_watchers,
                         tailscale_verifier,
                         desktop_api_override,
+                        script_execution_mode: h_script_mode,
                     };
                     let server = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env)
                         .map_err(|e| format!("open_with_env({host_label}): {e:#}"))?;

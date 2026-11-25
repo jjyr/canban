@@ -23,6 +23,19 @@ pub use canban_transport::auth;
 pub mod instance;
 mod updates;
 
+/// Controls how Workflow `uses: script` steps execute inside [`AppServer`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScriptExecutionMode {
+    /// Production default: Herdr PTY (`pump_scripts_herdr`) when observer is running with
+    /// `SystemRunner`, otherwise synchronous in-process (`pump_scripts_inline`).
+    #[default]
+    Auto,
+    /// Always run script steps inline via `exec_runner` (`pump_scripts_inline`).
+    Inline,
+    /// Always run script steps through Herdr PTY terminals (`pump_scripts_herdr`).
+    Herdr,
+}
+
 /// Injectable runtime environment for [`AppServer`] (defaults to real wall clock,
 /// real Herdr/GitHub backends, real OS subprocess/filesystem durability/watchers,
 /// and `spawn_blocking` workers; customized in DST).
@@ -39,6 +52,7 @@ pub struct ServerRuntimeEnv {
     pub disable_os_watchers: bool,
     pub tailscale_verifier: Option<Arc<dyn canban_transport::TailscalePeerVerifier>>,
     pub desktop_api_override: Option<u32>,
+    pub script_execution_mode: ScriptExecutionMode,
 }
 
 impl Default for ServerRuntimeEnv {
@@ -55,6 +69,7 @@ impl Default for ServerRuntimeEnv {
             disable_os_watchers: false,
             tailscale_verifier: None,
             desktop_api_override: None,
+            script_execution_mode: ScriptExecutionMode::Auto,
         }
     }
 }
@@ -72,6 +87,7 @@ pub struct AppServer {
     exec_runner: Arc<dyn canban_exec::CommandRunner>,
     fs_durability: canban_context::FsDurability,
     disable_os_watchers: bool,
+    script_execution_mode: ScriptExecutionMode,
     last_cardless_prune_at: AtomicU64,
     sim_abrupt_crash: Arc<AtomicBool>,
     utilities: utilities::Utilities,
@@ -647,6 +663,7 @@ impl AppServer {
             disable_os_watchers,
             tailscale_verifier,
             desktop_api_override,
+            script_execution_mode,
         } = env;
         let development = if exec_runner.is_system() {
             instance::bundled()?
@@ -878,6 +895,7 @@ impl AppServer {
             exec_runner,
             fs_durability,
             disable_os_watchers,
+            script_execution_mode,
             last_cardless_prune_at: AtomicU64::new(0),
             sim_abrupt_crash: Arc::new(AtomicBool::new(false)),
             utilities,

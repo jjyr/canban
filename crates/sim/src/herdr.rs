@@ -820,6 +820,31 @@ impl SimHerdr {
         self.state.lock().unwrap().terminals.get(address).cloned()
     }
 
+    /// Returns `(address, record)` for all simulated script PTY terminals (`labels["canban.script_run"]`).
+    pub fn script_terminals(&self) -> Vec<(String, Value)> {
+        self.state
+            .lock()
+            .unwrap()
+            .terminals
+            .iter()
+            .filter(|(_, rec)| {
+                rec.get("labels")
+                    .and_then(|l| l.get("canban.script_run"))
+                    .and_then(Value::as_str)
+                    .is_some()
+            })
+            .map(|(addr, rec)| (addr.clone(), rec.clone()))
+            .collect()
+    }
+
+    /// Appends scrollback output lines to a simulated script PTY terminal and finishes it with `exit_code`.
+    pub fn complete_script_terminal(&self, address: &str, output_lines: &[&str], exit_code: i32) {
+        if !output_lines.is_empty() {
+            self.append_output(address, output_lines.iter().copied());
+        }
+        self.finish_terminal(address, exit_code, "exited");
+    }
+
     fn emit_event_locked(st: &mut State, msg: Value) {
         if st.drop_next_events > 0 {
             st.drop_next_events -= 1;
