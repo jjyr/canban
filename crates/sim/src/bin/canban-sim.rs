@@ -34,11 +34,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run one complete deterministic simulation round (all 14 scripted scenarios + chaos),
+    /// Run one complete deterministic simulation round (all 16 scripted scenarios + chaos),
     /// or replay a specific `--seed` / `--scenario` or `--replay-file`.
     Run {
-        /// Optional scenario name (e.g. `remote_faults`, `transport_auth`, `workspaces_delivery`, `project_import_export`, `chaos`).
-        /// Omit to run one complete round (all 14 scripted scenarios + chaos).
+        /// Optional scenario name (e.g. `remote_faults`, `transport_auth`, `workspaces_delivery`, `project_import_export`, `sessions_and_adoption`, `review_and_events`, `chaos`).
+        /// Omit to run one complete round (all 16 scripted scenarios + chaos).
         #[arg(long)]
         scenario: Option<String>,
         /// Deterministic seed (default: 2026). Pass a failing seed to replay it exactly.
@@ -87,7 +87,7 @@ enum Command {
         /// Stop immediately on the first failing seed instead of continuing until Ctrl-C.
         #[arg(long, short = 'x')]
         fail_fast: bool,
-        /// Target scenario: `chaos` (default), `all` (random mix of all 14 scripted + chaos), or a specific scenario name.
+        /// Target scenario: `chaos` (default), `all` (random mix of all 16 scripted + chaos), or a specific scenario name.
         #[arg(long, default_value = "chaos")]
         scenario: String,
         /// Optional cap on total seeds (omit to run continuously until Ctrl-C).
@@ -418,6 +418,42 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "bundle.cross_host_ops_isolated",
     "bundle.project_archive_restore",
     "bundle.fault_recovery",
+    "storage.full_sync_verified",
+    "sessions.agent_lifecycle",
+    "sessions.mention_question_delivered",
+    "sessions.mention_crash_recovery",
+    "sessions.card_adopted",
+    "sessions.execution_retried",
+    "storage.fault_busy_rollback",
+    "storage.fault_ioerror_rollback",
+    "storage.corrupt_outbox_recovery",
+    "review.preview_checked",
+    "review.agent_steered",
+    "review.merged_cleanly",
+    "github.pr_published",
+    "github.pr_refreshed",
+    "github.pr_merged",
+    "github.pr_remote_merge_reconciled",
+    "drafts.conflict_and_persistence",
+    "events.journal_listed",
+    "events.subscription_delivery_and_ack",
+    "events.subscription_crash_retry",
+];
+
+const CHAOS_RANDOM_REQUIRED_COVERAGE: &[&str] = &[
+    "oracle.committed_durability_checked",
+    "chaos.net_partition",
+    "chaos.server_crash_bounce",
+    "chaos.client_bounce",
+    "chaos.env_save",
+    "chaos.faulty_stream_chunk",
+    "chaos.faulty_stream_rst",
+    "chaos.faulty_stream_stall",
+    "chaos.multi_client_race",
+    "chaos.schedule_ops",
+    "chaos.worktree_delivery_ops",
+    "chaos.auth_revoke_recover",
+    "chaos.project_archive_restore",
 ];
 
 fn verify_coverage(
@@ -625,7 +661,7 @@ impl RandomTarget {
         match self {
             Self::Single(sc) => *sc,
             Self::AllMixed => {
-                // 50% full-spectrum chaos, 50% one of the 14 focused scenarios.
+                // 50% full-spectrum chaos, 50% one of the 16 focused scenarios.
                 if rng.random_bool(0.5) {
                     Scenario::Chaos
                 } else {
@@ -810,13 +846,7 @@ fn run_random(
     let cov = total_coverage.lock().unwrap();
     let mut random_req: Vec<&str> = Vec::new();
     if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
-        random_req.extend_from_slice(&[
-            "oracle.committed_durability_checked",
-            "chaos.net_partition",
-            "chaos.server_crash_bounce",
-            "chaos.client_bounce",
-            "chaos.env_save",
-        ]);
+        random_req.extend_from_slice(CHAOS_RANDOM_REQUIRED_COVERAGE);
     } else if scenario_arg.trim().eq_ignore_ascii_case("all") && passed >= 12 {
         random_req.extend_from_slice(&[
             "oracle.post_bounce_recovery_checked",
@@ -962,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn full_suite_coverage_gate_requires_49_unique_properties() {
+    fn full_suite_coverage_gate_requires_69_unique_properties() {
         use std::collections::BTreeSet;
 
         let all: Vec<&str> = BASE_REQUIRED_COVERAGE
@@ -973,8 +1003,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            49,
-            "full suite coverage gate must require 49 properties"
+            69,
+            "full suite coverage gate must require 69 properties"
         );
         assert_eq!(
             unique.len(),
@@ -993,5 +1023,36 @@ mod tests {
             incomplete.hit(key);
         }
         assert!(verify_coverage(&incomplete, true, &[], FULL_SUITE_REQUIRED_COVERAGE).is_err());
+
+        let chaos_all: Vec<&str> = BASE_REQUIRED_COVERAGE
+            .iter()
+            .chain(CHAOS_RANDOM_REQUIRED_COVERAGE.iter())
+            .copied()
+            .collect();
+        let chaos_unique: BTreeSet<&str> = chaos_all.iter().copied().collect();
+        assert_eq!(
+            chaos_all.len(),
+            18,
+            "chaos random coverage gate must require 18 properties"
+        );
+        assert_eq!(
+            chaos_unique.len(),
+            chaos_all.len(),
+            "chaos random coverage gate must not contain duplicate property keys"
+        );
+
+        let mut chaos_tracker = CoverageTracker::new();
+        for key in &chaos_all {
+            chaos_tracker.hit(key);
+        }
+        verify_coverage(&chaos_tracker, true, &[], CHAOS_RANDOM_REQUIRED_COVERAGE).unwrap();
+
+        let mut chaos_incomplete = CoverageTracker::new();
+        for key in chaos_all.iter().skip(1) {
+            chaos_incomplete.hit(key);
+        }
+        assert!(
+            verify_coverage(&chaos_incomplete, true, &[], CHAOS_RANDOM_REQUIRED_COVERAGE).is_err()
+        );
     }
 }

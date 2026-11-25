@@ -5,8 +5,6 @@ pub mod github;
 pub mod herdr;
 pub mod net;
 pub mod oracle;
-#[path = "scenarios/review_and_events.rs"]
-pub mod review_and_events;
 pub mod scenarios;
 pub mod trace;
 pub mod world;
@@ -97,6 +95,12 @@ mod tests {
     }
 
     #[test]
+    fn scenario_16_sessions_and_adoption() {
+        scenarios::sessions_and_adoption::run(202_616)
+            .expect("sessions_and_adoption scenario failed");
+    }
+
+    #[test]
     fn scenario_17_review_and_events() {
         const REQUIRED_COVERAGE: &[&str] = &[
             "review.preview_checked",
@@ -113,14 +117,16 @@ mod tests {
         ];
 
         crate::trace::reset_thread_coverage();
-        let d100_a = crate::review_and_events::run(100).expect("review_and_events seed 100 run 1");
+        let d100_a =
+            scenarios::review_and_events::run(100).expect("review_and_events seed 100 run 1");
         let cov_100 = crate::trace::take_thread_coverage();
         cov_100
             .assert_required(REQUIRED_COVERAGE)
             .expect("seed 100 missing required Scenario 17 coverage hits");
 
         crate::trace::reset_thread_coverage();
-        let d100_b = crate::review_and_events::run(100).expect("review_and_events seed 100 run 2");
+        let d100_b =
+            scenarios::review_and_events::run(100).expect("review_and_events seed 100 run 2");
         let _ = crate::trace::take_thread_coverage();
         assert_eq!(
             d100_a, d100_b,
@@ -128,14 +134,16 @@ mod tests {
         );
 
         crate::trace::reset_thread_coverage();
-        let d101_a = crate::review_and_events::run(101).expect("review_and_events seed 101 run 1");
+        let d101_a =
+            scenarios::review_and_events::run(101).expect("review_and_events seed 101 run 1");
         let cov_101 = crate::trace::take_thread_coverage();
         cov_101
             .assert_required(REQUIRED_COVERAGE)
             .expect("seed 101 missing required Scenario 17 coverage hits");
 
         crate::trace::reset_thread_coverage();
-        let d101_b = crate::review_and_events::run(101).expect("review_and_events seed 101 run 2");
+        let d101_b =
+            scenarios::review_and_events::run(101).expect("review_and_events seed 101 run 2");
         let _ = crate::trace::take_thread_coverage();
         assert_eq!(
             d101_a, d101_b,
@@ -161,6 +169,15 @@ mod tests {
             .expect("outbox revision_conflict regression seed 6581024343186838594 failed");
         let d2 = scenarios::chaos::run(6_581_024_343_186_838_594, 40)
             .expect("outbox regression seed replay failed");
+        assert_eq!(d1, d2, "regression seed must replay deterministically");
+    }
+
+    #[test]
+    fn chaos_stale_dial_repair_regression_seed_14542862646255385444() {
+        let d1 = scenarios::chaos::run(14_542_862_646_255_385_444, 50)
+            .expect("stale dial re-pair regression seed 14542862646255385444 failed");
+        let d2 = scenarios::chaos::run(14_542_862_646_255_385_444, 50)
+            .expect("stale dial re-pair regression seed replay failed");
         assert_eq!(d1, d2, "regression seed must replay deterministically");
     }
 

@@ -9,6 +9,7 @@ pub mod notifications;
 pub mod project_import_export;
 pub mod reclaim;
 pub mod remote_faults;
+pub mod review_and_events;
 pub mod schedules_and_budget;
 pub mod sessions_and_adoption;
 pub mod transport_auth;
@@ -44,6 +45,7 @@ pub enum Scenario {
     WorkspacesDelivery,
     ProjectImportExport,
     SessionsAndAdoption,
+    ReviewAndEvents,
     Chaos,
 }
 
@@ -64,6 +66,7 @@ impl Scenario {
         Scenario::WorkspacesDelivery,
         Scenario::ProjectImportExport,
         Scenario::SessionsAndAdoption,
+        Scenario::ReviewAndEvents,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -83,6 +86,7 @@ impl Scenario {
             Scenario::WorkspacesDelivery => "workspaces_delivery",
             Scenario::ProjectImportExport => "project_import_export",
             Scenario::SessionsAndAdoption => "sessions_and_adoption",
+            Scenario::ReviewAndEvents => "review_and_events",
             Scenario::Chaos => "chaos",
         }
     }
@@ -106,9 +110,10 @@ impl Scenario {
                 Ok(Scenario::ProjectImportExport)
             }
             "sessions_and_adoption" | "sessions" | "adoption" => Ok(Scenario::SessionsAndAdoption),
+            "review_and_events" | "review" | "events" => Ok(Scenario::ReviewAndEvents),
             "chaos" | "fuzz" => Ok(Scenario::Chaos),
             other => bail!(
-                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, transport_auth, workspaces_delivery, project_import_export, sessions_and_adoption, chaos"
+                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, transport_auth, workspaces_delivery, project_import_export, sessions_and_adoption, review_and_events, chaos"
             ),
         }
     }
@@ -131,6 +136,7 @@ pub fn run_scenario(scenario: Scenario, seed: u64, ops: usize) -> Result<u64> {
         Scenario::WorkspacesDelivery => workspaces_delivery::run(seed),
         Scenario::ProjectImportExport => project_import_export::run(seed),
         Scenario::SessionsAndAdoption => sessions_and_adoption::run(seed),
+        Scenario::ReviewAndEvents => review_and_events::run(seed),
         Scenario::Chaos => chaos::run(seed, ops),
     }
 }
