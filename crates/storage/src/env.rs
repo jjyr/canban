@@ -2,7 +2,7 @@
 //! for Global, CLI Agent / `@Identity`, and Project scopes.
 use crate::vault;
 use anyhow::{Context, Result, bail, ensure};
-use canban_types::{EnvEntryMeta, EnvWriteEntry, Snapshot, is_valid_env_key};
+use canban_types::{EnvEntryMeta, EnvWriteEntry, IdGen, Snapshot, is_valid_env_key};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -51,10 +51,23 @@ pub struct GlobalEnvSyncWireRecord {
 
 impl GlobalEnvSyncRecord {
     pub fn to_wire(&self, tcp_token: Option<&str>) -> Result<GlobalEnvSyncWireRecord> {
+        self.to_wire_with_id_gen(tcp_token, None)
+    }
+
+    pub fn to_wire_with_id_gen(
+        &self,
+        tcp_token: Option<&str>,
+        id_gen: Option<&dyn IdGen>,
+    ) -> Result<GlobalEnvSyncWireRecord> {
         let value = match (&self.value, self.kind.as_str(), self.deleted) {
             (_, _, true) | (None, _, false) => None,
             (Some(v), "secret", false) => match tcp_token {
-                Some(tok) => Some(vault::seal_transport(tok, &self.key, v)?),
+                Some(tok) => match id_gen {
+                    Some(generator) => Some(vault::seal_transport_with_id_gen(
+                        tok, &self.key, v, generator,
+                    )?),
+                    None => Some(vault::seal_transport(tok, &self.key, v)?),
+                },
                 None => Some(v.as_str().to_owned()),
             },
             (Some(v), _, false) => Some(v.as_str().to_owned()),
@@ -251,6 +264,21 @@ pub fn apply_env_writes(
     entries: &BTreeMap<String, EnvWriteEntry>,
     now: u64,
 ) -> Result<BTreeMap<String, EnvEntryMeta>> {
+    apply_env_writes_with_options(conn, home, scope, target_id, entries, now, true, None)
+}
+
+/// Configurable durability and vault RNG variant of [`apply_env_writes`].
+#[allow(clippy::too_many_arguments)]
+pub fn apply_env_writes_with_options(
+    conn: &Connection,
+    home: &Path,
+    scope: &str,
+    target_id: &str,
+    entries: &BTreeMap<String, EnvWriteEntry>,
+    now: u64,
+    fs_sync: bool,
+    id_gen: Option<&dyn IdGen>,
+) -> Result<BTreeMap<String, EnvEntryMeta>> {
     ensure!(
         matches!(scope, SCOPE_GLOBAL | SCOPE_AGENT | SCOPE_PROJECT),
         "Unsupported env scope '{scope}'"
@@ -327,7 +355,17 @@ pub fn apply_env_writes(
                         !plaintext.contains('\0'),
                         "Secret '{key}' cannot contain NUL bytes"
                     );
-                    vault::put(conn, home, NAMESPACE_ENV, &vscope, key, plaintext, now)?;
+                    vault::put_with_sync_and_id_gen(
+                        conn,
+                        home,
+                        NAMESPACE_ENV,
+                        &vscope,
+                        key,
+                        plaintext,
+                        now,
+                        fs_sync,
+                        id_gen,
+                    )?;
                     keep_secrets.insert(key.clone());
                     conn.execute(
                         "INSERT INTO env_entries(scope, target_id, key, kind, value, updated_at, deleted) \
@@ -541,6 +579,17 @@ pub fn apply_synced_global_env(
     home: &Path,
     records: &[GlobalEnvSyncRecord],
 ) -> Result<usize> {
+    apply_synced_global_env_with_options(conn, home, records, true, None)
+}
+
+/// Configurable durability and vault RNG variant of [`apply_synced_global_env`].
+pub fn apply_synced_global_env_with_options(
+    conn: &Connection,
+    home: &Path,
+    records: &[GlobalEnvSyncRecord],
+    fs_sync: bool,
+    id_gen: Option<&dyn IdGen>,
+) -> Result<usize> {
     let mut applied = 0usize;
     for rec in records {
         ensure!(
@@ -603,7 +652,7 @@ pub fn apply_synced_global_env(
                     "Synced secret '{}' contains NUL",
                     rec.key
                 );
-                vault::put(
+                vault::put_with_sync_and_id_gen(
                     conn,
                     home,
                     NAMESPACE_ENV,
@@ -611,6 +660,8 @@ pub fn apply_synced_global_env(
                     &rec.key,
                     plain,
                     rec.updated_at,
+                    fs_sync,
+                    id_gen,
                 )?;
                 conn.execute(
                     "INSERT INTO env_entries(scope, target_id, key, kind, value, updated_at, deleted) \

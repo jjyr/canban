@@ -42,10 +42,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{
-    sync::{Notify, broadcast, mpsc, watch},
-    time::Instant,
-};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 const DEFAULT_READ_CACHE_BUDGET: u64 = 20 * 1024 * 1024;
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
@@ -1399,7 +1396,7 @@ impl MultiHostClient {
             .unwrap_or("Remote Host")
             .to_owned();
 
-        let (host_id, summary, need_supervisor, notify, updated_entities) = {
+        let (host_id, summary, updated_entities) = {
             let mut guard = self.hosts.write().unwrap();
             let existing_id = if reject_duplicate_server_id {
                 preferred_id
@@ -1425,8 +1422,11 @@ impl MultiHostClient {
 
             if let Some(hid) = existing_id {
                 let slot = guard.get_mut(&hid).expect("existing host slot");
-                let was_enabled = slot.saved.enabled;
+                // Invalidate any in-flight supervisor dial before replacing credentials
+                // so a stale auth/network error cannot tear down this new session.
+                slot.supervisor_epoch = slot.supervisor_epoch.wrapping_add(1);
                 slot.clear_connection(HostConnectionState::Connecting);
+                slot.next_retry_at = 0;
                 slot.saved.enabled = true;
                 slot.saved.transport = HostTransport::Tcp { addr, token };
                 if let Some(target) = ssh_target {
@@ -1454,9 +1454,8 @@ impl MultiHostClient {
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
                 let summary = slot.summary(now_ms);
-                let notify = was_enabled.then(|| Arc::clone(&slot.supervisor_notify));
                 self.persist_locked(&guard)?;
-                (hid, summary, !was_enabled, notify, entities)
+                (hid, summary, entities)
             } else {
                 let hid = preferred_id
                     .filter(|s| !s.trim().is_empty())
@@ -1497,18 +1496,14 @@ impl MultiHostClient {
                 let summary = slot.summary(now_ms);
                 guard.insert(hid.clone(), slot);
                 self.persist_locked(&guard)?;
-                (hid, summary, true, None, entities)
+                (hid, summary, entities)
             }
         };
 
         if !updated_entities.is_empty() {
             self.replace_host_entity_owners(&host_id, &updated_entities);
         }
-        if need_supervisor {
-            self.spawn_supervisor(&host_id);
-        } else if let Some(n) = notify {
-            n.notify_one();
-        }
+        self.spawn_supervisor(&host_id);
         self.emit_host(
             &host_id,
             AppEvent::Changed {
@@ -3626,10 +3621,11 @@ impl MultiHostClient {
                 );
             }
 
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline_ms = self.now_ms().saturating_add(10_000);
+            let mono_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             tokio::time::sleep(Duration::from_millis(350)).await;
             let mut connected = false;
-            while Instant::now() < deadline {
+            while tokio::time::Instant::now() < mono_deadline && self.now_ms() < deadline_ms {
                 let still_enabled = self
                     .hosts
                     .read()
@@ -3777,7 +3773,16 @@ impl MultiHostClient {
     }
 
     async fn connect_slot_async(&self, host_id: &str) -> Result<(Arc<ClientTransport>, u64)> {
-        let (transport_spec, server_id, cached_at, saved_at, last_marker) = {
+        let (
+            start_epoch,
+            start_conn_gen,
+            start_transport,
+            transport_spec,
+            server_id,
+            cached_at,
+            saved_at,
+            last_marker,
+        ) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(host_id)
@@ -3800,12 +3805,21 @@ impl MultiHostClient {
                 other => other.clone(),
             };
             (
+                slot.supervisor_epoch,
+                slot.conn_gen,
+                slot.saved.transport.clone(),
                 spec,
                 slot.saved.server_id.clone(),
                 slot.cached_at(),
                 slot.cached.saved_at,
                 slot.last_marker.clone(),
             )
+        };
+        let is_current = |slot: &RemoteHostSlot| {
+            !slot.updating
+                && slot.supervisor_epoch == start_epoch
+                && slot.conn_gen == start_conn_gen
+                && slot.saved.transport == start_transport
         };
 
         let after = if saved_at == 0 {
@@ -3835,7 +3849,7 @@ impl MultiHostClient {
                     let changed = {
                         let mut guard = self.hosts.write().unwrap();
                         if let Some(slot) = guard.get_mut(host_id)
-                            && !slot.updating
+                            && is_current(slot)
                         {
                             let prev = slot.connection.clone();
                             if slot.saved.server_id.is_none()
@@ -3872,7 +3886,7 @@ impl MultiHostClient {
                 let changed = {
                     let mut guard = self.hosts.write().unwrap();
                     if let Some(slot) = guard.get_mut(host_id)
-                        && !slot.updating
+                        && is_current(slot)
                     {
                         let prev = slot.connection.clone();
                         slot.reconnect_count = slot.reconnect_count.saturating_add(1);
@@ -3918,7 +3932,9 @@ impl MultiHostClient {
             let err_msg =
                 format!("Connected to wrong server (expected {expected_sid}, got {actual_sid})");
             let mut guard = self.hosts.write().unwrap();
-            if let Some(slot) = guard.get_mut(host_id) {
+            if let Some(slot) = guard.get_mut(host_id)
+                && is_current(slot)
+            {
                 slot.clear_connection(HostConnectionState::AuthFailed {
                     error: err_msg.clone(),
                 });
@@ -3933,7 +3949,7 @@ impl MultiHostClient {
                 drop(lease);
                 bail!("Host '{host_id}' was removed");
             };
-            if slot.updating || !slot.saved.enabled {
+            if !slot.saved.enabled || !is_current(slot) {
                 transport.close();
                 drop(lease);
                 bail!("Host '{host_id}' state changed during connect");
@@ -4734,6 +4750,16 @@ async fn host_supervisor_task(
             match connect_res {
                 Ok(triple) => triple,
                 Err(err) => {
+                    let still_current = weak_client.upgrade().is_some_and(|rc| {
+                        rc.hosts
+                            .read()
+                            .unwrap()
+                            .get(&host_id)
+                            .is_some_and(|s| s.saved.enabled && s.supervisor_epoch == epoch)
+                    });
+                    if !still_current {
+                        return;
+                    }
                     if err.downcast_ref::<ApiMismatchError>().is_some() {
                         tokio::select! {
                             biased;
@@ -5028,6 +5054,7 @@ mod tests {
     use crate::{pairing::format_pairing_uri, parse_pairing_invite, store::MemoryCredentialStore};
     use canban_app_server::AppServer;
     use canban_types::{Card, Project, ServerListenConfig, SyncMark, TerminalEntry, now};
+    use tokio::time::Instant;
 
     async fn start_tcp_server_with_verifier(
         home: PathBuf,
@@ -7909,6 +7936,241 @@ mod tests {
         assert!(
             is_auth_error(&tr_err),
             "transport_for_host on AuthFailed host must return auth error, got: {tr_err:#}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_revoked_dial_finishing_after_in_place_repair_preserves_connected_session() {
+        use crate::{
+            connector::{ConnectFuture, HostConnector, TcpConnector},
+            store::InlineHostsFileStore,
+        };
+        use canban_types::{HostsFile, PairedDevice, parse_pairing_uri};
+
+        struct GatedRevokedConnector {
+            inner: TcpConnector,
+            revoked_token: String,
+            stale_started: Arc<Notify>,
+            release_stale: Arc<Notify>,
+            stale_returned_auth_err: Arc<AtomicBool>,
+            stale_done: Arc<Notify>,
+        }
+
+        impl HostConnector for GatedRevokedConnector {
+            fn supports(&self, transport: &HostTransport) -> bool {
+                self.inner.supports(transport)
+            }
+
+            fn connect<'a>(
+                &'a self,
+                host_id: &'a str,
+                transport: &'a HostTransport,
+                device_name: &'a str,
+            ) -> ConnectFuture<'a> {
+                let is_revoked = matches!(
+                    transport,
+                    HostTransport::Tcp { token, .. } if token == &self.revoked_token
+                );
+                if !is_revoked {
+                    return self.inner.connect(host_id, transport, device_name);
+                }
+                let stale_started = Arc::clone(&self.stale_started);
+                let release_stale = Arc::clone(&self.release_stale);
+                let stale_returned_auth_err = Arc::clone(&self.stale_returned_auth_err);
+                let stale_done = Arc::clone(&self.stale_done);
+                let host_id = host_id.to_owned();
+                let transport = transport.clone();
+                let device_name = device_name.to_owned();
+                Box::pin(async move {
+                    stale_started.notify_one();
+                    release_stale.notified().await;
+                    let res = TcpConnector
+                        .connect(&host_id, &transport, &device_name)
+                        .await;
+                    if let Err(ref err) = res
+                        && is_auth_error(err)
+                    {
+                        stale_returned_auth_err.store(true, Ordering::SeqCst);
+                    }
+                    stale_done.notify_one();
+                    res
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("server-home");
+        let client_dir = dir.path().join("client-data");
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let hosts_file_path = client_dir.join("hosts.json");
+
+        let (server, _running, server_addr) = start_tcp_server(server_home, 0).await;
+        server
+            .call(
+                "project.create",
+                json!({ "name": "Repair Race", "directory": repo_dir }),
+            )
+            .unwrap();
+
+        // 1. Pair initially and persist the upgraded dev_ token to hosts.json.
+        let (code1, _) = server.create_pairing_code(300).unwrap();
+        let uri1 = canban_types::format_pairing_uri(&server_addr, &code1);
+        let (parsed_addr, parsed_code1) = parse_pairing_uri(&uri1).expect("valid invite 1");
+        let client1 = MultiHostClient::from_options_with_runtime(
+            MultiHostClientOptions {
+                config: RemoteClientConfig::new(client_dir.clone()),
+                host_store: Arc::new(InlineHostsFileStore::new(hosts_file_path.clone())),
+                connector: Arc::new(TcpConnector),
+                capabilities: ClientCapabilities::mobile(),
+                local_host: None,
+                global_env_provider: None,
+                min_api_version: None,
+                clock: system_clock(),
+                fs_durability: FsDurability::NoSync,
+            },
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let sum1 = client1
+            .add_host_async(SavedHost {
+                id: "remote-repair".into(),
+                name: "Repair Host".into(),
+                transport: HostTransport::Tcp {
+                    addr: parsed_addr.clone(),
+                    token: parsed_code1,
+                },
+                ssh_target: None,
+                server_id: None,
+                enabled: true,
+                added_at: now(),
+            })
+            .await
+            .expect("initial pair succeeds");
+        assert!(sum1.is_connected());
+        drop(client1);
+
+        let hosts_file: HostsFile =
+            serde_json::from_slice(&std::fs::read(&hosts_file_path).unwrap()).unwrap();
+        let revoked_token = match &hosts_file.hosts[0].transport {
+            HostTransport::Tcp { token, .. } => token.clone(),
+            other => panic!("unexpected transport: {other:?}"),
+        };
+        assert!(is_device_token(&revoked_token));
+
+        // 2. Revoke the persisted device token while the client is restarted.
+        let devs_val = server.call("device.list", json!({})).unwrap();
+        let devs: Vec<PairedDevice> = serde_json::from_value(devs_val["devices"].clone()).unwrap();
+        let dev_id = devs[0].id.clone();
+        server
+            .call("device.revoke", json!({ "device_id": dev_id }))
+            .unwrap();
+
+        // 3. Restart the client; pause the supervisor's in-flight dial using the revoked token.
+        let stale_started = Arc::new(Notify::new());
+        let release_stale = Arc::new(Notify::new());
+        let stale_returned_auth_err = Arc::new(AtomicBool::new(false));
+        let stale_done = Arc::new(Notify::new());
+
+        let client2 = MultiHostClient::from_options_with_runtime(
+            MultiHostClientOptions {
+                config: RemoteClientConfig::new(client_dir.clone()),
+                host_store: Arc::new(InlineHostsFileStore::new(hosts_file_path.clone())),
+                connector: Arc::new(GatedRevokedConnector {
+                    inner: TcpConnector,
+                    revoked_token: revoked_token.clone(),
+                    stale_started: Arc::clone(&stale_started),
+                    release_stale: Arc::clone(&release_stale),
+                    stale_returned_auth_err: Arc::clone(&stale_returned_auth_err),
+                    stale_done: Arc::clone(&stale_done),
+                }),
+                capabilities: ClientCapabilities::mobile(),
+                local_host: None,
+                global_env_provider: None,
+                min_api_version: None,
+                clock: system_clock(),
+                fs_durability: FsDurability::NoSync,
+            },
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), stale_started.notified())
+            .await
+            .expect("supervisor should start in-flight dial with revoked token");
+
+        // 4. Re-pair the same host_id in place with a fresh invite while the stale dial is in flight.
+        let (code2, _) = server.create_pairing_code(300).unwrap();
+        let uri2 = canban_types::format_pairing_uri(&server_addr, &code2);
+        let (_, parsed_code2) = parse_pairing_uri(&uri2).expect("valid invite 2");
+        let sum2 = client2
+            .add_host_async(SavedHost {
+                id: "remote-repair".into(),
+                name: "Repair Host".into(),
+                transport: HostTransport::Tcp {
+                    addr: parsed_addr,
+                    token: parsed_code2,
+                },
+                ssh_target: None,
+                server_id: None,
+                enabled: true,
+                added_at: now(),
+            })
+            .await
+            .expect("in-place re-pair succeeds");
+        assert!(sum2.is_connected());
+
+        let updated_hosts: HostsFile =
+            serde_json::from_slice(&std::fs::read(&hosts_file_path).unwrap()).unwrap();
+        let fresh_token = match &updated_hosts.hosts[0].transport {
+            HostTransport::Tcp { token, .. } => token.clone(),
+            other => panic!("unexpected transport: {other:?}"),
+        };
+        assert!(is_device_token(&fresh_token));
+        assert_ne!(fresh_token, revoked_token);
+
+        // 5. Release the stale in-flight dial; it fails with auth_failed from the server.
+        release_stale.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), stale_done.notified())
+            .await
+            .expect("stale dial should finish after release");
+        // Allow connect_slot_async's post-await error path and supervisor loop to run.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            stale_returned_auth_err.load(Ordering::SeqCst),
+            "stale revoked dial must actually observe auth_failed from server"
+        );
+        let summary_after = client2
+            .host_summaries()
+            .into_iter()
+            .find(|s| s.id == "remote-repair")
+            .expect("remote-repair present");
+        assert!(
+            summary_after.is_connected(),
+            "stale revoked dial must NOT tear down the newly re-paired Connected session; got {:?}",
+            summary_after.connection
+        );
+
+        // 6. Routed RPCs and subsequent polls continue working against the live re-paired session.
+        let projects = client2
+            .call_routed_async("project.list", json!({ "host_id": "remote-repair" }), None)
+            .await
+            .expect("routed RPC must succeed on re-paired host");
+        assert_eq!(projects.as_array().unwrap().len(), 1);
+        client2.poll_remotes_once_async().await;
+        let summary_final = client2
+            .host_summaries()
+            .into_iter()
+            .find(|s| s.id == "remote-repair")
+            .unwrap();
+        assert!(
+            summary_final.is_connected(),
+            "host must stay Connected after poll; got {:?}",
+            summary_final.connection
         );
     }
 }

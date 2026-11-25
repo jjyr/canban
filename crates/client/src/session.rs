@@ -131,7 +131,7 @@ impl SingleHostSession {
         after: Value,
         min_api_version: Option<u32>,
     ) -> Result<Self> {
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
         let connected = connector.connect(host_id, transport, device_name).await?;
         Self::handshake_checked_async(connected, after, started, min_api_version).await
     }
@@ -257,7 +257,17 @@ impl SingleHostSession {
 
     /// Synchronous handshake helper for blocking desktop/CLI callers.
     pub fn handshake_sync(connected: ConnectedTransport, after: Value) -> Result<Self> {
-        let started = Instant::now();
+        Self::handshake_sync_with_clock(connected, after, &canban_types::SystemClock)
+    }
+
+    /// Clock-injected variant of [`Self::handshake_sync`] that measures handshake RTT
+    /// through `clock` instead of ambient clocks.
+    pub fn handshake_sync_with_clock(
+        connected: ConnectedTransport,
+        after: Value,
+        clock: &dyn Clock,
+    ) -> Result<Self> {
+        let started_ms = clock.now_ms();
         let transport = connected.transport;
         let ping = transport
             .call("app.ping", &json!({}))
@@ -265,7 +275,7 @@ impl SingleHostSession {
         let state = transport
             .call("app.state", &json!({ "after": after }))
             .inspect_err(|_| transport.close())?;
-        let rtt_ms = started.elapsed().as_millis() as u64;
+        let rtt_ms = clock.now_ms().saturating_sub(started_ms);
         let handshake = extract_handshake_info(ping, state, rtt_ms);
         Ok(Self {
             transport,

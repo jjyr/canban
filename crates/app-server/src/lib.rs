@@ -19,6 +19,7 @@ use std::{
 pub const API_VERSION: u32 = canban_updater::DESKTOP_API;
 pub use canban_context::FsDurability;
 pub use canban_exec::{CommandRunner, CommandSpec, ExecOutput, SystemRunner};
+pub use canban_storage::{StorageFaultInjector, StorageFaultKind};
 pub use canban_transport::auth;
 pub mod instance;
 mod updates;
@@ -53,6 +54,7 @@ pub struct ServerRuntimeEnv {
     pub tailscale_verifier: Option<Arc<dyn canban_transport::TailscalePeerVerifier>>,
     pub desktop_api_override: Option<u32>,
     pub script_execution_mode: ScriptExecutionMode,
+    pub storage_faults: Option<Arc<canban_storage::StorageFaultInjector>>,
 }
 
 impl Default for ServerRuntimeEnv {
@@ -70,6 +72,7 @@ impl Default for ServerRuntimeEnv {
             tailscale_verifier: None,
             desktop_api_override: None,
             script_execution_mode: ScriptExecutionMode::Auto,
+            storage_faults: None,
         }
     }
 }
@@ -664,6 +667,7 @@ impl AppServer {
             tailscale_verifier,
             desktop_api_override,
             script_execution_mode,
+            storage_faults,
         } = env;
         let development = if exec_runner.is_system() {
             instance::bundled()?
@@ -691,6 +695,7 @@ impl AppServer {
         );
         let store_options = canban_storage::StoreOptions {
             synchronous_off: sqlite_synchronous_off,
+            fault_injector: storage_faults,
         };
         let mut store =
             Store::open_with_progress_and_options(&home, store_options, |phase, detail| {
@@ -1082,6 +1087,15 @@ impl AppServer {
     }
     pub fn exec_runner(&self) -> &Arc<dyn canban_exec::CommandRunner> {
         &self.exec_runner
+    }
+    /// Returns the injected [`IdGen`] for deterministic vault key/nonce derivation under
+    /// non-system runners (DST), and `None` in production so `OsRng` remains the default.
+    pub(crate) fn vault_id_gen(&self) -> Option<&dyn canban_types::IdGen> {
+        if self.exec_runner.is_system() {
+            None
+        } else {
+            Some(self.id_gen.as_ref())
+        }
     }
     /// Controls whether dropping the active [`SimRunning`] guard skips graceful
     /// `finish_agent_work()` teardown to simulate an abrupt server crash in DST.
@@ -2544,5 +2558,693 @@ steps:
             app.call("app.ping", json!({})).unwrap()["api_version"],
             API_VERSION
         );
+    }
+
+    struct FixedClock(AtomicU64);
+
+    impl canban_types::Clock for FixedClock {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn storage_faults_in_runtime_env_roll_back_rpc_cleanly_and_retry_with_same_request_key_succeeds()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let faults = Arc::new(StorageFaultInjector::new());
+        let env = ServerRuntimeEnv {
+            clock: Arc::new(FixedClock(AtomicU64::new(1_700_000_000_000))),
+            id_gen: canban_types::DeterministicIdGen::arc(55),
+            exec_runner: Arc::new(StaticHostRunner {
+                hostname: "dst-storage-fault".into(),
+            }),
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            inline_workers: true,
+            storage_faults: Some(Arc::clone(&faults)),
+            ..Default::default()
+        };
+        let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+        let project: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({"name": "FaultProj", "directory": dir.path().join("repo")}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let create_params = json!({
+            "view": "full",
+            "project_id": project.id,
+            "title": "Durable Card",
+            "request_key": "req-fault-retry-1",
+        });
+
+        // 1. Inject SQLITE_BUSY -> RPC fails cleanly, zero cards or operation receipts stored.
+        faults.inject_next(StorageFaultKind::Busy);
+        let busy_err = app.call("card.create", create_params.clone()).unwrap_err();
+        assert!(
+            busy_err
+                .downcast_ref::<rusqlite::Error>()
+                .is_some_and(|e| matches!(
+                    e,
+                    rusqlite::Error::SqliteFailure(f, _)
+                        if f.code == rusqlite::ErrorCode::DatabaseBusy
+                )),
+            "expected SQLITE_BUSY, got: {busy_err:#}"
+        );
+        assert!(app.snapshot().unwrap().cards.is_empty());
+
+        // 2. Inject SQLITE_IOERR -> transaction rolls back card + operations receipt cleanly.
+        faults.inject_next(StorageFaultKind::IoError);
+        let io_err = app.call("card.create", create_params.clone()).unwrap_err();
+        assert!(
+            io_err
+                .downcast_ref::<rusqlite::Error>()
+                .is_some_and(|e| matches!(
+                    e,
+                    rusqlite::Error::SqliteFailure(f, _)
+                        if f.code == rusqlite::ErrorCode::SystemIoFailure
+                            && f.extended_code == rusqlite::ffi::SQLITE_IOERR
+                )),
+            "expected SQLITE_IOERR, got: {io_err:#}"
+        );
+        assert!(app.snapshot().unwrap().cards.is_empty());
+        assert_eq!(faults.triggered_count(), 2);
+
+        // 3. SQLite integrity holds and retrying with the exact same request_key succeeds.
+        {
+            let store = app.store.lock().unwrap();
+            let integrity: String = store
+                .db()
+                .conn
+                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(integrity, "ok");
+        }
+        let created: Card = serde_json::from_value(
+            app.call("card.create", create_params)
+                .expect("retry after transient storage faults must succeed"),
+        )
+        .unwrap();
+        assert_eq!(created.title, "Durable Card");
+        assert_eq!(app.snapshot().unwrap().cards.len(), 1);
+    }
+
+    #[test]
+    fn app_server_deterministic_vault_reproduces_key_ciphertext_and_fingerprint_across_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let make_app = |name: &str| {
+            let env = ServerRuntimeEnv {
+                clock: Arc::new(FixedClock(AtomicU64::new(1_700_000_123_000))),
+                id_gen: canban_types::DeterministicIdGen::arc(2026),
+                exec_runner: Arc::new(StaticHostRunner {
+                    hostname: "dst-vault-host".into(),
+                }),
+                fs_durability: FsDurability::NoSync,
+                sqlite_synchronous_off: true,
+                disable_os_watchers: true,
+                inline_workers: true,
+                ..Default::default()
+            };
+            AppServer::open_with_env(dir.path().join(name), PathBuf::from("/bin/echo"), env)
+                .unwrap()
+        };
+
+        let app_a = make_app("home-a");
+        let app_b = make_app("home-b");
+
+        let save_params = json!({
+            "scope": "global",
+            "entries": {
+                "DET_SECRET": { "kind": "secret", "value": "sk-deterministic-9999" },
+                "DET_PLAIN": { "kind": "plain", "value": "hello" },
+            }
+        });
+        app_a.call("env.save", save_params.clone()).unwrap();
+        app_b.call("env.save", save_params).unwrap();
+
+        let key_a = std::fs::read(canban_storage::vault::key_path(&app_a.home)).unwrap();
+        let key_b = std::fs::read(canban_storage::vault::key_path(&app_b.home)).unwrap();
+        assert_eq!(key_a, key_b, "DST vault.key must be bit-for-bit identical");
+
+        let fetch_vault_row = |app: &AppServer| -> (Vec<u8>, Vec<u8>) {
+            let store = app.store.lock().unwrap();
+            store
+                .db()
+                .conn
+                .query_row(
+                    "SELECT nonce, ciphertext FROM vault_entries WHERE namespace='env' AND scope='global' AND key='DET_SECRET'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            fetch_vault_row(&app_a),
+            fetch_vault_row(&app_b),
+            "DST vault nonce + ciphertext must be bit-for-bit identical"
+        );
+
+        let fp_a = canban_storage::env::global_env_state_fingerprint_from_home(&app_a.home)
+            .unwrap()
+            .unwrap();
+        let fp_b = canban_storage::env::global_env_state_fingerprint_from_home(&app_b.home)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fp_a, fp_b);
+
+        // DesktopGlobalEnvProvider::with_id_gen produces bit-for-bit identical sealed wire records.
+        use canban_client::GlobalEnvSyncProvider;
+        let token = "dev_0123456789abcdef0123456789abcdef";
+        let prov_a = hosts::DesktopGlobalEnvProvider::new(app_a.home.clone())
+            .with_id_gen(canban_types::DeterministicIdGen::arc(999));
+        let prov_b = hosts::DesktopGlobalEnvProvider::new(app_b.home.clone())
+            .with_id_gen(canban_types::DeterministicIdGen::arc(999));
+        let (wire_a, _) = prov_a.build_sync_payload(Some(token)).unwrap();
+        let (wire_b, _) = prov_b.build_sync_payload(Some(token)).unwrap();
+        assert_eq!(wire_a, wire_b);
+
+        // Syncing into two fresh peers with matching seeds reproduces identical vault ciphertexts too.
+        let peer_a = make_app("peer-a");
+        let peer_b = make_app("peer-b");
+        peer_a
+            .call_with_transport_token("env.global.sync", wire_a, Some(token), false)
+            .unwrap();
+        peer_b
+            .call_with_transport_token("env.global.sync", wire_b, Some(token), false)
+            .unwrap();
+        assert_eq!(fetch_vault_row(&peer_a), fetch_vault_row(&peer_b));
+        let decrypted = canban_storage::env::list_decrypted_scope(
+            peer_a.store.lock().unwrap().db().conn,
+            &peer_a.home,
+            canban_storage::env::SCOPE_GLOBAL,
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            decrypted.get("DET_SECRET").map(|(v, _)| v.as_str()),
+            Some("sk-deterministic-9999")
+        );
+    }
+
+    #[test]
+    fn wave10_review_github_pr_sessions_events_and_drafts_isolate_from_host() {
+        use canban_github::{HttpRequest, HttpResponse, HttpTransport};
+        use canban_herdr::{BackendSubscription, HerdrBackend};
+
+        struct Wave10GitRunner {
+            repo_git_dir: PathBuf,
+            card_wt: PathBuf,
+            branch: String,
+            head_sha: String,
+            target_head: Mutex<String>,
+        }
+
+        impl Wave10GitRunner {
+            fn ok(s: &str) -> ExecOutput {
+                ExecOutput {
+                    status_code: 0,
+                    stdout: s.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                }
+            }
+            fn err(code: i32, s: &str) -> ExecOutput {
+                ExecOutput {
+                    status_code: code,
+                    stdout: Vec::new(),
+                    stderr: s.as_bytes().to_vec(),
+                }
+            }
+        }
+
+        impl CommandRunner for Wave10GitRunner {
+            fn run(&self, spec: &CommandSpec) -> Result<ExecOutput> {
+                assert_eq!(spec.program, "git", "stray non-git spawn: {:?}", spec);
+                let mut i = 0;
+                let mut cwd = spec.cwd.clone().unwrap_or_default();
+                while i < spec.args.len() {
+                    match spec.args[i].as_str() {
+                        "--no-optional-locks" => i += 1,
+                        "-C" => {
+                            cwd = PathBuf::from(spec.args.get(i + 1).cloned().unwrap_or_default());
+                            i += 2;
+                        }
+                        _ => break,
+                    }
+                }
+                let sub = &spec.args[i..];
+                let is_card = cwd == self.card_wt;
+                let target_head = self.target_head.lock().unwrap().clone();
+                let out = match sub.first().map(String::as_str) {
+                    Some("remote") => {
+                        if sub.get(1).map(String::as_str) == Some("get-url") {
+                            Self::ok("https://github.com/acme/app.git\n")
+                        } else {
+                            Self::ok("origin\n")
+                        }
+                    }
+                    Some("check-ref-format") => Self::ok(""),
+                    Some("symbolic-ref") => {
+                        if is_card {
+                            Self::ok(&format!("{}\n", self.branch))
+                        } else {
+                            Self::ok("main\n")
+                        }
+                    }
+                    Some("rev-parse") => {
+                        if sub.iter().any(|a| a == "--is-inside-work-tree") {
+                            Self::ok("true\n")
+                        } else if sub.iter().any(|a| a == "--git-common-dir") {
+                            Self::ok(&format!("{}\n", self.repo_git_dir.display()))
+                        } else if sub
+                            .iter()
+                            .any(|a| a == "MERGE_HEAD" || a == "CHERRY_PICK_HEAD")
+                        {
+                            Self::err(128, "none")
+                        } else if sub.iter().any(|a| a == "--git-path") {
+                            Self::ok(&format!("{}\n", cwd.join(".git/none").display()))
+                        } else if sub.iter().any(|a| a == "refs/heads/main^{commit}") {
+                            Self::ok(&format!("{target_head}\n"))
+                        } else if sub.iter().any(|a| a == "HEAD") {
+                            if is_card {
+                                Self::ok(&format!("{}\n", self.head_sha))
+                            } else {
+                                Self::ok(&format!("{target_head}\n"))
+                            }
+                        } else {
+                            Self::ok(&format!("{}\n", self.head_sha))
+                        }
+                    }
+                    Some("status") | Some("ls-files") | Some("show-ref") | Some("worktree") => {
+                        Self::ok("")
+                    }
+                    Some("diff") => {
+                        if sub.iter().any(|a| a == "--diff-filter=U") {
+                            Self::ok("")
+                        } else if sub.iter().any(|a| a == "--name-only") {
+                            Self::ok("a.txt\0")
+                        } else {
+                            Self::ok("diff --git a/a.txt b/a.txt\n+hello\n")
+                        }
+                    }
+                    Some("rev-list") => Self::ok("1\n"),
+                    Some("merge-base") => Self::ok(&format!("{target_head}\n")),
+                    Some("push") => Self::ok(""),
+                    Some("merge") => {
+                        if sub.iter().any(|a| a == "--ff-only") {
+                            *self.target_head.lock().unwrap() = self.head_sha.clone();
+                        }
+                        Self::ok("")
+                    }
+                    Some("rebase") | Some("fetch") | Some("checkout") => Self::ok(""),
+                    other => panic!("unexpected git subcommand {other:?}: {sub:?}"),
+                };
+                Ok(out)
+            }
+
+            fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+                None
+            }
+
+            fn shell_env(&self) -> canban_exec::shell_env::ShellEnvSnapshot {
+                canban_exec::shell_env::ShellEnvSnapshot::default()
+            }
+
+            fn hostname(&self) -> String {
+                "wave10-sim-host".into()
+            }
+        }
+
+        struct Wave10GitHub {
+            pr_head: String,
+            pr_created: AtomicBool,
+            pr_merged: AtomicBool,
+            requests: Mutex<Vec<(String, String)>>,
+        }
+
+        impl Wave10GitHub {
+            fn json_ok(val: Value) -> HttpResponse {
+                HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: serde_json::to_vec(&val).unwrap(),
+                }
+            }
+
+            fn pr_payload(&self) -> Value {
+                let merged = self.pr_merged.load(Ordering::SeqCst);
+                json!({
+                    "number": 42,
+                    "html_url": "https://github.com/acme/app/pull/42",
+                    "state": if merged { "closed" } else { "open" },
+                    "merged": merged,
+                    "draft": false,
+                    "head": { "sha": self.pr_head, "ref": "proj/1" },
+                    "base": { "ref": "main", "repo": { "id": 777 } },
+                    "merge_commit_sha": if merged { json!("9999999999999999999999999999999999999999") } else { Value::Null },
+                })
+            }
+        }
+
+        impl HttpTransport for Wave10GitHub {
+            fn send(&self, req: HttpRequest) -> Result<HttpResponse> {
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .push((req.method.clone(), req.path.clone()));
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/repos/acme/app") => Ok(Self::json_ok(json!({
+                        "id": 777,
+                        "full_name": "acme/app",
+                        "default_branch": "main",
+                        "html_url": "https://github.com/acme/app",
+                    }))),
+                    ("GET", p) if p.starts_with("/repos/acme/app/pulls?") => {
+                        if self.pr_created.load(Ordering::SeqCst) {
+                            Ok(Self::json_ok(json!([self.pr_payload()])))
+                        } else {
+                            Ok(Self::json_ok(json!([])))
+                        }
+                    }
+                    ("POST", "/repos/acme/app/pulls") => {
+                        self.pr_created.store(true, Ordering::SeqCst);
+                        Ok(Self::json_ok(self.pr_payload()))
+                    }
+                    ("GET", "/repos/acme/app/pulls/42") => Ok(Self::json_ok(self.pr_payload())),
+                    ("PUT", "/repos/acme/app/pulls/42/merge") => {
+                        self.pr_merged.store(true, Ordering::SeqCst);
+                        Ok(Self::json_ok(json!({
+                            "merged": true,
+                            "sha": "9999999999999999999999999999999999999999",
+                        })))
+                    }
+                    ("GET", p) if p.contains("/check-runs") => {
+                        Ok(Self::json_ok(json!({"check_runs": []})))
+                    }
+                    ("GET", p) if p.contains("/status") => {
+                        Ok(Self::json_ok(json!({"state": "success", "statuses": []})))
+                    }
+                    ("GET", p) if p.contains("/reviews") || p.contains("/comments") => {
+                        Ok(Self::json_ok(json!([])))
+                    }
+                    other => anyhow::bail!("unexpected Wave10GitHub request: {other:?}"),
+                }
+            }
+        }
+
+        struct Wave10Herdr {
+            calls: Mutex<Vec<String>>,
+        }
+
+        impl HerdrBackend for Wave10Herdr {
+            fn call(&self, method: &str, _params: Value) -> Result<Value> {
+                self.calls.lock().unwrap().push(method.to_owned());
+                match method {
+                    "server.status" => Ok(json!({"core": {"id": "sim-core-1"}})),
+                    "terminal.interrupt" | "terminal.kill" => Ok(json!({"ok": true})),
+                    other => anyhow::bail!("unexpected Wave10Herdr call: {other}"),
+                }
+            }
+
+            fn subscribe(&self, _wake: Arc<dyn Fn() + Send + Sync>) -> Result<BackendSubscription> {
+                anyhow::bail!("unused in synchronous seam test")
+            }
+
+            fn activity(&self, _core: &str, _terminal: &str) -> canban_herdr::activity::Activity {
+                Default::default()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repo");
+        let card_wt = home.join("worktrees/proj/1");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&card_wt).unwrap();
+
+        let head_sha = "2222222222222222222222222222222222222222".to_owned();
+        let git_runner = Arc::new(Wave10GitRunner {
+            repo_git_dir: repo.join(".git"),
+            card_wt: card_wt.clone(),
+            branch: "proj/1".into(),
+            head_sha: head_sha.clone(),
+            target_head: Mutex::new("1111111111111111111111111111111111111111".into()),
+        });
+        let gh_transport = Arc::new(Wave10GitHub {
+            pr_head: head_sha.clone(),
+            pr_created: AtomicBool::new(false),
+            pr_merged: AtomicBool::new(false),
+            requests: Mutex::new(Vec::new()),
+        });
+        let herdr = Arc::new(Wave10Herdr {
+            calls: Mutex::new(Vec::new()),
+        });
+        let env = ServerRuntimeEnv {
+            clock: Arc::new(FixedClock(AtomicU64::new(1_700_000_500_000))),
+            id_gen: canban_types::DeterministicIdGen::arc(101),
+            herdr_backend: Some(herdr.clone()),
+            github_transport: Some(gh_transport.clone()),
+            exec_runner: git_runner,
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            inline_workers: true,
+            ..Default::default()
+        };
+        let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+        // 1. Live GitHub OAuth device flow fails closed when custom transport is injected.
+        assert!(app.call("github.auth.begin", json!({})).is_err());
+        assert!(app.call("github.auth.refresh", json!({})).is_err());
+
+        // 2. Project + GitHub source + Card with worktree.
+        let project: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({"name": "Wave10", "directory": repo, "target_branch": "main"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "project.github",
+            json!({"project_id": project.id, "repository": "acme/app", "intake": "off"}),
+        )
+        .unwrap();
+        let card: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": "PR Card"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut c: Card = db.get(&card.id)?;
+                c.worktree = Some(card_wt.to_string_lossy().into_owned());
+                c.branch = Some("proj/1".into());
+                c.workspace = Some(WorkspaceBinding {
+                    directory: project.directory.clone(),
+                    path: card_wt.to_string_lossy().into_owned(),
+                    branch: Some("proj/1".into()),
+                    base_commit: Some("1111111111111111111111111111111111111111".into()),
+                    target_branch: Some("main".into()),
+                });
+                db.save(&c)
+            })
+            .unwrap();
+
+        // 3. review.preview -> github.pr.publish -> github.pr.refresh -> github.pr.merge.
+        let preview = app
+            .call("review.preview", json!({"card_id": card.id}))
+            .unwrap();
+        let token = preview["token"].as_str().unwrap().to_owned();
+        let published = app
+            .call(
+                "github.pr.publish",
+                json!({
+                    "card_id": card.id,
+                    "revision": card.revision,
+                    "token": token,
+                    "request_key": "pub-pr-1",
+                }),
+            )
+            .unwrap();
+        assert_eq!(published["state"], "published");
+        assert_eq!(published["number"], 42);
+
+        let refreshed = app
+            .call("github.pr.refresh", json!({"card_id": card.id}))
+            .unwrap();
+        assert_eq!(refreshed["state"], "open");
+        let card_rev = app
+            .snapshot()
+            .unwrap()
+            .cards
+            .into_iter()
+            .find(|c| c.id == card.id)
+            .unwrap()
+            .revision;
+        let merged = app
+            .call(
+                "github.pr.merge",
+                json!({
+                    "card_id": card.id,
+                    "revision": card_rev,
+                    "head": head_sha,
+                    "request_key": "merge-pr-1",
+                }),
+            )
+            .unwrap();
+        assert_eq!(merged["state"], "merged");
+        assert!(
+            !gh_transport.requests.lock().unwrap().is_empty(),
+            "PR lifecycle must route through injected HttpTransport"
+        );
+
+        // 4. Sessions + @mention Question + agent.{open,bind,interrupt,end,reply} via HerdrBackend.
+        let card2: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": "Session Card"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let opened = app
+            .call(
+                "agent.open",
+                json!({"card_id": card2.id, "profile_id": "codex"}),
+            )
+            .unwrap();
+        let tid = opened["terminal_id"].as_str().unwrap().to_owned();
+        app.call(
+            "agent.bind",
+            json!({"terminal_id": tid, "session_id": "sess-123"}),
+        )
+        .unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut entry: TerminalEntry = db.get(&tid)?;
+                let run = entry.agent.as_mut().unwrap();
+                run.state = "running".into();
+                run.core_id = Some("sim-core-1".into());
+                run.terminal = Some("t-sim-1".into());
+                db.save(&entry)
+            })
+            .unwrap();
+        let intr = app
+            .call(
+                "agent.interrupt",
+                json!({"terminal_id": tid, "request_key": "intr-1"}),
+            )
+            .unwrap();
+        assert_eq!(intr["state"], "sent");
+        let ended = app
+            .call(
+                "agent.end",
+                json!({"terminal_id": tid, "request_key": "end-1"}),
+            )
+            .unwrap();
+        assert_eq!(ended["state"], "sent");
+        assert!(
+            herdr
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&"terminal.interrupt".to_owned())
+        );
+        assert!(
+            herdr
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&"terminal.kill".to_owned())
+        );
+
+        app.call(
+            "comment.add",
+            json!({"card_id": card2.id, "body": "Please check", "mentions": ["codex"]}),
+        )
+        .unwrap();
+        let qid = app
+            .snapshot()
+            .unwrap()
+            .questions
+            .into_iter()
+            .find(|q| q.card_id == card2.id && q.profile_id == "codex")
+            .expect("mention should create Question")
+            .id;
+        let reply = app
+            .call(
+                "agent.reply",
+                json!({"question_id": qid, "body": "Checked!", "request_key": "reply-1"}),
+            )
+            .unwrap();
+        assert_eq!(reply["accepted"], true);
+
+        // 5. Drafts + durable events + consumer subscription save/deliveries/ack.
+        let saved_draft = app
+            .call(
+                "draft.save",
+                json!({"id": format!("card:{}", card2.id), "revision": 0, "data": {"body": "wip"}}),
+            )
+            .unwrap();
+        assert_eq!(saved_draft["revision"], 1);
+        assert_eq!(
+            app.call("draft.list", json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let sub = app
+            .call(
+                "subscription.save",
+                json!({
+                    "revision": 0,
+                    "enabled": true,
+                    "selector": {"card_id": card2.id, "types": ["comment.*"]},
+                    "target": {"type": "consumer"},
+                }),
+            )
+            .unwrap();
+        let sub_id = sub["id"].as_str().unwrap().to_owned();
+        app.call(
+            "comment.add",
+            json!({"card_id": card2.id, "body": "Trigger event"}),
+        )
+        .unwrap();
+        let deliveries = app
+            .call(
+                "subscription.deliveries",
+                json!({"subscription_id": sub_id}),
+            )
+            .unwrap();
+        let delivery_id = deliveries[0]["id"].as_str().unwrap().to_owned();
+        let acked = app
+            .call("subscription.ack", json!({"delivery_id": delivery_id}))
+            .unwrap();
+        assert_eq!(acked["state"], "completed");
+        let evs = app
+            .call(
+                "event.list",
+                json!({"after": 0, "limit": 50, "selector": {"card_id": card2.id}}),
+            )
+            .unwrap();
+        assert!(!evs["events"].as_array().unwrap().is_empty());
     }
 }

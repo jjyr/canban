@@ -732,16 +732,18 @@ async fn github_sync_loop(
             if server.stopped() {
                 return None;
             }
-            if let Err(e) = server.github.poll() {
-                eprintln!("Canban GitHub sign-in: {e}");
-            }
-            let auth_state = server.github.status().state;
-            if auth_state != prev_auth_state {
-                if auth_state == "connected" && !prev_auth_state.is_empty() {
-                    server.github_sync_due.store(true, Ordering::SeqCst);
-                    server.emit("github", None);
+            if server.github_transport.is_none() {
+                if let Err(e) = server.github.poll() {
+                    eprintln!("Canban GitHub sign-in: {e}");
                 }
-                prev_auth_state = auth_state;
+                let auth_state = server.github.status().state;
+                if auth_state != prev_auth_state {
+                    if auth_state == "connected" && !prev_auth_state.is_empty() {
+                        server.github_sync_due.store(true, Ordering::SeqCst);
+                        server.emit("github", None);
+                    }
+                    prev_auth_state = auth_state;
+                }
             }
             let now_ms = server.now_ms();
             let mut next_fast_pr_ms =

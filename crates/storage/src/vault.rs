@@ -2,7 +2,7 @@
 //! and TCP transport envelope helpers (`enc:v1:`).
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use canban_types::secret_hint;
+use canban_types::{IdGen, secret_hint};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
@@ -69,6 +69,37 @@ fn encode_hex_key(bytes: &[u8; 32]) -> Zeroizing<String> {
     out
 }
 
+fn generate_master_key(id_gen: Option<&dyn IdGen>) -> Zeroizing<[u8; 32]> {
+    match id_gen {
+        None => Zeroizing::new(XChaCha20Poly1305::generate_key(&mut OsRng).into()),
+        Some(generator) => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"canban-vault-master-key-v1\0");
+            hasher.update(generator.next_uuid().as_bytes());
+            hasher.update(generator.next_uuid().as_bytes());
+            hasher.update(generator.next_uuid().as_bytes());
+            let digest = hasher.finalize();
+            let mut key = Zeroizing::new([0u8; 32]);
+            key.copy_from_slice(&digest);
+            key
+        }
+    }
+}
+
+fn generate_nonce(id_gen: Option<&dyn IdGen>) -> XNonce {
+    match id_gen {
+        None => XChaCha20Poly1305::generate_nonce(&mut OsRng),
+        Some(generator) => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"canban-vault-nonce-v1\0");
+            hasher.update(generator.next_uuid().as_bytes());
+            hasher.update(generator.next_uuid().as_bytes());
+            let digest = hasher.finalize();
+            *XNonce::from_slice(&digest[..XNONCE_LEN])
+        }
+    }
+}
+
 pub fn load_or_create_master_key(home: &Path) -> Result<Zeroizing<[u8; 32]>> {
     load_or_create_master_key_with_sync(home, true)
 }
@@ -79,6 +110,16 @@ pub fn load_or_create_master_key(home: &Path) -> Result<Zeroizing<[u8; 32]>> {
 pub fn load_or_create_master_key_with_sync(
     home: &Path,
     fs_sync: bool,
+) -> Result<Zeroizing<[u8; 32]>> {
+    load_or_create_master_key_with_sync_and_id_gen(home, fs_sync, None)
+}
+
+/// Loads `<home>/vault.key`, or atomically creates a new 256-bit master key using `OsRng`
+/// (`id_gen == None`, production default) or a deterministic derivation from `id_gen` (DST).
+pub fn load_or_create_master_key_with_sync_and_id_gen(
+    home: &Path,
+    fs_sync: bool,
+    id_gen: Option<&dyn IdGen>,
 ) -> Result<Zeroizing<[u8; 32]>> {
     if !home.exists() {
         fs::create_dir_all(home)?;
@@ -99,7 +140,7 @@ pub fn load_or_create_master_key_with_sync(
     }
 
     static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
-    let key = Zeroizing::new(XChaCha20Poly1305::generate_key(&mut OsRng).into());
+    let key = generate_master_key(id_gen);
     let encoded = encode_hex_key(&key);
     let tmp_seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = home.join(format!(".vault-key-{}-{tmp_seq}.tmp", std::process::id()));
@@ -152,9 +193,14 @@ fn entry_aad(namespace: &str, scope: &str, key: &str) -> Vec<u8> {
     format!("canban-vault-v1\0{namespace}\0{scope}\0{key}").into_bytes()
 }
 
-fn encrypt_with_key(key: &[u8; 32], aad: &[u8], plaintext: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+fn encrypt_with_key(
+    key: &[u8; 32],
+    aad: &[u8],
+    plaintext: &str,
+    id_gen: Option<&dyn IdGen>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let cipher = XChaCha20Poly1305::new(key.into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = generate_nonce(id_gen);
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -211,8 +257,27 @@ fn transport_aad(key_name: &str) -> Vec<u8> {
 }
 
 pub fn seal_transport(server_token: &str, key_name: &str, plaintext: &str) -> Result<String> {
+    seal_transport_inner(server_token, key_name, plaintext, None)
+}
+
+/// Deterministic/injected-`IdGen` variant of [`seal_transport`].
+pub fn seal_transport_with_id_gen(
+    server_token: &str,
+    key_name: &str,
+    plaintext: &str,
+    id_gen: &dyn IdGen,
+) -> Result<String> {
+    seal_transport_inner(server_token, key_name, plaintext, Some(id_gen))
+}
+
+fn seal_transport_inner(
+    server_token: &str,
+    key_name: &str,
+    plaintext: &str,
+    id_gen: Option<&dyn IdGen>,
+) -> Result<String> {
     let key = transport_key(server_token)?;
-    let (nonce, ciphertext) = encrypt_with_key(&key, &transport_aad(key_name), plaintext)?;
+    let (nonce, ciphertext) = encrypt_with_key(&key, &transport_aad(key_name), plaintext, id_gen)?;
     let mut combined = Zeroizing::new(Vec::with_capacity(nonce.len() + ciphertext.len()));
     combined.extend_from_slice(&nonce);
     combined.extend_from_slice(&ciphertext);
@@ -269,9 +334,26 @@ pub fn put_with_sync(
     updated_at: u64,
     fs_sync: bool,
 ) -> Result<String> {
-    let master = load_or_create_master_key_with_sync(home, fs_sync)?;
+    put_with_sync_and_id_gen(
+        conn, home, namespace, scope, key, plaintext, updated_at, fs_sync, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn put_with_sync_and_id_gen(
+    conn: &Connection,
+    home: &Path,
+    namespace: &str,
+    scope: &str,
+    key: &str,
+    plaintext: &str,
+    updated_at: u64,
+    fs_sync: bool,
+    id_gen: Option<&dyn IdGen>,
+) -> Result<String> {
+    let master = load_or_create_master_key_with_sync_and_id_gen(home, fs_sync, id_gen)?;
     let aad = entry_aad(namespace, scope, key);
-    let (nonce, ciphertext) = encrypt_with_key(&master, &aad, plaintext)?;
+    let (nonce, ciphertext) = encrypt_with_key(&master, &aad, plaintext, id_gen)?;
     let hint = secret_hint(plaintext);
     conn.execute(
         "INSERT INTO vault_entries(namespace, scope, key, nonce, ciphertext, hint, updated_at) \
@@ -536,6 +618,158 @@ mod tests {
                 .as_deref()
                 .map(String::as_str),
             Some("sim-secret-1234")
+        );
+    }
+
+    #[test]
+    fn deterministic_id_gen_reproduces_vault_master_key_nonces_and_transport_seal() {
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let home_c = tempfile::tempdir().unwrap();
+        let store_a = Store::open(home_a.path()).unwrap();
+        let store_b = Store::open(home_b.path()).unwrap();
+        let store_c = Store::open(home_c.path()).unwrap();
+
+        let g_a = canban_types::DeterministicIdGen::new(2026);
+        let g_b = canban_types::DeterministicIdGen::new(2026);
+        let g_c = canban_types::DeterministicIdGen::new(2027);
+
+        let key_a =
+            load_or_create_master_key_with_sync_and_id_gen(home_a.path(), false, Some(&g_a))
+                .unwrap();
+        let key_b =
+            load_or_create_master_key_with_sync_and_id_gen(home_b.path(), false, Some(&g_b))
+                .unwrap();
+        let key_c =
+            load_or_create_master_key_with_sync_and_id_gen(home_c.path(), false, Some(&g_c))
+                .unwrap();
+        assert_eq!(
+            *key_a, *key_b,
+            "same IdGen seed must derive identical master key"
+        );
+        assert_ne!(
+            *key_a, *key_c,
+            "different IdGen seeds must derive distinct master keys"
+        );
+        assert_eq!(
+            fs::read(key_path(home_a.path())).unwrap(),
+            fs::read(key_path(home_b.path())).unwrap(),
+            "vault.key files must be bit-for-bit identical"
+        );
+
+        put_with_sync_and_id_gen(
+            &store_a.conn,
+            home_a.path(),
+            "env",
+            "global",
+            "SECRET_1",
+            "alpha-value",
+            100,
+            false,
+            Some(&g_a),
+        )
+        .unwrap();
+        put_with_sync_and_id_gen(
+            &store_a.conn,
+            home_a.path(),
+            "env",
+            "global",
+            "SECRET_2",
+            "alpha-value",
+            100,
+            false,
+            Some(&g_a),
+        )
+        .unwrap();
+
+        put_with_sync_and_id_gen(
+            &store_b.conn,
+            home_b.path(),
+            "env",
+            "global",
+            "SECRET_1",
+            "alpha-value",
+            100,
+            false,
+            Some(&g_b),
+        )
+        .unwrap();
+        put_with_sync_and_id_gen(
+            &store_b.conn,
+            home_b.path(),
+            "env",
+            "global",
+            "SECRET_2",
+            "alpha-value",
+            100,
+            false,
+            Some(&g_b),
+        )
+        .unwrap();
+
+        put_with_sync_and_id_gen(
+            &store_c.conn,
+            home_c.path(),
+            "env",
+            "global",
+            "SECRET_1",
+            "alpha-value",
+            100,
+            false,
+            Some(&g_c),
+        )
+        .unwrap();
+
+        let fetch_raw = |conn: &Connection, key: &str| -> (Vec<u8>, Vec<u8>) {
+            conn.query_row(
+                "SELECT nonce, ciphertext FROM vault_entries WHERE namespace='env' AND scope='global' AND key=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+
+        let a1 = fetch_raw(&store_a.conn, "SECRET_1");
+        let a2 = fetch_raw(&store_a.conn, "SECRET_2");
+        let b1 = fetch_raw(&store_b.conn, "SECRET_1");
+        let b2 = fetch_raw(&store_b.conn, "SECRET_2");
+        let c1 = fetch_raw(&store_c.conn, "SECRET_1");
+
+        assert_eq!(a1, b1, "same seed must produce identical nonce+ciphertext");
+        assert_eq!(a2, b2, "same seed must produce identical second entry");
+        assert_ne!(
+            a1.0, a2.0,
+            "consecutive writes must never reuse the same XChaCha20 nonce"
+        );
+        assert_ne!(a1, c1, "different seed must produce different ciphertext");
+        assert_eq!(
+            get(&store_a.conn, home_a.path(), "env", "global", "SECRET_1")
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("alpha-value")
+        );
+        assert_eq!(
+            get(&store_b.conn, home_b.path(), "env", "global", "SECRET_2")
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("alpha-value")
+        );
+
+        let token = "tok-0123456789abcdef0123456789abcdef";
+        let seal_a1 = seal_transport_with_id_gen(token, "MY_SEC", "wire-secret", &g_a).unwrap();
+        let seal_a2 = seal_transport_with_id_gen(token, "MY_SEC", "wire-secret", &g_a).unwrap();
+        let seal_b1 = seal_transport_with_id_gen(token, "MY_SEC", "wire-secret", &g_b).unwrap();
+        assert_eq!(seal_a1, seal_b1);
+        assert_ne!(seal_a1, seal_a2);
+        assert_eq!(
+            open_transport(token, "MY_SEC", &seal_a1).unwrap().as_str(),
+            "wire-secret"
+        );
+        assert_eq!(
+            open_transport(token, "MY_SEC", &seal_a2).unwrap().as_str(),
+            "wire-secret"
         );
     }
 }

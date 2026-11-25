@@ -562,11 +562,16 @@ impl AppServer {
         let now_ts = self.now_ms();
         let config = self.config();
         let fs_sync = self.fs_durability == canban_context::FsDurability::Full;
+        let vault_id_gen = self.vault_id_gen();
         if entries
             .values()
             .any(|e| matches!(e, EnvWriteEntry::Secret { value: Some(_), .. }))
         {
-            let _ = vault::load_or_create_master_key_with_sync(&self.home, fs_sync)?;
+            let _ = vault::load_or_create_master_key_with_sync_and_id_gen(
+                &self.home,
+                fs_sync,
+                vault_id_gen,
+            )?;
         }
         let (target_id, snapshot_key, meta) = self.store.lock().unwrap().write(|db| {
             let (tid, snap_key) = match scope {
@@ -585,8 +590,16 @@ impl AppServer {
                 }
                 _ => unreachable!(),
             };
-            let meta =
-                env_store::apply_env_writes(db.conn, &self.home, scope, &tid, &entries, now_ts)?;
+            let meta = env_store::apply_env_writes_with_options(
+                db.conn,
+                &self.home,
+                scope,
+                &tid,
+                &entries,
+                now_ts,
+                fs_sync,
+                vault_id_gen,
+            )?;
             Ok((tid, snap_key, meta))
         })?;
         if scope != env_store::SCOPE_PROJECT {
@@ -616,14 +629,23 @@ impl AppServer {
             records.push(env_store::GlobalEnvSyncRecord::from_wire(w, tok)?);
         }
         let fs_sync = self.fs_durability == canban_context::FsDurability::Full;
+        let vault_id_gen = self.vault_id_gen();
         if records.iter().any(|r| !r.deleted && r.kind == "secret") {
-            let _ = vault::load_or_create_master_key_with_sync(&self.home, fs_sync)?;
+            let _ = vault::load_or_create_master_key_with_sync_and_id_gen(
+                &self.home,
+                fs_sync,
+                vault_id_gen,
+            )?;
         }
-        let applied = self
-            .store
-            .lock()
-            .unwrap()
-            .write(|db| env_store::apply_synced_global_env(db.conn, &self.home, &records))?;
+        let applied = self.store.lock().unwrap().write(|db| {
+            env_store::apply_synced_global_env_with_options(
+                db.conn,
+                &self.home,
+                &records,
+                fs_sync,
+                vault_id_gen,
+            )
+        })?;
         let meta = {
             let store = self.store.lock().unwrap();
             env_store::list_env_meta(store.db().conn, env_store::SCOPE_GLOBAL, "")?

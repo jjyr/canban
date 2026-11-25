@@ -237,11 +237,19 @@ impl AppServer {
         match method {
             "github.auth.status" => Ok(serde_json::to_value(self.github.status())?),
             "github.auth.begin" => {
+                ensure!(
+                    self.github_transport.is_none(),
+                    "GitHub OAuth device flow is disabled when a custom GitHub transport is configured"
+                );
                 let status = self.github.begin()?;
                 self.github_sync_notify.notify_one();
                 Ok(serde_json::to_value(status)?)
             }
             "github.auth.refresh" => {
+                ensure!(
+                    self.github_transport.is_none(),
+                    "GitHub OAuth refresh is disabled when a custom GitHub transport is configured"
+                );
                 self.github.refresh()?;
                 Ok(serde_json::to_value(self.github.status())?)
             }

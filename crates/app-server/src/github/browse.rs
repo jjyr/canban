@@ -858,10 +858,13 @@ impl AppServer {
                 json!({"state":if e.downcast_ref::<canban_github::HttpError>().is_some_and(|e|(400..500).contains(&e.0)&&e.0!=408){"failed"}else{"unknown"},"message":format!("{e:#}"),"request_key":key})
             }
         };
-        self.store.lock().unwrap().db().conn.execute(
-            "UPDATE operations SET result=?2 WHERE id=?1",
-            params![key, serde_json::to_string(&result)?],
-        )?;
+        self.store.lock().unwrap().write(|db| {
+            db.conn.execute(
+                "UPDATE operations SET result=?2 WHERE id=?1",
+                params![key, serde_json::to_string(&result)?],
+            )?;
+            Ok(())
+        })?;
         if result["state"] == "published" {
             if let Some(item_id) = result["id"].as_u64() {
                 let receipt_kind = if method == "github.remote.review" {
@@ -960,10 +963,13 @@ impl AppServer {
             Ok(_) => json!({"state":"published","request_key":key}),
             Err(e) => json!({"state":"unknown","message":format!("{e:#}"),"request_key":key}),
         };
-        self.store.lock().unwrap().db().conn.execute(
-            "UPDATE operations SET result=?2 WHERE id=?1",
-            params![key, serde_json::to_string(&result)?],
-        )?;
+        self.store.lock().unwrap().write(|db| {
+            db.conn.execute(
+                "UPDATE operations SET result=?2 WHERE id=?1",
+                params![key, serde_json::to_string(&result)?],
+            )?;
+            Ok(())
+        })?;
         if result["state"] == "published" {
             self.github_cli
                 .notification_changed(thread, method.ends_with("done"))?;

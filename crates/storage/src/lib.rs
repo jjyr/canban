@@ -238,18 +238,110 @@ impl Record for Event {
 
 type CommitHook = std::sync::Arc<dyn Fn(u64, &'static str) + Send + Sync>;
 
-/// Options controlling SQLite durability when opening [`Store`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Storage fault class that [`StorageFaultInjector`] can deterministically inject
+/// into [`Store::write_topic`] / [`Store::write`] transactions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageFaultKind {
+    /// Simulates SQLite write-lock contention (`SQLITE_BUSY`) at transaction entry.
+    Busy,
+    /// Simulates a transient disk/WAL I/O error (`SQLITE_IOERR`) before transaction commit,
+    /// cleanly rolling back uncommitted writes.
+    IoError,
+}
+
+impl StorageFaultKind {
+    /// Constructs the corresponding [`rusqlite::Error::SqliteFailure`].
+    pub fn into_rusqlite_error(self) -> rusqlite::Error {
+        match self {
+            Self::Busy => rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("injected SQLITE_BUSY fault".into()),
+            ),
+            Self::IoError => rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                Some("injected SQLITE_IOERR fault".into()),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScheduledStorageFault {
+    skip_writes: usize,
+    kind: StorageFaultKind,
+}
+
+/// Thread-safe, per-[`Store`] deterministic fault injector for storage durability testing.
+///
+/// Uses zero process-global state so concurrent multi-worker DST runs (`--jobs N`) remain
+/// completely isolated. Production builds leave [`StoreOptions::fault_injector`] as `None`.
+#[derive(Debug, Default)]
+pub struct StorageFaultInjector {
+    queue: std::sync::Mutex<std::collections::VecDeque<ScheduledStorageFault>>,
+    triggered: std::sync::atomic::AtomicU64,
+}
+
+impl StorageFaultInjector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Schedule `kind` to trigger on the very next write transaction.
+    pub fn inject_next(&self, kind: StorageFaultKind) {
+        self.inject_after_writes(0, kind);
+    }
+
+    /// Schedule `kind` to trigger after `n` write transactions have proceeded cleanly
+    /// (`n == 0` is equivalent to [`Self::inject_next`]).
+    pub fn inject_after_writes(&self, n: usize, kind: StorageFaultKind) {
+        self.queue.lock().unwrap().push_back(ScheduledStorageFault {
+            skip_writes: n,
+            kind,
+        });
+    }
+
+    /// Remove all pending scheduled faults without resetting [`Self::triggered_count`].
+    pub fn clear(&self) {
+        self.queue.lock().unwrap().clear();
+    }
+
+    /// Total number of faults triggered by this injector instance.
+    pub fn triggered_count(&self) -> u64 {
+        self.triggered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Advance write-entry state by one transaction and return the fault to inject, if any.
+    pub fn take_next_fault(&self) -> Option<StorageFaultKind> {
+        let mut guard = self.queue.lock().unwrap();
+        let front = guard.front_mut()?;
+        if front.skip_writes > 0 {
+            front.skip_writes -= 1;
+            return None;
+        }
+        let fault = guard.pop_front()?;
+        drop(guard);
+        self.triggered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(fault.kind)
+    }
+}
+
+/// Options controlling SQLite durability and fault injection when opening [`Store`].
+#[derive(Clone, Debug, Default)]
 pub struct StoreOptions {
     /// When `true`, uses `PRAGMA synchronous = OFF` while keeping `PRAGMA journal_mode = WAL`.
     /// Intended for ephemeral deterministic simulation testing (DST); production uses `false` (`FULL`).
     pub synchronous_off: bool,
+    /// Optional per-instance fault injector for deterministic `SQLITE_BUSY` / `SQLITE_IOERR` testing.
+    /// Production leaves this `None` for zero overhead.
+    pub fault_injector: Option<std::sync::Arc<StorageFaultInjector>>,
 }
 
 pub struct Store {
     conn: Connection,
     pub home: PathBuf,
     on_commit: Option<CommitHook>,
+    fault_injector: Option<std::sync::Arc<StorageFaultInjector>>,
 }
 #[derive(Clone, Copy)]
 pub struct Db<'a> {
@@ -413,6 +505,7 @@ impl Store {
             conn,
             home: home.to_owned(),
             on_commit: None,
+            fault_injector: options.fault_injector,
         })
     }
     pub fn set_on_commit(&mut self, hook: impl Fn(u64, &'static str) + Send + Sync + 'static) {
@@ -429,11 +522,23 @@ impl Store {
         topic: &'static str,
         f: impl FnOnce(Db<'_>) -> Result<T>,
     ) -> Result<T> {
+        let injected_fault = self
+            .fault_injector
+            .as_deref()
+            .and_then(StorageFaultInjector::take_next_fault);
+        if let Some(StorageFaultKind::Busy) = injected_fault {
+            return Err(StorageFaultKind::Busy.into_rusqlite_error().into());
+        }
         let before = self.conn.total_changes();
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let out = f(Db { conn: &tx })?;
+        let out_res = f(Db { conn: &tx });
+        if let Some(fault) = injected_fault {
+            drop(tx);
+            return Err(fault.into_rusqlite_error().into());
+        }
+        let out = out_res?;
         tx.commit()?;
         let after = self.conn.total_changes();
         if after != before
@@ -1036,6 +1141,7 @@ mod store_options_tests {
             &home,
             StoreOptions {
                 synchronous_off: true,
+                ..Default::default()
             },
             |_, _| {},
         )
@@ -1090,5 +1196,215 @@ mod store_options_tests {
         );
         let loaded: Project = reopened.db().get("proj-sync-off").unwrap();
         assert_eq!(loaded.name, "Sync Off");
+    }
+
+    fn test_project(id: &str, name: &str) -> Project {
+        Project {
+            id: id.into(),
+            name: name.into(),
+            directory: format!("/tmp/{id}"),
+            workflow: Workflow::default(),
+            github: None,
+            github_disconnected: false,
+            detected_github: None,
+            delivery_mode: DeliveryMode::default(),
+            agent_overrides: Default::default(),
+            tags: Vec::new(),
+            target_branch: None,
+            created_at: 1_000,
+        }
+    }
+
+    fn assert_sqlite_healthy(store: &Store) {
+        let integrity: String = store
+            .db()
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            integrity, "ok",
+            "SQLite integrity_check failed: {integrity}"
+        );
+        let mut fk = store.db().conn.prepare("PRAGMA foreign_key_check").unwrap();
+        let violations: Vec<String> = fk
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            violations.is_empty(),
+            "unexpected FK violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn storage_fault_injector_busy_and_ioerror_roll_back_cleanly_and_retry_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let injector = std::sync::Arc::new(StorageFaultInjector::new());
+        let commit_hooks = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let mut store = Store::open_with_progress_and_options(
+            &home,
+            StoreOptions {
+                synchronous_off: true,
+                fault_injector: Some(std::sync::Arc::clone(&injector)),
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        {
+            let hooks = std::sync::Arc::clone(&commit_hooks);
+            store.set_on_commit(move |_, _| {
+                hooks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+
+        // 1. SQLITE_BUSY aborts at transaction entry without committing or firing hooks.
+        injector.inject_next(StorageFaultKind::Busy);
+        let p_busy = test_project("proj-busy", "Busy Project");
+        let err = store.write(|db| db.save(&p_busy)).unwrap_err();
+        let sql_err = err
+            .downcast_ref::<rusqlite::Error>()
+            .expect("must return rusqlite::Error");
+        assert!(
+            matches!(
+                sql_err,
+                rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::DatabaseBusy
+            ),
+            "expected SQLITE_BUSY, got {sql_err:?}"
+        );
+        assert_eq!(injector.triggered_count(), 1);
+        assert_eq!(commit_hooks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(store.db().get::<Project>("proj-busy").is_err());
+        assert_sqlite_healthy(&store);
+
+        // Retry succeeds immediately.
+        store.write(|db| db.save(&p_busy)).unwrap();
+        assert_eq!(commit_hooks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            store.db().get::<Project>("proj-busy").unwrap().name,
+            "Busy Project"
+        );
+
+        // 2. SQLITE_IOERR runs closure writes inside BEGIN IMMEDIATE, then rolls back before commit.
+        injector.inject_next(StorageFaultKind::IoError);
+        let p_io = test_project("proj-io", "IO Project");
+        let err = store
+            .write(|db| {
+                db.save(&p_io)?;
+                let n = db.counter("cards:proj-io")?;
+                assert_eq!(n, 1);
+                Ok(())
+            })
+            .unwrap_err();
+        let sql_err = err
+            .downcast_ref::<rusqlite::Error>()
+            .expect("must return rusqlite::Error");
+        assert!(
+            matches!(
+                sql_err,
+                rusqlite::Error::SqliteFailure(e, _)
+                    if e.code == rusqlite::ErrorCode::SystemIoFailure
+                        && e.extended_code == rusqlite::ffi::SQLITE_IOERR
+            ),
+            "expected SQLITE_IOERR, got {sql_err:?}"
+        );
+        assert_eq!(injector.triggered_count(), 2);
+        assert_eq!(
+            commit_hooks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "rolled-back transaction must not fire on_commit hook"
+        );
+        assert!(
+            store.db().get::<Project>("proj-io").is_err(),
+            "uncommitted project row must be rolled back"
+        );
+        let counter_exists: bool = store
+            .db()
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM counters WHERE id='cards:proj-io')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !counter_exists,
+            "uncommitted counter row must be rolled back"
+        );
+        assert_sqlite_healthy(&store);
+
+        // Retry succeeds cleanly and persists across reopen.
+        store
+            .write(|db| {
+                db.save(&p_io)?;
+                let n = db.counter("cards:proj-io")?;
+                assert_eq!(n, 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(commit_hooks.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            store.db().get::<Project>("proj-io").unwrap().name,
+            "IO Project"
+        );
+
+        // 3. inject_after_writes(2, ...) lets 2 writes pass, faults the 3rd, and clear() cancels queued faults.
+        injector.inject_after_writes(2, StorageFaultKind::IoError);
+        injector.inject_next(StorageFaultKind::Busy);
+        store
+            .write(|db| db.save(&test_project("proj-ok-1", "OK 1")))
+            .unwrap();
+        store
+            .write(|db| db.save(&test_project("proj-ok-2", "OK 2")))
+            .unwrap();
+        assert!(
+            store
+                .write(|db| db.save(&test_project("proj-fail-3", "Fail 3")))
+                .is_err()
+        );
+        assert_eq!(injector.triggered_count(), 3);
+        assert!(store.db().get::<Project>("proj-fail-3").is_err());
+
+        injector.clear();
+        store
+            .write(|db| db.save(&test_project("proj-after-clear", "After Clear")))
+            .unwrap();
+        assert_eq!(injector.triggered_count(), 3);
+
+        // 4. Per-instance isolation: another Store with its own injector is unaffected.
+        let other_home = dir.path().join("other-home");
+        let other_injector = std::sync::Arc::new(StorageFaultInjector::new());
+        let mut other_store = Store::open_with_progress_and_options(
+            &other_home,
+            StoreOptions {
+                synchronous_off: true,
+                fault_injector: Some(other_injector.clone()),
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        injector.inject_next(StorageFaultKind::Busy);
+        other_store
+            .write(|db| db.save(&test_project("proj-other", "Other")))
+            .unwrap();
+        assert_eq!(other_injector.triggered_count(), 0);
+
+        drop(store);
+        let reopened = Store::open(&home).unwrap();
+        assert_sqlite_healthy(&reopened);
+        assert_eq!(
+            reopened.db().get::<Project>("proj-io").unwrap().name,
+            "IO Project"
+        );
+        assert_eq!(
+            reopened
+                .db()
+                .get::<Project>("proj-after-clear")
+                .unwrap()
+                .name,
+            "After Clear"
+        );
     }
 }

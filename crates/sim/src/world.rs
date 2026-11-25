@@ -673,6 +673,7 @@ impl SimWorld {
                         tailscale_verifier,
                         desktop_api_override,
                         script_execution_mode: h_script_mode,
+                        storage_faults: None,
                     };
                     let server = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env)
                         .map_err(|e| format!("open_with_env({host_label}): {e:#}"))?;

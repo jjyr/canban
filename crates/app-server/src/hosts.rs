@@ -262,11 +262,22 @@ impl canban_client::LocalHostDriver for DesktopLocalHost {
 /// Desktop [`canban_client::GlobalEnvSyncProvider`] backed by `canban_storage::env`.
 pub struct DesktopGlobalEnvProvider {
     local_home: PathBuf,
+    id_gen: Option<Arc<dyn canban_types::IdGen>>,
 }
 
 impl DesktopGlobalEnvProvider {
     pub fn new(local_home: PathBuf) -> Self {
-        Self { local_home }
+        Self {
+            local_home,
+            id_gen: None,
+        }
+    }
+
+    /// Inject a deterministic [`canban_types::IdGen`] for sealing synced secrets in DST.
+    /// Production leaves this unset (`OsRng`).
+    pub fn with_id_gen(mut self, id_gen: Arc<dyn canban_types::IdGen>) -> Self {
+        self.id_gen = Some(id_gen);
+        self
     }
 }
 
@@ -284,7 +295,7 @@ impl canban_client::GlobalEnvSyncProvider for DesktopGlobalEnvProvider {
             )?;
         let mut wire = Vec::with_capacity(records.len());
         for record in records {
-            wire.push(record.to_wire(tcp_token)?);
+            wire.push(record.to_wire_with_id_gen(tcp_token, self.id_gen.as_deref())?);
         }
         Ok((json!({ "records": wire }), fp))
     }

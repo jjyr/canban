@@ -10,7 +10,7 @@ use canban_context::{
     read_project_bundle, read_project_bundle_manifest, validate_relative_bundle_path,
 };
 use canban_herdr::host::Host;
-use canban_storage::env::{SCOPE_PROJECT, apply_env_writes};
+use canban_storage::env::SCOPE_PROJECT;
 use canban_types::WorkflowStep;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1323,7 +1323,16 @@ impl AppServer {
                     }
                 }
                 if !writes.is_empty() {
-                    apply_env_writes(db.conn, &self.home, SCOPE_PROJECT, &pid, &writes, now_ms)?;
+                    canban_storage::env::apply_env_writes_with_options(
+                        db.conn,
+                        &self.home,
+                        SCOPE_PROJECT,
+                        &pid,
+                        &writes,
+                        now_ms,
+                        self.fs_durability == canban_context::FsDurability::Full,
+                        self.vault_id_gen(),
+                    )?;
                 }
             }
 
