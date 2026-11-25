@@ -32,6 +32,135 @@ struct SshTunnel {
     child: Child,
 }
 
+/// Desktop [`canban_client::HostConnector`] supporting SSH-forwarded Unix sockets with RAII
+/// [`canban_client::ConnectionLease`] subprocess cleanup.
+pub struct DesktopSshConnector {
+    tunnels_dir: PathBuf,
+}
+
+impl DesktopSshConnector {
+    pub fn new(local_home: &Path) -> Self {
+        Self {
+            tunnels_dir: HostRegistry::tunnels_dir(local_home),
+        }
+    }
+}
+
+impl canban_client::HostConnector for DesktopSshConnector {
+    fn supports(&self, transport: &HostTransport) -> bool {
+        matches!(transport, HostTransport::Ssh { .. })
+    }
+
+    fn connect<'a>(
+        &'a self,
+        host_id: &'a str,
+        transport: &'a HostTransport,
+        _device_name: &'a str,
+    ) -> canban_client::ConnectFuture<'a> {
+        let tunnels_dir = self.tunnels_dir.clone();
+        let host_id = host_id.to_owned();
+        let transport = transport.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let HostTransport::Ssh {
+                    target,
+                    remote_home,
+                } = transport
+                else {
+                    bail!("DesktopSshConnector only supports SSH hosts");
+                };
+                let tun =
+                    SshTunnel::start(&tunnels_dir, &host_id, &target, remote_home.as_deref())?;
+                let client = Arc::new(canban_transport::ClientTransport::connect_direct(
+                    ClientEndpoint::Unix(tun.socket_path.clone()),
+                )?);
+                Ok(canban_client::ConnectedTransport::with_lease(
+                    client,
+                    canban_client::ConnectionLease::from_guard(Mutex::new(tun)),
+                ))
+            })
+            .await?
+        })
+    }
+}
+
+/// Desktop [`canban_client::LocalDiscoveryProvider`] delegating to local Tailscale & `~/.ssh/config` probing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DesktopDiscoveryProvider;
+
+impl canban_client::LocalDiscoveryProvider for DesktopDiscoveryProvider {
+    fn discover_local(&self) -> canban_types::DiscoveryCatalog {
+        network::discover_all()
+    }
+}
+
+/// Desktop [`canban_client::SshCapabilityProvider`] implementing Tailscale WhoIs + SSH auto-pairing and bootstrap.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DesktopSshProvider;
+
+impl canban_client::SshCapabilityProvider for DesktopSshProvider {
+    fn connect_tailscale_peer_or_ssh(
+        &self,
+        peer_ip: &str,
+        ssh_target: &str,
+        port: u16,
+    ) -> canban_client::TailscalePeerConnectResult {
+        let direct_addr = format!("{peer_ip}:{port}");
+        let probe = network::probe_tcp_reachable(&direct_addr, Duration::from_secs(2));
+        let mut tailscale_auth_error: Option<String> = None;
+        let pair_res = if probe.is_ok() {
+            match AppClient::connect_tcp(
+                direct_addr.clone(),
+                canban_types::TAILSCALE_AUTH_SENTINEL.into(),
+            ) {
+                Ok(client) => {
+                    let sid = client.server_id().map(str::to_owned);
+                    drop(client);
+                    Ok(json!({
+                        "addr": direct_addr,
+                        "token": canban_types::TAILSCALE_AUTH_SENTINEL,
+                        "server_id": sid,
+                        "via": "tailscale_whois",
+                    }))
+                }
+                Err(ts_err) => {
+                    tailscale_auth_error = Some(format!("{ts_err:#}"));
+                    network::pair_via_ssh_noninteractive(ssh_target, true, port)
+                }
+            }
+        } else {
+            network::pair_via_ssh_noninteractive(ssh_target, true, port)
+        };
+        canban_client::TailscalePeerConnectResult {
+            tcp_reachable: probe.is_ok(),
+            tailscale_auth_error,
+            paired: pair_res.map_err(|e| format!("{e:#}")),
+        }
+    }
+
+    fn pair_via_ssh(&self, ssh_target: &str, prefer_tailscale: bool, port: u16) -> Result<Value> {
+        network::pair_via_ssh_noninteractive(ssh_target, prefer_tailscale, port)
+    }
+
+    fn build_ssh_bootstrap_command(
+        &self,
+        ssh_target: &str,
+        repo: &str,
+        prefer_tailscale: bool,
+        port: u16,
+    ) -> String {
+        network::build_ssh_bootstrap_command(ssh_target, repo, prefer_tailscale, port)
+    }
+}
+
+/// Builds the desktop [`canban_client::CompositeConnector`] (TCP + SSH tunnels).
+pub fn desktop_connector(local_home: &Path) -> Arc<dyn canban_client::HostConnector> {
+    Arc::new(
+        canban_client::CompositeConnector::with_default_tcp()
+            .push(Arc::new(DesktopSshConnector::new(local_home))),
+    )
+}
+
 impl SshTunnel {
     fn start(
         tunnels_dir: &Path,

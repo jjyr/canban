@@ -523,6 +523,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "canban-client",
  "canban-context",
  "canban-exec",
  "canban-github",
@@ -560,6 +561,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "canban-app-server",
+ "canban-client",
  "canban-context",
  "canban-storage",
  "canban-types",

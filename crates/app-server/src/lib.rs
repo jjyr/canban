@@ -1416,46 +1416,8 @@ pub fn default_home() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".canban"))
 }
 pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
-    let raw = endpoint.to_string_lossy();
-    if let Some((addr, token)) = canban_types::parse_pairing_uri(&raw) {
-        return client::rpc_tcp(&addr, Some(&token), method, params);
-    }
-    if let Some(addr) = raw.strip_prefix("tcp://") {
-        let token = std::env::var("CANBAN_TOKEN").ok();
-        return client::rpc_tcp(
-            &canban_types::normalize_daemon_addr(addr),
-            token.as_deref(),
-            method,
-            params,
-        );
-    }
-    let mut stream = UnixStream::connect(endpoint)
-        .with_context(|| format!("Canban is not running at {}", endpoint.display()))?;
-    stream.set_read_timeout(Some(client::rpc_read_timeout(method)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(90)))?;
-    canban_transport::write_json_line(
-        &mut stream,
-        &json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}),
-    )?;
-    let mut line = String::new();
-    let n = BufReader::new(stream).read_line(&mut line)?;
-    if n == 0 || !line.ends_with('\n') {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "AppServer closed RPC socket",
-        )
-        .into());
-    }
-    let reply: Value = serde_json::from_str(&line)?;
-    ensure!(
-        reply.get("error").is_none(),
-        "{}",
-        reply["error"]["message"]
-    );
-    reply
-        .get("result")
-        .cloned()
-        .context("Invalid Canban response")
+    let _rpc = canban_profiler::Span::new("rpc.request");
+    canban_client::rpc_once(endpoint, method, params)
 }
 
 #[cfg(test)]

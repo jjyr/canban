@@ -18,6 +18,7 @@ serde_json.workspace = true
 canban-types.workspace = true
 canban-context.workspace = true
 canban-storage.workspace = true
+canban-client.workspace = true
 canban-app-server.workspace = true
 
 [[bin]]

@@ -196,6 +196,21 @@ pub trait UiBackend: Send + Sync + 'static {
         anyhow::bail!("Global environment sync is not supported by this backend")
     }
 
+    /// Returns runtime capabilities supported by this backend (local daemon, SSH, local discovery, updater).
+    fn capabilities(&self) -> canban_client::ClientCapabilities {
+        canban_client::ClientCapabilities::mobile()
+    }
+
+    /// Optional local discovery provider (`tailscale status` + `~/.ssh/config`) when supported.
+    fn discovery_provider(&self) -> Option<Arc<dyn canban_client::LocalDiscoveryProvider>> {
+        None
+    }
+
+    /// Optional SSH pairing/bootstrap capability provider when supported.
+    fn ssh_provider(&self) -> Option<Arc<dyn canban_client::SshCapabilityProvider>> {
+        None
+    }
+
     /// Notifies a pure-remote client that the mobile/desktop app returned to foreground.
     fn on_foreground(&self) {}
 
@@ -357,6 +372,31 @@ pub fn on_foreground() {
 
 pub fn remote_client() -> Option<Arc<canban_client::RemoteClient>> {
     BACKEND.get().and_then(|b| b.remote_client())
+}
+
+/// Runtime capabilities of the active [`UiBackend`] (falls back to compile-time defaults in Gallery preview).
+pub fn capabilities() -> canban_client::ClientCapabilities {
+    if let Some(backend) = BACKEND.get() {
+        return backend.capabilities();
+    }
+    #[cfg(feature = "local-host")]
+    {
+        canban_client::ClientCapabilities::desktop()
+    }
+    #[cfg(not(feature = "local-host"))]
+    {
+        canban_client::ClientCapabilities::mobile()
+    }
+}
+
+/// Optional local host discovery provider (`tailscale status` + `~/.ssh/config`) from the active backend.
+pub fn discovery_provider() -> Option<Arc<dyn canban_client::LocalDiscoveryProvider>> {
+    BACKEND.get().and_then(|b| b.discovery_provider())
+}
+
+/// Optional SSH pairing & bootstrap provider from the active backend.
+pub fn ssh_provider() -> Option<Arc<dyn canban_client::SshCapabilityProvider>> {
+    BACKEND.get().and_then(|b| b.ssh_provider())
 }
 
 /// Desktop API version used for compatibility displays and fixture metadata.
@@ -763,6 +803,18 @@ impl UiBackend for LocalBackend {
         hosts.sync_global_env_now();
         Ok(())
     }
+
+    fn capabilities(&self) -> canban_client::ClientCapabilities {
+        canban_client::ClientCapabilities::desktop()
+    }
+
+    fn discovery_provider(&self) -> Option<Arc<dyn canban_client::LocalDiscoveryProvider>> {
+        Some(Arc::new(canban_app_server::hosts::DesktopDiscoveryProvider))
+    }
+
+    fn ssh_provider(&self) -> Option<Arc<dyn canban_client::SshCapabilityProvider>> {
+        Some(Arc::new(canban_app_server::hosts::DesktopSshProvider))
+    }
 }
 
 /// Pure-remote [`UiBackend`] backed by [`canban_client::RemoteClient`] (works without
@@ -894,6 +946,10 @@ impl UiBackend for RemoteBackend {
 
     fn sync_action(&self, host_id: &str, mutation_id: &str, action: SyncAction) -> Result<()> {
         self.client.sync_action(host_id, mutation_id, action)
+    }
+
+    fn capabilities(&self) -> canban_client::ClientCapabilities {
+        self.client.capabilities()
     }
 
     fn on_foreground(&self) {

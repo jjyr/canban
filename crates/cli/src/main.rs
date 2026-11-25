@@ -904,7 +904,7 @@ fn run() -> Result<()> {
         match command {
             WorkflowCmd::Sources { project_id, global } => {
                 let scope_id = workflow_scope_id(project_id, *global)?;
-                let collection = canban_app_server::rpc(
+                let collection = canban_client::rpc_once(
                     &endpoint,
                     "workflow.sources",
                     json!({"project_id": scope_id}),
@@ -920,7 +920,7 @@ fn run() -> Result<()> {
                 check,
             } => {
                 let scope_id = workflow_scope_id(project_id, *global)?;
-                let collection = canban_app_server::rpc(
+                let collection = canban_client::rpc_once(
                     &endpoint,
                     "workflow.sources",
                     json!({"project_id": scope_id}),
@@ -942,7 +942,7 @@ fn run() -> Result<()> {
                     .map(|s| json!({"filename":s["filename"],"source":s["source"]}))
                     .collect::<Vec<_>>();
                 sources.push(json!({"filename":name,"source":raw}));
-                let value = canban_app_server::rpc(
+                let value = canban_client::rpc_once(
                     &endpoint,
                     if *check {
                         "workflow.check"
@@ -961,7 +961,7 @@ fn run() -> Result<()> {
             } => {
                 use std::io::Write;
                 let scope_id = workflow_scope_id(project_id, *global)?;
-                let collection = canban_app_server::rpc(
+                let collection = canban_client::rpc_once(
                     &endpoint,
                     "workflow.sources",
                     json!({"project_id": scope_id}),
@@ -992,7 +992,7 @@ fn run() -> Result<()> {
                 );
             }
             WorkflowCmd::SetDefault { project_id } => {
-                let value = canban_app_server::rpc(
+                let value = canban_client::rpc_once(
                     &endpoint,
                     "workflow.default.set",
                     json!({"project_id": project_id, "request_key": canban_types::id()}),
@@ -1000,7 +1000,7 @@ fn run() -> Result<()> {
                 println!("{}", output.encode(&value)?);
             }
             WorkflowCmd::ResetDefault => {
-                let value = canban_app_server::rpc(
+                let value = canban_client::rpc_once(
                     &endpoint,
                     "workflow.default.reset",
                     json!({"request_key": canban_types::id()}),
@@ -1443,7 +1443,7 @@ fn run() -> Result<()> {
                     "dry_run": dry_run,
                 });
                 output.params("worktree.gc", &mut params)?;
-                let value = canban_app_server::rpc(&endpoint, "worktree.gc", params)?;
+                let value = canban_client::rpc_once(&endpoint, "worktree.gc", params)?;
                 let dirty = value["dirty"].as_array().cloned().unwrap_or_default();
                 if let Some(env_key) = env_dirty
                     .as_deref()
@@ -1696,7 +1696,7 @@ fn run() -> Result<()> {
         println!("{}", json!({"queued":true,"request_key":p["request_key"]}));
         return Ok(());
     }
-    let result = match canban_app_server::rpc(&endpoint, &method, p.clone()) {
+    let result = match canban_client::rpc_once(&endpoint, &method, p.clone()) {
         Ok(result) => {
             if let Some(path) = queued {
                 let _ = std::fs::remove_file(path);

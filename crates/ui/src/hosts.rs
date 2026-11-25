@@ -137,24 +137,20 @@ pub fn close_overlays(ui: Ui) {
 }
 
 pub fn refresh_discovery(ui: Ui) {
-    #[cfg(feature = "local-host")]
-    {
-        if ui.discovery_loading.get_untracked() || !crate::backend::is_connected() {
-            return;
+    if ui.discovery_loading.get_untracked() || !crate::backend::is_connected() {
+        return;
+    }
+    let Some(provider) = crate::backend::discovery_provider() else {
+        return;
+    };
+    ui.discovery_loading.set(true);
+    ui.spawn(async move {
+        let res = blocking(move || provider.discover_local()).await;
+        let _ = ui.discovery_loading.try_set(false);
+        if let Ok(cat) = res {
+            let _ = ui.discovery.try_set(cat);
         }
-        ui.discovery_loading.set(true);
-        ui.spawn(async move {
-            let res = blocking(canban_app_server::network::discover_all).await;
-            let _ = ui.discovery_loading.try_set(false);
-            if let Ok(cat) = res {
-                let _ = ui.discovery.try_set(cat);
-            }
-        });
-    }
-    #[cfg(not(feature = "local-host"))]
-    {
-        let _ = ui;
-    }
+    });
 }
 
 pub fn reconnect_host(ui: Ui, host_id: Option<String>) {
@@ -350,42 +346,34 @@ pub fn open_host_settings(ui: Ui, host_id: String, section: &'static str) {
 }
 
 fn spawn_ssh_bootstrap_terminal(ui: Ui, ssh_target: &str, prefer_tailscale: bool, port: u16) {
-    #[cfg(feature = "local-host")]
-    {
-        let repo = std::env::var("CANBAN_UPDATE_REPOSITORY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "jjyr/canban".into());
-        let script = canban_app_server::network::build_ssh_bootstrap_command(
-            ssh_target,
-            &repo,
-            prefer_tailscale,
-            port,
-        );
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let title = ui
-            .snapshot
-            .with_untracked(|s| s.next_unique_terminal_title("Add machine"));
-        close_overlays(ui);
-        crate::terminals::launch_custom(
-            ui,
-            json!({
-                "host_id": "local",
-                "name": title,
-                "setup_argv": [shell, "-lc", script],
-            }),
-        );
-        ui.notify(format!(
-            "Opened interactive setup terminal for {}",
-            ssh_target.trim()
-        ));
-    }
-    #[cfg(not(feature = "local-host"))]
-    {
-        let _ = (ssh_target, prefer_tailscale, port);
+    let Some(ssh_provider) = crate::backend::ssh_provider() else {
         ui.operation_error
-            .set("SSH bootstrap requires the local-host feature".into());
-    }
+            .set("SSH bootstrap is not supported by the active client backend".into());
+        return;
+    };
+    let repo = std::env::var("CANBAN_UPDATE_REPOSITORY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "jjyr/canban".into());
+    let script =
+        ssh_provider.build_ssh_bootstrap_command(ssh_target, &repo, prefer_tailscale, port);
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let title = ui
+        .snapshot
+        .with_untracked(|s| s.next_unique_terminal_title("Add machine"));
+    close_overlays(ui);
+    crate::terminals::launch_custom(
+        ui,
+        json!({
+            "host_id": "local",
+            "name": title,
+            "setup_argv": [shell, "-lc", script],
+        }),
+    );
+    ui.notify(format!(
+        "Opened interactive setup terminal for {}",
+        ssh_target.trim()
+    ));
 }
 
 pub(crate) fn status_tone(summary: &HostSummary) -> Tone {
@@ -1342,7 +1330,13 @@ fn finish_host_registration(
 
 /// Modal wizard for discovering, bootstrapping, and pairing a remote `canband` (`popup == "connect-host"`).
 pub fn connect_modal(ui: Ui) -> impl IntoElement {
-    let active_tab = signal("tailscale".to_owned());
+    let caps = crate::backend::capabilities();
+    let initial_tab = if caps.local_tailscale_discovery {
+        "tailscale"
+    } else {
+        "uri"
+    };
+    let active_tab = signal(initial_tab.to_owned());
     let busy = signal(false);
     let feedback = signal(String::new());
     let feedback_tone = signal(Tone::Neutral);
@@ -1435,9 +1429,10 @@ pub fn connect_modal(ui: Ui) -> impl IntoElement {
                                 .items_center()
                                 .justify_between()
                                 .gap_2()
-                                .child(
-                                    segmented()
-                                        .child(compact_segment(
+                                .child({
+                                    let mut tabs = segmented();
+                                    if caps.local_tailscale_discovery {
+                                        tabs = tabs.child(compact_segment(
                                             "Tailscale",
                                             Some(Icon::Server),
                                             move || active_tab.get() == "tailscale",
@@ -1445,8 +1440,10 @@ pub fn connect_modal(ui: Ui) -> impl IntoElement {
                                                 feedback.set(String::new());
                                                 active_tab.set("tailscale".into());
                                             },
-                                        ))
-                                        .child(compact_segment(
+                                        ));
+                                    }
+                                    if caps.ssh {
+                                        tabs = tabs.child(compact_segment(
                                             "SSH Host",
                                             Some(Icon::Terminal),
                                             move || active_tab.get() == "ssh",
@@ -1454,28 +1451,31 @@ pub fn connect_modal(ui: Ui) -> impl IntoElement {
                                                 feedback.set(String::new());
                                                 active_tab.set("ssh".into());
                                             },
-                                        ))
-                                        .child(compact_segment(
-                                            "Address / URI",
-                                            Some(Icon::Copy),
-                                            move || active_tab.get() == "uri",
-                                            move |_| {
-                                                feedback.set(String::new());
-                                                active_tab.set("uri".into());
-                                            },
-                                        )),
-                                )
-                                .child(compact_action(
-                                    move || {
-                                        if ui.discovery_loading.get() {
-                                            "Scanning…".to_owned()
-                                        } else {
-                                            "Refresh".to_owned()
-                                        }
-                                    },
-                                    Variant::Quiet,
-                                    move |_| refresh_discovery(ui),
-                                )),
+                                        ));
+                                    }
+                                    tabs.child(compact_segment(
+                                        "Address / URI",
+                                        Some(Icon::Copy),
+                                        move || active_tab.get() == "uri",
+                                        move |_| {
+                                            feedback.set(String::new());
+                                            active_tab.set("uri".into());
+                                        },
+                                    ))
+                                })
+                                .children(caps.local_tailscale_discovery.then(|| {
+                                    compact_action(
+                                        move || {
+                                            if ui.discovery_loading.get() {
+                                                "Scanning…".to_owned()
+                                            } else {
+                                                "Refresh".to_owned()
+                                            }
+                                        },
+                                        Variant::Quiet,
+                                        move |_| refresh_discovery(ui),
+                                    )
+                                })),
                         )
                         .child(
                             scroll()
@@ -1661,66 +1661,28 @@ fn connect_tailscale_tab(
                             ui.spawn(async move {
                                 let ip_c = peer_ip.clone();
                                 let ssh_c = ssh_spec.clone();
+                                let ssh_provider = crate::backend::ssh_provider();
                                 let res = blocking(move || {
-                                    #[cfg(feature = "local-host")]
-                                    {
-                                        let direct_addr = format!("{ip_c}:{DEFAULT_DAEMON_PORT}");
-                                        let probe = canban_app_server::network::probe_tcp_reachable(
-                                            &direct_addr,
-                                            Duration::from_secs(2),
-                                        );
-                                        let mut ts_auth_err: Option<String> = None;
-                                        let pair_res = if probe.is_ok() {
-                                            match canban_app_server::AppClient::connect_tcp(
-                                                direct_addr.clone(),
-                                                TAILSCALE_AUTH_SENTINEL.into(),
-                                            ) {
-                                                Ok(client) => {
-                                                    let sid = client.server_id().map(str::to_owned);
-                                                    drop(client);
-                                                    Ok(json!({
-                                                        "addr": direct_addr,
-                                                        "token": TAILSCALE_AUTH_SENTINEL,
-                                                        "server_id": sid,
-                                                        "via": "tailscale_whois",
-                                                    }))
-                                                }
-                                                Err(ts_err) => {
-                                                    ts_auth_err = Some(format!("{ts_err:#}"));
-                                                    canban_app_server::network::pair_via_ssh_noninteractive(
-                                                        &ssh_c,
-                                                        true,
-                                                        DEFAULT_DAEMON_PORT,
-                                                    )
-                                                }
-                                            }
-                                        } else {
-                                            canban_app_server::network::pair_via_ssh_noninteractive(
-                                                &ssh_c,
-                                                true,
-                                                DEFAULT_DAEMON_PORT,
-                                            )
-                                        };
-                                        (probe, ts_auth_err, pair_res)
-                                    }
-                                    #[cfg(not(feature = "local-host"))]
-                                    {
-                                        let _ = (ip_c, ssh_c);
-                                        (
-                                            Err::<u64, anyhow::Error>(anyhow::anyhow!(
-                                                "Host probing requires the local-host feature"
-                                            )),
-                                            None::<String>,
-                                            Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
-                                                "SSH pairing requires the local-host feature"
-                                            )),
+                                    if let Some(provider) = ssh_provider {
+                                        provider.connect_tailscale_peer_or_ssh(
+                                            &ip_c,
+                                            &ssh_c,
+                                            DEFAULT_DAEMON_PORT,
                                         )
+                                    } else {
+                                        canban_client::TailscalePeerConnectResult {
+                                            tcp_reachable: false,
+                                            tailscale_auth_error: None,
+                                            paired: Err(
+                                                "Local host probing and SSH pairing are not supported by the active client backend".into(),
+                                            ),
+                                        }
                                     }
                                 })
                                 .await;
                                 let _ = busy.try_set(false);
-                                if let Ok((probe_res, ts_auth_err, pair_res)) = res {
-                                    match pair_res {
+                                if let Ok(outcome) = res {
+                                    match outcome.paired {
                                         Ok(paired) => {
                                             let token = paired["token"]
                                                 .as_str()
@@ -1753,11 +1715,12 @@ fn connect_tailscale_tab(
                                                 feedback_tone,
                                             );
                                         }
-                                        Err(pair_err) => {
-                                            let msg = format!("{pair_err:#}");
-                                            if probe_res.is_ok() {
+                                        Err(msg) => {
+                                            if outcome.tcp_reachable {
                                                 let _ = feedback_tone.try_set(Tone::Attention);
-                                                let detail = if let Some(ts_msg) = ts_auth_err {
+                                                let detail = if let Some(ts_msg) =
+                                                    outcome.tailscale_auth_error
+                                                {
                                                     format!(
                                                         "Tailscale direct auth failed ({ts_msg}); SSH auto-pair fallback also failed ({msg})."
                                                     )
@@ -2031,20 +1994,13 @@ fn connect_ssh_tab(
                     feedback.set(format!("Connecting to {target} over SSH…"));
                     ui.spawn(async move {
                         let t_clone = target.clone();
+                        let ssh_provider = crate::backend::ssh_provider();
                         let pair_res = blocking(move || {
-                            #[cfg(feature = "local-host")]
-                            {
-                                canban_app_server::network::pair_via_ssh_noninteractive(
-                                    &t_clone,
-                                    prefer_ts,
-                                    DEFAULT_DAEMON_PORT,
-                                )
-                            }
-                            #[cfg(not(feature = "local-host"))]
-                            {
-                                let _ = (t_clone, prefer_ts);
-                                Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
-                                    "SSH pairing requires the local-host feature"
+                            if let Some(provider) = ssh_provider {
+                                provider.pair_via_ssh(&t_clone, prefer_ts, DEFAULT_DAEMON_PORT)
+                            } else {
+                                Err(anyhow::anyhow!(
+                                    "SSH pairing is not supported by the active client backend"
                                 ))
                             }
                         })

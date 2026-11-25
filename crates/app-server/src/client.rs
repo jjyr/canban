@@ -1,8 +1,8 @@
 //! UI-side access to authoritative Canban services over local Unix sockets,
 //! authenticated Tailscale/TCP sockets, or SSH-forwarded Unix sockets.
 use super::*;
+pub(crate) use canban_client::push::{PushFrame, change_topic, open_async_subscribe};
 pub use canban_transport::ClientEndpoint;
-pub(crate) use canban_transport::rpc_read_timeout;
 
 pub(crate) fn rpc_endpoint(
     endpoint: &ClientEndpoint,
@@ -13,20 +13,15 @@ pub(crate) fn rpc_endpoint(
     canban_transport::rpc_once(endpoint, method, &params)
 }
 
+#[cfg(test)]
 pub(crate) fn rpc_tcp(
     addr: &str,
     token: Option<&str>,
     method: &str,
     params: Value,
 ) -> Result<Value> {
-    rpc_endpoint(
-        &ClientEndpoint::Tcp {
-            addr: addr.to_owned(),
-            token: token.unwrap_or_default().to_owned(),
-        },
-        method,
-        params,
-    )
+    let _rpc = canban_profiler::Span::new("rpc.request");
+    canban_client::rpc_tcp_once(addr, token, method, params)
 }
 
 pub struct AppClient {
@@ -205,14 +200,12 @@ impl AppClient {
             .flatten();
         if let Some(raw_os) = &explicit {
             let raw_str = raw_os.to_string_lossy();
-            if let Some((addr, token)) = canban_types::parse_pairing_uri(&raw_str) {
+            let env_token = std::env::var("CANBAN_TOKEN").ok();
+            if let ClientEndpoint::Tcp { addr, token } =
+                canban_client::parse_endpoint(&raw_str, env_token.as_deref())
+            {
                 emit("connect", "REMOTE", format!("Connecting to {addr}…"));
                 return Self::connect_tcp(addr, token);
-            }
-            if let Some(addr) = raw_str.strip_prefix("tcp://") {
-                emit("connect", "REMOTE", format!("Connecting to tcp://{addr}…"));
-                let token = std::env::var("CANBAN_TOKEN").unwrap_or_default();
-                return Self::connect_tcp(addr.to_owned(), token);
             }
         }
         let sock_path = explicit
@@ -722,196 +715,6 @@ fn static_event_topic(raw: Option<&str>, previous: &Value, params: &Value) -> &'
         Some("host") => "host",
         Some("application") => "application",
         _ => change_topic(true, previous, params),
-    }
-}
-
-pub(crate) enum PushFrame {
-    Heartbeat,
-    StateChanged {
-        topic: &'static str,
-        card_id: Option<String>,
-        marker: Value,
-    },
-    UpdateChanged(Value),
-    UtilitiesChanged(Value),
-    UsageChanged(Value),
-    HerdrInstall(Value),
-}
-
-pub(crate) struct SubscribeHandshake {
-    pub changed: bool,
-    pub marker: Value,
-    pub result: Value,
-}
-
-pub(crate) struct AsyncSubscribeStream {
-    reader: tokio::io::BufReader<tokio::io::ReadHalf<canban_transport::TransportStream>>,
-    _writer: tokio::io::WriteHalf<canban_transport::TransportStream>,
-    heartbeat_ms: u64,
-    last_marker: Value,
-}
-
-impl AsyncSubscribeStream {
-    pub(crate) fn read_timeout(&self) -> Duration {
-        Duration::from_millis(self.heartbeat_ms.saturating_mul(3).max(500))
-    }
-
-    pub(crate) async fn next_frame(&mut self) -> Result<Option<PushFrame>> {
-        loop {
-            let line_opt = match tokio::time::timeout(
-                self.read_timeout(),
-                canban_transport::read_bounded_line(
-                    &mut self.reader,
-                    canban_transport::MAX_FRAME_BYTES,
-                ),
-            )
-            .await
-            {
-                Ok(Ok(opt)) => opt,
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "app.subscribe heartbeat timed out",
-                    )
-                    .into());
-                }
-            };
-            let Some(line) = line_opt else {
-                return Ok(None);
-            };
-            let mut msg: Value = serde_json::from_str(&line)?;
-            match msg["method"].as_str() {
-                Some("heartbeat") => return Ok(Some(PushFrame::Heartbeat)),
-                Some("event") => {
-                    let params = &msg["params"];
-                    let topic =
-                        static_event_topic(params["topic"].as_str(), &self.last_marker, params);
-                    let card_id = params["card_id"].as_str().map(str::to_owned);
-                    let marker = super::state::state_marker(params);
-                    self.last_marker = marker.clone();
-                    return Ok(Some(PushFrame::StateChanged {
-                        topic,
-                        card_id,
-                        marker,
-                    }));
-                }
-                Some("update.changed") => {
-                    return Ok(Some(PushFrame::UpdateChanged(
-                        msg["params"]["state"].take(),
-                    )));
-                }
-                Some("utilities.changed") => {
-                    return Ok(Some(PushFrame::UtilitiesChanged(
-                        msg["params"]["state"].take(),
-                    )));
-                }
-                Some("usage.changed") => {
-                    return Ok(Some(PushFrame::UsageChanged(msg["params"]["state"].take())));
-                }
-                Some("herdr.install") => {
-                    return Ok(Some(PushFrame::HerdrInstall(msg["params"]["state"].take())));
-                }
-                _ => continue,
-            }
-        }
-    }
-}
-
-/// Open an async persistent `app.subscribe` stream without holding any client mutexes.
-pub(crate) async fn open_async_subscribe(
-    transport: &canban_transport::ClientTransport,
-    after: &Value,
-    topics: &[&str],
-    heartbeat_ms: Option<u64>,
-) -> Result<(AsyncSubscribeStream, SubscribeHandshake)> {
-    let (stream, auth_token) = transport.open_async_stream().await?;
-    let (read_half, mut writer) = tokio::io::split(stream);
-    let mut reader = tokio::io::BufReader::new(read_half);
-    let mut params = json!({
-        "after": after,
-        "topics": topics,
-    });
-    if let Some(ms) = heartbeat_ms {
-        params["heartbeat_ms"] = json!(ms);
-    }
-    let mut req = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "app.subscribe",
-        "params": params,
-    });
-    if let Some(token) = auth_token {
-        req["auth"] = json!(token);
-    }
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        canban_transport::write_json_line_async(&mut writer, &req),
-    )
-    .await
-    .map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "Timed out sending app.subscribe request",
-        )
-    })??;
-
-    let line_opt = tokio::time::timeout(
-        Duration::from_secs(15),
-        canban_transport::read_bounded_line(&mut reader, canban_transport::MAX_FRAME_BYTES),
-    )
-    .await
-    .map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "Timed out waiting for app.subscribe handshake",
-        )
-    })??;
-    let Some(line) = line_opt else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "Server closed connection during app.subscribe handshake",
-        )
-        .into());
-    };
-    let reply: Value = serde_json::from_str(&line)?;
-    if let Some(err) = reply.get("error") {
-        let code = err["code"].as_i64().unwrap_or(-32000);
-        let msg = err["message"].as_str().unwrap_or("app.subscribe failed");
-        if code == -32001 {
-            bail!("auth_failed: {msg}");
-        }
-        bail!("{msg}");
-    }
-    let result = reply
-        .get("result")
-        .cloned()
-        .context("Invalid app.subscribe response")?;
-    let marker = super::state::state_marker(&result);
-    let changed = result["changed"] == true;
-    let hb_ms = result["heartbeat_ms"].as_u64().unwrap_or(15_000);
-    Ok((
-        AsyncSubscribeStream {
-            reader,
-            _writer: writer,
-            heartbeat_ms: hb_ms,
-            last_marker: marker.clone(),
-        },
-        SubscribeHandshake {
-            changed,
-            marker,
-            result,
-        },
-    ))
-}
-
-pub(crate) fn change_topic(connected: bool, previous: &Value, next: &Value) -> &'static str {
-    if !connected {
-        "resync"
-    } else if previous["github_revision"] != next["github_revision"] {
-        "github"
-    } else {
-        "application"
     }
 }
 

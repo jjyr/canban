@@ -1,8 +1,12 @@
-//! Pure-remote multi-host client (`RemoteClient`) driven by Tokio async push streams,
-//! `canban-sync` outbox/read-cache replay, AEAD TCP secret sealing, and remote PTY transport.
+//! Multi-host client (`MultiHostClient`, aliased as `RemoteClient`) driven by pluggable
+//! [`HostConnector`] adapters, Tokio async push streams, `canban-sync` outbox/read-cache replay,
+//! AEAD TCP secret sealing, and remote PTY transport.
 use crate::{
+    capabilities::ClientCapabilities,
+    connector::{ConnectionLease, HostConnector, TcpConnector},
     pairing::{PairingInvite, TransportSecurity},
     push::{PushFrame, change_topic, open_async_subscribe, state_marker},
+    session::SingleHostSession,
     store::{
         CachedHostData, CredentialStore, load_cache, load_hosts, outbox_path, reads_dir,
         remove_host_files, save_cache, save_hosts, seal_params_for_tcp,
@@ -104,6 +108,7 @@ pub enum ClientEvent {
 struct RemoteHostSlot {
     saved: SavedHost,
     client: Option<Arc<ClientTransport>>,
+    lease: ConnectionLease,
     terminal: Option<Arc<RemotePtyTransport>>,
     connection: HostConnectionState,
     cached: CachedHostData,
@@ -141,6 +146,7 @@ impl RemoteHostSlot {
         Self {
             saved,
             client: None,
+            lease: ConnectionLease::none(),
             terminal: None,
             connection: initial_conn,
             cached,
@@ -164,7 +170,8 @@ impl RemoteHostSlot {
         HostSummary {
             id: self.saved.id.clone(),
             name: self.saved.name.clone(),
-            is_local: false,
+            is_local: matches!(self.saved.transport, HostTransport::Local)
+                || self.saved.id == "local",
             transport_label: self.saved.transport.label().to_owned(),
             endpoint_label: self.saved.transport.endpoint_display(),
             ssh_target: self.saved.ssh_target.clone(),
@@ -177,13 +184,6 @@ impl RemoteHostSlot {
             last_synced_at: self.last_synced_at,
             pending_mutations: outbox.pending_count(),
             sync_conflicts: outbox.conflict_count(),
-        }
-    }
-
-    fn tcp_addr_and_token(&self) -> Option<(String, String)> {
-        match &self.saved.transport {
-            HostTransport::Tcp { addr, token } => Some((addr.clone(), token.clone())),
-            _ => None,
         }
     }
 
@@ -206,17 +206,20 @@ impl RemoteHostSlot {
             client.close();
             self.reconnect_count = self.reconnect_count.saturating_add(1);
         }
+        self.lease = ConnectionLease::none();
         self.terminal = None;
         self.connection = next_state;
         self.conn_gen = self.conn_gen.wrapping_add(1);
     }
 }
 
-/// Shared pure-remote Canban client managing TCP connections, Tokio push streams,
+/// Shared multi-host Canban client managing pluggable transport connections, Tokio push streams,
 /// offline read cache, and FIFO mutation replay across saved hosts.
-pub struct RemoteClient {
+pub struct MultiHostClient {
     config: RemoteClientConfig,
     creds: Arc<dyn CredentialStore>,
+    connector: Arc<dyn HostConnector>,
+    capabilities: ClientCapabilities,
     hosts: RwLock<BTreeMap<String, RemoteHostSlot>>,
     events: broadcast::Sender<ClientEvent>,
     shutdown_tx: watch::Sender<bool>,
@@ -225,23 +228,29 @@ pub struct RemoteClient {
     self_weak: OnceLock<Weak<Self>>,
 }
 
-impl Drop for RemoteClient {
+/// Backward-compatible alias for pure-remote callers (`canban-ios`, `canban-android`).
+pub type RemoteClient = MultiHostClient;
+
+impl Drop for MultiHostClient {
     fn drop(&mut self) {
         let _ = self.shutdown_tx.send(true);
-        let clients: Vec<Arc<ClientTransport>> = {
+        let (clients, leases): (Vec<Arc<ClientTransport>>, Vec<ConnectionLease>) = {
             let mut guard = self.hosts.write().unwrap();
             let mut out = Vec::new();
+            let mut leases = Vec::new();
             for slot in guard.values_mut() {
                 slot.terminal = None;
+                leases.push(std::mem::replace(&mut slot.lease, ConnectionLease::none()));
                 if let Some(c) = slot.client.take() {
                     out.push(c);
                 }
             }
-            out
+            (out, leases)
         };
         for client in clients {
             client.close();
         }
+        drop(leases);
         if let Some(rt) = self.owned_runtime.take() {
             if tokio::runtime::Handle::try_current().is_ok() {
                 std::thread::spawn(move || drop(rt));
@@ -492,39 +501,80 @@ fn cache_and_augment_timeline(
     response
 }
 
-impl RemoteClient {
-    /// Creates a new [`RemoteClient`] owning a multi-thread Tokio runtime, loads saved hosts
-    /// and caches from `config.data_dir`, and starts push supervisors for enabled hosts.
+impl MultiHostClient {
+    /// Creates a new [`MultiHostClient`] owning a multi-thread Tokio runtime using the built-in
+    /// [`TcpConnector`] and [`ClientCapabilities::mobile()`].
     pub fn new(config: RemoteClientConfig, creds: Arc<dyn CredentialStore>) -> Result<Arc<Self>> {
+        Self::with_connector(
+            config,
+            creds,
+            Arc::new(TcpConnector),
+            ClientCapabilities::mobile(),
+        )
+    }
+
+    /// Creates a new [`MultiHostClient`] with custom transport connector(s) and runtime capabilities.
+    pub fn with_connector(
+        config: RemoteClientConfig,
+        creds: Arc<dyn CredentialStore>,
+        connector: Arc<dyn HostConnector>,
+        capabilities: ClientCapabilities,
+    ) -> Result<Arc<Self>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
-            .thread_name("canban-remote-client")
+            .thread_name("canban-client")
             .build()
-            .context("Failed to build RemoteClient Tokio runtime")?;
+            .context("Failed to build MultiHostClient Tokio runtime")?;
         let handle = runtime.handle().clone();
-        Self::build(config, creds, handle, Some(runtime))
+        Self::build(
+            config,
+            creds,
+            connector,
+            capabilities,
+            handle,
+            Some(runtime),
+        )
     }
 
-    /// Creates a new [`RemoteClient`] bound to an existing caller Tokio runtime handle.
+    /// Creates a new [`MultiHostClient`] bound to an existing caller Tokio runtime handle.
     pub fn with_runtime(
         config: RemoteClientConfig,
         creds: Arc<dyn CredentialStore>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Arc<Self>> {
-        Self::build(config, creds, runtime_handle, None)
+        Self::with_runtime_and_connector(
+            config,
+            creds,
+            Arc::new(TcpConnector),
+            ClientCapabilities::mobile(),
+            runtime_handle,
+        )
+    }
+
+    /// Creates a new [`MultiHostClient`] bound to an existing runtime with custom connector(s) and capabilities.
+    pub fn with_runtime_and_connector(
+        config: RemoteClientConfig,
+        creds: Arc<dyn CredentialStore>,
+        connector: Arc<dyn HostConnector>,
+        capabilities: ClientCapabilities,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Result<Arc<Self>> {
+        Self::build(config, creds, connector, capabilities, runtime_handle, None)
     }
 
     fn build(
         config: RemoteClientConfig,
         creds: Arc<dyn CredentialStore>,
+        connector: Arc<dyn HostConnector>,
+        capabilities: ClientCapabilities,
         runtime_handle: tokio::runtime::Handle,
         owned_runtime: Option<tokio::runtime::Runtime>,
     ) -> Result<Arc<Self>> {
         let saved = load_hosts(&config.data_dir, creds.as_ref());
         let mut slots = BTreeMap::new();
         for host in saved {
-            if !matches!(host.transport, HostTransport::Tcp { .. }) {
+            if !connector.supports(&host.transport) {
                 continue;
             }
             slots.insert(
@@ -538,6 +588,8 @@ impl RemoteClient {
         let client = Arc::new(Self {
             config,
             creds,
+            connector,
+            capabilities,
             hosts: RwLock::new(slots),
             events,
             shutdown_tx,
@@ -560,6 +612,16 @@ impl RemoteClient {
         }
 
         Ok(client)
+    }
+
+    /// Runtime capabilities advertised by this client instance.
+    pub fn capabilities(&self) -> ClientCapabilities {
+        self.capabilities
+    }
+
+    /// Returns `true` when this client's configured [`HostConnector`] supports `transport`.
+    pub fn supports_transport(&self, transport: &HostTransport) -> bool {
+        self.connector.supports(transport)
     }
 
     fn upgrade_self(&self) -> Option<Arc<Self>> {
@@ -797,52 +859,38 @@ impl RemoteClient {
             "Pairing invite does not contain an address"
         );
 
-        let start = Instant::now();
-        let transport = Arc::new(
-            ClientTransport::connect_tcp_async(
-                addr.clone(),
-                invite.secret.clone(),
-                self.config.device_name.clone(),
-            )
-            .await?,
-        );
-        let rtt_ms = start.elapsed().as_millis() as u64;
-
-        let token = transport
+        let tcp_transport = HostTransport::Tcp {
+            addr: addr.clone(),
+            token: invite.secret.clone(),
+        };
+        let session = SingleHostSession::connect_async(
+            self.connector.as_ref(),
+            preferred_id.as_deref().unwrap_or("pairing"),
+            &tcp_transport,
+            &self.config.device_name,
+            Value::Null,
+        )
+        .await?;
+        let token = session
             .upgraded_token()
             .map(str::to_owned)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| invite.secret.clone());
+        let (transport, lease, hs) = session.into_parts();
+        let rtt_ms = hs.rtt_ms;
+        let ping_val = hs.ping;
+        let state_val = hs.state;
 
-        let ping_res = transport.call_async("app.ping", &json!({})).await;
-        let state_res = transport
-            .call_async("app.state", &json!({"after": Value::Null}))
-            .await;
-        let (ping_val, state_val) = match (ping_res, state_res) {
-            (Ok(p), Ok(s)) => (p, s),
-            (Err(e), _) | (_, Err(e)) => {
-                transport.close();
-                return Err(e);
-            }
-        };
-
-        let server_id = state_val["server_id"]
-            .as_str()
-            .or_else(|| ping_val["server_id"].as_str())
-            .or(invite.server_id.as_deref())
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_owned);
+        let server_id = hs
+            .server_id
+            .or_else(|| invite.server_id.clone())
+            .filter(|s| !s.trim().is_empty());
 
         let host_name = display_name
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .or_else(|| invite.host_name.as_deref().filter(|s| !s.trim().is_empty()))
-            .or_else(|| {
-                ping_val["hostname"]
-                    .as_str()
-                    .or_else(|| state_val["hostname"].as_str())
-                    .filter(|s| !s.trim().is_empty())
-            })
+            .or_else(|| hs.hostname.as_deref().filter(|s| !s.trim().is_empty()))
             .unwrap_or("Remote Host")
             .to_owned();
 
@@ -876,6 +924,7 @@ impl RemoteClient {
                     Arc::clone(&transport),
                     self.runtime_handle.clone(),
                 )));
+                slot.lease = lease;
                 slot.client = Some(Arc::clone(&transport));
                 apply_state_to_slot(
                     slot,
@@ -911,6 +960,7 @@ impl RemoteClient {
                     Arc::clone(&transport),
                     self.runtime_handle.clone(),
                 )));
+                slot.lease = lease;
                 slot.client = Some(Arc::clone(&transport));
                 apply_state_to_slot(
                     &mut slot,
@@ -942,22 +992,26 @@ impl RemoteClient {
         Ok(summary)
     }
 
-    /// Adds or updates a TCP host synchronously and connects immediately when `host.enabled`.
+    /// Adds or updates a host synchronously and connects immediately when `host.enabled`.
     pub fn add_host(&self, host: SavedHost) -> Result<HostSummary> {
         block_on_rt(&self.runtime_handle, self.add_host_async(host))
     }
 
-    /// Adds or updates a TCP host asynchronously and connects immediately when `host.enabled`.
+    /// Adds or updates a host asynchronously and connects immediately when `host.enabled`.
     pub async fn add_host_async(&self, mut host: SavedHost) -> Result<HostSummary> {
-        let HostTransport::Tcp { addr, token } = &mut host.transport else {
-            bail!("RemoteClient only supports TCP hosts");
-        };
-        *addr = normalize_daemon_addr(addr);
-        ensure!(!addr.is_empty(), "Host address cannot be empty");
         ensure!(
-            !token.trim().is_empty(),
-            "TCP host requires a device token or pairing code"
+            self.connector.supports(&host.transport),
+            "Transport {} is not supported by this client",
+            host.transport.label()
         );
+        if let HostTransport::Tcp { addr, token } = &mut host.transport {
+            *addr = normalize_daemon_addr(addr);
+            ensure!(!addr.is_empty(), "Host address cannot be empty");
+            ensure!(
+                !token.trim().is_empty(),
+                "TCP host requires a device token or pairing code"
+            );
+        }
         if host.id.trim().is_empty() {
             host.id = canban_types::id();
         }
@@ -965,7 +1019,9 @@ impl RemoteClient {
             host.added_at = now();
         }
 
-        if host.enabled {
+        if host.enabled
+            && let HostTransport::Tcp { addr, token } = &host.transport
+        {
             let invite = PairingInvite {
                 addr: addr.clone(),
                 security: TransportSecurity::classify_tcp_addr(addr),
@@ -975,6 +1031,60 @@ impl RemoteClient {
             };
             let display = (!host.name.trim().is_empty()).then_some(host.name.as_str());
             return self.pair_internal(Some(host.id), &invite, display).await;
+        }
+
+        if host.enabled {
+            let session = SingleHostSession::connect_async(
+                self.connector.as_ref(),
+                &host.id,
+                &host.transport,
+                &self.config.device_name,
+                Value::Null,
+            )
+            .await?;
+            let (transport, lease, hs) = session.into_parts();
+            if host.server_id.is_none() {
+                host.server_id = hs.server_id;
+            }
+            if host.name.trim().is_empty() {
+                host.name = hs.hostname.unwrap_or_else(|| host.id.clone());
+            }
+            let hid = host.id.clone();
+            let summary = {
+                let mut guard = self.hosts.write().unwrap();
+                let mut slot = RemoteHostSlot::from_saved(
+                    host,
+                    &self.config.data_dir,
+                    self.config.read_cache_budget_bytes,
+                );
+                slot.terminal = Some(Arc::new(RemotePtyTransport::new(
+                    Arc::clone(&transport),
+                    self.runtime_handle.clone(),
+                )));
+                slot.lease = lease;
+                slot.client = Some(Arc::clone(&transport));
+                apply_state_to_slot(
+                    &mut slot,
+                    &self.config.data_dir,
+                    &hs.state,
+                    Some(hs.rtt_ms),
+                    Some(&hs.ping),
+                    None,
+                );
+                let sum = slot.summary();
+                guard.insert(hid.clone(), slot);
+                self.persist_locked(&guard)?;
+                sum
+            };
+            self.spawn_supervisor(&hid);
+            self.emit_host(
+                &hid,
+                AppEvent::Changed {
+                    topic: "resync",
+                    card_id: None,
+                },
+            );
+            return Ok(summary);
         }
 
         let hid = host.id.clone();
@@ -1791,89 +1901,92 @@ impl RemoteClient {
     }
 
     async fn connect_slot_async(&self, host_id: &str) -> Result<(Arc<ClientTransport>, u64)> {
-        let (addr, token, server_id, cached_at, saved_at, last_marker) = {
+        let (transport_spec, server_id, cached_at, saved_at, last_marker) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(host_id)
                 .with_context(|| format!("Unknown host '{host_id}'"))?;
             ensure!(slot.saved.enabled, "Host '{host_id}' is disabled");
-            let (raw_addr, token) = slot
-                .tcp_addr_and_token()
-                .with_context(|| format!("Host '{host_id}' is not TCP"))?;
+            let spec = match &slot.saved.transport {
+                HostTransport::Tcp { addr, token } => {
+                    let norm = normalize_daemon_addr(addr.as_str());
+                    ensure!(!norm.is_empty(), "No TCP address configured for host");
+                    ensure!(
+                        !token.trim().is_empty(),
+                        "No device token found for host '{host_id}'"
+                    );
+                    HostTransport::Tcp {
+                        addr: norm,
+                        token: token.clone(),
+                    }
+                }
+                other => other.clone(),
+            };
             (
-                normalize_daemon_addr(raw_addr.as_str()),
-                token,
+                spec,
                 slot.saved.server_id.clone(),
                 slot.cached_at(),
                 slot.cached.saved_at,
                 slot.last_marker.clone(),
             )
         };
-        ensure!(!addr.is_empty(), "No TCP address configured for host");
-        ensure!(
-            !token.trim().is_empty(),
-            "No device token found for host '{host_id}'"
-        );
 
-        let start = Instant::now();
-        let (transport, rtt_ms) =
-            match ClientTransport::connect_tcp_async(addr, token, self.config.device_name.clone())
-                .await
-            {
-                Ok(client) => (Arc::new(client), start.elapsed().as_millis() as u64),
-                Err(err) => {
-                    let err_str = err.to_string();
-                    let auth = is_auth_error(&err);
-                    {
-                        let mut guard = self.hosts.write().unwrap();
-                        if let Some(slot) = guard.get_mut(host_id) {
-                            slot.reconnect_count = slot.reconnect_count.saturating_add(1);
-                            let next_state = if auth {
-                                HostConnectionState::AuthFailed { error: err_str }
-                            } else {
-                                HostConnectionState::Offline {
-                                    error: err_str,
-                                    cached_at,
-                                }
-                            };
-                            slot.clear_connection(next_state);
-                        }
-                    }
-                    self.emit_host(
-                        host_id,
-                        AppEvent::Changed {
-                            topic: "resync",
-                            card_id: None,
-                        },
-                    );
-                    return Err(err);
-                }
-            };
-
-        let ping_res = transport.call_async("app.ping", &json!({})).await;
         let after = if saved_at == 0 {
             Value::Null
         } else {
             last_marker["revision"].clone()
         };
-        let state_res = transport
-            .call_async("app.state", &json!({"after": after}))
-            .await;
-        let (ping_val, state_val) = match (ping_res, state_res) {
-            (Ok(p), Ok(s)) => (p, s),
-            (Err(e), _) | (_, Err(e)) => {
-                transport.close();
-                return Err(e);
+        let session = match SingleHostSession::connect_async(
+            self.connector.as_ref(),
+            host_id,
+            &transport_spec,
+            &self.config.device_name,
+            after,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(err) => {
+                let err_str = err.to_string();
+                let auth = is_auth_error(&err);
+                {
+                    let mut guard = self.hosts.write().unwrap();
+                    if let Some(slot) = guard.get_mut(host_id) {
+                        slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                        let next_state = if auth {
+                            HostConnectionState::AuthFailed { error: err_str }
+                        } else {
+                            HostConnectionState::Offline {
+                                error: err_str,
+                                cached_at,
+                            }
+                        };
+                        slot.clear_connection(next_state);
+                    }
+                }
+                self.emit_host(
+                    host_id,
+                    AppEvent::Changed {
+                        topic: "resync",
+                        card_id: None,
+                    },
+                );
+                return Err(err);
             }
         };
 
+        let upgraded = session
+            .upgraded_token()
+            .filter(|t| is_device_token(t))
+            .map(str::to_owned);
+        let (transport, lease, hs) = session.into_parts();
+
         if let Some(expected_sid) = server_id.as_deref()
-            && let Some(actual_sid) = state_val["server_id"]
-                .as_str()
-                .or_else(|| ping_val["server_id"].as_str())
+            && let Some(actual_sid) = hs.server_id.as_deref()
             && actual_sid != expected_sid
         {
             transport.close();
+            drop(lease);
             let err_msg =
                 format!("Connected to wrong server (expected {expected_sid}, got {actual_sid})");
             let mut guard = self.hosts.write().unwrap();
@@ -1884,11 +1997,6 @@ impl RemoteClient {
             }
             bail!("{err_msg}");
         }
-
-        let upgraded = transport
-            .upgraded_token()
-            .filter(|t| is_device_token(t))
-            .map(str::to_owned);
 
         let conn_gen = {
             let mut guard = self.hosts.write().unwrap();
@@ -1908,13 +2016,14 @@ impl RemoteClient {
                 Arc::clone(&transport),
                 self.runtime_handle.clone(),
             )));
+            slot.lease = lease;
             slot.client = Some(Arc::clone(&transport));
             apply_state_to_slot(
                 slot,
                 &self.config.data_dir,
-                &state_val,
-                Some(rtt_ms),
-                Some(&ping_val),
+                &hs.state,
+                Some(hs.rtt_ms),
+                Some(&hs.ping),
                 None,
             );
             let conn_gen = slot.conn_gen;
@@ -3722,6 +3831,96 @@ mod tests {
         assert!(
             format!("{rej_err:#}").contains("auth_failed:"),
             "unverified Tailscale peer must fail with auth_failed, got {rej_err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_host_client_supports_custom_connector_and_drops_lease_on_disable() {
+        use crate::connector::{
+            CompositeConnector, ConnectFuture, ConnectedTransport, ConnectionLease, HostConnector,
+        };
+        use canban_transport::ClientEndpoint;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("local-server");
+        let server =
+            canban_app_server::AppServer::open(server_home.clone(), PathBuf::from("/bin/echo"))
+                .unwrap();
+        let _running = server.start().unwrap();
+        let sock_path = server_home.join("app.sock");
+
+        struct DropLease(Arc<AtomicBool>);
+        impl Drop for DropLease {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        struct LocalSockConnector {
+            sock: PathBuf,
+            dropped: Arc<AtomicBool>,
+        }
+        impl HostConnector for LocalSockConnector {
+            fn supports(&self, transport: &HostTransport) -> bool {
+                matches!(transport, HostTransport::Local)
+            }
+            fn connect<'a>(
+                &'a self,
+                _host_id: &'a str,
+                _transport: &'a HostTransport,
+                _device_name: &'a str,
+            ) -> ConnectFuture<'a> {
+                let sock = self.sock.clone();
+                let dropped = Arc::clone(&self.dropped);
+                Box::pin(async move {
+                    let tr = Arc::new(ClientTransport::connect_direct(ClientEndpoint::Unix(sock))?);
+                    Ok(ConnectedTransport::with_lease(
+                        tr,
+                        ConnectionLease::from_guard(DropLease(dropped)),
+                    ))
+                })
+            }
+        }
+
+        let lease_dropped = Arc::new(AtomicBool::new(false));
+        let connector = Arc::new(CompositeConnector::with_default_tcp().push(Arc::new(
+            LocalSockConnector {
+                sock: sock_path,
+                dropped: Arc::clone(&lease_dropped),
+            },
+        )));
+        let client = MultiHostClient::with_runtime_and_connector(
+            RemoteClientConfig::new(dir.path().join("client")),
+            Arc::new(MemoryCredentialStore::new()),
+            connector,
+            ClientCapabilities::desktop(),
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        assert_eq!(client.capabilities(), ClientCapabilities::desktop());
+        assert!(client.supports_transport(&HostTransport::Local));
+
+        let summary = client
+            .add_host_async(SavedHost {
+                id: "local".into(),
+                name: "This Mac".into(),
+                transport: HostTransport::Local,
+                ssh_target: None,
+                server_id: None,
+                enabled: true,
+                added_at: now(),
+            })
+            .await
+            .unwrap();
+        assert!(summary.is_local);
+        assert!(summary.is_connected());
+        assert!(!lease_dropped.load(Ordering::SeqCst));
+
+        client.set_host_enabled("local", false).unwrap();
+        assert!(
+            lease_dropped.load(Ordering::SeqCst),
+            "disabling host must drop its ConnectionLease"
         );
     }
 }
