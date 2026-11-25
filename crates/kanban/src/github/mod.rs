@@ -110,7 +110,17 @@ pub fn fetch(
     Ok(Sync { changes })
 }
 pub fn apply(db: Db<'_>, project: &Project, expected: &str, sync: Sync) -> Result<()> {
-    apply_batch(db, project, expected, sync, true)
+    apply_at(db, project, expected, sync, now())
+}
+/// Pure clock-injected variant of [`apply`].
+pub fn apply_at(
+    db: Db<'_>,
+    project: &Project,
+    expected: &str,
+    sync: Sync,
+    now_ms: u64,
+) -> Result<()> {
+    apply_batch_at(db, project, expected, sync, true, now_ms)
 }
 /// Partial worker batches leave last-success unchanged until the complete sync finishes.
 pub fn apply_batch(
@@ -119,6 +129,17 @@ pub fn apply_batch(
     expected: &str,
     sync: Sync,
     finish: bool,
+) -> Result<()> {
+    apply_batch_at(db, project, expected, sync, finish, now())
+}
+/// Pure clock-injected variant of [`apply_batch`].
+pub fn apply_batch_at(
+    db: Db<'_>,
+    project: &Project,
+    expected: &str,
+    sync: Sync,
+    finish: bool,
+    now_ms: u64,
 ) -> Result<()> {
     let current: Project = db.get(&project.id)?;
     ensure!(
@@ -136,13 +157,13 @@ pub fn apply_batch(
             .get(&key)
             .is_some_and(|c| c.removed_at.is_some())
         {
-            intake.upsert(db, &current, c, false, "")?;
+            intake.upsert_at(db, &current, c, false, "", now_ms)?;
         }
     }
     if finish {
         let mut current = current;
         let source = current.github.as_mut().unwrap();
-        source.synced_at = Some(now());
+        source.synced_at = Some(now_ms);
         source.error = None;
         db.save(&current)?;
     }
@@ -155,7 +176,18 @@ pub fn upsert(
     manual: bool,
     instructions: &str,
 ) -> Result<Card> {
-    Intake::load(db, project)?.upsert(db, project, change, manual, instructions)
+    upsert_at(db, project, change, manual, instructions, now())
+}
+/// Pure clock-injected variant of [`upsert`].
+pub fn upsert_at(
+    db: Db<'_>,
+    project: &Project,
+    change: Change,
+    manual: bool,
+    instructions: &str,
+    now_ms: u64,
+) -> Result<Card> {
+    Intake::load(db, project)?.upsert_at(db, project, change, manual, instructions, now_ms)
 }
 /// One project-scoped read per transaction, shared by source deduplication,
 /// delivery exclusion and append ordering. Rebuilt after each bounded batch so
@@ -202,13 +234,14 @@ impl Intake {
         }
         Ok(result)
     }
-    fn upsert(
+    fn upsert_at(
         &mut self,
         db: Db<'_>,
         project: &Project,
         change: Change,
         manual: bool,
         instructions: &str,
+        now_ms: u64,
     ) -> Result<Card> {
         let config = project
             .github
@@ -236,18 +269,19 @@ impl Intake {
                 ensure!(manual, "Issue was removed locally");
                 c.removed_at = None;
                 c.revision += 1;
-                event(
+                event_at(
                     db,
                     &c,
                     "card.restored",
                     "user",
                     "Issue restored to Board",
                     json!({}),
+                    now_ms,
                 )?;
             }
             c
         } else {
-            let mut c = crate::create_at(
+            let mut c = crate::create_ranked_at(
                 db,
                 project,
                 &format!("{}#{}", source.repository, source.number),
@@ -256,6 +290,7 @@ impl Intake {
                 self.tail
                     .as_ref()
                     .map_or(Some(0), |tail| tail.board_rank().checked_add(1024)),
+                now_ms,
             )?;
             c.content = if is_pr {
                 CardContent::GitHubPr {
@@ -299,26 +334,32 @@ impl Intake {
         Ok(card)
     }
 }
-fn event(
+fn event_at(
     db: Db<'_>,
     c: &Card,
     kind: &str,
     actor: &str,
     text: &str,
     data: serde_json::Value,
+    now_ms: u64,
 ) -> Result<()> {
-    db.append(canban_timeline::event(
+    db.append(canban_timeline::event_at(
         &c.project_id,
         &c.id,
         kind,
         actor,
         text,
         data,
+        now_ms,
     ))?;
     Ok(())
 }
 pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
     super::remove(db, card)
+}
+/// Pure clock-injected variant of [`remove`].
+pub fn remove_at(db: Db<'_>, card: &mut Card, now_ms: u64) -> Result<()> {
+    super::remove_at(db, card, now_ms)
 }
 
 #[cfg(test)]

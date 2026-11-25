@@ -2,10 +2,12 @@ mod activity;
 mod board_filter;
 mod clock;
 mod env;
+mod id_gen;
 pub use activity::*;
 pub use board_filter::BoardFilter;
 pub use clock::*;
 pub use env::*;
+pub use id_gen::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -1112,7 +1114,18 @@ impl AgentRun {
             .and_then(|v| v["status"]["state"].as_str())
             .unwrap_or("unknown")
     }
+    /// Update `observed` with a Herdr terminal state and Agent status state.
+    pub fn set_observed_status(&mut self, terminal_state: &str, status_state: &str) {
+        self.observed = Some(serde_json::json!({
+            "state": terminal_state,
+            "status": { "state": status_state },
+        }));
+    }
     pub fn promote_pending(&mut self) -> Option<QueuedAssignment> {
+        self.promote_pending_at(now())
+    }
+    /// Pure clock-injected variant of [`Self::promote_pending`].
+    pub fn promote_pending_at(&mut self, now_ms: u64) -> Option<QueuedAssignment> {
         let pending = self.pending.take()?;
         let stopped = self.finished();
         self.workflow_run_id = pending.workflow_run_id.clone();
@@ -1143,7 +1156,7 @@ impl AgentRun {
             self.applied_env.clear();
             self.applied_env_fingerprint.clear();
         }
-        self.updated_at = pending.queued_at.max(now());
+        self.updated_at = pending.queued_at.max(now_ms);
         Some(pending)
     }
 }
@@ -2503,6 +2516,71 @@ mod tests {
             v4.split('-').map(str::len).collect::<Vec<_>>(),
             vec![8, 4, 4, 4, 12]
         );
+    }
+
+    #[test]
+    fn runtime_status_at_and_promote_pending_at_use_explicit_clock_under_2023_epoch() {
+        const EPOCH_2023_MS: u64 = 1_700_000_000_000;
+        let mut run = AgentRun {
+            workflow_run_id: None,
+            workflow_step: None,
+            resume_session: false,
+            trigger: ExecutionTrigger::Workflow,
+            stage: "develop".into(),
+            profile: Profile::default(),
+            instruction: "work".into(),
+            on_completed: None,
+            require_human_review: false,
+            workspace: None,
+            directory: None,
+            lifecycle: Lifecycle {
+                observed_at: Some(EPOCH_2023_MS),
+                ..Default::default()
+            },
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            card_number: 1,
+            number: 1,
+            state: "running".into(),
+            core_id: Some("core".into()),
+            terminal: Some("term".into()),
+            cwd: "/tmp".into(),
+            input_path: String::new(),
+            output_path: None,
+            observed: Some(json!({"state": "running", "status": {"state": "idle"}})),
+            error: None,
+            started_at: Some(EPOCH_2023_MS),
+            updated_at: EPOCH_2023_MS,
+            provider_session_id: None,
+            close_state: String::new(),
+            turn_ended_at: None,
+            response_path: None,
+            completed_at: None,
+            completion_turn: None,
+            close_requested_at: None,
+            connection_state: "connected".into(),
+            pending: Some(QueuedAssignment {
+                workflow_run_id: Some("wf1".into()),
+                workflow_step: Some("review:1".into()),
+                trigger: ExecutionTrigger::Workflow,
+                stage: "review".into(),
+                profile: Profile::default(),
+                instruction: "review".into(),
+                on_completed: None,
+                require_human_review: false,
+                queued_at: EPOCH_2023_MS + 1_000,
+            }),
+            applied_env: BTreeMap::new(),
+            applied_env_fingerprint: String::new(),
+        };
+        assert_eq!(run.runtime_status_at(EPOCH_2023_MS + 30_000), "idle");
+        assert_eq!(run.runtime_status_at(EPOCH_2023_MS + 30_001), "unknown");
+
+        run.promote_pending_at(EPOCH_2023_MS + 5_000)
+            .expect("pending assignment promoted");
+        assert_eq!(run.updated_at, EPOCH_2023_MS + 5_000);
+        assert_eq!(run.stage, "review");
+        assert_eq!(run.state, "queued");
     }
 
     #[test]

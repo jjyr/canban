@@ -1,9 +1,10 @@
 //! GitHub CLI transport. Credentials stay in gh; Canban never extracts a token.
 use crate::{
-    cache::{Cache, Response, now},
+    cache::{Cache, Response},
     models::User,
 };
 use anyhow::{Context, Result, ensure};
+use canban_types::{Clock, system_clock};
 use serde_json::Value;
 use std::{
     io::{Read, Seek},
@@ -17,30 +18,38 @@ pub struct Service {
     pub cache: Arc<Cache>,
     root: PathBuf,
     user: Mutex<Option<User>>,
+    clock: Arc<dyn Clock>,
 }
 impl Service {
     pub fn new(root: PathBuf) -> Self {
+        Self::new_with_clock(root, system_clock())
+    }
+    pub fn new_with_clock(root: PathBuf, clock: Arc<dyn Clock>) -> Self {
         let user = std::fs::read(root.join("identity.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok());
         Self {
-            cache: Cache::new(root.join("responses")),
+            cache: Cache::new_with_clock(root.join("responses"), clock.clone()),
             root,
             user: Mutex::new(user),
+            clock,
         }
+    }
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
     }
     pub fn identity(&self) -> Option<User> {
         self.user.lock().unwrap().clone()
     }
     pub fn write(&self, method: &str, path: &str, body: &Value) -> Result<Value> {
         let payload = if method == "DELETE" { None } else { Some(body) };
-        Ok(request_with_body(path, None, method, payload)?.data)
+        Ok(request_with_body(path, None, method, payload, self.clock.as_ref())?.data)
     }
     pub fn login(&self) -> Option<String> {
         self.user.lock().unwrap().as_ref().map(|u| u.login.clone())
     }
     pub fn identify(&self) -> Result<User> {
-        let value = request("/user", None)?;
+        let value = request("/user", None, self.clock.as_ref())?;
         let user: User = serde_json::from_value(value.data)?;
         let mut current = self.user.lock().unwrap();
         if current.as_ref().is_some_and(|u| u.id != user.id) {
@@ -61,7 +70,7 @@ impl Service {
         };
         let key = format!("github.com:gh:{}:{path}", user.id);
         let gate = self.cache.gate(&key);
-        let start = now();
+        let start = self.clock.now_ms();
         let _guard = gate.lock().unwrap();
         let old = self.cache.get(&key);
         if let Some(old) = &old
@@ -69,7 +78,7 @@ impl Service {
                 || old.fetched_at > start
                 || (path.starts_with("/notifications?")
                     && old.poll_interval.is_some_and(|interval| {
-                        now()
+                        self.clock.now_ms()
                             < old
                                 .validated_at
                                 .saturating_add(interval.saturating_mul(1000))
@@ -84,7 +93,7 @@ impl Service {
             live.id == user.id,
             "GitHub CLI account changed; refresh the page"
         );
-        let response = request(path, old.as_ref());
+        let response = request(path, old.as_ref(), self.clock.as_ref());
         let response = response?;
         ensure!(
             self.user
@@ -121,7 +130,7 @@ impl Service {
             "Unsupported notification action"
         );
         self.identify()?;
-        request_method(path, None, method)
+        request_method(path, None, method, self.clock.as_ref())
     }
     pub fn notification_changed(&self, id: &str, done: bool) -> Result<()> {
         self.cache.patch(|key, value| {
@@ -162,17 +171,23 @@ fn binary() -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("gh"))
         })
 }
-fn request(path: &str, old: Option<&Response>) -> Result<Response> {
-    request_method(path, old, "GET")
+fn request(path: &str, old: Option<&Response>, clock: &dyn Clock) -> Result<Response> {
+    request_method(path, old, "GET", clock)
 }
-fn request_method(path: &str, old: Option<&Response>, method: &str) -> Result<Response> {
-    request_with_body(path, old, method, None)
+fn request_method(
+    path: &str,
+    old: Option<&Response>,
+    method: &str,
+    clock: &dyn Clock,
+) -> Result<Response> {
+    request_with_body(path, old, method, None, clock)
 }
 fn request_with_body(
     path: &str,
     old: Option<&Response>,
     method: &str,
     body: Option<&Value>,
+    clock: &dyn Clock,
 ) -> Result<Response> {
     ensure!(
         path.starts_with('/')
@@ -186,7 +201,7 @@ fn request_with_body(
             && !path.contains('\\'),
         "Invalid GitHub API path"
     );
-    let fetched_at = now();
+    let fetched_at = clock.now_ms();
     let mut output = tempfile::tempfile()?;
     let mut command = canban_exec::command(binary());
     command.args([
@@ -253,7 +268,7 @@ fn request_with_body(
         .context("Invalid GitHub CLI HTTP status")?;
     if code == 304 {
         let mut value = old.cloned().context("304 without cache")?;
-        value.validated_at = now();
+        value.validated_at = clock.now_ms();
         value.fetched_at = fetched_at;
         value.cached = false;
         return Ok(value);
@@ -282,7 +297,7 @@ fn request_with_body(
         etag: header("etag"),
         modified: header("last-modified"),
         poll_interval: header("x-poll-interval").and_then(|v| v.parse().ok()),
-        validated_at: now(),
+        validated_at: clock.now_ms(),
         fetched_at,
         cached: false,
     })

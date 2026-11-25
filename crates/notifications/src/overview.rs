@@ -64,6 +64,16 @@ pub const UNREPORTED_IDLE_ALERT_MS: u64 = 60 * 60 * 1_000;
 /// continuously in `idle` / `done` without status change, user interaction, or
 /// task report.
 pub fn unreported_idle_anchor(snapshot: &Snapshot, entry_id: &str, run: &AgentRun) -> Option<u64> {
+    unreported_idle_anchor_at(snapshot, entry_id, run, now())
+}
+
+/// Pure clock-injected variant of [`unreported_idle_anchor`].
+pub fn unreported_idle_anchor_at(
+    snapshot: &Snapshot,
+    entry_id: &str,
+    run: &AgentRun,
+    at: u64,
+) -> Option<u64> {
     if run.finished()
         || !run.close_state.is_empty()
         || !run.trigger.is_automatic()
@@ -72,7 +82,7 @@ pub fn unreported_idle_anchor(snapshot: &Snapshot, entry_id: &str, run: &AgentRu
         return None;
     }
     let runtime = if run.terminal.is_some() || run.observed.is_some() {
-        run.runtime_status()
+        run.runtime_status_at(at)
     } else {
         "unknown"
     };
@@ -99,7 +109,17 @@ pub fn unreported_idle_deadline(
     entry_id: &str,
     run: &AgentRun,
 ) -> Option<u64> {
-    unreported_idle_anchor(snapshot, entry_id, run)
+    unreported_idle_deadline_at(snapshot, entry_id, run, now())
+}
+
+/// Pure clock-injected variant of [`unreported_idle_deadline`].
+pub fn unreported_idle_deadline_at(
+    snapshot: &Snapshot,
+    entry_id: &str,
+    run: &AgentRun,
+    at: u64,
+) -> Option<u64> {
+    unreported_idle_anchor_at(snapshot, entry_id, run, at)
         .map(|anchor| anchor.saturating_add(UNREPORTED_IDLE_ALERT_MS))
 }
 
@@ -109,7 +129,7 @@ pub fn unreported_idle_stalled(
     run: &AgentRun,
     at: u64,
 ) -> bool {
-    unreported_idle_deadline(snapshot, entry_id, run).is_some_and(|deadline| at >= deadline)
+    unreported_idle_deadline_at(snapshot, entry_id, run, at).is_some_and(|deadline| at >= deadline)
 }
 
 pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
@@ -140,7 +160,7 @@ pub fn overview_at(snapshot: &Snapshot, at: u64) -> Vec<OverviewRow> {
             });
         }
         let runtime = if run.terminal.is_some() || run.observed.is_some() {
-            run.runtime_status()
+            run.runtime_status_at(at)
         } else {
             "unknown"
         };
@@ -298,4 +318,114 @@ pub fn overview_at(snapshot: &Snapshot, at: u64) -> Vec<OverviewRow> {
         )
     });
     rows
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn attention_at_overview_at_and_reminders_at_work_under_2023_epoch() {
+        const T0: u64 = 1_700_000_000_000;
+        let notice = crate::attention_at("p1", "c1", "Needs review", T0 + 500);
+        assert_eq!(notice.created_at, T0 + 500);
+
+        let mut snap = Snapshot::default();
+        snap.projects.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "p1",
+                "name": "Demo",
+                "directory": "/tmp/demo",
+                "workflow": {"name": "Dev", "stages": []},
+                "created_at": T0
+            }))
+            .unwrap(),
+        );
+        snap.cards.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "c1",
+                "project_id": "p1",
+                "number": 1,
+                "title": "Task",
+                "body": "",
+                "stage": "develop",
+                "revision": 1,
+                "attention": null,
+                "archived_at": null,
+                "archive": null,
+                "archive_error": null,
+                "worktree": null,
+                "created_at": T0
+            }))
+            .unwrap(),
+        );
+        snap.terminals.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "t1",
+                "number": 1,
+                "created_at": T0,
+                "agent": {
+                    "trigger": "workflow",
+                    "stage": "develop",
+                    "profile": {"id": "developer", "role_instruction": ""},
+                    "instruction": "do work",
+                    "on_completed": null,
+                    "project_id": "p1",
+                    "card_id": "c1",
+                    "number": 1,
+                    "state": "running",
+                    "terminal": "pty-1",
+                    "connection_state": "connected",
+                    "updated_at": T0,
+                    "observed": {"state": "running", "status": {"state": "idle"}, "turn": 2},
+                    "lifecycle": {"observed_at": T0 + UNREPORTED_IDLE_ALERT_MS, "idle_since": T0}
+                }
+            }))
+            .unwrap(),
+        );
+
+        let at_before = T0 + UNREPORTED_IDLE_ALERT_MS - 1;
+        let run = snap.terminals[0].agent.as_ref().unwrap();
+        assert_eq!(
+            unreported_idle_anchor_at(&snap, "t1", run, T0 + UNREPORTED_IDLE_ALERT_MS),
+            Some(T0)
+        );
+        assert!(!unreported_idle_stalled(&snap, "t1", run, at_before));
+        assert!(unreported_idle_stalled(
+            &snap,
+            "t1",
+            run,
+            T0 + UNREPORTED_IDLE_ALERT_MS
+        ));
+
+        // Before the 1-hour stall threshold (using fresh observed_at near `at_before`):
+        snap.terminals[0]
+            .agent
+            .as_mut()
+            .unwrap()
+            .lifecycle
+            .observed_at = Some(at_before);
+        let rows_before = overview_at(&snap, at_before);
+        assert_eq!(rows_before.len(), 1);
+        assert_eq!(rows_before[0].group, "Idle");
+        assert!(crate::runtime_reminders_at(&snap, at_before).is_empty());
+
+        // Exactly at the 1-hour stall threshold under 2023 epoch:
+        let at_stalled = T0 + UNREPORTED_IDLE_ALERT_MS;
+        snap.terminals[0]
+            .agent
+            .as_mut()
+            .unwrap()
+            .lifecycle
+            .observed_at = Some(at_stalled);
+        let rows_stalled = overview_at(&snap, at_stalled);
+        assert_eq!(rows_stalled[0].group, "Needs attention");
+        let rems = crate::reminders_from_events_at(&snap, &[], at_stalled);
+        assert_eq!(rems.len(), 1);
+        assert_eq!(rems[0].id, format!("stalled:t1:{T0}"));
+
+        crate::reconcile_runtime_reminders_at(&mut snap, at_stalled);
+        assert_eq!(snap.reminders.len(), 1);
+        assert_eq!(snap.reminders[0].id, format!("stalled:t1:{T0}"));
+    }
 }

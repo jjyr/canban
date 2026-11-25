@@ -1,5 +1,5 @@
 //! One reminder per semantic item; unread and unresolved are independent flags.
-use crate::overview;
+use crate::{overview, overview_at};
 use canban_types::*;
 pub use canban_types::{Reminder, ReminderEventMeta};
 use std::collections::{BTreeMap, BTreeSet};
@@ -165,10 +165,11 @@ fn event_is_audible_when_unread(id: &str, e: &Event) -> bool {
         )
 }
 
-fn runtime_reminder_for_reason(
+fn runtime_reminder_for_reason_at(
     s: &Snapshot,
     row: &overview::OverviewRow,
     reason: &overview::OverviewReason,
+    at: u64,
 ) -> Option<Reminder> {
     if !matches!(reason.source.as_str(), "runtime" | "recovery") {
         return None;
@@ -184,7 +185,7 @@ fn runtime_reminder_for_reason(
             .and_then(|a| a.lifecycle.waiting.as_ref())
             .map(|w| format!("wait:{}", w.id))
             .unwrap_or_else(|| {
-                let runtime = agent.map(|a| a.runtime_status()).unwrap_or("unknown");
+                let runtime = agent.map(|a| a.runtime_status_at(at)).unwrap_or("unknown");
                 if matches!(runtime, "idle" | "done") {
                     let turn = agent
                         .and_then(|a| a.observed.as_ref())
@@ -192,7 +193,7 @@ fn runtime_reminder_for_reason(
                         .unwrap_or(0);
                     if agent.is_some_and(|a| a.trigger.is_automatic()) {
                         let anchor = agent
-                            .and_then(|a| crate::unreported_idle_anchor(s, target, a))
+                            .and_then(|a| crate::unreported_idle_anchor_at(s, target, a, at))
                             .unwrap_or(turn);
                         format!("stalled:{target}:{anchor}")
                     } else {
@@ -224,10 +225,15 @@ fn runtime_reminder_for_reason(
 }
 
 pub fn runtime_reminders(s: &Snapshot) -> Vec<Reminder> {
+    runtime_reminders_at(s, now())
+}
+
+/// Pure clock-injected variant of [`runtime_reminders`].
+pub fn runtime_reminders_at(s: &Snapshot, at: u64) -> Vec<Reminder> {
     let mut out = Vec::new();
-    for row in overview(s).into_iter().filter(|r| r.card.active()) {
+    for row in overview_at(s, at).into_iter().filter(|r| r.card.active()) {
         for reason in &row.reasons {
-            if let Some(rem) = runtime_reminder_for_reason(s, &row, reason) {
+            if let Some(rem) = runtime_reminder_for_reason_at(s, &row, reason, at) {
                 out.push(rem);
             }
         }
@@ -246,6 +252,11 @@ pub fn is_runtime_reminder_id(id: &str) -> bool {
 /// Recompute only runtime/recovery reminders after applying a partial `RuntimeState`
 /// while preserving event-derived unread/gate/delivery reminders in `s.reminders`.
 pub fn reconcile_runtime_reminders(s: &mut Snapshot) {
+    reconcile_runtime_reminders_at(s, now());
+}
+
+/// Pure clock-injected variant of [`reconcile_runtime_reminders`].
+pub fn reconcile_runtime_reminders_at(s: &mut Snapshot, at: u64) {
     let mut items = BTreeMap::<String, Reminder>::new();
     for rem in s
         .reminders
@@ -254,7 +265,7 @@ pub fn reconcile_runtime_reminders(s: &mut Snapshot) {
     {
         items.insert(rem.id.clone(), rem);
     }
-    for rem in runtime_reminders(s) {
+    for rem in runtime_reminders_at(s, at) {
         items
             .entry(rem.id.clone())
             .and_modify(|i| i.pending = true)
@@ -267,6 +278,11 @@ pub fn reconcile_runtime_reminders(s: &mut Snapshot) {
 }
 
 pub fn reminders_from_events(s: &Snapshot, events: &[Event]) -> Vec<Reminder> {
+    reminders_from_events_at(s, events, now())
+}
+
+/// Pure clock-injected variant of [`reminders_from_events`].
+pub fn reminders_from_events_at(s: &Snapshot, events: &[Event], at: u64) -> Vec<Reminder> {
     let active_cards: BTreeSet<&str> = s
         .cards
         .iter()
@@ -313,7 +329,7 @@ pub fn reminders_from_events(s: &Snapshot, events: &[Event]) -> Vec<Reminder> {
         }
     }
 
-    for row in overview(s).into_iter().filter(|r| r.card.active()) {
+    for row in overview_at(s, at).into_iter().filter(|r| r.card.active()) {
         let card_evs = by_card
             .get(row.card.id.as_str())
             .map(Vec::as_slice)
@@ -322,7 +338,7 @@ pub fn reminders_from_events(s: &Snapshot, events: &[Event]) -> Vec<Reminder> {
             if reason.source == "question" {
                 continue;
             }
-            if let Some(rem) = runtime_reminder_for_reason(s, &row, reason) {
+            if let Some(rem) = runtime_reminder_for_reason_at(s, &row, reason, at) {
                 items
                     .entry(rem.id.clone())
                     .and_modify(|i| i.pending = true)

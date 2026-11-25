@@ -4,6 +4,10 @@ use canban_storage::Db;
 use canban_types::{Card, TerminalEntry, now};
 use serde_json::json;
 pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
+    remove_at(db, card, now())
+}
+/// Pure clock-injected variant of [`remove`].
+pub fn remove_at(db: Db<'_>, card: &mut Card, now_ms: u64) -> Result<()> {
     ensure!(
         !db.list::<TerminalEntry>()?.iter().any(|t| {
             t.agent.as_ref().is_some_and(|a| {
@@ -41,10 +45,10 @@ pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
             db.save(&t)?;
         }
     }
-    card.removed_at = Some(now());
+    card.removed_at = Some(now_ms);
     card.revision += 1;
     db.save(card)?;
-    db.append(canban_timeline::event(
+    db.append(canban_timeline::event_at(
         &card.project_id,
         &card.id,
         "card.removed",
@@ -55,6 +59,7 @@ pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
             "Card deleted; history retained for restoration"
         },
         json!({}),
+        now_ms,
     ))?;
     Ok(())
 }

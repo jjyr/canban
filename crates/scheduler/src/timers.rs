@@ -164,6 +164,15 @@ pub fn next_schedule_deadline(states: &[ScheduleState]) -> Option<u64> {
 /// Next queued Cardless `ScheduledRun` eligible for execution or Agent slot admission.
 /// Script-starting runs (`terminal_id.is_none()`) execute without consuming an Agent slot.
 pub fn next_scheduled_run(snapshot: &Snapshot, max_agents: usize) -> Option<ScheduledRun> {
+    next_scheduled_run_at(snapshot, max_agents, canban_types::now())
+}
+
+/// Pure clock-injected variant of [`next_scheduled_run`].
+pub fn next_scheduled_run_at(
+    snapshot: &Snapshot,
+    max_agents: usize,
+    now_ms: u64,
+) -> Option<ScheduledRun> {
     if let Some(script_run) = snapshot
         .scheduled_runs
         .iter()
@@ -172,7 +181,7 @@ pub fn next_scheduled_run(snapshot: &Snapshot, max_agents: usize) -> Option<Sche
     {
         return Some(script_run.clone());
     }
-    if crate::active_count(snapshot) >= max_agents {
+    if crate::active_count_at(snapshot, now_ms) >= max_agents {
         return None;
     }
     snapshot
@@ -295,5 +304,86 @@ mod tests {
                 other => panic!("Unexpected overlap decision: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn next_scheduled_run_at_uses_explicit_clock_for_agent_budget() {
+        const T0: u64 = 1_700_000_000_000;
+        let mut agent = crate::agent_run_at(
+            "p1",
+            "c1",
+            1,
+            "develop",
+            "auto",
+            canban_types::Profile::default(),
+            "go".into(),
+            None,
+            T0,
+        );
+        agent.state = "running".into();
+        agent.terminal = Some("pty-1".into());
+        agent.connection_state = "connected".into();
+        agent.lifecycle.observed_at = Some(T0);
+        agent.set_observed_status("running", "idle");
+
+        let queued_run = ScheduledRun {
+            host_id: String::new(),
+            id: "scheduled:p1:r2".into(),
+            schedule_id: "schedule:p1:wf1:nightly".into(),
+            project_id: "p1".into(),
+            workflow_id: "wf1".into(),
+            workflow_name: "Nightly".into(),
+            filename: "nightly.yaml".into(),
+            rule_id: "nightly".into(),
+            cron: "0 * * * *".into(),
+            number: 2,
+            trigger_kind: "cron".into(),
+            creates_card: false,
+            card_id: None,
+            card_number: None,
+            workflow_run_id: None,
+            start_step: None,
+            current_step: None,
+            profile_id: Some("developer".into()),
+            provider_session_id: None,
+            terminal_id: Some("scheduled:p1:r2".into()),
+            cwd: "/tmp".into(),
+            state: "queued".into(),
+            summary: None,
+            report_path: None,
+            output_path: None,
+            error: None,
+            steps: Vec::new(),
+            scheduled_at: T0,
+            started_at: None,
+            completed_at: None,
+            close_requested_at: None,
+            updated_at: T0,
+        };
+
+        let snap = Snapshot {
+            terminals: vec![canban_types::TerminalEntry {
+                id: "t1".into(),
+                conversation_id: None,
+                number: 1,
+                name: None,
+                origin_project_id: None,
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: None,
+                agent: Some(agent),
+                created_at: T0,
+            }],
+            scheduled_runs: vec![queued_run],
+            ..Default::default()
+        };
+
+        // Fresh idle terminal releases slot at T0 + 10_000 -> scheduled run admitted.
+        assert_eq!(
+            next_scheduled_run_at(&snap, 1, T0 + 10_000).map(|r| r.id),
+            Some("scheduled:p1:r2".into())
+        );
+        // Stale observation at T0 + 31_000 reserves slot -> scheduled run waits.
+        assert!(next_scheduled_run_at(&snap, 1, T0 + 31_000).is_none());
     }
 }

@@ -1,11 +1,12 @@
 //! Disposable response cache. Freshness is driven by explicit refresh events, never a TTL.
 use anyhow::Result;
+use canban_types::{Clock, system_clock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
-    path::PathBuf,
+    collections::BTreeMap,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
@@ -27,36 +28,52 @@ pub struct Response {
     #[serde(default)]
     pub cached: bool,
 }
-pub fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 #[derive(Serialize, Deserialize)]
 struct Entry {
     key: String,
     response: Response,
+    #[serde(default)]
+    stored_at: u64,
+}
+impl Entry {
+    fn effective_stored_at(&self) -> u64 {
+        if self.stored_at > 0 {
+            self.stored_at
+        } else {
+            self.response.validated_at.max(self.response.fetched_at)
+        }
+    }
 }
 #[derive(Default)]
 struct State {
-    entries: HashMap<String, (Response, usize, u64)>,
-    gates: HashMap<String, Weak<Mutex<()>>>,
+    entries: BTreeMap<String, (Response, usize, u64)>,
+    gates: BTreeMap<String, Weak<Mutex<()>>>,
     tick: u64,
-    page_epochs: HashMap<String, u64>,
+    page_epochs: BTreeMap<String, u64>,
+    disk_stored_at: BTreeMap<PathBuf, u64>,
 }
 pub struct Cache {
     root: PathBuf,
     state: Mutex<State>,
     generation: AtomicU64,
+    clock: Arc<dyn Clock>,
+    disk_limit: u64,
 }
 impl Cache {
     pub fn new(root: PathBuf) -> Arc<Self> {
+        Self::new_with_clock(root, system_clock())
+    }
+    pub fn new_with_clock(root: PathBuf, clock: Arc<dyn Clock>) -> Arc<Self> {
         Arc::new(Self {
             root,
             state: Mutex::new(State::default()),
             generation: AtomicU64::new(0),
+            clock,
+            disk_limit: DISK_LIMIT,
         })
+    }
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
     }
     fn page_family(key: &str) -> Option<(String, bool)> {
         let start = key.rfind("&page=")? + 6;
@@ -99,12 +116,13 @@ impl Cache {
             .retain(|k, _| k == key || Self::page_family(k).is_none_or(|(f, _)| f != family));
         let prefix = format!("{:x}.", Sha256::digest(family.as_bytes()));
         let current = self.path(key);
-        for (path, _, _) in self.files() {
+        for (path, _) in self.files() {
             if path != current
                 && path
                     .file_name()
                     .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
             {
+                state.disk_stored_at.remove(&path);
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -135,6 +153,7 @@ impl Cache {
         }
         let path = self.path(key);
         if std::fs::metadata(&path).ok()?.len() > 5 * 1024 * 1024 {
+            state.disk_stored_at.remove(&path);
             let _ = std::fs::remove_file(&path);
             return None;
         }
@@ -142,6 +161,7 @@ impl Cache {
         let entry: Entry = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             Err(_) => {
+                state.disk_stored_at.remove(&path);
                 let _ = std::fs::remove_file(path);
                 return None;
             }
@@ -149,6 +169,9 @@ impl Cache {
         if entry.key != key {
             return None;
         }
+        state
+            .disk_stored_at
+            .insert(path, entry.effective_stored_at());
         Self::remember(&mut state, key, entry.response.clone(), bytes.len());
         let mut v = entry.response;
         v.cached = true;
@@ -206,63 +229,89 @@ impl Cache {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700))?;
         }
+        let stored_at = self.clock.now_ms();
         let bytes = serde_json::to_vec(&Entry {
             key: key.into(),
             response: response.clone(),
+            stored_at,
         })?;
+        let path = self.path(key);
         let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
         std::io::Write::write_all(&mut file, &bytes)?;
-        file.persist(self.path(key))?;
+        file.persist(&path)?;
+        state_guard.disk_stored_at.insert(path, stored_at);
         Self::remember(&mut state_guard, key, response.clone(), bytes.len());
-        self.trim()?;
+        self.trim(&mut state_guard)?;
         drop(state_guard);
         Ok(())
     }
-    fn trim(&self) -> Result<()> {
-        let mut files = self.files();
-        let mut bytes: u64 = files.iter().map(|(_, size, _)| size).sum();
-        files.sort_by_key(|(_, _, time)| *time);
-        for (path, size, _) in files {
-            if bytes <= DISK_LIMIT {
+    fn stored_at_from_disk(path: &Path) -> u64 {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Entry>(&bytes).ok())
+            .map(|entry| entry.effective_stored_at())
+            .unwrap_or(0)
+    }
+    fn trim(&self, state: &mut State) -> Result<()> {
+        let files = self.files();
+        let mut bytes: u64 = files.iter().map(|(_, size)| size).sum();
+        if bytes <= self.disk_limit {
+            return Ok(());
+        }
+        let mut ranked: Vec<(u64, PathBuf, u64)> = files
+            .into_iter()
+            .map(|(path, size)| {
+                let ts = *state
+                    .disk_stored_at
+                    .entry(path.clone())
+                    .or_insert_with(|| Self::stored_at_from_disk(&path));
+                (ts, path, size)
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, path, size) in ranked {
+            if bytes <= self.disk_limit {
                 break;
             }
-            std::fs::remove_file(path)?;
+            std::fs::remove_file(&path)?;
+            state.disk_stored_at.remove(&path);
             bytes = bytes.saturating_sub(size);
         }
         Ok(())
     }
-    fn files(&self) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
-        std::fs::read_dir(&self.root)
+    /// Lists cached `.json` files in deterministic lexicographical path order.
+    fn files(&self) -> Vec<(PathBuf, u64)> {
+        let mut files: Vec<(PathBuf, u64)> = std::fs::read_dir(&self.root)
             .into_iter()
             .flatten()
             .filter_map(|entry| {
                 let entry = entry.ok()?;
-                if entry.path().extension()?.to_str()? != "json" {
+                let path = entry.path();
+                if path.extension()?.to_str()? != "json" {
                     return None;
                 }
                 let m = entry.metadata().ok()?;
-                Some((
-                    entry.path(),
-                    m.len(),
-                    m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                ))
+                Some((path, m.len()))
             })
-            .collect()
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files
     }
     pub fn patch(&self, mut update: impl FnMut(&str, &mut Response)) -> Result<()> {
         let generation = {
             let _guard = self.state.lock().unwrap();
             self.generation.fetch_add(1, Ordering::SeqCst) + 1
         };
-        let keys: Vec<String> = self
+        let mut keys: Vec<String> = self
             .files()
             .into_iter()
-            .filter_map(|(path, _, _)| {
+            .filter_map(|(path, _)| {
                 serde_json::from_slice::<Entry>(&std::fs::read(path).ok()?)
                     .ok()
                     .map(|e| e.key)
             })
             .collect();
+        keys.sort();
         for key in keys {
             let gate = self.gate(&key);
             let _guard = gate.lock().unwrap();
@@ -274,14 +323,15 @@ impl Cache {
         Ok(())
     }
     pub fn bytes(&self) -> u64 {
-        self.files().iter().map(|(_, n, _)| n).sum()
+        self.files().iter().map(|(_, n)| n).sum()
     }
     pub fn clear(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         self.generation.fetch_add(1, Ordering::SeqCst);
         state.entries.clear();
         state.page_epochs.clear();
-        for (path, _, _) in self.files() {
+        state.disk_stored_at.clear();
+        for (path, _) in self.files() {
             std::fs::remove_file(path)?;
         }
         Ok(())
@@ -359,5 +409,77 @@ mod pagination_tests {
         let restarted = Cache::new(dir.path().into());
         assert!(restarted.get(second).is_none());
         assert!(restarted.get(other).is_some());
+    }
+
+    struct MockClock(AtomicU64);
+    impl Clock for MockClock {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn mock_clock_drives_deterministic_trim_and_sorted_patch_order() {
+        const T0: u64 = 1_700_000_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(MockClock(AtomicU64::new(T0)));
+
+        let make_resp = |tag: &str, ts: u64| Response {
+            data: serde_json::json!({"tag": tag, "pad": "x".repeat(64)}),
+            link: None,
+            etag: None,
+            modified: None,
+            poll_interval: None,
+            validated_at: ts,
+            fetched_at: ts,
+            cached: false,
+        };
+
+        // Measure one serialized entry on disk, then set `disk_limit` to fit exactly two entries.
+        let probe = Cache::new_with_clock(dir.path().into(), clock.clone());
+        probe
+            .put("acct:/k_old", &make_resp("old", T0), probe.generation())
+            .unwrap();
+        let one_entry_bytes = probe.bytes();
+        probe.clear().unwrap();
+
+        let cache = Arc::new(Cache {
+            root: dir.path().into(),
+            state: Mutex::new(State::default()),
+            generation: AtomicU64::new(0),
+            clock: clock.clone(),
+            disk_limit: one_entry_bytes * 2 + 16,
+        });
+        let generation = cache.generation();
+
+        // Write `k_old` at T0, `k_mid` at T0 + 100, then `k_new` at T0 + 200 to trigger trim.
+        cache
+            .put("acct:/k_old", &make_resp("old", T0), generation)
+            .unwrap();
+        clock.0.store(T0 + 100, Ordering::SeqCst);
+        cache
+            .put("acct:/k_mid", &make_resp("mid", T0 + 100), generation)
+            .unwrap();
+        clock.0.store(T0 + 200, Ordering::SeqCst);
+        cache
+            .put("acct:/k_new", &make_resp("new", T0 + 200), generation)
+            .unwrap();
+
+        // Reload from disk with a fresh Cache instance to verify persisted `stored_at` eviction.
+        let reloaded = Cache::new_with_clock(dir.path().into(), clock.clone());
+        assert!(reloaded.get("acct:/k_old").is_none());
+        assert!(reloaded.get("acct:/k_mid").is_some());
+        assert!(reloaded.get("acct:/k_new").is_some());
+
+        // `patch` visits keys in deterministic sorted order.
+        let mut visited = Vec::new();
+        reloaded
+            .patch(|key, resp| {
+                visited.push(key.to_owned());
+                resp.validated_at = T0 + 999;
+            })
+            .unwrap();
+        assert_eq!(visited, vec!["acct:/k_mid", "acct:/k_new"]);
+        assert_eq!(reloaded.get("acct:/k_mid").unwrap().validated_at, T0 + 999);
     }
 }

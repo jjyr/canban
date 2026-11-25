@@ -53,6 +53,32 @@ pub fn agent_run(
     instruction: String,
     on_completed: Option<String>,
 ) -> AgentRun {
+    agent_run_at(
+        project,
+        card,
+        number,
+        stage,
+        trigger,
+        profile,
+        instruction,
+        on_completed,
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`agent_run`].
+#[allow(clippy::too_many_arguments)]
+pub fn agent_run_at(
+    project: &str,
+    card: &str,
+    number: u32,
+    stage: &str,
+    trigger: impl Into<ExecutionTrigger>,
+    profile: Profile,
+    instruction: String,
+    on_completed: Option<String>,
+    now_ms: u64,
+) -> AgentRun {
     AgentRun {
         workflow_run_id: None,
         workflow_step: None,
@@ -79,7 +105,7 @@ pub fn agent_run(
         observed: None,
         error: None,
         started_at: None,
-        updated_at: now(),
+        updated_at: now_ms,
         provider_session_id: None,
         close_state: String::new(),
         turn_ended_at: None,
@@ -154,7 +180,12 @@ pub fn active_count_at(snapshot: &canban_types::Snapshot, at: u64) -> usize {
 pub fn automatic(agent: &AgentRun) -> bool {
     agent.trigger.is_automatic()
 }
-fn can_hand_off_idle(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
+/// Pure clock-injected idle hand-off eligibility check.
+pub fn can_hand_off_idle_at(
+    snapshot: &canban_types::Snapshot,
+    entry: &TerminalEntry,
+    now_ms: u64,
+) -> bool {
     let Some(agent) = entry.agent.as_ref() else {
         return false;
     };
@@ -163,7 +194,7 @@ fn can_hand_off_idle(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -
         && agent.close_state.is_empty()
         && !agent.finished()
         && agent.connection_state == "connected"
-        && matches!(agent.runtime_status(), "idle" | "done")
+        && matches!(agent.runtime_status_at(now_ms), "idle" | "done")
         && matches!(agent.state.as_str(), "completed" | "backlog")
         && !snapshot
             .questions
@@ -174,7 +205,16 @@ fn can_hand_off_idle(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -
 /// True when `entry` holds a live, completed, idle PTY that can accept a queued `pending`
 /// assignment in-place without spawning a new PTY.
 pub fn can_continue_in_place(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
-    if !can_hand_off_idle(snapshot, entry) {
+    can_continue_in_place_at(snapshot, entry, canban_types::now())
+}
+
+/// Pure clock-injected variant of [`can_continue_in_place`].
+pub fn can_continue_in_place_at(
+    snapshot: &canban_types::Snapshot,
+    entry: &TerminalEntry,
+    now_ms: u64,
+) -> bool {
+    if !can_hand_off_idle_at(snapshot, entry, now_ms) {
         return false;
     }
     let agent = entry.agent.as_ref().unwrap();
@@ -217,6 +257,11 @@ fn queued_meta(agent: &AgentRun) -> Option<(&str, &ExecutionTrigger, Option<&str
     }
 }
 pub fn eligible(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
+    eligible_at(snapshot, entry, canban_types::now())
+}
+
+/// Pure clock-injected variant of [`eligible`].
+pub fn eligible_at(snapshot: &canban_types::Snapshot, entry: &TerminalEntry, now_ms: u64) -> bool {
     let Some(agent) = entry.agent.as_ref() else {
         return false;
     };
@@ -248,19 +293,30 @@ pub fn eligible(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> boo
         return false;
     }
     if agent.pending.is_some() {
-        can_hand_off_idle(snapshot, entry) || agent.finished() || agent.terminal.is_none()
+        can_hand_off_idle_at(snapshot, entry, now_ms)
+            || agent.finished()
+            || agent.terminal.is_none()
     } else {
         (agent.finished() || agent.terminal.is_none()) && agent.state != "unknown"
     }
 }
 pub fn next(snapshot: &canban_types::Snapshot, max_agents: usize) -> Option<TerminalEntry> {
-    if active_count(snapshot) >= max_agents {
+    next_at(snapshot, max_agents, canban_types::now())
+}
+
+/// Pure clock-injected variant of [`next`].
+pub fn next_at(
+    snapshot: &canban_types::Snapshot,
+    max_agents: usize,
+    now_ms: u64,
+) -> Option<TerminalEntry> {
+    if active_count_at(snapshot, now_ms) >= max_agents {
         return None;
     }
     snapshot
         .terminals
         .iter()
-        .filter(|t| eligible(snapshot, t))
+        .filter(|t| eligible_at(snapshot, t, now_ms))
         .min_by_key(|t| {
             let a = t.agent.as_ref().unwrap();
             let (stage, _, _, queued_at) = queued_meta(a).unwrap();
@@ -277,12 +333,21 @@ pub fn next(snapshot: &canban_types::Snapshot, max_agents: usize) -> Option<Term
 
 /// Workflow runs to release from `admit` gates, in admission order.
 pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<String> {
+    admissions_at(snapshot, max_agents, canban_types::now())
+}
+
+/// Pure clock-injected variant of [`admissions`].
+pub fn admissions_at(
+    snapshot: &canban_types::Snapshot,
+    max_agents: usize,
+    now_ms: u64,
+) -> Vec<String> {
     use canban_types::WorkflowStep;
     let card = |id: &str| snapshot.cards.iter().find(|c| c.id == id);
     let queued = snapshot
         .terminals
         .iter()
-        .filter(|t| eligible(snapshot, t))
+        .filter(|t| eligible_at(snapshot, t, now_ms))
         .count()
         + snapshot
             .merge_batches
@@ -294,7 +359,7 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
             .iter()
             .filter(|r| !r.creates_card && r.state == "queued")
             .count();
-    let mut free = max_agents.saturating_sub(active_count(snapshot) + queued);
+    let mut free = max_agents.saturating_sub(active_count_at(snapshot, now_ms) + queued);
     // (project, workflow, gate step, column) -> admitted Cards still in that column.
     let mut ready = std::collections::BTreeMap::<(String, String, String, String), u32>::new();
     for run in snapshot.workflow_runs.iter().filter(|r| r.active()) {
@@ -597,5 +662,107 @@ mod tests {
         assert_eq!(active_count(&snap), 0);
         assert!(admissions(&snap, 2).is_empty());
         assert_eq!(admissions(&snap, 3), vec!["wf2".to_string()]);
+    }
+
+    #[test]
+    fn clock_injected_scheduler_helpers_respect_2023_epoch_without_wall_clock() {
+        const T0: u64 = 1_700_000_000_000;
+        let mut agent = agent_run_at(
+            "p1",
+            "c1",
+            1,
+            "develop",
+            "auto",
+            Profile::default(),
+            "go".into(),
+            None,
+            T0,
+        );
+        assert_eq!(agent.updated_at, T0);
+        agent.state = "completed".into();
+        agent.terminal = Some("pty-1".into());
+        agent.connection_state = "connected".into();
+        agent.lifecycle.observed_at = Some(T0);
+        agent.set_observed_status("running", "idle");
+        agent.pending = Some(canban_types::QueuedAssignment {
+            workflow_run_id: None,
+            workflow_step: None,
+            trigger: ExecutionTrigger::Interactive,
+            stage: "develop".into(),
+            profile: Profile::default(),
+            instruction: "next".into(),
+            on_completed: None,
+            require_human_review: false,
+            queued_at: T0 + 100,
+        });
+
+        let entry = TerminalEntry {
+            id: "t1".into(),
+            conversation_id: Some("conv1".into()),
+            number: 1,
+            name: None,
+            origin_project_id: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: None,
+            agent: Some(agent),
+            created_at: T0,
+        };
+        let card = canban_types::Card {
+            schedule_source: None,
+            source_trust: None,
+            hold_auto_merge: false,
+            github_links: vec![],
+            created_by: String::new(),
+            content: Default::default(),
+            removed_at: None,
+            pull_request: None,
+            pull_request_history: vec![],
+            delivery_mode: None,
+            workspace: None,
+            workspace_history: vec![],
+            id: "c1".into(),
+            project_id: "p1".into(),
+            number: 1,
+            title: "Card 1".into(),
+            body: String::new(),
+            board_order: None,
+            context_notes: None,
+            stage: "develop".into(),
+            revision: 1,
+            attention: None,
+            archived_at: None,
+            archive: None,
+            archive_error: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            human_gate: None,
+            delivery: None,
+            resolution: None,
+            created_at: T0,
+        };
+        let snap = canban_types::Snapshot {
+            cards: vec![card],
+            terminals: vec![entry.clone()],
+            ..Default::default()
+        };
+
+        // At T0 + 30_000, observation is fresh (`idle`), so slot is free and hand-off is eligible.
+        assert_eq!(active_count_at(&snap, T0 + 30_000), 0);
+        assert!(can_hand_off_idle_at(&snap, &entry, T0 + 30_000));
+        assert!(can_continue_in_place_at(&snap, &entry, T0 + 30_000));
+        assert!(eligible_at(&snap, &entry, T0 + 30_000));
+        assert_eq!(
+            next_at(&snap, 1, T0 + 30_000).map(|t| t.id),
+            Some("t1".into())
+        );
+
+        // At T0 + 30_001, observation is stale (`unknown`), so slot is reserved and hand-off waits.
+        assert_eq!(active_count_at(&snap, T0 + 30_001), 1);
+        assert!(!can_hand_off_idle_at(&snap, &entry, T0 + 30_001));
+        assert!(!can_continue_in_place_at(&snap, &entry, T0 + 30_001));
+        assert!(!eligible_at(&snap, &entry, T0 + 30_001));
+        assert!(next_at(&snap, 1, T0 + 30_001).is_none());
     }
 }

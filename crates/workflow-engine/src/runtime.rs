@@ -47,7 +47,92 @@ pub type Queue = for<'a> fn(
     Option<&str>,
     Option<String>,
 ) -> Result<Option<TerminalEntry>>;
-fn log(
+
+/// Clock-injected queue adapter for `*_at` workflow runtime entrypoints.
+pub type QueueAt = for<'a> fn(
+    Db<'a>,
+    &Config,
+    &mut Card,
+    &Project,
+    &Stage,
+    ExecutionTrigger,
+    Option<&str>,
+    Option<String>,
+    u64,
+) -> Result<Option<TerminalEntry>>;
+
+/// Clock-aware queue callback accepted by `*_at` workflow runtime entrypoints.
+///
+/// Implemented automatically for any [`QueueAt`] function pointer or matching closure.
+pub trait QueueHandler {
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue(
+        &mut self,
+        db: Db<'_>,
+        config: &Config,
+        card: &mut Card,
+        project: &Project,
+        stage: &Stage,
+        trigger: ExecutionTrigger,
+        explicit: Option<&str>,
+        context: Option<String>,
+        now_ms: u64,
+    ) -> Result<Option<TerminalEntry>>;
+}
+
+impl<F> QueueHandler for F
+where
+    F: for<'a> FnMut(
+        Db<'a>,
+        &Config,
+        &mut Card,
+        &Project,
+        &Stage,
+        ExecutionTrigger,
+        Option<&str>,
+        Option<String>,
+        u64,
+    ) -> Result<Option<TerminalEntry>>,
+{
+    fn enqueue(
+        &mut self,
+        db: Db<'_>,
+        config: &Config,
+        card: &mut Card,
+        project: &Project,
+        stage: &Stage,
+        trigger: ExecutionTrigger,
+        explicit: Option<&str>,
+        context: Option<String>,
+        now_ms: u64,
+    ) -> Result<Option<TerminalEntry>> {
+        self(
+            db, config, card, project, stage, trigger, explicit, context, now_ms,
+        )
+    }
+}
+
+struct LegacyQueue(Queue);
+
+impl QueueHandler for LegacyQueue {
+    fn enqueue(
+        &mut self,
+        db: Db<'_>,
+        config: &Config,
+        card: &mut Card,
+        project: &Project,
+        stage: &Stage,
+        trigger: ExecutionTrigger,
+        explicit: Option<&str>,
+        context: Option<String>,
+        _now_ms: u64,
+    ) -> Result<Option<TerminalEntry>> {
+        (self.0)(db, config, card, project, stage, trigger, explicit, context)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_at(
     db: Db<'_>,
     c: &Card,
     kind: &str,
@@ -55,23 +140,25 @@ fn log(
     message: &str,
     terminal_id: Option<&str>,
     mut data: Value,
+    now_ms: u64,
 ) -> Result<()> {
     if let Some(tid) = terminal_id
         && data.get("terminal_id").is_none()
     {
         data["terminal_id"] = json!(tid);
     }
-    db.append(canban_timeline::event(
+    db.append(canban_timeline::event_at(
         &c.project_id,
         &c.id,
         kind,
         actor,
         message,
         data,
+        now_ms,
     ))?;
     Ok(())
 }
-fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
+fn attention_at(db: Db<'_>, card: &mut Card, message: &str, now_ms: u64) -> Result<()> {
     card.attention = Some(message.into());
     if card.human_gate.is_none() {
         card.human_gate = Some(HumanGate {
@@ -80,10 +167,11 @@ fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
             next_stage: None,
         });
     }
-    db.save(&canban_notifications::attention(
+    db.save(&canban_notifications::attention_at(
         &card.project_id,
         &card.id,
         message,
+        now_ms,
     ))?;
     Ok(())
 }
@@ -121,7 +209,7 @@ pub fn card_digest(db: Db<'_>, card: &Card) -> String {
         &serde_json::to_vec(&json!([card.title, card.body, card.content, source])).unwrap(),
     )
 }
-fn record(db: Db<'_>, run: &WorkflowRun, kind: &str, message: &str) -> Result<()> {
+fn record_at(db: Db<'_>, run: &WorkflowRun, kind: &str, message: &str, now_ms: u64) -> Result<()> {
     let actor = if kind == "workflow.approved" {
         "user"
     } else {
@@ -131,7 +219,7 @@ fn record(db: Db<'_>, run: &WorkflowRun, kind: &str, message: &str) -> Result<()
         json!({"workflow_run_id":run.id,"step":run.step,"visit":run.visit,"state":run.state});
     if let Some(card_id) = &run.card_id {
         let card: Card = db.get(card_id)?;
-        log(
+        log_at(
             db,
             &card,
             kind,
@@ -139,58 +227,70 @@ fn record(db: Db<'_>, run: &WorkflowRun, kind: &str, message: &str) -> Result<()
             message,
             run.terminal_id.as_deref(),
             data,
+            now_ms,
         )
     } else {
         if let Some(tid) = run.terminal_id.as_deref() {
             data["terminal_id"] = json!(tid);
         }
-        db.append(canban_timeline::event(
+        db.append(canban_timeline::event_at(
             &run.project_id,
             "",
             kind,
             actor,
             message,
             data,
+            now_ms,
         ))?;
         Ok(())
     }
 }
-fn next(run: &mut WorkflowRun, to: Option<String>) {
+fn next_at(run: &mut WorkflowRun, to: Option<String>, now_ms: u64) {
     if let Some(step) = &run.step {
         run.history
-            .push(json!({"step":step,"visit":run.visit,"event":"completed","at":now()}));
+            .push(json!({"step":step,"visit":run.visit,"event":"completed","at":now_ms}));
     }
     run.step = to;
     run.terminal_id = None;
     run.error = None;
     run.state = "running".into();
     run.visit += 1;
-    run.updated_at = now();
+    run.updated_at = now_ms;
 }
 
 pub fn stop_card(db: Db<'_>, card: &str, state: &str) -> Result<()> {
+    stop_card_at(db, card, state, now())
+}
+
+/// Pure clock-injected variant of [`stop_card`].
+pub fn stop_card_at(db: Db<'_>, card: &str, state: &str, now_ms: u64) -> Result<()> {
     for mut run in db
         .list::<WorkflowRun>()?
         .into_iter()
         .filter(|r| r.card_id.as_deref() == Some(card) && r.active())
     {
-        stop_active_run(db, &mut run, state)?;
+        stop_active_run_at(db, &mut run, state, now_ms)?;
     }
     Ok(())
 }
 
 /// Stops a single active `WorkflowRun` (card-bound or cardless) by ID.
 pub fn stop_run(db: Db<'_>, run_id: &str, state: &str) -> Result<()> {
+    stop_run_at(db, run_id, state, now())
+}
+
+/// Pure clock-injected variant of [`stop_run`].
+pub fn stop_run_at(db: Db<'_>, run_id: &str, state: &str, now_ms: u64) -> Result<()> {
     let mut run: WorkflowRun = db.get(run_id)?;
     if !run.active() {
         return Ok(());
     }
-    stop_active_run(db, &mut run, state)
+    stop_active_run_at(db, &mut run, state, now_ms)
 }
 
-fn stop_active_run(db: Db<'_>, run: &mut WorkflowRun, state: &str) -> Result<()> {
+fn stop_active_run_at(db: Db<'_>, run: &mut WorkflowRun, state: &str, now_ms: u64) -> Result<()> {
     run.state = state.into();
-    run.updated_at = now();
+    run.updated_at = now_ms;
     for mut entry in db.list::<TerminalEntry>()? {
         let mut changed = false;
         if let Some(a) = &mut entry.agent {
@@ -211,7 +311,7 @@ fn stop_active_run(db: Db<'_>, run: &mut WorkflowRun, state: &str) -> Result<()>
         }
     }
     db.save(run)?;
-    record(db, run, "workflow.stopped", state)?;
+    record_at(db, run, "workflow.stopped", state, now_ms)?;
     Ok(())
 }
 
@@ -300,6 +400,37 @@ pub fn start(
     legacy: bool,
     queue: Queue,
 ) -> Result<WorkflowRun> {
+    start_at(
+        db,
+        config,
+        card,
+        flow,
+        revision,
+        entry,
+        event,
+        legacy,
+        LegacyQueue(queue),
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`start`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped entry captures definition, causality, queue adapter and clock"
+)]
+pub fn start_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    flow: WorkflowDefinition,
+    revision: u64,
+    entry: &str,
+    event: Option<String>,
+    legacy: bool,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
+) -> Result<WorkflowRun> {
     ensure!(card.active(), "Restore the Card before starting a workflow");
     ensure!(
         !card.resolved(),
@@ -340,12 +471,12 @@ pub fn start(
         outputs: BTreeMap::new(),
         history: Vec::new(),
         error: None,
-        created_at: now(),
-        updated_at: now(),
+        created_at: now_ms,
+        updated_at: now_ms,
     };
     db.save(&run)?;
-    record(db, &run, "workflow.started", entry)?;
-    drive(db, config, card, &mut run, queue)?;
+    record_at(db, &run, "workflow.started", entry, now_ms)?;
+    drive_at(db, config, card, &mut run, &mut queue, now_ms)?;
     Ok(run)
 }
 
@@ -368,6 +499,39 @@ pub fn start_adopted(
     legacy: bool,
     adopted_terminal: Option<&mut TerminalEntry>,
     queue: Queue,
+) -> Result<WorkflowRun> {
+    start_adopted_at(
+        db,
+        config,
+        card,
+        flow,
+        revision,
+        entry,
+        event,
+        legacy,
+        adopted_terminal,
+        LegacyQueue(queue),
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`start_adopted`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped adoption captures definition, optional live terminal, queue adapter and clock"
+)]
+pub fn start_adopted_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    flow: WorkflowDefinition,
+    revision: u64,
+    entry: &str,
+    event: Option<String>,
+    legacy: bool,
+    adopted_terminal: Option<&mut TerminalEntry>,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<WorkflowRun> {
     ensure!(card.active(), "Restore the Card before starting a workflow");
     ensure!(
@@ -409,11 +573,11 @@ pub fn start_adopted(
         outputs: BTreeMap::new(),
         history: Vec::new(),
         error: None,
-        created_at: now(),
-        updated_at: now(),
+        created_at: now_ms,
+        updated_at: now_ms,
     };
     db.save(&run)?;
-    record(db, &run, "workflow.started", entry)?;
+    record_at(db, &run, "workflow.started", entry, now_ms)?;
     let mut claimed = false;
     let mut adopted_terminal = adopted_terminal;
     while run.state == "running" {
@@ -434,43 +598,45 @@ pub fn start_adopted(
                 otherwise,
             } => {
                 run.history
-                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+                    .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
                 let mut card_val = serde_json::to_value(&*card)?;
                 if let Some(obj) = card_val.as_object_mut() {
                     obj.insert("source_trust".into(), json!(card.trust_level()));
                 }
                 let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":card_val});
-                next(
+                next_at(
                     &mut run,
                     Some(if condition_matches(context.pointer(&pointer), &equals) {
                         then
                     } else {
                         otherwise
                     }),
+                    now_ms,
                 );
             }
             WorkflowStep::Notify { message, next: to } => {
                 run.history
-                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
-                db.save(&canban_notifications::attention(
+                    .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
+                db.save(&canban_notifications::attention_at(
                     &card.project_id,
                     &card.id,
                     &message,
+                    now_ms,
                 ))?;
-                record(db, &run, "workflow.notified", &message)?;
-                next(&mut run, to);
+                record_at(db, &run, "workflow.notified", &message, now_ms)?;
+                next_at(&mut run, to, now_ms);
             }
             WorkflowStep::Admit { next: to, .. } => {
                 // An already-live session holds its terminal; bypass capacity admission.
                 run.history
-                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
-                next(&mut run, to);
+                    .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
+                next_at(&mut run, to, now_ms);
             }
             WorkflowStep::Agent {
                 next: continuation, ..
             } => {
                 run.history
-                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+                    .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
                 let step_ref = format!("{key}:{}", run.visit);
                 if let Some(entry_ref) = adopted_terminal.take() {
                     if let Some(agent) = &mut entry_ref.agent {
@@ -495,7 +661,7 @@ pub fn start_adopted(
                         agent.workflow_run_id = Some(run.id.clone());
                         agent.workflow_step = Some(step_ref);
                         agent.stage = card.stage.clone();
-                        agent.updated_at = now();
+                        agent.updated_at = now_ms;
                         if legacy {
                             let following = run.definition.steps[&key]
                                 .next()
@@ -522,7 +688,7 @@ pub fn start_adopted(
                 run.inputs["body"] = json!(card.body);
                 run.input_digest = digest(db, card);
                 run.inputs["pending_next"] = json!(continuation);
-                run.updated_at = now();
+                run.updated_at = now_ms;
                 db.save(&run)?;
                 db.save(card)?;
                 claimed = true;
@@ -532,16 +698,17 @@ pub fn start_adopted(
         }
     }
     if !claimed {
-        drive(db, config, card, &mut run, queue)?;
+        drive_at(db, config, card, &mut run, &mut queue, now_ms)?;
     }
     Ok(run)
 }
-fn drive(
+fn drive_at<Q: QueueHandler>(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
     run: &mut WorkflowRun,
-    queue: Queue,
+    queue: &mut Q,
+    now_ms: u64,
 ) -> Result<()> {
     while run.state == "running" {
         if let Some(removed) = run.inputs["stop_after_step"].as_str()
@@ -549,13 +716,19 @@ fn drive(
         {
             run.step = None;
             run.state = "cancelled".into();
-            record(db, run, "workflow.stopped", "Step removed from workflow")?;
+            record_at(
+                db,
+                run,
+                "workflow.stopped",
+                "Step removed from workflow",
+                now_ms,
+            )?;
             break;
         }
         if run.visit > run.definition.max_steps {
             run.state = "failed".into();
             run.error = Some("Workflow execution limit reached".into());
-            attention(db, card, run.error.as_deref().unwrap())?;
+            attention_at(db, card, run.error.as_deref().unwrap(), now_ms)?;
             break;
         }
         let Some(key) = run.step.clone() else {
@@ -569,7 +742,7 @@ fn drive(
             .context("Workflow step not found")?
             .clone();
         run.history
-            .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+            .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
         match step {
             WorkflowStep::Agent {
                 profile,
@@ -615,9 +788,9 @@ fn drive(
                 } else {
                     ExecutionTrigger::Workflow
                 };
-                if let Some(mut entry) =
-                    queue(db, config, card, &project, &stage, trigger, None, None)?
-                {
+                if let Some(mut entry) = queue.enqueue(
+                    db, config, card, &project, &stage, trigger, None, None, now_ms,
+                )? {
                     let step_ref = format!("{key}:{}", run.visit);
                     if let Some(agent) = &mut entry.agent {
                         let (require_human_review, on_completed) = if run.inputs["legacy"] == true {
@@ -674,14 +847,15 @@ fn drive(
                     obj.remove("script_terminal");
                 }
                 run.inputs["pending_next"] = json!(to);
-                run.inputs["script_started_at"] = json!(now());
+                run.inputs["script_started_at"] = json!(now_ms);
                 run.input_digest = digest(db, card);
                 run.state = "waiting_script".into();
-                record(
+                record_at(
                     db,
                     run,
                     "workflow.script_started",
                     &format!("Running script {key}"),
+                    now_ms,
                 )?;
             }
             WorkflowStep::Move { column, next: to } => {
@@ -696,7 +870,7 @@ fn drive(
                     card.revision += 1;
                     canban_kanban::order::place(db, card, None)?;
                     db.save(card)?;
-                    log(
+                    log_at(
                         db,
                         card,
                         "card.stage_changed",
@@ -704,12 +878,13 @@ fn drive(
                         &format!("{} → {}", from, card.stage),
                         run.terminal_id.as_deref(),
                         json!({"from":from,"to":card.stage,"entry_id":id(),"reason":"workflow_completed","workflow_run_id":run.id,"step":key}),
+                        now_ms,
                     )?;
                 }
-                next(run, to);
+                next_at(run, to, now_ms);
             }
             WorkflowStep::Approval { title, .. } => {
-                attention(db, card, &title)?;
+                attention_at(db, card, &title, now_ms)?;
                 card.human_gate = Some(HumanGate {
                     reason: title.clone(),
                     terminal_id: run.terminal_id.clone(),
@@ -723,7 +898,7 @@ fn drive(
                 card.revision += 1;
                 db.save(card)?;
                 run.state = "waiting_approval".into();
-                record(db, run, "workflow.waiting_for_human", &title)?;
+                record_at(db, run, "workflow.waiting_for_human", &title, now_ms)?;
             }
             WorkflowStep::Deliver {
                 target_branch,
@@ -736,7 +911,7 @@ fn drive(
             } => {
                 if card.hold_auto_merge {
                     let title = "Auto-merge held by user; approve or resume to merge";
-                    attention(db, card, title)?;
+                    attention_at(db, card, title, now_ms)?;
                     card.human_gate = Some(HumanGate {
                         reason: title.into(),
                         terminal_id: run.terminal_id.clone(),
@@ -749,11 +924,11 @@ fn drive(
                         obj.remove("queue_pause_reason");
                     }
                     run.state = "waiting_approval".into();
-                    record(db, run, "workflow.waiting_for_human", title)?;
+                    record_at(db, run, "workflow.waiting_for_human", title, now_ms)?;
                 } else {
                     if run.inputs["queued_at"].as_u64().is_none() {
                         run.inputs["queued_at"] =
-                            json!(next_merge_queued_at(db, &card.project_id)?);
+                            json!(next_merge_queued_at_ms(db, &card.project_id, now_ms)?);
                     }
                     if let Some(obj) = run.inputs.as_object_mut() {
                         obj.remove("queue_pause_reason");
@@ -778,23 +953,25 @@ fn drive(
                     obj.insert("source_trust".into(), json!(card.trust_level()));
                 }
                 let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":card_val});
-                next(
+                next_at(
                     run,
                     Some(if condition_matches(context.pointer(&pointer), &equals) {
                         then
                     } else {
                         otherwise
                     }),
+                    now_ms,
                 );
             }
             WorkflowStep::Notify { message, next: to } => {
-                db.save(&canban_notifications::attention(
+                db.save(&canban_notifications::attention_at(
                     &card.project_id,
                     &card.id,
                     &message,
+                    now_ms,
                 ))?;
-                record(db, run, "workflow.notified", &message)?;
-                next(run, to);
+                record_at(db, run, "workflow.notified", &message, now_ms)?;
+                next_at(run, to, now_ms);
             }
             WorkflowStep::Admit { next: to, .. } => {
                 // The AppServer admission pump releases runs in Board order.
@@ -803,17 +980,17 @@ fn drive(
             }
             WorkflowStep::Complete => {
                 run.history
-                    .push(json!({"step":key,"visit":run.visit,"event":"completed","at":now()}));
+                    .push(json!({"step":key,"visit":run.visit,"event":"completed","at":now_ms}));
                 run.step = None;
                 run.state = "completed".into();
             }
         }
     }
-    run.updated_at = now();
+    run.updated_at = now_ms;
     db.save(run)?;
     db.save(card)?;
     if run.state == "completed" {
-        record(db, run, "workflow.completed", "Workflow completed")?;
+        record_at(db, run, "workflow.completed", "Workflow completed", now_ms)?;
     }
     Ok(())
 }
@@ -825,6 +1002,27 @@ pub fn reported(
     terminal: Option<&TerminalEntry>,
     report: &Report,
     queue: Queue,
+) -> Result<()> {
+    reported_at(
+        db,
+        config,
+        card,
+        terminal,
+        report,
+        LegacyQueue(queue),
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`reported`].
+pub fn reported_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    terminal: Option<&TerminalEntry>,
+    report: &Report,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<()> {
     let agent = terminal.and_then(|t| t.agent.as_ref());
     let run_opt: Option<WorkflowRun> = if let Some(a) = agent
@@ -863,10 +1061,10 @@ pub fn reported(
                     key.clone(),
                     json!({"report_id":report.id,"path":report.path,"message":report.message,"terminal_id":term_id,"run_number":run_num,"state":"backlog"}),
                 );
-                run.history.push(json!({"step":key,"visit":run.visit,"event":"returned_to_backlog","report_id":report.id,"at":now()}));
+                run.history.push(json!({"step":key,"visit":run.visit,"event":"returned_to_backlog","report_id":report.id,"at":now_ms}));
             }
             run.state = "cancelled".into();
-            run.updated_at = now();
+            run.updated_at = now_ms;
             db.save(&run)?;
         } else if matches!(report.state.as_str(), "blocked" | "failed") {
             if run.step_is_deliver()
@@ -889,9 +1087,9 @@ pub fn reported(
     if digest(db, card) != run.input_digest {
         run.state = "stale".into();
         run.error = Some("Task content changed; rework or stop this workflow".into());
-        attention(db, card, run.error.as_deref().unwrap())?;
+        attention_at(db, card, run.error.as_deref().unwrap(), now_ms)?;
         db.save(&run)?;
-        record(db, &run, "workflow.stale", "Input changed")?;
+        record_at(db, &run, "workflow.stale", "Input changed", now_ms)?;
         return Ok(());
     }
     let key = run.step.clone().context("Missing Agent step")?;
@@ -904,7 +1102,7 @@ pub fn reported(
             json!({"report_id":report.id,"path":report.path,"message":report.message,"terminal_id":term_id,"run_number":run_num,"state":"conflict_resolved"}),
         );
         run.history.push(
-            json!({"step":key,"visit":run.visit,"event":"conflict_resolved","report_id":report.id,"at":now()}),
+            json!({"step":key,"visit":run.visit,"event":"conflict_resolved","report_id":report.id,"at":now_ms}),
         );
         let to = run.definition.steps[&key].next().map(str::to_owned);
         if let Some(gate) = &mut card.human_gate {
@@ -925,11 +1123,11 @@ pub fn reported(
         run.terminal_id = term_id;
         run.error = None;
         run.state = "running".into();
-        return drive(db, config, card, &mut run, queue);
+        return drive_at(db, config, card, &mut run, &mut queue, now_ms);
     }
     run.outputs.insert(key.clone(),json!({"report_id":report.id,"path":report.path,"message":report.message,"terminal_id":term_id,"run_number":run_num}));
     run.history.push(
-        json!({"step":key,"visit":run.visit,"event":"completed","report_id":report.id,"at":now()}),
+        json!({"step":key,"visit":run.visit,"event":"completed","report_id":report.id,"at":now_ms}),
     );
     let to = run.definition.steps[&key].next().map(str::to_owned);
     // A previously reported block must still be approved even if the Agent later completes.
@@ -943,7 +1141,7 @@ pub fn reported(
         db.save(&run)?;
         return Ok(());
     }
-    next(&mut run, to);
+    next_at(&mut run, to, now_ms);
     // Keep the completing terminal as decision context when the next node is approval or delivery.
     if run.step.as_ref().is_some_and(|k| {
         matches!(
@@ -953,7 +1151,7 @@ pub fn reported(
     }) {
         run.terminal_id = term_id;
     }
-    drive(db, config, card, &mut run, queue)
+    drive_at(db, config, card, &mut run, &mut queue, now_ms)
 }
 
 /// Compatibility callers (Review/merge) resolve the same run, never a stage executor.
@@ -963,6 +1161,18 @@ pub fn advance(
     card: &mut Card,
     terminal: Option<&TerminalEntry>,
     queue: Queue,
+) -> Result<()> {
+    advance_at(db, config, card, terminal, LegacyQueue(queue), now())
+}
+
+/// Pure clock-injected variant of [`advance`].
+pub fn advance_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    terminal: Option<&TerminalEntry>,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<()> {
     let agent = terminal.and_then(|t| t.agent.as_ref());
     let run_opt: Option<WorkflowRun> = if let Some(a) = agent
@@ -979,7 +1189,9 @@ pub fn advance(
             return Ok(());
         }
         if run.state == "waiting_approval" {
-            return approve_with_feedback(db, config, card, &mut run, false, None, queue);
+            return approve_with_feedback_at(
+                db, config, card, &mut run, false, None, queue, now_ms,
+            );
         }
         if run.state == "blocked" && agent.is_none_or(|a| a.state == "completed") {
             ensure!(
@@ -990,15 +1202,16 @@ pub fn advance(
                 if let Some(obj) = run.inputs.as_object_mut() {
                     obj.remove("queue_pause_reason");
                 }
-                run.inputs["queued_at"] = json!(next_merge_queued_at(db, &card.project_id)?);
+                run.inputs["queued_at"] =
+                    json!(next_merge_queued_at_ms(db, &card.project_id, now_ms)?);
                 run.visit += 1;
                 run.error = None;
                 run.state = "running".into();
-                return drive(db, config, card, &mut run, queue);
+                return drive_at(db, config, card, &mut run, &mut queue, now_ms);
             }
             let to = run.inputs["pending_next"].as_str().map(str::to_owned);
-            next(&mut run, to);
-            return drive(db, config, card, &mut run, queue);
+            next_at(&mut run, to, now_ms);
+            return drive_at(db, config, card, &mut run, &mut queue, now_ms);
         }
     }
     Ok(())
@@ -1011,7 +1224,20 @@ pub fn approve(
     rework: bool,
     queue: Queue,
 ) -> Result<()> {
-    approve_with_feedback(db, config, card, run, rework, None, queue)
+    approve_at(db, config, card, run, rework, LegacyQueue(queue), now())
+}
+
+/// Pure clock-injected variant of [`approve`].
+pub fn approve_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    rework: bool,
+    queue: impl QueueHandler,
+    now_ms: u64,
+) -> Result<()> {
+    approve_with_feedback_at(db, config, card, run, rework, None, queue, now_ms)
 }
 pub fn approve_with_feedback(
     db: Db<'_>,
@@ -1021,6 +1247,30 @@ pub fn approve_with_feedback(
     rework: bool,
     feedback: Option<&str>,
     queue: Queue,
+) -> Result<()> {
+    approve_with_feedback_at(
+        db,
+        config,
+        card,
+        run,
+        rework,
+        feedback,
+        LegacyQueue(queue),
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`approve_with_feedback`].
+#[allow(clippy::too_many_arguments)]
+pub fn approve_with_feedback_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    rework: bool,
+    feedback: Option<&str>,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<()> {
     ensure!(
         matches!(run.state.as_str(), "waiting_approval" | "stale"),
@@ -1065,7 +1315,7 @@ pub fn approve_with_feedback(
             ..
         } = &run.definition.steps[&key]
         {
-            run.history.push(json!({"step":key,"visit":run.visit,"decision":"approved","outputs":run.outputs,"at":now()}));
+            run.history.push(json!({"step":key,"visit":run.visit,"decision":"approved","outputs":run.outputs,"at":now_ms}));
             card.human_gate = None;
             card.attention = None;
             card.hold_auto_merge = false;
@@ -1080,16 +1330,22 @@ pub fn approve_with_feedback(
             {
                 run.inputs["conflict_attempts"] = json!(max_conflict_attempts - 1);
             }
-            run.inputs["queued_at"] = json!(next_merge_queued_at(db, &card.project_id)?);
+            run.inputs["queued_at"] = json!(next_merge_queued_at_ms(db, &card.project_id, now_ms)?);
             run.inputs["pending_next"] = json!(to);
             run.inputs["target_branch"] = json!(target_branch);
             run.inputs["strategy"] = json!(strategy);
             run.inputs["sync_upstream"] = json!(sync_upstream);
             run.state = "waiting_delivery".into();
-            run.updated_at = now();
+            run.updated_at = now_ms;
             db.save(run)?;
             db.save(card)?;
-            record(db, run, "workflow.approved", "Human approved delivery")?;
+            record_at(
+                db,
+                run,
+                "workflow.approved",
+                "Human approved delivery",
+                now_ms,
+            )?;
             return Ok(());
         }
         if is_script {
@@ -1106,7 +1362,7 @@ pub fn approve_with_feedback(
                 .unwrap_or_default();
             failures.insert(key.clone(), json!(0));
             run.inputs["script_failures"] = Value::Object(failures);
-            run.history.push(json!({"step":key,"visit":run.visit,"decision":"retry","outputs":run.outputs,"at":now()}));
+            run.history.push(json!({"step":key,"visit":run.visit,"decision":"retry","outputs":run.outputs,"at":now_ms}));
             card.human_gate = None;
             card.attention = None;
             card.revision += 1;
@@ -1116,9 +1372,9 @@ pub fn approve_with_feedback(
             run.terminal_id = None;
             run.state = "running".into();
             run.visit += 1;
-            run.updated_at = now();
-            record(db, run, "workflow.approved", "Retrying script")?;
-            return drive(db, config, card, run, queue);
+            run.updated_at = now_ms;
+            record_at(db, run, "workflow.approved", "Retrying script", now_ms)?;
+            return drive_at(db, config, card, run, &mut queue, now_ms);
         }
         run.definition.steps[&key].next().map(str::to_owned)
     };
@@ -1162,13 +1418,13 @@ pub fn approve_with_feedback(
         obj.remove("queued_at");
         obj.remove("queue_pause_reason");
     }
-    run.history.push(json!({"step":key,"visit":run.visit,"decision":if rework{"rework"}else{"approved"},"feedback":clean_feedback,"outputs":run.outputs,"at":now()}));
+    run.history.push(json!({"step":key,"visit":run.visit,"decision":if rework{"rework"}else{"approved"},"feedback":clean_feedback,"outputs":run.outputs,"at":now_ms}));
     card.human_gate = None;
     card.attention = None;
     card.revision += 1;
     run.input_digest = digest(db, card);
-    next(run, to);
-    record(
+    next_at(run, to, now_ms);
+    record_at(
         db,
         run,
         "workflow.approved",
@@ -1181,16 +1437,30 @@ pub fn approve_with_feedback(
         } else {
             "Human approved"
         },
+        now_ms,
     )?;
-    drive(db, config, card, run, queue)
+    drive_at(db, config, card, run, &mut queue, now_ms)
 }
 pub fn complete_delivery(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
     run: &mut WorkflowRun,
-    mut output: Value,
+    output: Value,
     queue: Queue,
+) -> Result<()> {
+    complete_delivery_at(db, config, card, run, output, LegacyQueue(queue), now())
+}
+
+/// Pure clock-injected variant of [`complete_delivery`].
+pub fn complete_delivery_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    mut output: Value,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<()> {
     let key = run.step.clone().context("Missing Deliver step")?;
     let queued_at = run.inputs["queued_at"].as_u64();
@@ -1205,8 +1475,8 @@ pub fn complete_delivery(
     }
     run.outputs.insert(key.clone(), output);
     let to = run.inputs["pending_next"].as_str().map(str::to_owned);
-    next(run, to);
-    drive(db, config, card, run, queue)
+    next_at(run, to, now_ms);
+    drive_at(db, config, card, run, &mut queue, now_ms)
 }
 
 /// Records successful (or `continue_on_error`) completion of the active `Script` step,
@@ -1219,6 +1489,30 @@ pub fn complete_script(
     output: Value,
     exported_env: &BTreeMap<String, String>,
     queue: Queue,
+) -> Result<()> {
+    complete_script_at(
+        db,
+        config,
+        card,
+        run,
+        output,
+        exported_env,
+        LegacyQueue(queue),
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`complete_script`].
+#[allow(clippy::too_many_arguments)]
+pub fn complete_script_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<()> {
     ensure!(
         run.state == "waiting_script",
@@ -1239,8 +1533,8 @@ pub fn complete_script(
     }
     run.outputs.insert(key, output);
     let to = run.inputs["pending_next"].as_str().map(str::to_owned);
-    next(run, to);
-    drive(db, config, card, run, queue)
+    next_at(run, to, now_ms);
+    drive_at(db, config, card, run, &mut queue, now_ms)
 }
 
 /// Records failure of the active `Script` step: jumps back to `on_failure` at most once per
@@ -1261,6 +1555,37 @@ pub fn fail_script(
     detail_feedback: &str,
     queue: Queue,
 ) -> Result<()> {
+    fail_script_at(
+        db,
+        config,
+        card,
+        run,
+        output,
+        exported_env,
+        summary,
+        detail_feedback,
+        LegacyQueue(queue),
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`fail_script`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped script failure carries output, exported env, summary, rework feedback, and clock"
+)]
+pub fn fail_script_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+    summary: &str,
+    detail_feedback: &str,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
+) -> Result<()> {
     ensure!(
         run.state == "waiting_script",
         "Workflow is not running a script"
@@ -1276,9 +1601,9 @@ pub fn fail_script(
         obj.remove("script_terminal");
     }
     run.history
-        .push(json!({"step":key,"visit":run.visit,"event":"failed","outputs":output,"at":now()}));
+        .push(json!({"step":key,"visit":run.visit,"event":"failed","outputs":output,"at":now_ms}));
     run.outputs.insert(key.clone(), output.clone());
-    log(
+    log_at(
         db,
         card,
         "workflow.script_failed",
@@ -1292,6 +1617,7 @@ pub fn fail_script(
             "exit_code": output["exit_code"],
             "timed_out": output["timed_out"],
         }),
+        now_ms,
     )?;
 
     let mut failures = run
@@ -1314,11 +1640,11 @@ pub fn fail_script(
         run.error = None;
         run.state = "running".into();
         run.visit += 1;
-        run.updated_at = now();
-        return drive(db, config, card, run, queue);
+        run.updated_at = now_ms;
+        return drive_at(db, config, card, run, &mut queue, now_ms);
     }
 
-    attention(db, card, summary)?;
+    attention_at(db, card, summary, now_ms)?;
     card.human_gate = Some(HumanGate {
         reason: summary.into(),
         terminal_id: run.terminal_id.clone(),
@@ -1329,10 +1655,10 @@ pub fn fail_script(
     run.error = Some(summary.into());
     run.inputs["rework_feedback"] = json!(detail_feedback);
     run.input_digest = digest(db, card);
-    run.updated_at = now();
+    run.updated_at = now_ms;
     db.save(run)?;
     db.save(card)?;
-    record(db, run, "workflow.waiting_for_human", summary)?;
+    record_at(db, run, "workflow.waiting_for_human", summary, now_ms)?;
     Ok(())
 }
 /// Releases a run waiting at an `admit` gate. The caller (admission pump) decides
@@ -1343,6 +1669,18 @@ pub fn admit(
     card: &mut Card,
     run: &mut WorkflowRun,
     queue: Queue,
+) -> Result<()> {
+    admit_at(db, config, card, run, LegacyQueue(queue), now())
+}
+
+/// Pure clock-injected variant of [`admit`].
+pub fn admit_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<()> {
     ensure!(
         run.state == "waiting_capacity",
@@ -1360,9 +1698,9 @@ pub fn admit(
     if max_ready.is_some() {
         run.inputs["ready_gate"] = json!({"step": key, "column": card.stage});
     }
-    record(db, run, "workflow.admitted", "Capacity available")?;
-    next(run, to);
-    drive(db, config, card, run, queue)
+    record_at(db, run, "workflow.admitted", "Capacity available", now_ms)?;
+    next_at(run, to, now_ms);
+    drive_at(db, config, card, run, &mut queue, now_ms)
 }
 
 /// Dispatches a delivery merge conflict directly to the Deliver step's conflict
@@ -1383,6 +1721,35 @@ pub fn rework_conflict(
     target_head: &str,
     files: &[String],
     queue: Queue,
+) -> Result<bool> {
+    rework_conflict_at(
+        db,
+        config,
+        card,
+        run,
+        target_branch,
+        target_head,
+        files,
+        LegacyQueue(queue),
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`rework_conflict`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped conflict context plus queue adapter and clock"
+)]
+pub fn rework_conflict_at(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    target_branch: &str,
+    target_head: &str,
+    files: &[String],
+    mut queue: impl QueueHandler,
+    now_ms: u64,
 ) -> Result<bool> {
     if run.state != "waiting_delivery" {
         return Ok(false);
@@ -1464,7 +1831,7 @@ pub fn rework_conflict(
         on_completed: None,
         require_human_review: false,
     };
-    let Some(mut entry) = queue(
+    let Some(mut entry) = queue.enqueue(
         db,
         config,
         card,
@@ -1473,6 +1840,7 @@ pub fn rework_conflict(
         ExecutionTrigger::Workflow,
         None,
         None,
+        now_ms,
     )?
     else {
         return Ok(false);
@@ -1508,7 +1876,7 @@ pub fn rework_conflict(
         json!({"state":"conflict","target_branch":target_branch,"target_head":target_head,"files":files,"conflict_round":attempts + 1,"profile_id":agent_id}),
     );
     run.history.push(
-        json!({"step":key,"visit":run.visit,"decision":"merge_conflict","profile_id":agent_id,"files":files,"at":now()}),
+        json!({"step":key,"visit":run.visit,"decision":"merge_conflict","profile_id":agent_id,"files":files,"at":now_ms}),
     );
     card.human_gate = None;
     card.attention = None;
@@ -1517,8 +1885,8 @@ pub fn rework_conflict(
     run.state = "waiting_agent".into();
     run.error = None;
     run.input_digest = digest(db, card);
-    run.updated_at = now();
-    log(
+    run.updated_at = now_ms;
+    log_at(
         db,
         card,
         "review.merge_conflict",
@@ -1529,6 +1897,7 @@ pub fn rework_conflict(
         ),
         Some(&entry.id),
         json!({"workflow_run_id":run.id,"target_branch":target_branch,"target_head":target_head,"files":files,"conflict_round":attempts + 1,"profile_id":agent_id}),
+        now_ms,
     )?;
     db.save(run)?;
     db.save(card)?;
@@ -1541,7 +1910,18 @@ pub fn hold_delivery(
     run: &mut WorkflowRun,
     reason: &str,
 ) -> Result<()> {
-    attention(db, card, reason)?;
+    hold_delivery_at(db, card, run, reason, now())
+}
+
+/// Pure clock-injected variant of [`hold_delivery`].
+pub fn hold_delivery_at(
+    db: Db<'_>,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    reason: &str,
+    now_ms: u64,
+) -> Result<()> {
+    attention_at(db, card, reason, now_ms)?;
     card.human_gate = Some(HumanGate {
         reason: reason.into(),
         terminal_id: run.terminal_id.clone(),
@@ -1553,16 +1933,21 @@ pub fn hold_delivery(
         obj.remove("queue_pause_reason");
     }
     run.state = "waiting_approval".into();
-    run.updated_at = now();
+    run.updated_at = now_ms;
     db.save(run)?;
     db.save(card)?;
-    record(db, run, "workflow.waiting_for_human", reason)?;
+    record_at(db, run, "workflow.waiting_for_human", reason, now_ms)?;
     Ok(())
 }
 
 /// Computes a strictly increasing `queued_at` ticket for a Project's FIFO merge queue
 /// so newly queued or retried deliveries always join behind existing queued/active entries.
 pub fn next_merge_queued_at(db: Db<'_>, project_id: &str) -> Result<u64> {
+    next_merge_queued_at_ms(db, project_id, now())
+}
+
+/// Pure clock-injected variant of [`next_merge_queued_at`].
+pub fn next_merge_queued_at_ms(db: Db<'_>, project_id: &str, now_ms: u64) -> Result<u64> {
     let max_existing = db
         .list::<WorkflowRun>()?
         .into_iter()
@@ -1570,13 +1955,23 @@ pub fn next_merge_queued_at(db: Db<'_>, project_id: &str) -> Result<u64> {
         .filter_map(|r| r.inputs["queued_at"].as_u64())
         .max()
         .unwrap_or(0);
-    Ok(now().max(max_existing.saturating_add(1)))
+    Ok(now_ms.max(max_existing.saturating_add(1)))
 }
 
 /// Re-queues a failed, blocked, or stopped `Deliver` workflow run at the tail of its
 /// Project's FIFO merge queue (`waiting_delivery`) rather than bypassing active queue members
 /// or re-launching `@merger` out of order.
 pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> Result<()> {
+    requeue_delivery_at(db, card, run, now())
+}
+
+/// Pure clock-injected variant of [`requeue_delivery`].
+pub fn requeue_delivery_at(
+    db: Db<'_>,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    now_ms: u64,
+) -> Result<()> {
     ensure!(run.active(), "Workflow already ended");
     let key = run.step.clone().context("Missing Deliver step")?;
     let WorkflowStep::Deliver {
@@ -1658,7 +2053,7 @@ pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> R
             entry_changed = true;
         }
         if entry_changed {
-            agent.updated_at = now();
+            agent.updated_at = now_ms;
             db.save(&entry)?;
         }
     }
@@ -1680,7 +2075,7 @@ pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> R
     if let Some(obj) = run.inputs.as_object_mut() {
         obj.remove("queue_pause_reason");
     }
-    run.inputs["queued_at"] = json!(next_merge_queued_at(db, &card.project_id)?);
+    run.inputs["queued_at"] = json!(next_merge_queued_at_ms(db, &card.project_id, now_ms)?);
     run.inputs["pending_next"] = json!(to);
     run.inputs["target_branch"] = json!(target_branch);
     run.inputs["strategy"] = json!(strategy);
@@ -1690,20 +2085,21 @@ pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> R
     run.terminal_id = None;
     run.error = None;
     run.state = "waiting_delivery".into();
-    run.updated_at = now();
+    run.updated_at = now_ms;
     run.history.push(json!({
         "step": key,
         "visit": run.visit,
         "decision": "retry_queued",
-        "at": now()
+        "at": now_ms
     }));
     db.save(run)?;
     db.save(card)?;
-    record(
+    record_at(
         db,
         run,
         "workflow.delivery_requeued",
         "Queued for auto-merge",
+        now_ms,
     )?;
     Ok(())
 }
@@ -1737,6 +2133,19 @@ pub fn start_cardless(
     entry: &str,
     event: Option<String>,
 ) -> Result<WorkflowRun> {
+    start_cardless_at(db, project_id, flow, revision, entry, event, now())
+}
+
+/// Pure clock-injected variant of [`start_cardless`].
+pub fn start_cardless_at(
+    db: Db<'_>,
+    project_id: &str,
+    flow: WorkflowDefinition,
+    revision: u64,
+    entry: &str,
+    event: Option<String>,
+    now_ms: u64,
+) -> Result<WorkflowRun> {
     let step = if let Some(s) = flow.entries.get(entry) {
         s.clone()
     } else if flow.steps.contains_key(entry) {
@@ -1763,12 +2172,12 @@ pub fn start_cardless(
         outputs: BTreeMap::new(),
         history: Vec::new(),
         error: None,
-        created_at: now(),
-        updated_at: now(),
+        created_at: now_ms,
+        updated_at: now_ms,
     };
     db.save(&run)?;
-    record(db, &run, "workflow.started", entry)?;
-    drive_cardless(db, &mut run)?;
+    record_at(db, &run, "workflow.started", entry, now_ms)?;
+    drive_cardless_at(db, &mut run, now_ms)?;
     Ok(run)
 }
 
@@ -1776,6 +2185,11 @@ pub fn start_cardless(
 /// `Complete` steps. Card-only steps (`Move`, `Approval`, `Deliver`, `Admit`) fail with a clear
 /// error.
 pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
+    drive_cardless_at(db, run, now())
+}
+
+/// Pure clock-injected variant of [`drive_cardless`].
+pub fn drive_cardless_at(db: Db<'_>, run: &mut WorkflowRun, now_ms: u64) -> Result<()> {
     ensure!(
         run.card_id.is_none(),
         "drive_cardless requires a cardless WorkflowRun"
@@ -1786,7 +2200,13 @@ pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
         {
             run.step = None;
             run.state = "cancelled".into();
-            record(db, run, "workflow.stopped", "Step removed from workflow")?;
+            record_at(
+                db,
+                run,
+                "workflow.stopped",
+                "Step removed from workflow",
+                now_ms,
+            )?;
             break;
         }
         if run.visit > run.definition.max_steps {
@@ -1805,7 +2225,7 @@ pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
             .context("Workflow step not found")?
             .clone();
         run.history
-            .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+            .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
         match step {
             WorkflowStep::Script { next: to, .. } => {
                 run.error = None;
@@ -1813,13 +2233,14 @@ pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
                     obj.remove("script_terminal");
                 }
                 run.inputs["pending_next"] = json!(to);
-                run.inputs["script_started_at"] = json!(now());
+                run.inputs["script_started_at"] = json!(now_ms);
                 run.state = "waiting_script".into();
-                record(
+                record_at(
                     db,
                     run,
                     "workflow.script_started",
                     &format!("Running script {key}"),
+                    now_ms,
                 )?;
             }
             WorkflowStep::Condition {
@@ -1829,13 +2250,14 @@ pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
                 otherwise,
             } => {
                 let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":Value::Null});
-                next(
+                next_at(
                     run,
                     Some(if condition_matches(context.pointer(&pointer), &equals) {
                         then
                     } else {
                         otherwise
                     }),
+                    now_ms,
                 );
             }
             WorkflowStep::Agent {
@@ -1877,25 +2299,27 @@ pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
                     "instruction": full_instruction,
                 });
                 run.state = "waiting_agent".into();
-                record(
+                record_at(
                     db,
                     run,
                     "workflow.agent_queued",
                     &format!("Queued cardless agent step {key}"),
+                    now_ms,
                 )?;
             }
             WorkflowStep::Notify { message, next: to } => {
-                db.save(&canban_notifications::attention(
+                db.save(&canban_notifications::attention_at(
                     &run.project_id,
                     "",
                     &message,
+                    now_ms,
                 ))?;
-                record(db, run, "workflow.notified", &message)?;
-                next(run, to);
+                record_at(db, run, "workflow.notified", &message, now_ms)?;
+                next_at(run, to, now_ms);
             }
             WorkflowStep::Complete => {
                 run.history
-                    .push(json!({"step":key,"visit":run.visit,"event":"completed","at":now()}));
+                    .push(json!({"step":key,"visit":run.visit,"event":"completed","at":now_ms}));
                 run.step = None;
                 run.state = "completed".into();
             }
@@ -1912,17 +2336,17 @@ pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
                 );
                 run.state = "failed".into();
                 run.error = Some(err.clone());
-                run.updated_at = now();
+                run.updated_at = now_ms;
                 db.save(run)?;
-                record(db, run, "workflow.failed", &err)?;
+                record_at(db, run, "workflow.failed", &err, now_ms)?;
                 bail!("{err}");
             }
         }
     }
-    run.updated_at = now();
+    run.updated_at = now_ms;
     db.save(run)?;
     if run.state == "completed" {
-        record(db, run, "workflow.completed", "Workflow completed")?;
+        record_at(db, run, "workflow.completed", "Workflow completed", now_ms)?;
     }
     Ok(())
 }
@@ -1934,6 +2358,17 @@ pub fn complete_cardless_script(
     run: &mut WorkflowRun,
     output: Value,
     exported_env: &BTreeMap<String, String>,
+) -> Result<()> {
+    complete_cardless_script_at(db, run, output, exported_env, now())
+}
+
+/// Pure clock-injected variant of [`complete_cardless_script`].
+pub fn complete_cardless_script_at(
+    db: Db<'_>,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+    now_ms: u64,
 ) -> Result<()> {
     ensure!(
         run.card_id.is_none(),
@@ -1958,8 +2393,8 @@ pub fn complete_cardless_script(
     }
     run.outputs.insert(key, output);
     let to = run.inputs["pending_next"].as_str().map(str::to_owned);
-    next(run, to);
-    drive_cardless(db, run)
+    next_at(run, to, now_ms);
+    drive_cardless_at(db, run, now_ms)
 }
 
 /// Records failure of the active `Script` step in a cardless `WorkflowRun`: jumps to `on_failure`
@@ -1971,6 +2406,27 @@ pub fn fail_cardless_script(
     exported_env: &BTreeMap<String, String>,
     summary: &str,
     detail_feedback: &str,
+) -> Result<()> {
+    fail_cardless_script_at(
+        db,
+        run,
+        output,
+        exported_env,
+        summary,
+        detail_feedback,
+        now(),
+    )
+}
+
+/// Pure clock-injected variant of [`fail_cardless_script`].
+pub fn fail_cardless_script_at(
+    db: Db<'_>,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+    summary: &str,
+    detail_feedback: &str,
+    now_ms: u64,
 ) -> Result<()> {
     ensure!(
         run.card_id.is_none(),
@@ -1991,9 +2447,9 @@ pub fn fail_cardless_script(
         obj.remove("script_terminal");
     }
     run.history
-        .push(json!({"step":key,"visit":run.visit,"event":"failed","outputs":output,"at":now()}));
+        .push(json!({"step":key,"visit":run.visit,"event":"failed","outputs":output,"at":now_ms}));
     run.outputs.insert(key.clone(), output.clone());
-    db.append(canban_timeline::event(
+    db.append(canban_timeline::event_at(
         &run.project_id,
         "",
         "workflow.script_failed",
@@ -2006,6 +2462,7 @@ pub fn fail_cardless_script(
             "exit_code": output["exit_code"],
             "timed_out": output["timed_out"],
         }),
+        now_ms,
     ))?;
 
     let mut failures = run
@@ -2028,16 +2485,16 @@ pub fn fail_cardless_script(
         run.error = None;
         run.state = "running".into();
         run.visit += 1;
-        run.updated_at = now();
-        return drive_cardless(db, run);
+        run.updated_at = now_ms;
+        return drive_cardless_at(db, run, now_ms);
     }
 
     run.state = "failed".into();
     run.error = Some(summary.into());
     run.inputs["rework_feedback"] = json!(detail_feedback);
-    run.updated_at = now();
+    run.updated_at = now_ms;
     db.save(run)?;
-    record(db, run, "workflow.failed", summary)?;
+    record_at(db, run, "workflow.failed", summary, now_ms)?;
     Ok(())
 }
 
@@ -2048,6 +2505,17 @@ pub fn complete_cardless_agent(
     run: &mut WorkflowRun,
     output: Value,
     report_state: &str,
+) -> Result<()> {
+    complete_cardless_agent_at(db, run, output, report_state, now())
+}
+
+/// Pure clock-injected variant of [`complete_cardless_agent`].
+pub fn complete_cardless_agent_at(
+    db: Db<'_>,
+    run: &mut WorkflowRun,
+    output: Value,
+    report_state: &str,
+    now_ms: u64,
 ) -> Result<()> {
     ensure!(
         run.card_id.is_none(),
@@ -2076,7 +2544,7 @@ pub fn complete_cardless_agent(
             "visit": run.visit,
             "event": report_state,
             "outputs": output,
-            "at": now()
+            "at": now_ms
         }));
         run.state = if report_state == "backlog" {
             "cancelled".into()
@@ -2084,13 +2552,13 @@ pub fn complete_cardless_agent(
             report_state.into()
         };
         run.error = output["message"].as_str().map(str::to_owned);
-        run.updated_at = now();
+        run.updated_at = now_ms;
         db.save(run)?;
         return Ok(());
     }
     let to = run.inputs["pending_next"].as_str().map(str::to_owned);
-    next(run, to);
-    drive_cardless(db, run)
+    next_at(run, to, now_ms);
+    drive_cardless_at(db, run, now_ms)
 }
 
 pub fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
@@ -2099,11 +2567,16 @@ pub fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
 }
 
 pub fn reconcile(db: Db<'_>) -> Result<()> {
+    reconcile_at(db, now())
+}
+
+/// Pure clock-injected variant of [`reconcile`].
+pub fn reconcile_at(db: Db<'_>, now_ms: u64) -> Result<()> {
     for mut run in db.list::<WorkflowRun>()?.into_iter().filter(|r| r.active()) {
         if let Some(card_id) = &run.card_id {
             let card: Card = db.get(card_id)?;
             if !card.active() {
-                stop_card(db, &card.id, "cancelled")?;
+                stop_card_at(db, &card.id, "cancelled", now_ms)?;
                 continue;
             }
         }
@@ -2456,6 +2929,269 @@ steps:
         assert_eq!(run.state, "failed");
         assert!(run.inputs.get("agent_terminal").is_none());
         assert!(run.inputs.get("pending_agent").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workflow_runtime_at_stamps_all_timestamps_under_2023_epoch_without_wall_clock_leaks() {
+        const T0: u64 = 1_700_000_000_000;
+        const T_MAX: u64 = T0 + 100_000;
+
+        let (mut store, dir) = temp_store();
+        let project = Project {
+            id: "proj-clock".into(),
+            name: "Clock Demo".into(),
+            directory: "/tmp/clock-demo".into(),
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: DeliveryMode::default(),
+            agent_overrides: BTreeMap::new(),
+            tags: Vec::new(),
+            workflow: Workflow::default(),
+            target_branch: None,
+            created_at: T0,
+        };
+        store.write(|db| db.save(&project)).unwrap();
+
+        let mut card = store
+            .write(|db| canban_kanban::create_at(db, &project, "Clock Card", "Body", "user", T0))
+            .unwrap();
+        let config = Config::default();
+
+        // Card-bound workflow covering Notify -> Script -> Approval -> Deliver -> Move -> Complete.
+        let mut entries = BTreeMap::new();
+        entries.insert("start".into(), "notify".into());
+        let mut steps = BTreeMap::new();
+        steps.insert(
+            "notify".into(),
+            WorkflowStep::Notify {
+                message: "Started".into(),
+                next: Some("check".into()),
+            },
+        );
+        steps.insert(
+            "check".into(),
+            WorkflowStep::Script {
+                run: "echo ok".into(),
+                shell: None,
+                working_directory: None,
+                timeout_minutes: None,
+                timeout_seconds: Some(60),
+                continue_on_error: false,
+                env: BTreeMap::new(),
+                on_failure: None,
+                next: Some("approve".into()),
+            },
+        );
+        steps.insert(
+            "approve".into(),
+            WorkflowStep::Approval {
+                title: "Approve delivery".into(),
+                next: Some("deliver".into()),
+                rework: None,
+            },
+        );
+        steps.insert(
+            "deliver".into(),
+            WorkflowStep::Deliver {
+                profile: None,
+                target_branch: Some("main".into()),
+                strategy: MergeStrategy::Rebase,
+                sync_upstream: false,
+                batch_size: DEFAULT_MERGE_BATCH_SIZE,
+                test_command: None,
+                next: Some("move_review".into()),
+                rework: None,
+                max_conflict_attempts: DEFAULT_MAX_CONFLICT_ATTEMPTS,
+            },
+        );
+        steps.insert(
+            "move_review".into(),
+            WorkflowStep::Move {
+                column: "review".into(),
+                next: Some("done".into()),
+            },
+        );
+        steps.insert("done".into(), WorkflowStep::Complete);
+        let flow = WorkflowDefinition {
+            id: "wf-clock".into(),
+            name: "Clock Flow".into(),
+            scope: WorkflowScope::Project,
+            columns: Vec::new(),
+            entries,
+            steps,
+            env: BTreeMap::new(),
+            workspace: WorkspaceSettings::default(),
+            max_steps: 20,
+        };
+
+        let noop_queue: QueueAt = |_, _, _, _, _, _, _, _, _| Ok(None);
+
+        let mut run = store
+            .write(|db| {
+                start_at(
+                    db,
+                    &config,
+                    &mut card,
+                    flow.clone(),
+                    1,
+                    "start",
+                    None,
+                    false,
+                    noop_queue,
+                    T0 + 1_000,
+                )
+            })
+            .unwrap();
+        assert_eq!(run.state, "waiting_script");
+        assert_eq!(run.created_at, T0 + 1_000);
+        assert_eq!(run.updated_at, T0 + 1_000);
+        assert_eq!(run.inputs["script_started_at"], json!(T0 + 1_000));
+
+        store
+            .write(|db| {
+                complete_script_at(
+                    db,
+                    &config,
+                    &mut card,
+                    &mut run,
+                    json!({"ok": true}),
+                    &BTreeMap::new(),
+                    noop_queue,
+                    T0 + 2_000,
+                )
+            })
+            .unwrap();
+        assert_eq!(run.state, "waiting_approval");
+        assert_eq!(run.updated_at, T0 + 2_000);
+
+        store
+            .write(|db| {
+                approve_with_feedback_at(
+                    db,
+                    &config,
+                    &mut card,
+                    &mut run,
+                    false,
+                    None,
+                    noop_queue,
+                    T0 + 3_000,
+                )
+            })
+            .unwrap();
+        assert_eq!(run.state, "waiting_delivery");
+        assert_eq!(run.updated_at, T0 + 3_000);
+        assert_eq!(run.inputs["queued_at"], json!(T0 + 3_000));
+
+        store
+            .write(|db| hold_delivery_at(db, &mut card, &mut run, "Hold", T0 + 4_000))
+            .unwrap();
+        assert_eq!(run.state, "waiting_approval");
+        assert_eq!(run.updated_at, T0 + 4_000);
+
+        store
+            .write(|db| {
+                approve_with_feedback_at(
+                    db,
+                    &config,
+                    &mut card,
+                    &mut run,
+                    false,
+                    None,
+                    noop_queue,
+                    T0 + 5_000,
+                )
+            })
+            .unwrap();
+        assert_eq!(run.state, "waiting_delivery");
+        assert_eq!(run.inputs["queued_at"], json!(T0 + 5_000));
+
+        store
+            .write(|db| {
+                complete_delivery_at(
+                    db,
+                    &config,
+                    &mut card,
+                    &mut run,
+                    json!({"state": "merged"}),
+                    noop_queue,
+                    T0 + 6_000,
+                )
+            })
+            .unwrap();
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.updated_at, T0 + 6_000);
+        assert_eq!(card.stage, "review");
+
+        // Cardless workflow via `*_at` also stamps strictly within 2023 epoch.
+        let yaml = r#"schema: 11
+id: clock:cardless
+name: Clock Cardless
+on:
+  tick:
+    event: github.issue.comment_created
+    start_at: filter
+    cardless: true
+steps:
+  - id: filter
+    run: echo ok
+    next: note
+  - id: note
+    uses: notify
+    with:
+      message: Done
+    next: end
+  - id: end
+    uses: complete
+"#;
+        let cardless_flow = crate::source::parse(yaml).unwrap().compile().unwrap();
+        let mut crun = store
+            .write(|db| {
+                start_cardless_at(db, &project.id, cardless_flow, 1, "tick", None, T0 + 7_000)
+            })
+            .unwrap();
+        assert_eq!(crun.created_at, T0 + 7_000);
+        assert_eq!(crun.inputs["script_started_at"], json!(T0 + 7_000));
+        store
+            .write(|db| {
+                complete_cardless_script_at(
+                    db,
+                    &mut crun,
+                    json!({"ok": true}),
+                    &BTreeMap::new(),
+                    T0 + 8_000,
+                )
+            })
+            .unwrap();
+        assert_eq!(crun.state, "completed");
+        assert_eq!(crun.updated_at, T0 + 8_000);
+
+        // Verify zero wall-clock leaks across all history entries, timeline events, and notices.
+        for hist in run.history.iter().chain(crun.history.iter()) {
+            let at = hist["at"].as_u64().expect("history entry must carry `at`");
+            assert!(
+                (T0..=T_MAX).contains(&at),
+                "wall-clock leak in history: {hist}"
+            );
+        }
+        for ev in store.db().list::<Event>().unwrap() {
+            assert!(
+                (T0..=T_MAX).contains(&ev.created_at),
+                "wall-clock leak in event {}: {}",
+                ev.kind,
+                ev.created_at
+            );
+        }
+        for notice in store.db().list::<Notice>().unwrap() {
+            assert!(
+                (T0..=T_MAX).contains(&notice.created_at),
+                "wall-clock leak in notice {}: {}",
+                notice.message,
+                notice.created_at
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -4,24 +4,16 @@ use crate::{
     client::{agent, decode},
 };
 use anyhow::{Context, Result, ensure};
+use canban_types::{Clock, system_clock};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{SystemTime, UNIX_EPOCH},
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 pub const CLIENT_ID: &str = "Iv23li1ImpryrkMbQjKF";
 pub const INSTALL_URL: &str = "https://github.com/apps/canban-app/installations/new";
-fn seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 #[derive(Clone, Default, Serialize)]
 pub struct Status {
     pub installation_url: Option<String>,
@@ -67,6 +59,7 @@ pub struct Service {
     home: std::path::PathBuf,
     client_id: String,
     state: Mutex<State>,
+    clock: Arc<dyn Clock>,
 }
 #[derive(Deserialize)]
 struct Token {
@@ -77,6 +70,9 @@ struct Token {
 }
 impl Service {
     pub fn new(home: std::path::PathBuf) -> Self {
+        Self::new_with_clock(home, system_clock())
+    }
+    pub fn new_with_clock(home: std::path::PathBuf, clock: Arc<dyn Clock>) -> Self {
         let client_id = std::env::var("CANBAN_GITHUB_CLIENT_ID").unwrap_or(CLIENT_ID.into());
         let installation_url = std::env::var("CANBAN_GITHUB_INSTALL_URL")
             .ok()
@@ -86,12 +82,22 @@ impl Service {
             .or_else(|| (client_id == CLIENT_ID).then(|| INSTALL_URL.into()));
         Self {
             generation: AtomicU64::new(0),
-            cache: crate::cache::Cache::new(home.join("cache/github/app")),
+            cache: crate::cache::Cache::new_with_clock(
+                home.join("cache/github/app"),
+                clock.clone(),
+            ),
             installation_url,
             home,
             client_id,
             state: Mutex::new(State::default()),
+            clock,
         }
+    }
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+    fn seconds(&self) -> u64 {
+        self.clock.now_ms() / 1000
     }
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
@@ -150,8 +156,8 @@ impl Service {
                 && (1..=60).contains(&device.interval),
             "Invalid GitHub device authorization response"
         );
-        let expires = seconds() + device.expires_in;
-        let next = seconds() + device.interval;
+        let expires = self.seconds() + device.expires_in;
+        let next = self.seconds() + device.interval;
         self.generation.fetch_add(1, Ordering::SeqCst);
         s.pending = Some(Pending {
             device,
@@ -167,21 +173,21 @@ impl Service {
         let Some(p) = s.pending.as_mut() else {
             return Ok(());
         };
-        if seconds() >= p.expires {
+        if self.seconds() >= p.expires {
             s.pending = None;
             s.error = Some("GitHub authorization expired. Connect again.".into());
             return Ok(());
         }
-        if seconds() < p.next {
+        if self.seconds() < p.next {
             return Ok(());
         }
-        p.next = seconds() + p.device.interval;
+        p.next = self.seconds() + p.device.interval;
         let reply:Token=decode(agent().post("https://github.com/login/oauth/access_token").header("Accept","application/json").send_json(json!({"client_id":self.client_id,"device_code":p.device.device_code.expose_secret(),"grant_type":"urn:ietf:params:oauth:grant-type:device_code"}))?)?;
         match reply.error.as_deref() {
             Some("authorization_pending") => return Ok(()),
             Some("slow_down") => {
                 p.device.interval += 5;
-                p.next = seconds() + p.device.interval;
+                p.next = self.seconds() + p.device.interval;
                 return Ok(());
             }
             Some(_) => {
@@ -192,11 +198,13 @@ impl Service {
             None => (),
         }
         let access_token = reply.access_token.context("No GitHub access token")?;
-        let user: crate::models::User = Client::new(access_token.clone()).get("/user")?;
+        let user: crate::models::User = Client::new(access_token.clone())
+            .with_clock(self.clock.clone())
+            .get("/user")?;
         let c = Credential {
             access_token,
             refresh_token: reply.refresh_token,
-            expires_at: reply.expires_in.map(|n| seconds() + n),
+            expires_at: reply.expires_in.map(|n| self.seconds() + n),
             client_id: self.client_id.clone(),
             login: user.login,
         };
@@ -215,7 +223,7 @@ impl Service {
             .credential
             .as_ref()
             .context("Connect GitHub on the GitHub page first")?;
-        if c.expires_at.is_some_and(|t| t <= seconds() + 300) {
+        if c.expires_at.is_some_and(|t| t <= self.seconds() + 300) {
             let refresh = c
                 .refresh_token
                 .as_ref()
@@ -230,7 +238,7 @@ impl Service {
                     .access_token
                     .context("GitHub refresh returned no token")?,
                 refresh_token: reply.refresh_token,
-                expires_at: reply.expires_in.map(|n| seconds() + n),
+                expires_at: reply.expires_in.map(|n| self.seconds() + n),
                 client_id: c.client_id.clone(),
                 login: c.login.clone(),
             };
@@ -238,20 +246,24 @@ impl Service {
             s.credential = Some(c);
         }
         let c = s.credential.as_ref().unwrap();
-        Ok(Client::new(c.access_token.clone()).with_cache(
-            self.cache.clone(),
-            format!("github.com:{}:{}", c.client_id, c.login),
-        ))
+        Ok(Client::new(c.access_token.clone())
+            .with_clock(self.clock.clone())
+            .with_cache(
+                self.cache.clone(),
+                format!("github.com:{}:{}", c.client_id, c.login),
+            ))
     }
     /// Cache-only projection: never refreshes credentials or performs IO on the network.
     pub fn cached_client(&self) -> Result<Client> {
         let mut s = self.state.lock().unwrap();
         self.load(&mut s)?;
         let c = s.credential.as_ref().context("GitHub is disconnected")?;
-        Ok(Client::new(c.access_token.clone()).with_cache(
-            self.cache.clone(),
-            format!("github.com:{}:{}", c.client_id, c.login),
-        ))
+        Ok(Client::new(c.access_token.clone())
+            .with_clock(self.clock.clone())
+            .with_cache(
+                self.cache.clone(),
+                format!("github.com:{}:{}", c.client_id, c.login),
+            ))
     }
     pub fn refresh(&self) -> Result<()> {
         {

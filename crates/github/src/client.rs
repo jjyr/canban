@@ -160,7 +160,8 @@ impl Client {
                 .context("Check the gh connection on the GitHub page")?
         };
         let generation = service.cache.generation();
-        let mut client = Self::new(SecretString::from("gh-owned-credential"));
+        let clock = service.clock().clone();
+        let mut client = Self::new(SecretString::from("gh-owned-credential")).with_clock(clock);
         client.cli = Some((service, user.id, generation));
         Ok(client)
     }
@@ -172,7 +173,7 @@ impl Client {
     pub fn seed(&self, path: &str, data: Value) {
         if let Some((cli, user, generation)) = &self.cli {
             if cli.identity().is_some_and(|u| u.id == *user) {
-                let now = crate::cache::now();
+                let now = self.clock.now_ms();
                 let value = crate::cache::Response {
                     data,
                     link: None,
@@ -1300,5 +1301,45 @@ mod cache_tests {
         ] {
             assert!(remote_repository(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn client_with_mock_clock_and_transport_stamps_2023_epoch_without_wall_clock() {
+        use std::sync::atomic::AtomicU64;
+
+        struct MockClock(AtomicU64);
+        impl Clock for MockClock {
+            fn now_ms(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        struct StaticTransport;
+        impl HttpTransport for StaticTransport {
+            fn send(&self, _req: HttpRequest) -> Result<HttpResponse> {
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![("ETag".into(), "\"v1\"".into())],
+                    body: br#"{"title":"mocked"}"#.to_vec(),
+                })
+            }
+        }
+
+        const T0: u64 = 1_700_000_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(MockClock(AtomicU64::new(T0)));
+        let cache = crate::cache::Cache::new_with_clock(dir.path().into(), clock.clone());
+        let client = Client::new(SecretString::from("fixture"))
+            .with_clock(clock.clone())
+            .with_transport(Arc::new(StaticTransport))
+            .with_cache(cache, "acct".into());
+
+        let resp = client.response("/repos/o/r/issues/1").unwrap();
+        assert_eq!(resp.fetched_at, T0);
+        assert_eq!(resp.validated_at, T0);
+
+        clock.0.store(T0 + 5_000, Ordering::SeqCst);
+        client.seed("/repos/o/r/issues/2", json!({"id": 2}));
+        let seeded = client.cached_response("/repos/o/r/issues/2").unwrap();
+        assert_eq!(seeded.validated_at, T0 + 5_000);
     }
 }
