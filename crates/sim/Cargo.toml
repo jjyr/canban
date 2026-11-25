@@ -17,6 +17,7 @@ canban-storage.workspace = true
 canban-sync.workspace = true
 canban-transport.workspace = true
 canban-types.workspace = true
+canban-ui = { path = "../ui", default-features = false }
 clap.workspace = true
 rand = "0.9"
 serde_json.workspace = true

@@ -234,7 +234,20 @@ pub fn watch(ui: Ui) {
                 let mut combined = prev_entries.get_untracked();
                 for r in &current_rows {
                     if let Some(existing) = combined.iter_mut().find(|e| e.saved.id == r.saved.id) {
+                        let prev_location = existing.location.clone();
+                        let prev_project_id = existing.project_id.clone();
+                        let prev_project_name = existing.project_name.clone();
                         *existing = r.clone();
+                        // When a terminal exits naturally, AppServer clears its `terminal_contexts`.
+                        // Preserve its last known location/project so close-fallback still resolves
+                        // same-worktree -> same-project -> same-host accurately.
+                        if !r.listed() && existing.location.is_none() && prev_location.is_some() {
+                            existing.location = prev_location;
+                            if existing.project_id.is_none() {
+                                existing.project_id = prev_project_id;
+                                existing.project_name = prev_project_name;
+                            }
+                        }
                     } else {
                         combined.push(r.clone());
                     }
@@ -313,21 +326,34 @@ pub fn scope_tabs(ui: Ui) -> Vec<Entry> {
     }
 }
 
-/// Pure fallback resolution when closing a live Terminal:
+/// Pure fallback resolution when closing or exiting a live Terminal:
 /// 1. Previous live Terminal in the same `WorktreeScope` (or next if none precedes it);
 /// 2. Previous live Terminal in the same Project in tree order (or next if none precedes it);
-/// 3. Previous live Terminal globally in sidebar tree order (or next if none precedes it).
+/// 3. Previous live Terminal on the same Host / Machine in sidebar tree order (or next if none precedes it);
+/// 4. Previous live Terminal globally in sidebar tree order (or next if none precedes it).
 pub fn fallback_after_close(
     s: &canban_types::Snapshot,
     rows: &[Entry],
     closing: &std::collections::BTreeSet<String>,
     closed_id: &str,
 ) -> Option<String> {
+    let pick_neighbor = |ordered: &[&Entry]| -> Option<String> {
+        let pos = ordered.iter().position(|e| e.saved.id == closed_id)?;
+        if pos > 0 {
+            return Some(ordered[pos - 1].saved.id.clone());
+        }
+        if pos + 1 < ordered.len() {
+            return Some(ordered[pos + 1].saved.id.clone());
+        }
+        None
+    };
+
     let closed_entry = rows.iter().find(|e| e.saved.id == closed_id)?;
     let target_scope = worktrees::entry_scope(s, closed_entry);
     let is_live_or_target =
         |e: &Entry| e.saved.id == closed_id || (e.listed() && !closing.contains(&e.saved.id));
 
+    // 1. Same worktree / directory scope.
     let same_scope: Vec<&Entry> = rows
         .iter()
         .filter(|e| {
@@ -335,13 +361,8 @@ pub fn fallback_after_close(
                 && worktrees::location_key(e) == worktrees::location_key(closed_entry)
         })
         .collect();
-    if let Some(pos) = same_scope.iter().position(|e| e.saved.id == closed_id) {
-        if pos > 0 {
-            return Some(same_scope[pos - 1].saved.id.clone());
-        }
-        if pos + 1 < same_scope.len() {
-            return Some(same_scope[pos + 1].saved.id.clone());
-        }
+    if let Some(next) = pick_neighbor(&same_scope) {
+        return Some(next);
     }
 
     let project_id = target_scope.project_id(s);
@@ -350,42 +371,88 @@ pub fn fallback_after_close(
         .filter(|e| is_live_or_target(e))
         .cloned()
         .collect();
-    let ordered_scopes =
-        worktrees::project_scopes_in_tree_order(s, &candidate_rows, project_id.as_deref());
-    let same_project: Vec<Entry> = ordered_scopes
-        .into_iter()
-        .flat_map(|(_, children)| children)
-        .collect();
-    if let Some(pos) = same_project.iter().position(|e| e.saved.id == closed_id) {
-        if pos > 0 {
-            return Some(same_project[pos - 1].saved.id.clone());
-        }
-        if pos + 1 < same_project.len() {
-            return Some(same_project[pos + 1].saved.id.clone());
+
+    // 2. Same Project (only when the closed terminal belongs to a Project).
+    if let Some(pid) = project_id.as_deref() {
+        let ordered_scopes = worktrees::project_scopes_in_tree_order(s, &candidate_rows, Some(pid));
+        let same_project: Vec<Entry> = ordered_scopes
+            .into_iter()
+            .flat_map(|(_, children)| children)
+            .collect();
+        let refs: Vec<&Entry> = same_project.iter().collect();
+        if let Some(next) = pick_neighbor(&refs) {
+            return Some(next);
         }
     }
 
-    let mut global_tree: Vec<Entry> = Vec::new();
-    for p in &s.projects {
-        for (_, children) in
-            worktrees::project_scopes_in_tree_order(s, &candidate_rows, Some(p.id.as_str()))
+    // 3. Same Host / Machine in sidebar tree order (Projects on host -> Other on host -> remaining).
+    let closed_host = closed_entry.host_id.as_str();
+    let append_host_tree = |host_id: &str, out: &mut Vec<Entry>| {
+        let host_rows: Vec<Entry> = candidate_rows
+            .iter()
+            .filter(|e| e.host_id == host_id)
+            .cloned()
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for p in s
+            .projects
+            .iter()
+            .filter(|p| s.project_host(&p.id) == host_id)
         {
-            global_tree.extend(children);
+            for (_, children) in
+                worktrees::project_scopes_in_tree_order(s, &host_rows, Some(p.id.as_str()))
+            {
+                for child in children {
+                    if seen.insert(child.saved.id.clone()) {
+                        out.push(child);
+                    }
+                }
+            }
         }
-    }
-    for (_, children) in worktrees::project_scopes_in_tree_order(s, &candidate_rows, None) {
-        global_tree.extend(children);
-    }
-    if let Some(pos) = global_tree.iter().position(|e| e.saved.id == closed_id) {
-        if pos > 0 {
-            return Some(global_tree[pos - 1].saved.id.clone());
+        for (_, children) in worktrees::project_scopes_in_tree_order(s, &host_rows, None) {
+            for child in children {
+                if seen.insert(child.saved.id.clone()) {
+                    out.push(child);
+                }
+            }
         }
-        if pos + 1 < global_tree.len() {
-            return Some(global_tree[pos + 1].saved.id.clone());
+        for e in host_rows {
+            if seen.insert(e.saved.id.clone()) {
+                out.push(e);
+            }
         }
+    };
+
+    let mut same_host_tree: Vec<Entry> = Vec::new();
+    append_host_tree(closed_host, &mut same_host_tree);
+    let same_host_refs: Vec<&Entry> = same_host_tree.iter().collect();
+    if let Some(next) = pick_neighbor(&same_host_refs) {
+        return Some(next);
     }
 
-    None
+    // 4. Global cross-host sidebar tree order.
+    let mut global_tree: Vec<Entry> = Vec::new();
+    let mut host_ids: Vec<String> = Vec::new();
+    let mut push_host = |hid: &str| {
+        if !hid.is_empty() && !host_ids.iter().any(|h| h == hid) {
+            host_ids.push(hid.to_owned());
+        }
+    };
+    push_host("local");
+    for hid in s.host_summaries.keys() {
+        push_host(hid);
+    }
+    for p in &s.projects {
+        push_host(s.project_host(&p.id));
+    }
+    for e in &candidate_rows {
+        push_host(&e.host_id);
+    }
+    for hid in host_ids {
+        append_host_tree(&hid, &mut global_tree);
+    }
+    let global_refs: Vec<&Entry> = global_tree.iter().collect();
+    pick_neighbor(&global_refs)
 }
 pub fn restore_selection(ui: Ui) {
     if !ui.terminal_selection.get_untracked().is_empty() {

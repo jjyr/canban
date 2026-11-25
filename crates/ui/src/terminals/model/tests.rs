@@ -1869,8 +1869,8 @@ fn global_new_terminal_opens_in_project_root_while_in_page_new_tab_inherits_curr
             .unwrap();
         assert_eq!(
             entry_scope(&snap2, &global_entry),
-            WorktreeScope::Unassigned("local".into()),
-            "a root not yet present in the tree waits for background discovery"
+            WorktreeScope::ProjectRoot("p1".into()),
+            "newly created project terminal must land immediately in ProjectRoot instead of Other"
         );
         // Simulate the ordinary observation that confirms the newly occupied root.
         let mut snap2 = snap2;
@@ -6563,4 +6563,396 @@ fn project_heading_to_first_worktree_has_no_extra_vertical_gap_in_single_or_mult
     );
     assert!(multi_ids.contains_key("project:p2"));
     assert_eq!(multi_frames[&multi_ids["project:p2"]].size.height.0, 28.0);
+}
+
+#[test]
+fn new_project_terminal_joins_project_immediately_before_directory_discovery_and_respects_external_cd()
+ {
+    use crate::terminals::{
+        tree::{TreeNode, project_tree},
+        worktrees::{WorktreeScope, entry_scope},
+    };
+
+    let mut s = fixture();
+    s.terminals.clear();
+    s.terminal_contexts.clear();
+    s.projects[0].directory = "/repo/p1".into();
+
+    // 1. Brand-new starting terminal with origin_project_id = Some("p1") and NO terminal_contexts yet
+    //    must immediately mount under Project("p1"), NEVER under OtherHeader.
+    s.terminals.push(TerminalEntry {
+        id: "shell-new".into(),
+        conversation_id: None,
+        number: 1,
+        name: Some("Terminal 1".into()),
+        origin_project_id: Some("p1".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        created_at: 10,
+        runtime: Some(TerminalRuntime {
+            core_id: None,
+            terminal: None,
+            state: "starting".into(),
+            connection: "checking".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+    });
+
+    let rows = crate::terminals::entries(&s);
+    let entry = rows.iter().find(|e| e.saved.id == "shell-new").unwrap();
+    assert_eq!(entry.project_id.as_deref(), Some("p1"));
+    assert_ne!(entry.project_name, "Other");
+    assert_eq!(
+        entry_scope(&s, entry),
+        WorktreeScope::ProjectRoot("p1".into())
+    );
+    let nodes = project_tree(&s, &rows);
+    assert!(
+        !nodes.contains(&TreeNode::OtherHeader),
+        "new project terminal must never flash under OtherHeader: {nodes:?}"
+    );
+    let p1_pos = nodes
+        .iter()
+        .position(|n| *n == TreeNode::Project("p1".into()))
+        .unwrap();
+    let p2_pos = nodes
+        .iter()
+        .position(|n| *n == TreeNode::Project("p2".into()))
+        .unwrap();
+    let term_pos = nodes
+        .iter()
+        .position(|n| *n == TreeNode::Terminal("shell-new".into()))
+        .unwrap();
+    assert!(
+        p1_pos < term_pos && term_pos < p2_pos,
+        "new terminal must appear directly under p1: {nodes:?}"
+    );
+
+    // 2. Once the user explicitly `cd /outside`, observed external cwd legitimately moves it to Other.
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "shell-new".into(),
+        core_id: "core".into(),
+        terminal: "pty-1".into(),
+        cwd: Some("/outside".into()),
+        directory_root: Some("/outside".into()),
+        project_id: None,
+        ..Default::default()
+    });
+    let rows_after_cd = crate::terminals::entries(&s);
+    let moved = rows_after_cd
+        .iter()
+        .find(|e| e.saved.id == "shell-new")
+        .unwrap();
+    assert!(moved.project_id.is_none());
+    assert!(project_tree(&s, &rows_after_cd).contains(&TreeNode::OtherHeader));
+}
+
+#[test]
+fn fallback_after_close_prefers_same_worktree_then_same_project_then_same_host_then_cross_host() {
+    let mut s = Snapshot::default();
+    let mk_host = |id: &str, is_local: bool| HostSummary {
+        id: id.into(),
+        name: id.into(),
+        is_local,
+        transport_label: if is_local { "Local" } else { "TCP" }.into(),
+        endpoint_label: id.into(),
+        ssh_target: None,
+        server_id: None,
+        connection: HostConnectionState::Connected {
+            rtt_ms: 0,
+            api_version: 1,
+            version: "0.1.0".into(),
+            platform: "macos".into(),
+        },
+        active_agents: 0,
+        max_agents: 4,
+        project_count: 1,
+        reconnect_count: 0,
+        last_synced_at: None,
+        pending_mutations: 0,
+        sync_conflicts: 0,
+    };
+    s.host_summaries
+        .insert("local".into(), mk_host("local", true));
+    s.host_summaries
+        .insert("remote-a".into(), mk_host("remote-a", false));
+
+    let mk_project = |id: &str, dir: &str| -> Project {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": id,
+            "directory": dir,
+            "workflow": Workflow::default(),
+            "created_at": 1
+        }))
+        .unwrap()
+    };
+    // Intentionally place local project BEFORE remote-a projects so naive global `pos - 1`
+    // would wrongly jump to `local` instead of staying on `remote-a`.
+    s.projects.push(mk_project("p-local", "/repo/local"));
+    s.projects.push(mk_project("remote-a::p1", "/repo/ra1"));
+    s.projects.push(mk_project("remote-a::p2", "/repo/ra2"));
+    s.entity_hosts.insert("p-local".into(), "local".into());
+    s.entity_hosts
+        .insert("remote-a::p1".into(), "remote-a".into());
+    s.entity_hosts
+        .insert("remote-a::p2".into(), "remote-a".into());
+
+    s.worktrees.push(ManagedWorktree {
+        id: "remote-a::wt1".into(),
+        project_id: "remote-a::p1".into(),
+        branch: "feat/wt1".into(),
+        base_branch: "main".into(),
+        base_commit: None,
+        path: "/repo/ra1-wt1".into(),
+        directory: "/repo/ra1".into(),
+        created_at: 1,
+    });
+    s.entity_hosts
+        .insert("remote-a::wt1".into(), "remote-a".into());
+
+    let add_shell = |s: &mut Snapshot,
+                     id: &str,
+                     num: u64,
+                     host: &str,
+                     pid: Option<&str>,
+                     cwd: &str,
+                     wt: Option<&str>| {
+        s.entity_hosts.insert(id.into(), host.into());
+        s.terminals.push(TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: Some(id.into()),
+            origin_project_id: pid.map(str::to_owned),
+            origin_card_id: None,
+            agent_engine: None,
+            created_at: num,
+            runtime: Some(TerminalRuntime {
+                core_id: Some(format!("core-{host}")),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+        });
+        s.terminal_contexts.push(TerminalContext {
+            terminal_id: id.into(),
+            core_id: format!("core-{host}"),
+            terminal: format!("pty-{id}"),
+            cwd: Some(cwd.into()),
+            directory_root: Some(cwd.into()),
+            project_id: pid.map(str::to_owned),
+            worktree_id: wt.map(str::to_owned),
+            ..Default::default()
+        });
+    };
+
+    add_shell(
+        &mut s,
+        "t-local",
+        1,
+        "local",
+        Some("p-local"),
+        "/repo/local",
+        None,
+    );
+    add_shell(
+        &mut s,
+        "t-ra-p1-wt-a",
+        2,
+        "remote-a",
+        Some("remote-a::p1"),
+        "/repo/ra1-wt1",
+        Some("remote-a::wt1"),
+    );
+    add_shell(
+        &mut s,
+        "t-ra-p1-wt-b",
+        3,
+        "remote-a",
+        Some("remote-a::p1"),
+        "/repo/ra1-wt1",
+        Some("remote-a::wt1"),
+    );
+    add_shell(
+        &mut s,
+        "t-ra-p1-root",
+        4,
+        "remote-a",
+        Some("remote-a::p1"),
+        "/repo/ra1",
+        None,
+    );
+    add_shell(
+        &mut s,
+        "t-ra-p2",
+        5,
+        "remote-a",
+        Some("remote-a::p2"),
+        "/repo/ra2",
+        None,
+    );
+    add_shell(
+        &mut s,
+        "t-ra-other",
+        6,
+        "remote-a",
+        None,
+        "/tmp/ra-other",
+        None,
+    );
+
+    let rows = crate::terminals::entries(&s);
+    let mut closing = std::collections::BTreeSet::new();
+
+    // Tier 1: Same worktree (`t-ra-p1-wt-b` -> `t-ra-p1-wt-a`).
+    assert_eq!(
+        crate::terminals::fallback_after_close(&s, &rows, &closing, "t-ra-p1-wt-b").as_deref(),
+        Some("t-ra-p1-wt-a")
+    );
+    closing.insert("t-ra-p1-wt-b".into());
+
+    // Tier 2: Same project (`t-ra-p1-wt-a` -> `t-ra-p1-root`).
+    assert_eq!(
+        crate::terminals::fallback_after_close(&s, &rows, &closing, "t-ra-p1-wt-a").as_deref(),
+        Some("t-ra-p1-root")
+    );
+    closing.insert("t-ra-p1-wt-a".into());
+
+    // Tier 3: Same host (`t-ra-p1-root` -> `t-ra-p2` on remote-a, NOT `t-local` on local!).
+    assert_eq!(
+        crate::terminals::fallback_after_close(&s, &rows, &closing, "t-ra-p1-root").as_deref(),
+        Some("t-ra-p2")
+    );
+    closing.insert("t-ra-p1-root".into());
+
+    // Tier 3 still prefers remaining terminal on same host (`t-ra-p2` -> `t-ra-other` on remote-a).
+    assert_eq!(
+        crate::terminals::fallback_after_close(&s, &rows, &closing, "t-ra-p2").as_deref(),
+        Some("t-ra-other")
+    );
+    closing.insert("t-ra-p2".into());
+
+    // Tier 4: No terminals left on remote-a -> falls back cross-host to `t-local`.
+    assert_eq!(
+        crate::terminals::fallback_after_close(&s, &rows, &closing, "t-ra-other").as_deref(),
+        Some("t-local")
+    );
+}
+
+#[test]
+fn natural_terminal_exit_preserves_last_worktree_for_fallback_selection() {
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, (ui, after)) = nsh_core::element::create_root(|| {
+        let mut s = fixture();
+        s.terminals.clear();
+        s.terminal_contexts.clear();
+        s.projects[0].directory = "/repo/p1".into();
+        s.worktrees.push(ManagedWorktree {
+            id: "wt1".into(),
+            project_id: "p1".into(),
+            branch: "feat/a".into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            path: "/repo/p1-wt1".into(),
+            directory: "/repo/p1".into(),
+            created_at: 1,
+        });
+        let mk_shell = |id: &str, num: u64, state: &str| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: Some(id.into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            created_at: num,
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: state.into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+        };
+        s.terminals.push(mk_shell("root-1", 1, "running"));
+        s.terminals.push(mk_shell("wt-a", 2, "running"));
+        s.terminals.push(mk_shell("wt-b", 3, "running"));
+        s.terminal_contexts.extend([
+            TerminalContext {
+                terminal_id: "root-1".into(),
+                core_id: "core".into(),
+                terminal: "pty-root-1".into(),
+                cwd: Some("/repo/p1".into()),
+                directory_root: Some("/repo/p1".into()),
+                project_id: Some("p1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                terminal_id: "wt-a".into(),
+                core_id: "core".into(),
+                terminal: "pty-wt-a".into(),
+                cwd: Some("/repo/p1-wt1".into()),
+                directory_root: Some("/repo/p1-wt1".into()),
+                project_id: Some("p1".into()),
+                worktree_id: Some("wt1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                terminal_id: "wt-b".into(),
+                core_id: "core".into(),
+                terminal: "pty-wt-b".into(),
+                cwd: Some("/repo/p1-wt1".into()),
+                directory_root: Some("/repo/p1-wt1".into()),
+                project_id: Some("p1".into()),
+                worktree_id: Some("wt1".into()),
+                ..Default::default()
+            },
+        ]);
+
+        let ui = crate::presenter::Ui::new();
+        ui.snapshot.set(s.clone());
+        ui.snapshot_ready.set(true);
+        ui.page.set("terminals".into());
+        ui.open_terminal("wt-b".into());
+        crate::terminals::watch(ui);
+
+        // Simulate `wt-b` exiting naturally: AppServer marks it finished AND drops its TerminalContext.
+        let mut after = s;
+        after
+            .terminals
+            .iter_mut()
+            .find(|t| t.id == "wt-b")
+            .unwrap()
+            .runtime
+            .as_mut()
+            .unwrap()
+            .state = "finished".into();
+        after.terminal_contexts.retain(|c| c.terminal_id != "wt-b");
+        (ui, after)
+    });
+
+    ui.snapshot.set(after);
+    assert_eq!(
+        ui.terminal_selection.get_untracked(),
+        "wt-a",
+        "exiting wt-b must switch to sibling wt-a in the same worktree, not jump to root-1"
+    );
 }

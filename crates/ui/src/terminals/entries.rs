@@ -636,7 +636,13 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     })
             })
         };
-        // Presentation follows observed location; Agent/Card ownership remains on `agent`.
+        // Presentation follows observed location; before directory discovery arrives,
+        // fall back to `origin_project_id` so newly created project terminals never
+        // flash in "Other". Once an external `cwd` is observed, `location_unobserved`
+        // is false and external directories still group under "Other".
+        let location_unobserved = location
+            .as_ref()
+            .is_none_or(|c| c.cwd.is_none() && c.project_id.is_none());
         let project_id = location
             .as_ref()
             .and_then(|c| c.project_id.clone())
@@ -644,7 +650,10 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .or_else(|| {
                 t.origin_project_id
                     .as_deref()
-                    .filter(|id| is_global_project_id(id))
+                    .filter(|id| {
+                        is_global_project_id(id)
+                            || (location_unobserved && s.projects.iter().any(|p| p.id == *id))
+                    })
                     .map(str::to_owned)
             });
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();

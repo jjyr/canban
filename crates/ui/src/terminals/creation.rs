@@ -77,7 +77,7 @@ pub(crate) fn location_hint(
         })
         .or(directory)
         .or(inherited_cwd)?;
-    let known = rows
+    if let Some((_, known)) = rows
         .iter()
         .filter(|e| e.listed() && e.host_id == host)
         .filter_map(|e| e.location.as_ref())
@@ -91,15 +91,73 @@ pub(crate) fn location_hint(
             let git = c.branch.is_some() || c.card_id.is_some() || c.worktree_id.is_some();
             (same || (git && Path::new(cwd).starts_with(root))).then_some((root, c))
         })
-        .max_by_key(|(root, _)| root.len())?
-        .1;
-    let mut hint = known.clone();
-    hint.terminal_id = terminal.id.clone();
-    hint.core_id = runtime.core_id.clone()?;
-    hint.terminal = runtime.terminal.clone()?;
-    hint.directory_root = known.directory_root.clone().or_else(|| known.cwd.clone());
-    hint.cwd = Some(cwd.into());
-    Some(hint)
+        .max_by_key(|(root, _)| root.len())
+    {
+        let mut hint = known.clone();
+        hint.terminal_id = terminal.id.clone();
+        hint.core_id = runtime.core_id.clone()?;
+        hint.terminal = runtime.terminal.clone()?;
+        hint.directory_root = known.directory_root.clone().or_else(|| known.cwd.clone());
+        hint.cwd = Some(cwd.into());
+        return Some(hint);
+    }
+
+    // Even when no existing live terminal is open in this Project / Worktree yet,
+    // place the newly created terminal immediately into its registered scope so it
+    // never flashes in "Other" while background directory discovery catches up.
+    let core_id = runtime.core_id.clone()?;
+    let terminal_addr = runtime.terminal.clone()?;
+    if let Some(wt) = snapshot.worktrees.iter().find(|w| {
+        snapshot.host_of(&w.id) == host
+            && !w.path.is_empty()
+            && Path::new(cwd).starts_with(Path::new(&w.path))
+    }) {
+        return Some(TerminalContext {
+            terminal_id: terminal.id.clone(),
+            core_id,
+            terminal: terminal_addr,
+            cwd: Some(cwd.into()),
+            directory_root: Some(wt.path.clone()),
+            project_id: Some(wt.project_id.clone()),
+            worktree_id: Some(wt.id.clone()),
+            branch: Some(wt.branch.clone()),
+            ..Default::default()
+        });
+    }
+    if let Some(c) = card
+        && snapshot.card_host(&c.id) == host
+        && let Some(wt) = c.worktree.as_deref().filter(|w| !w.is_empty())
+        && Path::new(cwd).starts_with(Path::new(wt))
+    {
+        return Some(TerminalContext {
+            terminal_id: terminal.id.clone(),
+            core_id,
+            terminal: terminal_addr,
+            cwd: Some(cwd.into()),
+            directory_root: Some(wt.into()),
+            project_id: Some(c.project_id.clone()),
+            card_id: Some(c.id.clone()),
+            branch: c.branch.clone(),
+            ..Default::default()
+        });
+    }
+    if let Some(proj) = project
+        && snapshot.project_host(&proj.id) == host
+        && !proj.directory.is_empty()
+        && Path::new(cwd).starts_with(Path::new(&proj.directory))
+    {
+        return Some(TerminalContext {
+            terminal_id: terminal.id.clone(),
+            core_id,
+            terminal: terminal_addr,
+            cwd: Some(cwd.into()),
+            directory_root: Some(proj.directory.clone()),
+            project_id: Some(proj.id.clone()),
+            branch: proj.target_branch.clone(),
+            ..Default::default()
+        });
+    }
+    None
 }
 
 #[cfg(test)]

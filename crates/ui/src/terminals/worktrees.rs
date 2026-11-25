@@ -339,8 +339,27 @@ impl WorktreeScope {
 }
 
 /// Location only: Agent task ownership remains on Entry.agent and never pins the tree.
+/// Before initial directory discovery arrives (`location` missing or `cwd` unset), fall
+/// back to the terminal's registered origin worktree/project so newly created project
+/// terminals mount directly under their Project instead of transiently flashing in Other.
 pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
     let Some(loc) = e.location.as_ref().filter(|l| l.cwd.is_some()) else {
+        if let Some(cid) = e.saved.origin_card_id.as_ref().filter(|id| {
+            s.cards.iter().any(|c| {
+                &c.id == *id
+                    && c.archived_at.is_none()
+                    && c.worktree.as_deref().is_some_and(|w| !w.is_empty())
+            })
+        }) {
+            return WorktreeScope::CardWorktree(cid.clone());
+        }
+        if let Some(pid) = e
+            .project_id
+            .as_ref()
+            .filter(|id| s.projects.iter().any(|p| &p.id == *id))
+        {
+            return WorktreeScope::ProjectRoot(pid.clone());
+        }
         return WorktreeScope::Unassigned(e.host_id.clone());
     };
     if let Some(wid) = loc
@@ -407,7 +426,7 @@ pub fn scope_resolution_label(s: &Snapshot, scope: &WorktreeScope) -> Option<Str
 /// Stable UI identity independent of names, branches and inferred business associations.
 pub fn location_key(e: &Entry) -> String {
     match &e.location {
-        Some(l) => format!(
+        Some(l) if l.directory_root.is_some() || l.cwd.is_some() => format!(
             "location:{}:{}",
             e.host_id,
             l.directory_root
@@ -415,7 +434,10 @@ pub fn location_key(e: &Entry) -> String {
                 .or(l.cwd.as_deref())
                 .unwrap_or("?")
         ),
-        None => format!("location:{}:?", e.host_id),
+        _ => match e.project_id.as_deref() {
+            Some(pid) => format!("location:{}:project:{pid}", e.host_id),
+            None => format!("location:{}:?", e.host_id),
+        },
     }
 }
 

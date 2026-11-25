@@ -26,6 +26,7 @@ The simulation boundary pushes all the way up to `canban-client::MultiHostClient
 - Zero duplicate notices or reminders, and zero resurrected read/archived notifications across reconnects and server restarts.
 - Zero plaintext secret leaks in `.outbox.json` on disk.
 - `merged_runtime_state()` active-agent count parity across local and remote hosts.
+- Immediate Project placement on `terminal.create` (pure UI `canban_ui::terminals::entries` + `worktrees::entry_scope` never transiently place a newly created project terminal under `"Other"`), and strict 4-tier close/exit fallback priority (`same worktree -> same project -> same host -> cross host`) via `canban_ui::terminals::fallback_after_close`.
 - Full outbox drain and client-to-server convergence at quiescence.
 
 All 8 product domains plus an interleaved chaos workload and a determinism self-test are covered:
@@ -36,7 +37,7 @@ All 8 product domains plus an interleaved chaos workload and a determinism self-
 4. **`client_pages`**: Multi-host Desktop & Mobile `MultiHostClient` routing, qualified IDs, `timeline.list`, `card.list`, `merged_snapshot()`, `merged_runtime_state()`, and disconnected cache fallback.
 5. **`env_sync`**: Desktop Global Env propagation to partitioned/skewed remote hosts, per-host LWW conflict convergence, scoped Project/Profile env isolation, and zero plaintext secret leaks in `.outbox.json`.
 6. **`notifications`**: Multi-host reminder deduplication, durable `notifications.read` / `notifications.read_all`, archived Card stale-reminder suppression, and non-resurrection across partitions and server restarts.
-7. **`herdr_lifecycle`**: `working` -> `idle` -> `done` -> `blocked` wait notice lifecycle, duplicate & stale `seq` rejection, `missed` snapshot resync, subscriber disconnect recovery, Core restart (`replaced`), `lost`/`finished` exit classification, and runtime count parity.
+7. **`herdr_lifecycle`**: `working` -> `idle` -> `done` -> `blocked` wait notice lifecycle, duplicate & stale `seq` rejection, `missed` snapshot resync, subscriber disconnect recovery, Core restart (`replaced`), `lost`/`finished` exit classification, runtime count parity, immediate project placement on `terminal.create`, and multi-host 4-tier close/exit fallback priority.
 8. **`reclaim`**: Automatic idle reclamation safety under active `viewer.presence` (`paused = true`, zero sends/kills), clean rollback on Herdr `status_mismatch` race without stuck `closing` or false error attention, and liveness once unviewed and idle (`/exit` -> `idle_closed`).
 9. **`chaos`**: Weighted random interleaving of all 8 subsystems combined with Turmoil network/process faults and continuous oracle checks, plus a same-seed determinism digest self-test.
 

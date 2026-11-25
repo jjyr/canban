@@ -287,9 +287,54 @@ pub fn run(seed: u64, max_ops: usize) -> Result<ChaosSummary> {
                     }
                 }
             }
-            // 64..73: Herdr status/fault injection + viewer presence / report on remote-a.
+            // 64..73: Herdr status/fault injection + independent terminal creation & close-fallback checks!
             64..=73 => {
-                if let Some(herdr_a) = world.herdr("remote-a") {
+                let sub_term: u32 = world.rng.random_range(0..10);
+                if sub_term < 3 {
+                    // Create an independent terminal in a random project and verify immediate
+                    // project placement (never transiently landing in "Other").
+                    let idx = world.rng.random_range(0..pids.len());
+                    let pid = pids[idx].1.clone();
+                    if let Ok(created) = world.client_call(
+                        "terminal.create",
+                        json!({ "project_id": pid }),
+                        Some(&pid),
+                    ) && let Some(tid) = created["id"].as_str()
+                    {
+                        let _ = world.advance(Duration::from_millis(120));
+                        if world
+                            .client_merged_snapshot()
+                            .is_ok_and(|s| s.terminals.iter().any(|t| t.id == tid))
+                        {
+                            InvariantOracle::assert_terminal_in_project(&world, tid, &pid)?;
+                        }
+                    }
+                } else if sub_term < 5 {
+                    // Probe close/exit fallback priority across all currently live terminals,
+                    // then optionally exit one shell via Herdr or `terminal.end`.
+                    if let Ok(merged) = world.client_merged_snapshot() {
+                        let rows = canban_ui::terminals::entries(&merged);
+                        let live_ids: Vec<String> = rows
+                            .iter()
+                            .filter(|e| e.listed())
+                            .map(|e| e.saved.id.clone())
+                            .collect();
+                        if !live_ids.is_empty() {
+                            let target = &live_ids[world.rng.random_range(0..live_ids.len())];
+                            let closing = std::collections::BTreeSet::new();
+                            let _ = InvariantOracle::assert_close_fallback_priority(
+                                &merged, &rows, &closing, target,
+                            )?;
+                            if live_ids.len() > 2 && world.rng.random_bool(0.5) {
+                                let _ = world.client_call(
+                                    "terminal.end",
+                                    json!({ "terminal_id": target }),
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(herdr_a) = world.herdr("remote-a") {
                     let addrs = herdr_a.terminal_addresses();
                     if !addrs.is_empty() {
                         let addr = &addrs[world.rng.random_range(0..addrs.len())];

@@ -715,6 +715,7 @@ dependencies = [
  "canban-sync",
  "canban-transport",
  "canban-types",
+ "canban-ui",
  "clap",
  "rand 0.9.5",
  "serde_json",

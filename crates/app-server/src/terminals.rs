@@ -926,11 +926,80 @@ impl AppServer {
                 .as_ref()
                 .map(|proj| proj.directory.clone())
                 .unwrap_or_else(|| cwd.clone());
+            // Seed an initial TerminalContext before emitting the `starting` snapshot so
+            // newly created project/worktree terminals appear directly under their Project
+            // in the sidebar instead of transiently landing in Other until discovery runs.
+            let managed_wt = db
+                .list::<ManagedWorktree>()
+                .ok()
+                .and_then(|wts| wts.into_iter().find(|w| super::path_within(&w.path, &cwd)));
+            let initial_context = if managed_wt.is_some() || card.is_some() || project.is_some() {
+                let (directory_root, ctx_project_id, ctx_card_id, ctx_worktree_id, ctx_branch) =
+                    if let Some(wt) = &managed_wt {
+                        (
+                            Some(wt.path.clone()),
+                            Some(wt.project_id.clone()),
+                            None,
+                            Some(wt.id.clone()),
+                            Some(wt.branch.clone()),
+                        )
+                    } else if let Some(c) = &card
+                        && c.worktree
+                            .as_deref()
+                            .is_some_and(|w| !w.is_empty() && super::path_within(w, &cwd))
+                    {
+                        (
+                            c.worktree.clone(),
+                            Some(c.project_id.clone()),
+                            Some(c.id.clone()),
+                            None,
+                            c.branch.clone(),
+                        )
+                    } else if let Some(proj) = &project {
+                        (
+                            Some(proj.directory.clone()),
+                            Some(proj.id.clone()),
+                            None,
+                            None,
+                            proj.target_branch.clone(),
+                        )
+                    } else {
+                        (Some(cwd.clone()), None, None, None, None)
+                    };
+                let seeded = TerminalContext {
+                    terminal_id: item.id.clone(),
+                    core_id: String::new(),
+                    terminal: String::new(),
+                    cwd: Some(cwd.clone()),
+                    directory_root,
+                    project_id: ctx_project_id,
+                    card_id: ctx_card_id,
+                    worktree_id: ctx_worktree_id,
+                    branch: ctx_branch,
+                    ..Default::default()
+                };
+                let mut contexts = self.terminal_contexts.lock().unwrap();
+                contexts.retain(|c| c.terminal_id != item.id);
+                contexts.push(seeded.clone());
+                Some(seeded)
+            } else {
+                None
+            };
             // Persist the launch intent before network IO, but cwd is only an argument.
-            launch = Some((item.clone(), cwd, project_dir, agent_profile, project, card));
+            launch = Some((
+                item.clone(),
+                cwd,
+                project_dir,
+                agent_profile,
+                project,
+                card,
+                initial_context,
+            ));
             Ok(serde_json::to_value(item)?)
         })?;
-        let Some((mut item, cwd, project_dir, agent_profile, project, card)) = launch else {
+        let Some((mut item, cwd, project_dir, agent_profile, project, card, initial_context)) =
+            launch
+        else {
             return Ok(serde_json::to_value(TerminalEntry::from_json(saved)?)?);
         };
         let runtime = item.runtime.as_mut().unwrap();
@@ -1089,7 +1158,7 @@ impl AppServer {
             }
             Ok(())
         })();
-        match result {
+        match &result {
             Ok(()) => {
                 runtime.state = "running".into();
                 runtime.connection = "connected".into();
@@ -1117,12 +1186,26 @@ impl AppServer {
         })?;
         // Publish an actual Core observation before selecting the new tab,
         // avoiding a temporary Other group when its directory is already known.
-        if let Ok(value) = self.terminal_context(json!({"terminal_id":item.id}))
-            && let Ok(context) = serde_json::from_value::<TerminalContext>(value)
-        {
+        if result.is_ok() {
+            if let Ok(value) = self.terminal_context(json!({"terminal_id":item.id}))
+                && let Ok(context) = serde_json::from_value::<TerminalContext>(value)
+                && (context.cwd.is_some() || context.project_id.is_some())
+            {
+                let mut contexts = self.terminal_contexts.lock().unwrap();
+                contexts.retain(|c| c.terminal_id != item.id);
+                contexts.push(context);
+            } else if let Some(mut seeded) = initial_context {
+                if let Some(rt) = &item.runtime {
+                    seeded.core_id = rt.core_id.clone().unwrap_or_default();
+                    seeded.terminal = rt.terminal.clone().unwrap_or_default();
+                }
+                let mut contexts = self.terminal_contexts.lock().unwrap();
+                contexts.retain(|c| c.terminal_id != item.id);
+                contexts.push(seeded);
+            }
+        } else {
             let mut contexts = self.terminal_contexts.lock().unwrap();
             contexts.retain(|c| c.terminal_id != item.id);
-            contexts.push(context);
         }
         self.emit("terminals", None);
         Ok(serde_json::to_value(item)?)
@@ -1435,21 +1518,40 @@ impl AppServer {
             }
             let entry_ended = item.agent.as_ref().is_some_and(AgentRun::finished)
                 || item.runtime.as_ref().is_some_and(|r| r.state == "finished");
-            // Preserve only a confirmed location for the same binding while the entry is
-            // still live in the product DB (including the brief window after Herdr reports
-            // `finished`/`removed` before Card Agent reconciliation completes) or while
-            // observation/discovery is unavailable. Never invent the launch directory.
-            if !entry_ended
-                && !contexts.iter().any(|c| c.terminal_id == item.id)
-                && let Some((core, terminal)) = &binding
-                && !observed
+            // Preserve a confirmed location for the same binding while the entry is still live,
+            // or the seeded project/worktree context while a brand-new terminal is still `starting`
+            // / within its launch grace window before Herdr discovery catches up.
+            if !entry_ended && !contexts.iter().any(|c| c.terminal_id == item.id) {
+                let is_starting = item.runtime.as_ref().is_some_and(|r| r.state == "starting");
+                let is_fresh_launch = item
+                    .runtime
                     .as_ref()
-                    .is_ok_and(|(observed_core, _)| observed_core != core)
-                && let Some(previous) = snapshot.terminal_contexts.iter().find(|c| {
-                    c.terminal_id == item.id && c.core_id == *core && c.terminal == *terminal
-                })
-            {
-                contexts.push(previous.clone());
+                    .is_some_and(|r| r.connection == "connected")
+                    && now().saturating_sub(item.created_at) < 3_000;
+                if let Some((core, terminal)) = &binding
+                    && !observed
+                        .as_ref()
+                        .is_ok_and(|(observed_core, _)| observed_core != core)
+                    && let Some(previous) = snapshot.terminal_contexts.iter().find(|c| {
+                        c.terminal_id == item.id
+                            && ((c.core_id == *core && c.terminal == *terminal)
+                                || (is_fresh_launch && c.terminal.is_empty()))
+                    })
+                {
+                    let mut kept = previous.clone();
+                    if kept.terminal.is_empty() {
+                        kept.core_id = core.clone();
+                        kept.terminal = terminal.clone();
+                    }
+                    contexts.push(kept);
+                } else if is_starting
+                    && let Some(previous) = snapshot
+                        .terminal_contexts
+                        .iter()
+                        .find(|c| c.terminal_id == item.id)
+                {
+                    contexts.push(previous.clone());
+                }
             }
         }
         if observed.is_ok() {

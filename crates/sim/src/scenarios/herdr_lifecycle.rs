@@ -290,6 +290,150 @@ pub fn run(seed: u64) -> Result<u64> {
         }))
     })?;
 
+    // 8. Independent Terminal creation & close-fallback UX invariants across local + remote-a:
+    //    (a) Creating the first terminal in a Project must land immediately under that Project
+    //        (never transiently in "Other" waiting for background directory discovery).
+    //    (b) Closing/exiting terminals must follow strict 4-tier priority:
+    //        same worktree -> same project -> same host -> cross host.
+    let dir_local = world.project_dir("herdr-local")?;
+    let p_local = world.client_call(
+        "project.create",
+        json!({ "host_id": "local", "name": "Local Project", "directory": dir_local }),
+        None,
+    )?;
+    let pid_local = p_local["id"].as_str().unwrap().to_owned();
+
+    let dir_a2 = world.project_dir("herdr-life-2")?;
+    let p_a2 = world.client_call(
+        "project.create",
+        json!({ "host_id": "remote-a", "name": "Herdr Life 2", "directory": dir_a2 }),
+        None,
+    )?;
+    let pid_a2 = p_a2["id"].as_str().unwrap().to_owned();
+    let subdir_wt = std::path::Path::new(&dir).join("sub-wt");
+    std::fs::create_dir_all(&subdir_wt)?;
+
+    // Create terminals: local project, 2 in remote-a project 1 subdir, 1 in remote-a project 1 root,
+    // and 1 in remote-a project 2 root. Verify immediate project placement on every single creation!
+    let t_local = world.client_call(
+        "terminal.create",
+        json!({ "project_id": pid_local }),
+        Some(&pid_local),
+    )?;
+    let tid_local = t_local["id"].as_str().unwrap().to_owned();
+    world.wait_until(5_000, |w| {
+        Ok(w.client_merged_snapshot()?
+            .terminals
+            .iter()
+            .any(|t| t.id == tid_local))
+    })?;
+    InvariantOracle::assert_terminal_in_project(&world, &tid_local, &pid_local)?;
+
+    let t_ra_root =
+        world.client_call("terminal.create", json!({ "project_id": pid }), Some(&pid))?;
+    let tid_ra_root = t_ra_root["id"].as_str().unwrap().to_owned();
+    world.wait_until(5_000, |w| {
+        Ok(w.client_merged_snapshot()?
+            .terminals
+            .iter()
+            .any(|t| t.id == tid_ra_root))
+    })?;
+    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_root, &pid)?;
+
+    let t_ra_sub1 = world.client_call(
+        "terminal.create",
+        json!({ "project_id": pid, "cwd": subdir_wt.to_string_lossy() }),
+        Some(&pid),
+    )?;
+    let tid_ra_sub1 = t_ra_sub1["id"].as_str().unwrap().to_owned();
+    world.wait_until(5_000, |w| {
+        Ok(w.client_merged_snapshot()?
+            .terminals
+            .iter()
+            .any(|t| t.id == tid_ra_sub1))
+    })?;
+    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_sub1, &pid)?;
+
+    let t_ra_sub2 = world.client_call(
+        "terminal.create",
+        json!({ "project_id": pid, "cwd": subdir_wt.to_string_lossy() }),
+        Some(&pid),
+    )?;
+    let tid_ra_sub2 = t_ra_sub2["id"].as_str().unwrap().to_owned();
+    world.wait_until(5_000, |w| {
+        Ok(w.client_merged_snapshot()?
+            .terminals
+            .iter()
+            .any(|t| t.id == tid_ra_sub2))
+    })?;
+    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_sub2, &pid)?;
+
+    let t_ra_p2 = world.client_call(
+        "terminal.create",
+        json!({ "project_id": pid_a2 }),
+        Some(&pid_a2),
+    )?;
+    let tid_ra_p2 = t_ra_p2["id"].as_str().unwrap().to_owned();
+    world.wait_until(5_000, |w| {
+        Ok(w.client_merged_snapshot()?
+            .terminals
+            .iter()
+            .any(|t| t.id == tid_ra_p2))
+    })?;
+    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_p2, &pid_a2)?;
+
+    // Walk through closing terminals in sequence and assert exact 4-tier fallback priority:
+    // Tier 1 (same worktree/dir) -> Tier 2 (same project) -> Tier 3 (same host) -> Tier 4 (cross host).
+    let snap = world.client_merged_snapshot()?;
+    let rows = canban_ui::terminals::entries(&snap);
+    let mut closing = std::collections::BTreeSet::new();
+
+    // Closing tid_ra_sub2 -> must stay in same directory (`tid_ra_sub1` or same project root if same directory_root).
+    let next1 =
+        InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &tid_ra_sub2)?;
+    ensure!(next1.is_some());
+    closing.insert(tid_ra_sub2.clone());
+
+    let next2 =
+        InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &tid_ra_sub1)?;
+    ensure!(next2.as_deref() == Some(tid_ra_root.as_str()));
+    closing.insert(tid_ra_sub1.clone());
+
+    // Closing last terminal in `pid` (`tid_ra_root`) -> MUST switch to `tid_ra_p2` on SAME host `remote-a`,
+    // NOT `tid_local` on `local`!
+    let next3 =
+        InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &tid_ra_root)?;
+    ensure!(
+        next3.as_deref() == Some(tid_ra_p2.as_str()),
+        "closing {tid_ra_root} on remote-a must prefer same-host {tid_ra_p2}, got {next3:?}"
+    );
+    closing.insert(tid_ra_root.clone());
+
+    // Closing `tid_ra_p2` -> still prefers any remaining live/replaced terminal on `remote-a`
+    // (such as Card 1's replaced agent terminal) over jumping cross-host; once every remaining
+    // `remote-a` terminal is closed, fallback crosses hosts to `tid_local`!
+    let mut cur = tid_ra_p2.clone();
+    loop {
+        let next = InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &cur)?;
+        let Some(next_id) = next else {
+            anyhow::bail!("unexpected empty fallback while {tid_local} is still live");
+        };
+        closing.insert(cur);
+        if next_id == tid_local {
+            break;
+        }
+        // Any intermediate fallback before `tid_local` MUST still be on `remote-a`!
+        let next_host = rows
+            .iter()
+            .find(|e| e.saved.id == next_id)
+            .map(|e| e.host_id.as_str());
+        ensure!(
+            next_host == Some("remote-a"),
+            "expected same-host remote-a fallback before cross-host {tid_local}, got {next_id} on {next_host:?}"
+        );
+        cur = next_id;
+    }
+
     world.heal_and_quiesce(15_000)?;
     oracle.check_quiescent_invariants(&world)?;
 

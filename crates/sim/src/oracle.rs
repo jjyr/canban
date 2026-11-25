@@ -288,6 +288,146 @@ impl InvariantOracle {
         Ok(card)
     }
 
+    /// Verifies that a newly created project terminal is IMMEDIATELY placed under its Project
+    /// in the pure UI terminal projection (`canban_ui::terminals::entries` + `worktrees::entry_scope`)
+    /// — never transiently falling into `"Other"` / `WorktreeScope::Unassigned`, BOTH in the live
+    /// merged snapshot AND even if `terminal_contexts` has not arrived yet.
+    pub fn assert_terminal_in_project(
+        world: &SimWorld,
+        terminal_id: &str,
+        expected_project_id: &str,
+    ) -> Result<()> {
+        let merged = world.client_merged_snapshot()?;
+        let rows = canban_ui::terminals::entries(&merged);
+        let entry = rows
+            .iter()
+            .find(|e| e.saved.id == terminal_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("terminal {terminal_id} missing from merged_snapshot entries")
+            })?;
+        let scope = canban_ui::terminals::worktrees::entry_scope(&merged, entry);
+        ensure!(
+            entry.project_id.as_deref() == Some(expected_project_id)
+                && entry.project_name != "Other"
+                && !matches!(
+                    scope,
+                    canban_ui::terminals::worktrees::WorktreeScope::Unassigned(_)
+                )
+                && scope.project_id(&merged).as_deref() == Some(expected_project_id),
+            "terminal {terminal_id} landed outside project {expected_project_id}: project_id={:?}, project_name={:?}, scope={:?}",
+            entry.project_id,
+            entry.project_name,
+            scope
+        );
+
+        // Also assert mid-flight safety when `terminal_contexts` for this terminal hasn't arrived yet.
+        let mut without_ctx = merged.clone();
+        without_ctx
+            .terminal_contexts
+            .retain(|c| c.terminal_id != terminal_id);
+        let rows_no_ctx = canban_ui::terminals::entries(&without_ctx);
+        let entry_no_ctx = rows_no_ctx
+            .iter()
+            .find(|e| e.saved.id == terminal_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("terminal {terminal_id} missing when contexts cleared")
+            })?;
+        let scope_no_ctx = canban_ui::terminals::worktrees::entry_scope(&without_ctx, entry_no_ctx);
+        ensure!(
+            entry_no_ctx.project_id.as_deref() == Some(expected_project_id)
+                && entry_no_ctx.project_name != "Other"
+                && !matches!(
+                    scope_no_ctx,
+                    canban_ui::terminals::worktrees::WorktreeScope::Unassigned(_)
+                )
+                && scope_no_ctx.project_id(&without_ctx).as_deref() == Some(expected_project_id),
+            "terminal {terminal_id} flashed in Other before discovery: project_id={:?}, project_name={:?}, scope={:?}",
+            entry_no_ctx.project_id,
+            entry_no_ctx.project_name,
+            scope_no_ctx
+        );
+        Ok(())
+    }
+
+    /// Verifies that `canban_ui::terminals::fallback_after_close` strictly obeys the 4-tier
+    /// priority order: `same worktree -> same project -> same host -> cross host`, and never
+    /// selects a closed, closing, or missing terminal.
+    pub fn assert_close_fallback_priority(
+        snapshot: &Snapshot,
+        rows: &[canban_ui::terminals::Entry],
+        closing: &BTreeSet<String>,
+        closed_id: &str,
+    ) -> Result<Option<String>> {
+        let Some(closed) = rows.iter().find(|e| e.saved.id == closed_id) else {
+            bail!("closed terminal {closed_id} missing from rows");
+        };
+        let actual = canban_ui::terminals::fallback_after_close(snapshot, rows, closing, closed_id);
+        let others: Vec<&canban_ui::terminals::Entry> = rows
+            .iter()
+            .filter(|e| e.saved.id != closed_id && e.listed() && !closing.contains(&e.saved.id))
+            .collect();
+        if others.is_empty() {
+            ensure!(
+                actual.is_none(),
+                "expected None when no live terminals remain after closing {closed_id}, got {actual:?}"
+            );
+            return Ok(None);
+        }
+        let chosen_id = actual.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "fallback_after_close returned None while {} live terminals remained after closing {closed_id}",
+                others.len()
+            )
+        })?;
+        let chosen = others
+            .iter()
+            .copied()
+            .find(|e| e.saved.id == chosen_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "fallback_after_close picked non-live/missing/closing terminal {chosen_id} after closing {closed_id}"
+                )
+            })?;
+
+        let closed_loc = canban_ui::terminals::worktrees::location_key(closed);
+        let chosen_loc = canban_ui::terminals::worktrees::location_key(chosen);
+        let closed_pid =
+            canban_ui::terminals::worktrees::entry_scope(snapshot, closed).project_id(snapshot);
+        let chosen_pid =
+            canban_ui::terminals::worktrees::entry_scope(snapshot, chosen).project_id(snapshot);
+
+        let has_same_worktree = others
+            .iter()
+            .any(|e| canban_ui::terminals::worktrees::location_key(e) == closed_loc);
+        let has_same_project = closed_pid.is_some()
+            && others.iter().any(|e| {
+                canban_ui::terminals::worktrees::entry_scope(snapshot, e).project_id(snapshot)
+                    == closed_pid
+            });
+        let has_same_host = others.iter().any(|e| e.host_id == closed.host_id);
+
+        if has_same_worktree {
+            ensure!(
+                chosen_loc == closed_loc,
+                "closing {closed_id} violated Tier 1 (same worktree {closed_loc}): picked {chosen_id} in {chosen_loc}"
+            );
+        } else if has_same_project {
+            ensure!(
+                chosen_pid == closed_pid,
+                "closing {closed_id} violated Tier 2 (same project {closed_pid:?}): picked {chosen_id} in {chosen_pid:?}"
+            );
+        } else if has_same_host {
+            ensure!(
+                chosen.host_id == closed.host_id,
+                "closing {closed_id} violated Tier 3 (same host {}): picked {chosen_id} on host {}",
+                closed.host_id,
+                chosen.host_id
+            );
+        }
+
+        Ok(Some(chosen_id.to_owned()))
+    }
+
     /// #2 & #4: At quiescence, `client.merged_snapshot()` contains every active Card from every
     /// connected server with matching titles/stages/revisions (accounting for multi-host qualification).
     fn check_client_server_convergence(&self, world: &SimWorld) -> Result<()> {
