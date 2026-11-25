@@ -22,10 +22,10 @@ use canban_sync::{
 use canban_terminal::{RemotePtyTransport, session::PtyTransport};
 use canban_transport::ClientTransport;
 use canban_types::{
-    AppEvent, Config, DiscoveredCanbanHost, EnvEntryMeta, GlobalEnvSyncHostFailure,
+    AppEvent, Clock, Config, DiscoveredCanbanHost, EnvEntryMeta, GlobalEnvSyncHostFailure,
     GlobalEnvSyncStatus, GlobalEnvSyncSummary, HostConnectionState, HostSummary, HostTransport,
     RuntimeState, SavedHost, SchedulerSettings, Snapshot, SyncAction, SyncItemState, SyncItemView,
-    TerminalEntry, is_device_token, is_pairing_code, normalize_daemon_addr, now,
+    TerminalEntry, is_device_token, is_pairing_code, normalize_daemon_addr, system_clock,
 };
 use serde_json::{Value, json};
 use std::{
@@ -35,9 +35,12 @@ use std::{
         Arc, Mutex, OnceLock, RwLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
-use tokio::sync::{Notify, broadcast, mpsc, watch};
+use tokio::{
+    sync::{Notify, broadcast, mpsc, watch},
+    time::Instant,
+};
 
 const DEFAULT_READ_CACHE_BUDGET: u64 = 20 * 1024 * 1024;
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
@@ -120,6 +123,7 @@ pub struct MultiHostClientOptions {
     pub local_host: Option<Arc<dyn LocalHostDriver>>,
     pub global_env_provider: Option<Arc<dyn GlobalEnvSyncProvider>>,
     pub min_api_version: Option<u32>,
+    pub clock: Arc<dyn Clock>,
 }
 
 /// Real-time events emitted by [`RemoteClient`] across all connected hosts.
@@ -275,6 +279,7 @@ pub struct MultiHostClient {
     local_summary_counts: Mutex<Option<(usize, usize, u64)>>,
     global_env_provider: Option<Arc<dyn GlobalEnvSyncProvider>>,
     min_api_version: Option<u32>,
+    clock: Arc<dyn Clock>,
     hosts: RwLock<BTreeMap<String, RemoteHostSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
     acknowledged_owners: Mutex<BTreeMap<String, String>>,
@@ -486,6 +491,7 @@ fn apply_state_to_slot(
     rtt_ms: Option<u64>,
     probe_val: Option<&Value>,
     preferred_topic: Option<&'static str>,
+    now_ms: u64,
 ) -> Option<&'static str> {
     let changed = state_val["changed"] == true || state_val.get("snapshot").is_some();
     let prev_marker = slot.last_marker.clone();
@@ -515,7 +521,7 @@ fn apply_state_to_slot(
         if let Ok(cfg) = serde_json::from_value::<Config>(state_val["config"].clone()) {
             slot.cached.config = cfg;
         }
-        slot.cached.saved_at = now();
+        slot.cached.saved_at = now_ms;
         save_cache(data_dir, &slot.saved.id, &slot.cached);
     }
 
@@ -546,7 +552,7 @@ fn apply_state_to_slot(
         *prev_rtt = rtt;
     }
 
-    slot.last_synced_at = Some(now());
+    slot.last_synced_at = Some(now_ms);
     if !next_marker["revision"].is_null() {
         slot.last_marker = next_marker.clone();
     }
@@ -628,6 +634,7 @@ impl MultiHostClient {
             local_host: None,
             global_env_provider: None,
             min_api_version: None,
+            clock: system_clock(),
         })
     }
 
@@ -664,6 +671,7 @@ impl MultiHostClient {
                 local_host: None,
                 global_env_provider: None,
                 min_api_version: None,
+                clock: system_clock(),
             },
             runtime_handle,
         )
@@ -696,6 +704,7 @@ impl MultiHostClient {
         runtime_handle: tokio::runtime::Handle,
         owned_runtime: Option<tokio::runtime::Runtime>,
     ) -> Result<Arc<Self>> {
+        let _rt_guard = runtime_handle.enter();
         let MultiHostClientOptions {
             config,
             host_store,
@@ -704,6 +713,7 @@ impl MultiHostClient {
             local_host,
             global_env_provider,
             min_api_version,
+            clock,
         } = options;
         let saved = host_store.load_hosts();
         let mut slots = BTreeMap::new();
@@ -734,6 +744,7 @@ impl MultiHostClient {
             local_summary_counts: Mutex::new(None),
             global_env_provider,
             min_api_version,
+            clock,
             hosts: RwLock::new(slots),
             entity_hosts: RwLock::new(initial_entity_hosts),
             acknowledged_owners: Mutex::new(BTreeMap::new()),
@@ -771,6 +782,10 @@ impl MultiHostClient {
     /// Runtime capabilities advertised by this client instance.
     pub fn capabilities(&self) -> ClientCapabilities {
         self.capabilities
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
     }
 
     /// Returns `true` when this client's configured [`HostConnector`] supports `transport`.
@@ -1231,7 +1246,7 @@ impl MultiHostClient {
                         ssh_target,
                         server_id,
                         enabled: true,
-                        added_at: now(),
+                        added_at: self.now_ms(),
                     };
                     let mut slot = RemoteHostSlot::from_saved(
                         saved,
@@ -1346,6 +1361,7 @@ impl MultiHostClient {
                     Some(rtt_ms),
                     Some(&ping_val),
                     None,
+                    self.now_ms(),
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
                 let summary = slot.summary();
@@ -1363,7 +1379,7 @@ impl MultiHostClient {
                     ssh_target,
                     server_id,
                     enabled: true,
-                    added_at: now(),
+                    added_at: self.now_ms(),
                 };
                 let mut slot = RemoteHostSlot::from_saved(
                     saved,
@@ -1383,6 +1399,7 @@ impl MultiHostClient {
                     Some(rtt_ms),
                     Some(&ping_val),
                     None,
+                    self.now_ms(),
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
                 let summary = slot.summary();
@@ -1469,7 +1486,7 @@ impl MultiHostClient {
             host.id = canban_types::id();
         }
         if host.added_at == 0 {
-            host.added_at = now();
+            host.added_at = self.now_ms();
         }
 
         let reject_dup = self.local_host.is_some();
@@ -1534,6 +1551,7 @@ impl MultiHostClient {
                     Some(hs.rtt_ms),
                     Some(&hs.ping),
                     None,
+                    self.now_ms(),
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
                 let sum = slot.summary();
@@ -1770,7 +1788,7 @@ impl MultiHostClient {
             let mut combined = local.snapshot()?;
             let local_active = count_active_agents(&combined);
             let local_projects = combined.projects.len();
-            let synced_at = now();
+            let synced_at = self.now_ms();
             *self.local_summary_counts.lock().unwrap() =
                 Some((local_active, local_projects, synced_at));
             combined.register_host_entities("local");
@@ -1852,7 +1870,7 @@ impl MultiHostClient {
             {
                 let mut counts = self.local_summary_counts.lock().unwrap();
                 let prev_projects = counts.map(|(_, p, _)| p).unwrap_or(0);
-                *counts = Some((local_active, prev_projects, now()));
+                *counts = Some((local_active, prev_projects, self.now_ms()));
             }
             combined.register_host("local");
 
@@ -2544,7 +2562,7 @@ impl MultiHostClient {
                 },
                 retry_same_params: sent_before_drop,
                 state: MutationState::Queued,
-                created_at: now(),
+                created_at: self.now_ms(),
                 attempts: u32::from(sent_before_drop),
             };
             let mut outbox = slot.outbox.lock().unwrap();
@@ -2628,7 +2646,7 @@ impl MultiHostClient {
                 .map(|c| c.revision)
         });
         let mut reads = slot.reads.lock().unwrap();
-        let _ = reads.put(method, params, val, card_id, card_rev, now());
+        let _ = reads.put(method, params, val, card_id, card_rev, self.now_ms());
     }
 
     fn offline_fallback(
@@ -2645,7 +2663,7 @@ impl MultiHostClient {
                 .with_context(|| format!("Unknown host '{host_id}'"))?;
             let outbox = slot.outbox.lock().unwrap();
             let mut reads = slot.reads.lock().unwrap();
-            let now_ms = now();
+            let now_ms = self.now_ms();
             if let Some(cached) = reads.get(method, &params, now_ms) {
                 let card_id = params["card_id"].as_str().unwrap_or("");
                 return Ok(cache_and_augment_timeline(
@@ -3019,7 +3037,7 @@ impl MultiHostClient {
                 sent_params: Value::Null,
                 retry_same_params: false,
                 state: MutationState::Queued,
-                created_at: now(),
+                created_at: self.now_ms(),
                 attempts: 0,
             };
             if let Ok(mut ob) = outbox_arc.lock() {
@@ -3390,6 +3408,7 @@ impl MultiHostClient {
                                 Some(hs.rtt_ms),
                                 Some(&hs.ping),
                                 None,
+                                self.now_ms(),
                             );
                             let entities = slot.cached.snapshot.entity_hosts.clone();
                             if persist_needed {
@@ -3646,6 +3665,7 @@ impl MultiHostClient {
                 Some(hs.rtt_ms),
                 Some(&hs.ping),
                 None,
+                self.now_ms(),
             );
             let conn_gen = slot.conn_gen;
             let entities = slot.cached.snapshot.entity_hosts.clone();
@@ -3715,6 +3735,7 @@ impl MultiHostClient {
                     Some(rtt_ms),
                     None,
                     preferred_topic,
+                    self.now_ms(),
                 );
                 let entities = topic
                     .is_some()
@@ -3772,7 +3793,7 @@ impl MultiHostClient {
             };
             slot.cached.snapshot.apply_runtime_state(rt);
             slot.cached.snapshot.register_host_entities(host_id);
-            slot.last_synced_at = Some(now());
+            slot.last_synced_at = Some(self.now_ms());
             if let HostConnectionState::Connected {
                 rtt_ms: ref mut prev_rtt,
                 ..
@@ -3788,7 +3809,7 @@ impl MultiHostClient {
         Ok(())
     }
 
-    async fn drain_outbox_async(&self, host_id: &str) -> Result<DrainReport> {
+    pub async fn drain_outbox_async(&self, host_id: &str) -> Result<DrainReport> {
         let (draining_lock, draining_active) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
@@ -3900,9 +3921,7 @@ impl MultiHostClient {
                     let conn = is_connection_error(err);
                     let msg = format!("{err:#}");
                     let need_refresh = !conn
-                        && ((msg.contains("revision_conflict")
-                            && !was_retry_same_params
-                            && allow_rebuild)
+                        && ((msg.contains("revision_conflict") && allow_rebuild)
                             || msg.contains("request_key_conflict"));
                     let snap = if need_refresh {
                         client
@@ -3942,7 +3961,7 @@ impl MultiHostClient {
                 }
                 snap.register_host_entities(host_id);
                 slot.cached.snapshot = snap;
-                slot.cached.saved_at = now();
+                slot.cached.saved_at = self.now_ms();
                 save_cache(&self.config.data_dir, host_id, &slot.cached);
                 outcome
             };
@@ -4055,13 +4074,17 @@ impl MultiHostClient {
                     json!({"card_id": card_id, "tail": true, "limit": 200, "view": "full"});
                 match client.call_async("timeline.list", &params).await {
                     Ok(val) => {
+                        let ts = weak
+                            .upgrade()
+                            .map(|this| this.now_ms())
+                            .unwrap_or_else(canban_types::now);
                         let _ = reads_arc.lock().unwrap().put(
                             "timeline.list",
                             &params,
                             &val,
                             Some(&card_id),
                             Some(rev),
-                            now(),
+                            ts,
                         );
                     }
                     Err(err) if is_connection_error(&err) => break,
@@ -4549,7 +4572,7 @@ async fn host_supervisor_task(
                         Ok(Some(PushFrame::Heartbeat)) => {
                             let mut guard = rc.hosts.write().unwrap();
                             if let Some(slot) = guard.get_mut(&host_id) {
-                                slot.last_synced_at = Some(now());
+                                slot.last_synced_at = Some(rc.now_ms());
                             }
                         }
                         Ok(Some(PushFrame::StateChanged { topic, card_id, marker })) => {
@@ -4625,7 +4648,7 @@ mod tests {
     use super::*;
     use crate::{pairing::format_pairing_uri, parse_pairing_invite, store::MemoryCredentialStore};
     use canban_app_server::AppServer;
-    use canban_types::{Card, Project, ServerListenConfig, SyncMark};
+    use canban_types::{Card, Project, ServerListenConfig, SyncMark, now};
 
     async fn start_tcp_server_with_verifier(
         home: PathBuf,

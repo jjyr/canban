@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, BufWriter, Read, Write},
     process::{Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -125,9 +126,24 @@ impl TerminalSize {
     }
 }
 
+/// Control-plane subscription returned by an injectable [`HerdrBackend`].
+pub struct BackendSubscription {
+    pub core: String,
+    pub snapshot: Value,
+    pub receiver: std::sync::mpsc::Receiver<Result<Value>>,
+}
+
+/// Injectable Herdr Core backend seam for deterministic simulation testing.
+pub trait HerdrBackend: Send + Sync + 'static {
+    fn call(&self, method: &str, params: Value) -> Result<Value>;
+    fn subscribe(&self, wake: Arc<dyn Fn() + Send + Sync>) -> Result<BackendSubscription>;
+    fn activity(&self, core: &str, terminal: &str) -> crate::activity::Activity;
+}
+
 #[derive(Clone)]
 pub struct Client {
     pub config: Config,
+    pub backend: Option<Arc<dyn HerdrBackend>>,
 }
 /// Retain runtime facts, not argv/env copies of the potentially very long prompt.
 pub fn observation(value: &Value) -> Value {
@@ -163,9 +179,21 @@ pub fn cwd(value: &Value) -> Option<&str> {
         .or_else(|| value["cwd"].as_str().filter(|s| !s.is_empty()))
 }
 impl Client {
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            backend: None,
+        }
+    }
+    pub fn with_backend(config: Config, backend: Option<Arc<dyn HerdrBackend>>) -> Self {
+        Self { config, backend }
+    }
     /// hc connect speaks the public JSON-RPC protocol and resolves the installed
     /// core's socket/config without linking Herdr's private implementation.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if let Some(backend) = &self.backend {
+            return backend.call(method, params);
+        }
         pool::call(&self.config, method, params)
     }
     pub fn status(&self) -> Result<Value> {
@@ -417,13 +445,11 @@ for line in sys.stdin:
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let client = Client {
-            config: Config {
-                hc: script.to_string_lossy().into_owned(),
-                hc_session: "unit-run-size".into(),
-                ..Default::default()
-            },
-        };
+        let client = Client::new(Config {
+            hc: script.to_string_lossy().into_owned(),
+            hc_session: "unit-run-size".into(),
+            ..Default::default()
+        });
         let cwd = dir.path().to_string_lossy().into_owned();
         client
             .launch_with_policy_unset_and_size(

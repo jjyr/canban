@@ -39,6 +39,9 @@ fn page(db: Db<'_>, after: u64, limit: usize) -> Result<Vec<JournalEvent>> {
     .collect()
 }
 pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
+    pump_at(db, config, now())
+}
+pub(super) fn pump_at(db: Db<'_>, config: &Config, now_ms: u64) -> Result<()> {
     super::workflow::reconcile(db)?;
     let top = highwater(db)?;
     let mut min_enabled_cursor: Option<u64> = None;
@@ -125,7 +128,7 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
         .filter(|d| {
             matches!(d.target, SubscriptionTarget::Workflow { .. })
                 && d.state == "pending"
-                && d.next_attempt_at <= now()
+                && d.next_attempt_at <= now_ms
         })
         .take(64)
     {
@@ -235,13 +238,13 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
                 if d.attempts >= 5 {
                     d.state = "failed".into();
                 } else {
-                    d.next_attempt_at = now() + 1000 * (1u64 << d.attempts);
+                    d.next_attempt_at = now_ms + 1000 * (1u64 << d.attempts);
                 }
             }
         }
         db.save(&d)?;
     }
-    let current_ts = now();
+    let current_ts = now_ms;
     let last_prune = LAST_CARDLESS_PRUNE_AT.load(Ordering::Relaxed);
     if current_ts.saturating_sub(last_prune) >= PRUNE_INTERVAL_MS
         && LAST_CARDLESS_PRUNE_AT
@@ -347,7 +350,7 @@ impl AppServer {
                         target: target.clone(),
                         enabled: p["enabled"].as_bool().unwrap_or(false),
                         cursor: highwater(db)?,
-                        created_at: now(),
+                        created_at: self.now_ms(),
                     };
                     db.save(&sub)?;
                     Ok(json!(sub))

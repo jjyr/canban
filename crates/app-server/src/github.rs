@@ -7,17 +7,35 @@ pub(super) mod worker;
 use canban_kanban::github::{self as integration, Change};
 impl AppServer {
     fn github_client(&self) -> Result<canban_github::Client> {
+        if let Some(transport) = &self.github_transport {
+            return Ok(canban_github::Client::new("sim-token".into())
+                .with_cache(self.github.cache.clone(), "github.com:sim:bot".into())
+                .with_transport(transport.clone())
+                .with_clock(self.clock.clone()));
+        }
         if self.github.status().state == "connected" {
-            self.github.client()
+            Ok(self.github.client()?.with_clock(self.clock.clone()))
         } else {
-            canban_github::Client::from_cli(self.github_cli.clone(), true)
+            Ok(
+                canban_github::Client::from_cli(self.github_cli.clone(), true)?
+                    .with_clock(self.clock.clone()),
+            )
         }
     }
     pub(super) fn github_cached_client(&self) -> Result<canban_github::Client> {
+        if let Some(transport) = &self.github_transport {
+            return Ok(canban_github::Client::new("sim-token".into())
+                .with_cache(self.github.cache.clone(), "github.com:sim:bot".into())
+                .with_transport(transport.clone())
+                .with_clock(self.clock.clone()));
+        }
         if self.github.status().state == "connected" {
-            self.github.cached_client()
+            Ok(self.github.cached_client()?.with_clock(self.clock.clone()))
         } else {
-            canban_github::Client::from_cli(self.github_cli.clone(), false)
+            Ok(
+                canban_github::Client::from_cli(self.github_cli.clone(), false)?
+                    .with_clock(self.clock.clone()),
+            )
         }
     }
     pub(super) fn detect_project_github(
@@ -542,7 +560,7 @@ impl AppServer {
                 && g.generation == generation
             {
                 g.synced_at = if error.is_none() {
-                    Some(now())
+                    Some(self.now_ms())
                 } else {
                     last_success
                 };
@@ -802,7 +820,7 @@ impl AppServer {
             let store = self.store.lock().unwrap();
             events::github::load_repo_watermark(store.db(), repository)?
         };
-        let scan_started_iso = events::github::format_iso8601_utc(now());
+        let scan_started_iso = events::github::format_iso8601_utc(self.now_ms());
 
         let mut issues = Vec::new();
         let issues_root = match &existing_watermark {

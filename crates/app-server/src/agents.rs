@@ -345,18 +345,17 @@ impl AppServer {
             Err(e) => (BTreeMap::new(), Some(format!("{e:#}"))),
         };
 
-        let herdr_templates = canban_herdr::Client {
-            config: config.clone(),
-        }
-        .call("templates.list", json!({}))
-        .ok()
-        .and_then(|v| {
-            v["templates"]
-                .as_array()
-                .cloned()
-                .or_else(|| v.as_array().cloned())
-        })
-        .unwrap_or_default();
+        let herdr_templates = self
+            .herdr_client_with_config(config.clone())
+            .call("templates.list", json!({}))
+            .ok()
+            .and_then(|v| {
+                v["templates"]
+                    .as_array()
+                    .cloned()
+                    .or_else(|| v.as_array().cloned())
+            })
+            .unwrap_or_default();
 
         let presets = canban_profiles::presets(&self.home).unwrap_or_default();
         let builtin_ids: BTreeSet<String> = catalog.iter().map(|e| e.id.clone()).collect();

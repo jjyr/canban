@@ -999,9 +999,7 @@ for line in sys.stdin:
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&hc_script, std::fs::Permissions::from_mode(0o755)).unwrap();
     app.config.write().unwrap().hc = hc_script.to_string_lossy().into_owned();
-    let client = canban_herdr::Client {
-        config: app.config(),
-    };
+    let client = canban_herdr::Client::new(app.config());
 
     app.call(
         "agent.open",
@@ -1272,9 +1270,7 @@ fn viewer_presence_protects_card_and_terminal_without_db_writes_and_drives_recla
         json!({"client_id": "win-1", "card_id": null, "terminal_id": null}),
     )
     .unwrap();
-    let client = canban_herdr::Client {
-        config: app.config(),
-    };
+    let client = canban_herdr::Client::new(app.config());
     app.close_idle(&client).unwrap();
     let after_clear = app.snapshot().unwrap();
     assert_eq!(

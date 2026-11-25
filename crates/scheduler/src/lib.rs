@@ -97,6 +97,11 @@ pub fn agent_run(
 /// This is an automatic admission budget, not a cap on retained terminals.
 /// Verified waits and idle states release slots; unknown launches reserve them.
 pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
+    active_count_at(snapshot, canban_types::now())
+}
+
+/// Pure clock-injected variant of [`active_count`].
+pub fn active_count_at(snapshot: &canban_types::Snapshot, at: u64) -> usize {
     let bound = snapshot
         .terminals
         .iter()
@@ -106,7 +111,7 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
                 && !a.finished()
                 && (a.close_state == "closing"
                     || !matches!(
-                        a.runtime_status(),
+                        a.runtime_status_at(at),
                         "closed" | "blocked" | "idle" | "done" | "error"
                     )))
                 || (a.terminal.is_none() && matches!(a.state.as_str(), "starting" | "unknown"))

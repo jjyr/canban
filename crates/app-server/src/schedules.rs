@@ -872,9 +872,7 @@ impl AppServer {
     fn observe_and_reclaim_cardless_schedules(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
         let now_ms = now();
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         for run in snapshot.scheduled_runs.iter().filter(|r| !r.creates_card) {
             let Some(tid) = run.terminal_id.as_deref() else {
                 continue;
@@ -1190,9 +1188,7 @@ impl AppServer {
         let Some(addr) = rt.terminal.as_deref() else {
             return Ok(None);
         };
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         if rt.core_id.as_deref() != self.verified_core_id().ok().as_deref() {
             return Ok(None);
         }

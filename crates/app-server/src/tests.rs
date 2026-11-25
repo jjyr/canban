@@ -1329,12 +1329,10 @@ fn core_loss_during_question_delivery_becomes_unknown_without_replay() {
         json!({"view":"full","card_id":card.id,"body":"@developer explain progress"}),
     )
     .unwrap();
-    let client = canban_herdr::Client {
-        config: Config {
-            hc: "/usr/bin/false".into(),
-            ..Default::default()
-        },
-    };
+    let client = canban_herdr::Client::new(Config {
+        hc: "/usr/bin/false".into(),
+        ..Default::default()
+    });
     app.deliver_questions(&client).unwrap();
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.questions[0].state, "delivery_unknown");

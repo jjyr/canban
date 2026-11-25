@@ -475,7 +475,7 @@ impl AppServer {
                 db.save(&current)?;
             }
             if ci_event_emitted || activity_emitted {
-                crate::events::pump(db, &self.config())?;
+                crate::events::pump_at(db, &self.config(), self.now_ms())?;
             }
             Ok(())
         })?;
@@ -606,7 +606,7 @@ impl AppServer {
                 db.save(&current)?;
             }
             if ci_event_emitted || activity_emitted {
-                crate::events::pump(db, &self.config())?;
+                crate::events::pump_at(db, &self.config(), self.now_ms())?;
             }
             Ok(())
         })?;

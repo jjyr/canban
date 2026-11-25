@@ -521,9 +521,7 @@ pub(crate) fn kill_card_scripts_db(db: Db<'_>, config: &Config, card_id: &str) {
     let Ok(all) = db.list::<WorkflowRun>() else {
         return;
     };
-    let client = canban_herdr::Client {
-        config: config.clone(),
-    };
+    let client = canban_herdr::Client::new(config.clone());
     for run in all
         .into_iter()
         .filter(|r| r.card_id.as_deref() == Some(card_id) && r.state == "waiting_script")
@@ -546,9 +544,7 @@ pub(crate) fn kill_run_scripts_db(db: Db<'_>, config: &Config, run_id: &str) {
     if run.state != "waiting_script" {
         return;
     }
-    let client = canban_herdr::Client {
-        config: config.clone(),
-    };
+    let client = canban_herdr::Client::new(config.clone());
     if let Some(addr) = run
         .inputs
         .get("script_terminal")
@@ -1028,9 +1024,7 @@ impl AppServer {
         if runs.is_empty() {
             return Ok(false);
         }
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
 
         for run in runs {
             let Some(step_id) = run.step.clone() else {

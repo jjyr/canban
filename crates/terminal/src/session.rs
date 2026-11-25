@@ -294,9 +294,7 @@ impl PtyAttachment for HerdrAttachment {
 impl PtyTransport for HerdrLocalTransport {
     fn attach(&self, params: &PtyAttachParams) -> anyhow::Result<Box<dyn PtyAttachment>> {
         let relay_fenced = self.config.relay_endpoint.is_some();
-        let client = canban_herdr::Client {
-            config: self.config.clone(),
-        };
+        let client = canban_herdr::Client::new(self.config.clone());
         if !relay_fenced {
             anyhow::ensure!(
                 client.status()?["core"]["id"] == params.core_id,

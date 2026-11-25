@@ -1,0 +1,25 @@
+[package]
+name = "canban-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Deterministic Simulation Testing (DST) harness over tokio-rs/turmoil for Canban."
+
+[dependencies]
+anyhow.workspace = true
+canban-app-server.workspace = true
+canban-client.workspace = true
+canban-github.workspace = true
+canban-herdr.workspace = true
+canban-notifications.workspace = true
+canban-storage.workspace = true
+canban-sync.workspace = true
+canban-transport.workspace = true
+canban-types.workspace = true
+clap.workspace = true
+rand = "0.9"
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+turmoil = "0.7"

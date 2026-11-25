@@ -279,7 +279,7 @@ for line in sys.stdin:
             hc_session: "pool-test".into(),
             ..Default::default()
         };
-        let client = Client { config };
+        let client = Client::new(config);
 
         // 5 sequential calls should spawn `hc connect` only ONCE!
         for _ in 0..5 {
@@ -344,7 +344,7 @@ for line in sys.stdin:
             hc_session: "pool-truncated-test".into(),
             ..Default::default()
         };
-        let client = Client { config };
+        let client = Client::new(config);
         let err = client
             .call("terminal.kill", json!({"terminal": "t1"}))
             .unwrap_err();

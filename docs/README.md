@@ -53,6 +53,7 @@ synthetic 62-operation comparison separating wire, CLI and candidate-context byt
 | [Vision and scope](product/vision.md) | Current user requirements and MVP boundary |
 | [Multi-host daemons and Diagnostics](multi-host.md) | Simultaneous local + remote `canband` connections, Tailscale/SSH discovery, offline snapshot cache, per-host Settings and Diagnostics |
 | [Unified client architecture](unified-client.md) | Accepted direction: single `canban-client` layer for Desktop, Mobile, and CLI with `HostConnector`, Cargo feature pruning, and runtime `ClientCapabilities` |
+| [Deterministic Simulation Testing (DST)](dst.md) | Turmoil-backed multi-host DST covering all 8 data/client domains, chaos fuzzing (`mise run sim-chaos`), and seed replay (`mise run sim-replay`) |
 | [Multi-machine execution](multi-machine.md) | Single-server Project work locations, remote Herdr Core routing and Terminal byte relay |
 | [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
 | [Mobile interaction design](mobile-interaction.md) | Shared mobile UI (iOS/Android), NSH mapping, Tailscale WhoIs auto-auth & single-address pairing, on-demand Tailnet discovery, Terminals and Diff views |

@@ -274,9 +274,7 @@ impl AppServer {
         }
     }
     fn close_archived_agents(&self, card_id: &str) -> Result<()> {
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         let terminals = self.snapshot()?.terminals;
         for entry in terminals.iter().filter(|t| {
             t.agent
@@ -423,9 +421,7 @@ impl AppServer {
                 .terminal
                 .as_ref()
                 .context("Execution has no terminal binding")?;
-            let client = canban_herdr::Client {
-                config: self.config(),
-            };
+            let client = self.herdr_client();
             let live = (|| {
                 let status = client.status()?;
                 ensure!(
@@ -466,9 +462,7 @@ impl AppServer {
                 .terminal
                 .as_ref()
                 .context("Terminal has no Herdr address")?;
-            let client = canban_herdr::Client {
-                config: self.config(),
-            };
+            let client = self.herdr_client();
             let status = client.status()?;
             ensure!(
                 runtime.core_id.as_deref() == status["core"]["id"].as_str(),
@@ -484,9 +478,7 @@ impl AppServer {
         let Some(terminal) = &run.terminal else {
             return Ok(());
         };
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         let status = client.status()?;
         ensure!(
             run.core_id.as_deref() == status["core"]["id"].as_str(),

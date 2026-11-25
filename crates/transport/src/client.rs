@@ -323,7 +323,6 @@ async fn try_connect_mux(
     token: String,
     device_name: String,
 ) -> Result<Option<MuxConnectResult>> {
-    const HANDSHAKE_MAX_BYTES: usize = 64 * 1024;
     let tcp = tokio::time::timeout(
         Duration::from_secs(10),
         tokio::net::TcpStream::connect(&addr),
@@ -337,8 +336,19 @@ async fn try_connect_mux(
     })?
     .with_context(|| format!("Canban is not reachable at {addr}"))?;
     let _ = tcp.set_nodelay(true);
+    try_connect_mux_on_stream(tcp, token, device_name).await
+}
 
-    let (read_half, mut writer) = tokio::io::split(tcp);
+async fn try_connect_mux_on_stream<S>(
+    stream: S,
+    token: String,
+    device_name: String,
+) -> Result<Option<MuxConnectResult>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    const HANDSHAKE_MAX_BYTES: usize = 64 * 1024;
+    let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(read_half);
     let req = json!({
         "jsonrpc": "2.0",
@@ -487,6 +497,43 @@ impl ClientTransport {
             mux_relay_key: None,
             upgraded_token: None,
             rpc_pool: Mutex::new(vec![conn]),
+        })
+    }
+
+    /// Connects over an already-established async byte stream (e.g. a simulated `turmoil::net::TcpStream`),
+    /// running the real `transport.mux` (`yamux/1`) handshake on the current Tokio runtime.
+    pub async fn connect_stream_async<S>(
+        stream: S,
+        addr: String,
+        token: String,
+        device_name: String,
+    ) -> Result<Self>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let normalized = canban_types::normalize_daemon_addr(&addr);
+        let Some(res) = try_connect_mux_on_stream(stream, token.clone(), device_name).await? else {
+            bail!("Remote AppServer at {normalized} did not accept transport.mux (yamux/1)");
+        };
+        let effective_token = res
+            .session_token
+            .clone()
+            .or_else(|| res.upgraded_token.clone())
+            .unwrap_or(token);
+        let key = canban_types::id();
+        mux_relay_registry()
+            .lock()
+            .unwrap()
+            .insert(key.clone(), res.mux.clone());
+        Ok(Self {
+            endpoint: ClientEndpoint::Tcp {
+                addr: normalized,
+                token: effective_token,
+            },
+            mux: Some(res.mux),
+            mux_relay_key: Some(key),
+            upgraded_token: res.upgraded_token,
+            rpc_pool: Mutex::new(Vec::new()),
         })
     }
 

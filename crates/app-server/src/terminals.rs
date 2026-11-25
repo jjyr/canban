@@ -220,9 +220,7 @@ impl AppServer {
             }
             return Ok(saved);
         };
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         let result = (|| -> Result<Value> {
             ensure!(
                 self.verified_core_id()? == core,
@@ -298,11 +296,10 @@ impl AppServer {
                 && let (Some(core), Some(addr)) = (&run.core_id, &run.terminal)
                 && self.verified_core_id().ok().as_deref() == Some(core.as_str())
             {
-                let finished = canban_herdr::Client {
-                    config: self.config(),
-                }
-                .get(addr)
-                .is_ok_and(|obs| obs["state"] == "finished");
+                let finished = self
+                    .herdr_client()
+                    .get(addr)
+                    .is_ok_and(|obs| obs["state"] == "finished");
                 (finished, false)
             } else {
                 (false, false)
@@ -314,11 +311,10 @@ impl AppServer {
                 && let (Some(core), Some(addr)) = (&rt.core_id, &rt.terminal)
                 && self.verified_core_id().ok().as_deref() == Some(core.as_str())
             {
-                let finished = canban_herdr::Client {
-                    config: self.config(),
-                }
-                .get(addr)
-                .is_ok_and(|obs| obs["state"] == "finished");
+                let finished = self
+                    .herdr_client()
+                    .get(addr)
+                    .is_ok_and(|obs| obs["state"] == "finished");
                 (finished, finished)
             } else {
                 (false, false)
@@ -666,9 +662,7 @@ impl AppServer {
         let (core, terminal) = Self::terminal_binding(&s, item)?;
         #[cfg(test)]
         if !self.observer_running.load(Ordering::SeqCst) {
-            let client = canban_herdr::Client {
-                config: self.config(),
-            };
+            let client = self.herdr_client();
             if client.status().ok()?["core"]["id"] != core {
                 return None;
             }
@@ -940,9 +934,7 @@ impl AppServer {
             return Ok(serde_json::to_value(TerminalEntry::from_json(saved)?)?);
         };
         let runtime = item.runtime.as_mut().unwrap();
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         let result = (|| -> Result<()> {
             runtime.core_id = Some(self.verified_core_id()?);
             let is_setup = p["setup_argv"].is_array();
@@ -1186,9 +1178,7 @@ impl AppServer {
             .as_ref()
             .context("Terminal has no runtime binding")?;
         ensure!(runtime.state != "finished", "Terminal has already ended");
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         ensure!(
             self.verified_core_id()? == *core,
             "Original Herdr core is unavailable"
@@ -1275,9 +1265,7 @@ impl AppServer {
                 Self::terminal_binding(&s, item).context("No runtime binding")?;
             #[cfg(test)]
             if !self.observer_running.load(Ordering::SeqCst) {
-                let client = canban_herdr::Client {
-                    config: self.config(),
-                };
+                let client = self.herdr_client();
                 ensure!(
                     client.status()?["core"]["id"] == core,
                     "Original Core unavailable"

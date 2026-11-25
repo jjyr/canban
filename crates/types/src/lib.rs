@@ -1,8 +1,10 @@
 mod activity;
 mod board_filter;
+mod clock;
 mod env;
 pub use activity::*;
 pub use board_filter::BoardFilter;
+pub use clock::*;
 pub use env::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1090,6 +1092,10 @@ impl AgentRun {
     }
     /// A stale or disconnected status must not release scheduling capacity.
     pub fn runtime_status(&self) -> &str {
+        self.runtime_status_at(now())
+    }
+    /// Pure clock-injected variant of [`Self::runtime_status`].
+    pub fn runtime_status_at(&self, at: u64) -> &str {
         if self.finished() {
             return "closed";
         }
@@ -1097,7 +1103,7 @@ impl AgentRun {
             || self
                 .lifecycle
                 .observed_at
-                .is_none_or(|t| now().saturating_sub(t) > 30_000)
+                .is_none_or(|t| at.saturating_sub(t) > 30_000)
         {
             return "unknown";
         }

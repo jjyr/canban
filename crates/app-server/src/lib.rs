@@ -21,11 +21,36 @@ pub use canban_transport::auth;
 pub mod instance;
 mod updates;
 
+/// Injectable runtime environment for [`AppServer`] (defaults to real wall clock,
+/// real Herdr/GitHub backends, and `spawn_blocking` workers; customized in DST).
+#[derive(Clone)]
+pub struct ServerRuntimeEnv {
+    pub clock: Arc<dyn canban_types::Clock>,
+    pub herdr_backend: Option<Arc<dyn canban_herdr::HerdrBackend>>,
+    pub github_transport: Option<Arc<dyn canban_github::HttpTransport>>,
+    pub inline_workers: bool,
+}
+
+impl Default for ServerRuntimeEnv {
+    fn default() -> Self {
+        Self {
+            clock: canban_types::system_clock(),
+            herdr_backend: None,
+            github_transport: None,
+            inline_workers: false,
+        }
+    }
+}
+
 pub struct AppServer {
     _development: Option<instance::Registration>,
     updates_disabled: bool,
     _service_lock: std::fs::File,
     self_weak: OnceLock<std::sync::Weak<Self>>,
+    clock: Arc<dyn canban_types::Clock>,
+    herdr_backend: Option<Arc<dyn canban_herdr::HerdrBackend>>,
+    github_transport: Option<Arc<dyn canban_github::HttpTransport>>,
+    inline_workers: bool,
     utilities: utilities::Utilities,
     pub home: PathBuf,
     github: Arc<canban_github::auth::Service>,
@@ -116,6 +141,22 @@ impl Drop for Running {
             }
         }
         let _ = std::fs::remove_file(&self.socket_path);
+        let _ = self.server.finish_agent_work();
+        let _ = self.server._service_lock.unlock();
+    }
+}
+/// Guard for an [`AppServer`] running inside an external Tokio runtime (used by DST).
+pub struct SimRunning {
+    server: Arc<AppServer>,
+    _lock: std::fs::File,
+}
+impl Drop for SimRunning {
+    fn drop(&mut self) {
+        self.server.trigger_stop();
+        *self.server.runtime_handle.lock().unwrap() = None;
+        *self.server.runtime_wake.lock().unwrap() = None;
+        *self.server.delivery_wake.lock().unwrap() = None;
+        *self.server.script_wake.lock().unwrap() = None;
         let _ = self.server.finish_agent_work();
         let _ = self.server._service_lock.unlock();
     }
@@ -530,6 +571,15 @@ fn enqueue(
 }
 impl AppServer {
     pub fn open(home: PathBuf, cli: PathBuf) -> Result<Arc<Self>> {
+        Self::open_with_env(home, cli, ServerRuntimeEnv::default())
+    }
+    pub fn open_with_env(home: PathBuf, cli: PathBuf, env: ServerRuntimeEnv) -> Result<Arc<Self>> {
+        let ServerRuntimeEnv {
+            clock,
+            herdr_backend,
+            github_transport,
+            inline_workers,
+        } = env;
         let development = instance::bundled()?;
         if let Some(instance) = &development {
             instance.check_home(&home)?;
@@ -719,6 +769,11 @@ impl AppServer {
             updates_disabled,
             _service_lock: service_lock,
             self_weak: OnceLock::new(),
+            started_at: clock.now_ms(),
+            clock,
+            herdr_backend,
+            github_transport,
+            inline_workers,
             utilities,
             github_sync_due: AtomicBool::new(true),
             github_sync_notify: Arc::new(tokio::sync::Notify::new()),
@@ -748,7 +803,6 @@ impl AppServer {
             device_revocations,
             tailscale_devices,
             tailscale_verifier_override: Mutex::new(None),
-            started_at: now(),
             bound_tcp: Mutex::new(Vec::new()),
             tcp_listener_stop: Mutex::new(None),
             active_tcp_connections: Arc::new(AtomicUsize::new(0)),
@@ -873,6 +927,42 @@ impl AppServer {
         }
         Ok(())
     }
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+    pub fn db_changes(&self) -> u64 {
+        self.db_changes.load(Ordering::SeqCst)
+    }
+    pub(crate) fn herdr_client(&self) -> canban_herdr::Client {
+        canban_herdr::Client::with_backend(self.config(), self.herdr_backend.clone())
+    }
+    pub(crate) fn herdr_client_with_config(&self, config: Config) -> canban_herdr::Client {
+        canban_herdr::Client::with_backend(config, self.herdr_backend.clone())
+    }
+    pub(crate) fn herdr_activity(
+        &self,
+        core: &str,
+        terminal: &str,
+    ) -> canban_herdr::activity::Activity {
+        if let Some(backend) = &self.herdr_backend {
+            backend.activity(core, terminal)
+        } else {
+            canban_herdr::activity::get(core, terminal)
+        }
+    }
+    pub(crate) async fn run_work<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        if self.inline_workers {
+            let out = f();
+            tokio::task::yield_now().await;
+            Ok(out)
+        } else {
+            Ok(tokio::task::spawn_blocking(f).await?)
+        }
+    }
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
@@ -899,7 +989,7 @@ impl AppServer {
             std::thread::spawn(task);
         }
     }
-    pub(crate) fn trigger_github_sync(&self) {
+    pub fn trigger_github_sync(&self) {
         self.github_sync_due.store(true, Ordering::SeqCst);
         self.github_sync_notify.notify_one();
     }
@@ -962,7 +1052,7 @@ impl AppServer {
             guard = self.stop_cond.1.wait(guard).unwrap();
         }
     }
-    pub(crate) fn stop_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+    pub fn stop_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
         self.stop_tx.subscribe()
     }
     pub(crate) fn subscribe_push(&self) -> tokio::sync::broadcast::Receiver<state::PushEvent> {
@@ -1133,7 +1223,7 @@ impl AppServer {
         self.populate_terminal_contexts(&mut snapshot);
         self.project_observation_freshness(&mut snapshot);
         self.populate_reclaim_status(&mut snapshot);
-        let local_active = canban_scheduler::active_count(&snapshot);
+        let local_active = canban_scheduler::active_count_at(&snapshot, self.now_ms());
         let mut runtime = RuntimeState {
             terminals: snapshot.terminals,
             terminal_contexts: snapshot.terminal_contexts,
@@ -1345,9 +1435,9 @@ impl AppServer {
             {
                 return Ok(cached);
             }
-            events::pump(db, &self.config())?;
+            events::pump_at(db, &self.config(), self.now_ms())?;
             let result = f(db)?;
-            events::pump(db, &self.config())?;
+            events::pump_at(db, &self.config(), self.now_ms())?;
             if let Some(key) = key {
                 db.conn.execute(
                     "INSERT INTO operations(id,fingerprint,result) VALUES(?1,?2,?3)",

@@ -424,13 +424,11 @@ sys.exit(0)
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let client = Client {
-            config: Config {
-                hc: script.to_string_lossy().into_owned(),
-                hc_session: "stream-truncated-test".into(),
-                ..Default::default()
-            },
-        };
+        let client = Client::new(Config {
+            hc: script.to_string_lossy().into_owned(),
+            hc_session: "stream-truncated-test".into(),
+            ..Default::default()
+        });
         let err = match client.attach("t1", 80, 24) {
             Ok(_) => panic!("expected truncated hello to fail"),
             Err(err) => err,
@@ -502,13 +500,11 @@ while True:
 
         // 1. Mismatched prior size (200x120 -> 100x30) sets resized_on_attach = true.
         let s1 = make_script("hc-mismatch", true, 200, 120);
-        let c1 = Client {
-            config: Config {
-                hc: s1.to_string_lossy().into_owned(),
-                hc_session: "stream-get-mismatch".into(),
-                ..Default::default()
-            },
-        };
+        let c1 = Client::new(Config {
+            hc: s1.to_string_lossy().into_owned(),
+            hc_session: "stream-get-mismatch".into(),
+            ..Default::default()
+        });
         let att1 = c1.attach("t1", 100, 30).unwrap();
         assert_eq!(att1.prior_size, Some((200, 120)));
         assert!(att1.resized_on_attach);
@@ -519,13 +515,11 @@ while True:
 
         // 2. Matching prior size (100x30 -> 100x30) sets resized_on_attach = false.
         let s2 = make_script("hc-same", true, 100, 30);
-        let c2 = Client {
-            config: Config {
-                hc: s2.to_string_lossy().into_owned(),
-                hc_session: "stream-get-same".into(),
-                ..Default::default()
-            },
-        };
+        let c2 = Client::new(Config {
+            hc: s2.to_string_lossy().into_owned(),
+            hc_session: "stream-get-same".into(),
+            ..Default::default()
+        });
         let att2 = c2.attach("t1", 100, 30).unwrap();
         assert_eq!(att2.prior_size, Some((100, 30)));
         assert!(!att2.resized_on_attach);
@@ -533,13 +527,11 @@ while True:
 
         // 3. Legacy server without terminal.get falls back cleanly without prior_size.
         let s3 = make_script("hc-legacy", false, 200, 120);
-        let c3 = Client {
-            config: Config {
-                hc: s3.to_string_lossy().into_owned(),
-                hc_session: "stream-get-legacy".into(),
-                ..Default::default()
-            },
-        };
+        let c3 = Client::new(Config {
+            hc: s3.to_string_lossy().into_owned(),
+            hc_session: "stream-get-legacy".into(),
+            ..Default::default()
+        });
         let att3 = c3.attach("t1", 100, 30).unwrap();
         assert_eq!(att3.prior_size, None);
         assert!(!att3.resized_on_attach);

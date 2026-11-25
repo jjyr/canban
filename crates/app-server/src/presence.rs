@@ -363,7 +363,7 @@ impl AppServer {
             .get("terminal_id")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let at = now();
+        let at = self.now_ms();
         let changed = self.presence.update(client_id, card_id, terminal_id, at);
         if changed {
             let mut s = self

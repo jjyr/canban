@@ -530,15 +530,17 @@ impl AppServer {
             req.source_trust,
         );
         let launch_size = self.resolve_launch_terminal_size(req.size);
-        let receipt = canban_herdr::Client { config: cfg }.launch_with_policy_unset_and_size(
-            spec.argv,
-            &spec.cwd,
-            spec.env,
-            req.labels,
-            env_policy,
-            &resolved.unset_keys,
-            Some(launch_size),
-        )?;
+        let receipt = self
+            .herdr_client_with_config(cfg)
+            .launch_with_policy_unset_and_size(
+                spec.argv,
+                &spec.cwd,
+                spec.env,
+                req.labels,
+                env_policy,
+                &resolved.unset_keys,
+                Some(launch_size),
+            )?;
         Ok(HerdrLaunchOutcome { receipt, resolved })
     }
 
@@ -553,7 +555,7 @@ impl AppServer {
         );
         let raw_target = p["target_id"].as_str().map(str::trim).unwrap_or("");
         let entries = decrypt_incoming_write_entries(&self.home, &p["entries"], transport_token)?;
-        let now_ts = now();
+        let now_ts = self.now_ms();
         let config = self.config();
         let (target_id, snapshot_key, meta) = self.store.lock().unwrap().write(|db| {
             let (tid, snap_key) = match scope {

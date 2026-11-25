@@ -1038,9 +1038,7 @@ impl AppServer {
         let Some(mut entry) = entry_opt else {
             return Ok(());
         };
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         // Leave the batch queued if Herdr Core is not reachable yet (e.g. startup or non-runtime tests).
         let Ok(core) = self.verified_core_id() else {
             return Ok(());
@@ -1374,9 +1372,7 @@ impl AppServer {
             }
         });
         if let Some((core, terminal)) = kill_target {
-            let client = canban_herdr::Client {
-                config: self.config(),
-            };
+            let client = self.herdr_client();
             if self.verified_core_id().ok().as_deref() == Some(core.as_str()) {
                 let _ = client.call("terminal.kill", json!({"terminal": terminal}));
             }

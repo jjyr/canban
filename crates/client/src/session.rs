@@ -8,7 +8,8 @@ use anyhow::Result;
 use canban_transport::{ClientEndpoint, ClientTransport};
 use canban_types::{HostTransport, normalize_daemon_addr, parse_pairing_uri};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc, time::Instant};
+use std::{path::Path, sync::Arc};
+use tokio::time::Instant;
 
 /// Canonical endpoint parsing shared across CLI (`CANBAN_ENDPOINT`), Desktop, and Mobile.
 ///

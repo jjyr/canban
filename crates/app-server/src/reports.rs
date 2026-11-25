@@ -328,7 +328,7 @@ impl AppServer {
                 && let Some(ref mut run) = entry.agent
                 && (!matches!(run.state.as_str(), "completed" | "backlog") || wf_awaiting_report)
             {
-                let report_at = now();
+                let report_at = self.now_ms();
                 run.state = state.into();
                 run.updated_at = report_at;
                 if state == "working" && run.lifecycle.idle_since.is_some() {

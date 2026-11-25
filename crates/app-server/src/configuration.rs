@@ -222,9 +222,7 @@ impl AppServer {
                 continue;
             };
             let result = (|| -> Result<()> {
-                let client = canban_herdr::Client {
-                    config: self.config(),
-                };
+                let client = self.herdr_client();
                 let core = self.verified_core_id()?;
                 let prompt = if fresh {
                     session.prompt.clone()

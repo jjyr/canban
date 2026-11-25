@@ -500,10 +500,12 @@ impl AppServer {
                 self.emit("configuration", None);
                 Ok(json!({"reloaded":true}))
             }
-            "herdr.status" => canban_herdr::Client { config }.status(),
+            "herdr.status" => self.herdr_client_with_config(config).status(),
             "herdr.check" => self.herdr_check(p),
             "herdr.install" => self.herdr_install(p),
-            "herdr.templates" => canban_herdr::Client { config }.call("templates.list", json!({})),
+            "herdr.templates" => self
+                .herdr_client_with_config(config)
+                .call("templates.list", json!({})),
             "project.create" => {
                 ensure!(
                     p.get("workflow").is_none(),

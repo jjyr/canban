@@ -85,7 +85,8 @@ async fn github_worker_loop(
 ) {
     while !*stop_rx.borrow() {
         let step_weak = weak.clone();
-        let worked = tokio::task::spawn_blocking(move || {
+        let inline = weak.upgrade().is_some_and(|s| s.inline_workers);
+        let work = move || {
             let server = step_weak.upgrade()?;
             if server.stopped() {
                 return None;
@@ -156,8 +157,14 @@ async fn github_worker_loop(
             }
             server.emit("github", None);
             Some(has_more)
-        })
-        .await;
+        };
+        let worked = if inline {
+            let res = work();
+            tokio::task::yield_now().await;
+            Ok(res)
+        } else {
+            tokio::task::spawn_blocking(work).await
+        };
         match worked {
             Ok(Some(true)) => continue,
             Ok(Some(false)) => {

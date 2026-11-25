@@ -67,11 +67,17 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<T> {
     }
 }
 
-/// Unified asynchronous bidirectional stream over Unix sockets, TCP sockets, or `yamux/1` sub-streams.
+/// Marker trait for type-erased async bidirectional byte streams (e.g., simulated TCP in DST).
+pub trait AsyncIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncIo for T {}
+
+/// Unified asynchronous bidirectional stream over Unix sockets, TCP sockets, `yamux/1` sub-streams,
+/// or type-erased custom async streams.
 pub enum TransportStream {
     Unix(tokio::net::UnixStream),
     Tcp(PrefixedStream<tokio::net::TcpStream>),
     Mux(crate::mux::MuxStream),
+    Boxed(PrefixedStream<Box<dyn AsyncIo>>),
 }
 
 impl TransportStream {
@@ -81,6 +87,14 @@ impl TransportStream {
 
     pub fn tcp_prefixed(prefix: Vec<u8>, stream: tokio::net::TcpStream) -> Self {
         Self::Tcp(PrefixedStream::new(prefix, stream))
+    }
+
+    pub fn boxed<S: AsyncIo + 'static>(stream: S) -> Self {
+        Self::Boxed(PrefixedStream::new(Vec::new(), Box::new(stream)))
+    }
+
+    pub fn boxed_prefixed<S: AsyncIo + 'static>(prefix: Vec<u8>, stream: S) -> Self {
+        Self::Boxed(PrefixedStream::new(prefix, Box::new(stream)))
     }
 }
 
@@ -94,6 +108,7 @@ impl AsyncRead for TransportStream {
             Self::Unix(s) => Pin::new(s).poll_read(cx, buf),
             Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             Self::Mux(s) => Pin::new(s).poll_read(cx, buf),
+            Self::Boxed(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -108,6 +123,7 @@ impl AsyncWrite for TransportStream {
             Self::Unix(s) => Pin::new(s).poll_write(cx, buf),
             Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             Self::Mux(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Boxed(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -116,6 +132,7 @@ impl AsyncWrite for TransportStream {
             Self::Unix(s) => Pin::new(s).poll_flush(cx),
             Self::Tcp(s) => Pin::new(s).poll_flush(cx),
             Self::Mux(s) => Pin::new(s).poll_flush(cx),
+            Self::Boxed(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -124,6 +141,7 @@ impl AsyncWrite for TransportStream {
             Self::Unix(s) => Pin::new(s).poll_shutdown(cx),
             Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
             Self::Mux(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Boxed(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }

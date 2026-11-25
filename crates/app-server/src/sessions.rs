@@ -405,9 +405,7 @@ impl AppServer {
             .iter()
             .find(|c| c.id == old.card_id)
             .context("Card missing")?;
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         ensure!(
             Some(self.verified_core_id()?) == old.core_id,
             "Original Core changed"
@@ -514,9 +512,7 @@ impl AppServer {
             .agent
             .as_ref()
             .context("Terminal has no Card Agent run")?;
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         ensure!(
             Some(self.verified_core_id()?) == run.core_id,
             "Original Herdr core is unavailable"

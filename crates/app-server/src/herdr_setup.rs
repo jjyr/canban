@@ -126,11 +126,7 @@ impl AppServer {
 
         let mut probe_config = self.config();
         probe_config.hc = resolved_hc.clone();
-        match (canban_herdr::Client {
-            config: probe_config,
-        })
-        .status()
-        {
+        match self.herdr_client_with_config(probe_config).status() {
             Ok(status) => {
                 self.wake_herdr();
                 self.wake_runtime();
@@ -349,11 +345,7 @@ fn run_herdr_installer(
             };
             let mut probe_config = raw;
             probe_config.hc = resolved.to_string_lossy().into_owned();
-            match (canban_herdr::Client {
-                config: probe_config,
-            })
-            .status()
-            {
+            match canban_herdr::Client::new(probe_config).status() {
                 Ok(status_val) => {
                     let version = status_val["core"]["version"]
                         .as_str()

@@ -272,7 +272,7 @@ impl AppServer {
         }
 
         if !to_probe.is_empty() {
-            let client = canban_herdr::Client { config };
+            let client = self.herdr_client_with_config(config);
             let mut updates: Vec<((String, String), CachedRefinement, usize)> =
                 Vec::with_capacity(to_probe.len());
             for probe in to_probe {

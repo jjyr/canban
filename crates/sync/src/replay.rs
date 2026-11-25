@@ -30,9 +30,27 @@ enum PrepareResult {
     Failed(String),
 }
 
+fn with_full_card_view(kind: MutationKind, mut p: Value) -> Value {
+    if matches!(
+        kind,
+        MutationKind::CreateCard
+            | MutationKind::UpdateCard
+            | MutationKind::MoveCard
+            | MutationKind::ResolveCard
+    ) && let Some(obj) = p.as_object_mut()
+    {
+        // Presentation fields (`view`/`fields`) are stripped before server `request_key`
+        // fingerprinting, so requesting `view: "full"` stays idempotent even on retries
+        // and guarantees `upsert_card_into_snapshot` receives the full authoritative `Card`.
+        obj.remove("fields");
+        obj.insert("view".into(), Value::String("full".into()));
+    }
+    p
+}
+
 fn prepare_params(op: &Mutation, snapshot: &Snapshot) -> PrepareResult {
     if op.retry_same_params && !op.sent_params.is_null() {
-        return PrepareResult::Send(op.sent_params.clone());
+        return PrepareResult::Send(with_full_card_view(op.kind, op.sent_params.clone()));
     }
     let strip_host_and_force = |mut p: Value| {
         if let Some(obj) = p.as_object_mut() {
@@ -40,7 +58,7 @@ fn prepare_params(op: &Mutation, snapshot: &Snapshot) -> PrepareResult {
             obj.remove("force");
             obj.insert("request_key".into(), Value::String(op.id.clone()));
         }
-        p
+        with_full_card_view(op.kind, p)
     };
     match op.kind {
         MutationKind::CreateCard => PrepareResult::Send(strip_host_and_force(op.params.clone())),
@@ -73,12 +91,8 @@ fn prepare_params(op: &Mutation, snapshot: &Snapshot) -> PrepareResult {
                 "card_id": op.card_id,
                 "revision": server.revision,
                 "request_key": op.id,
+                "view": "full",
             });
-            if let Some(view) = op.params.get("view") {
-                p["view"] = view.clone();
-            } else if let Some(fields) = op.params.get("fields") {
-                p["fields"] = fields.clone();
-            }
             if let Some(t) = apply_title {
                 p["title"] = Value::String(t);
             }
@@ -153,11 +167,76 @@ fn card_already_matches_after_key_conflict(op: &Mutation, snapshot: &Snapshot) -
     }
 }
 
-fn upsert_card_into_snapshot(snapshot: &mut Snapshot, reply: &Value) {
+fn upsert_card_into_snapshot(snapshot: &mut Snapshot, op: &Mutation, reply: &Value) {
     if let Ok(card) = serde_json::from_value::<Card>(reply.clone()) {
         if let Some(existing) = snapshot.cards.iter_mut().find(|c| c.id == card.id) {
             *existing = card;
         } else {
+            snapshot.cards.push(card);
+        }
+        return;
+    }
+    // Fallback for compact write receipts (`id`, `number`, `title`, `stage`, `revision`) so
+    // subsequent queued FIFO mutations on the same Card see the updated revision & fields.
+    let Some(id) = reply.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(existing) = snapshot.cards.iter_mut().find(|c| c.id == id) {
+        if let Some(rev) = reply.get("revision").and_then(Value::as_u64) {
+            existing.revision = rev;
+        }
+        if let Some(title) = reply.get("title").and_then(Value::as_str) {
+            existing.title = title.to_owned();
+        }
+        if let Some(stage) = reply.get("stage").and_then(Value::as_str) {
+            existing.stage = stage.to_owned();
+        }
+        if let Some(body) = reply
+            .get("body")
+            .and_then(Value::as_str)
+            .or_else(|| op.params.get("body").and_then(Value::as_str))
+        {
+            existing.body = body.to_owned();
+        }
+    } else if op.kind == MutationKind::CreateCard {
+        let project_id = reply
+            .get("project_id")
+            .and_then(Value::as_str)
+            .or_else(|| op.params.get("project_id").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_owned();
+        let title = reply
+            .get("title")
+            .and_then(Value::as_str)
+            .or_else(|| op.params.get("title").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_owned();
+        let body = reply
+            .get("body")
+            .and_then(Value::as_str)
+            .or_else(|| op.params.get("body").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_owned();
+        let stage = reply
+            .get("stage")
+            .and_then(Value::as_str)
+            .or_else(|| op.params.get("stage").and_then(Value::as_str))
+            .unwrap_or("backlog")
+            .to_owned();
+        let revision = reply.get("revision").and_then(Value::as_u64).unwrap_or(1);
+        let number = reply.get("number").and_then(Value::as_u64).unwrap_or(0);
+        let fallback_card = json!({
+            "id": id,
+            "project_id": project_id,
+            "number": number,
+            "title": title,
+            "body": body,
+            "stage": stage,
+            "revision": revision,
+            "created_at": op.created_at,
+            "created_by": "user",
+        });
+        if let Ok(card) = serde_json::from_value::<Card>(fallback_card) {
             snapshot.cards.push(card);
         }
     }
@@ -277,7 +356,7 @@ pub fn finish_step(
     };
     match result {
         Ok(reply) => {
-            upsert_card_into_snapshot(snapshot, &reply);
+            upsert_card_into_snapshot(snapshot, &outbox.ops[pos], &reply);
             outbox.ops.remove(pos);
             let _ = outbox.save();
             report.applied += 1;
@@ -294,10 +373,11 @@ pub fn finish_step(
             let msg = format!("{err:#}");
             if let Some(fresh) = refreshed_snapshot {
                 *snapshot = fresh;
-                if msg.contains("revision_conflict")
-                    && !was_retry_same_params
-                    && allow_revision_rebuild
-                {
+                if msg.contains("revision_conflict") && allow_revision_rebuild {
+                    // A `revision_conflict` proves the server never committed `request_key`
+                    // (even when `was_retry_same_params` was true after a transport drop), so
+                    // refreshing and re-classifying via three-way merge is safe and required.
+                    let _ = was_retry_same_params;
                     outbox.ops[pos].state = MutationState::Queued;
                     let _ = outbox.save();
                     return FinishOutcome::RetryImmediate;
@@ -345,9 +425,7 @@ pub fn drain(
                 let conn = transport.is_connection_error(err);
                 let msg = format!("{err:#}");
                 let need_refresh = !conn
-                    && ((msg.contains("revision_conflict")
-                        && !was_retry_same_params
-                        && allow_rebuild)
+                    && ((msg.contains("revision_conflict") && allow_rebuild)
                         || msg.contains("request_key_conflict"));
                 let snap = if need_refresh {
                     transport.refresh_snapshot().ok()

@@ -1421,9 +1421,7 @@ impl AppServer {
                 ("formatted_review", formatted_review),
             ],
         );
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         let runtime = item.runtime.as_mut().unwrap();
         let result = (|| -> Result<()> {
             let core = self.verified_core_id()?;

@@ -1,9 +1,46 @@
 use crate::models::*;
 use anyhow::{Context, Result, ensure};
+use canban_types::{Clock, system_clock};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::{io::Read, sync::OnceLock, time::Duration};
+use std::{
+    io::Read,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+
+/// Minimal HTTP request passed to an injectable [`HttpTransport`] (used by DST).
+#[derive(Clone, Debug)]
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Value>,
+}
+
+/// Minimal HTTP response returned by an injectable [`HttpTransport`].
+#[derive(Clone, Debug)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Injectable GitHub HTTP transport seam for deterministic simulation tests.
+pub trait HttpTransport: Send + Sync + 'static {
+    fn send(&self, req: HttpRequest) -> Result<HttpResponse>;
+}
+
 #[derive(Clone)]
 pub struct Client {
     pub(crate) token: SecretString,
@@ -12,6 +49,8 @@ pub struct Client {
     refresh: bool,
     cache_generation: u64,
     cli: Option<(std::sync::Arc<crate::cli::Service>, u64, u64)>,
+    transport: Option<Arc<dyn HttpTransport>>,
+    clock: Arc<dyn Clock>,
 }
 pub use crate::repository;
 pub fn segment(value: &str) -> String {
@@ -100,7 +139,17 @@ impl Client {
             refresh: false,
             cache_generation: 0,
             cli: None,
+            transport: None,
+            clock: system_clock(),
         }
+    }
+    pub fn with_transport(mut self, transport: Arc<dyn HttpTransport>) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
     pub fn from_cli(service: std::sync::Arc<crate::cli::Service>, validate: bool) -> Result<Self> {
         let user = if validate {
@@ -152,7 +201,7 @@ impl Client {
             }) {
                 return;
             }
-            let now = crate::cache::now();
+            let now = self.clock.now_ms();
             let preserved_fetched_at = cache
                 .get(&path_key)
                 .map(|old| old.fetched_at)
@@ -234,7 +283,7 @@ impl Client {
             .cache
             .as_ref()
             .map(|(cache, _)| cache.gate(key.as_deref().unwrap()));
-        let started = crate::cache::now();
+        let started = self.clock.now_ms();
         let _guard = gate.as_ref().map(|gate| gate.lock().unwrap());
         let old = self
             .cache
@@ -245,7 +294,7 @@ impl Client {
         {
             return Ok(old.clone());
         }
-        let fetched_at = crate::cache::now();
+        let fetched_at = self.clock.now_ms();
         let generation = self
             .cache
             .as_ref()
@@ -256,72 +305,128 @@ impl Client {
             .as_ref()
             .map(|(cache, _)| cache.page_epoch(key.as_deref().unwrap()))
             .unwrap_or(0);
-        let mut request = agent()
-            .get(format!("{}{path}", self.api))
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.token.expose_secret()),
-            )
-            .header("User-Agent", "Canban")
-            .header("Accept", "application/vnd.github+json");
-        if let Some(etag) = old.as_ref().and_then(|v| v.etag.as_deref()) {
-            request = request.header("If-None-Match", etag);
-        } else if let Some(modified) = old.as_ref().and_then(|v| v.modified.as_deref()) {
-            request = request.header("If-Modified-Since", modified);
-        }
-        let mut response = request.call()?;
-        let status = response.status().as_u16();
-        if (status == 401
-            || (status == 403
-                && response
-                    .headers()
-                    .get("x-ratelimit-remaining")
-                    .and_then(|v| v.to_str().ok())
-                    != Some("0")))
-            && let Some((cache, _)) = &self.cache
-        {
-            let _ = cache.clear();
-        }
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        };
-        let value = if status == 304 {
-            let mut old = old.context("GitHub returned 304 without a cached response")?;
-            old.validated_at = crate::cache::now();
-            old.fetched_at = fetched_at;
-            old.cached = false;
-            old
-        } else {
-            if !(200..300).contains(&status) {
-                return Err(crate::HttpError(status).into());
+        let value = if let Some(transport) = &self.transport {
+            let mut headers = vec![
+                (
+                    "Authorization".into(),
+                    format!("Bearer {}", self.token.expose_secret()),
+                ),
+                ("User-Agent".into(), "Canban".into()),
+                ("Accept".into(), "application/vnd.github+json".into()),
+            ];
+            if let Some(etag) = old.as_ref().and_then(|v| v.etag.as_deref()) {
+                headers.push(("If-None-Match".into(), etag.to_owned()));
+            } else if let Some(modified) = old.as_ref().and_then(|v| v.modified.as_deref()) {
+                headers.push(("If-Modified-Since".into(), modified.to_owned()));
             }
-            let link = header("link");
-            let etag = header("etag");
-            let modified = header("last-modified");
-            let poll_interval = header("x-poll-interval").and_then(|v| v.parse().ok());
-            let mut bytes = Vec::new();
-            response
-                .body_mut()
-                .as_reader()
-                .take(4 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)?;
-            ensure!(
-                bytes.len() <= 4 * 1024 * 1024,
-                "GitHub response exceeds 4 MiB"
-            );
-            crate::cache::Response {
-                data: serde_json::from_slice(&bytes)?,
-                link,
-                etag,
-                modified,
-                poll_interval,
-                validated_at: crate::cache::now(),
-                fetched_at,
-                cached: false,
+            let response = transport.send(HttpRequest {
+                method: "GET".into(),
+                path: path.to_owned(),
+                headers,
+                body: None,
+            })?;
+            let status = response.status;
+            if (status == 401
+                || (status == 403 && response.header("x-ratelimit-remaining") != Some("0")))
+                && let Some((cache, _)) = &self.cache
+            {
+                let _ = cache.clear();
+            }
+            if status == 304 {
+                let mut old = old.context("GitHub returned 304 without a cached response")?;
+                old.validated_at = self.clock.now_ms();
+                old.fetched_at = fetched_at;
+                old.cached = false;
+                old
+            } else {
+                if !(200..300).contains(&status) {
+                    return Err(crate::HttpError(status).into());
+                }
+                ensure!(
+                    response.body.len() <= 4 * 1024 * 1024,
+                    "GitHub response exceeds 4 MiB"
+                );
+                crate::cache::Response {
+                    data: serde_json::from_slice(&response.body)?,
+                    link: response.header("link").map(str::to_owned),
+                    etag: response.header("etag").map(str::to_owned),
+                    modified: response.header("last-modified").map(str::to_owned),
+                    poll_interval: response
+                        .header("x-poll-interval")
+                        .and_then(|v| v.parse().ok()),
+                    validated_at: self.clock.now_ms(),
+                    fetched_at,
+                    cached: false,
+                }
+            }
+        } else {
+            let mut request = agent()
+                .get(format!("{}{path}", self.api))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.token.expose_secret()),
+                )
+                .header("User-Agent", "Canban")
+                .header("Accept", "application/vnd.github+json");
+            if let Some(etag) = old.as_ref().and_then(|v| v.etag.as_deref()) {
+                request = request.header("If-None-Match", etag);
+            } else if let Some(modified) = old.as_ref().and_then(|v| v.modified.as_deref()) {
+                request = request.header("If-Modified-Since", modified);
+            }
+            let mut response = request.call()?;
+            let status = response.status().as_u16();
+            if (status == 401
+                || (status == 403
+                    && response
+                        .headers()
+                        .get("x-ratelimit-remaining")
+                        .and_then(|v| v.to_str().ok())
+                        != Some("0")))
+                && let Some((cache, _)) = &self.cache
+            {
+                let _ = cache.clear();
+            }
+            let header = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            };
+            if status == 304 {
+                let mut old = old.context("GitHub returned 304 without a cached response")?;
+                old.validated_at = self.clock.now_ms();
+                old.fetched_at = fetched_at;
+                old.cached = false;
+                old
+            } else {
+                if !(200..300).contains(&status) {
+                    return Err(crate::HttpError(status).into());
+                }
+                let link = header("link");
+                let etag = header("etag");
+                let modified = header("last-modified");
+                let poll_interval = header("x-poll-interval").and_then(|v| v.parse().ok());
+                let mut bytes = Vec::new();
+                response
+                    .body_mut()
+                    .as_reader()
+                    .take(4 * 1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)?;
+                ensure!(
+                    bytes.len() <= 4 * 1024 * 1024,
+                    "GitHub response exceeds 4 MiB"
+                );
+                crate::cache::Response {
+                    data: serde_json::from_slice(&bytes)?,
+                    link,
+                    etag,
+                    modified,
+                    poll_interval,
+                    validated_at: self.clock.now_ms(),
+                    fetched_at,
+                    cached: false,
+                }
             }
         };
         if let Some((cache, _)) = &self.cache {
@@ -354,6 +459,38 @@ impl Client {
                     .all(|s| s != ".." && s != "."),
             "Invalid GitHub API path"
         );
+        if let Some(transport) = &self.transport {
+            ensure!(
+                matches!(method, "POST" | "PUT" | "PATCH" | "DELETE"),
+                "Unsupported GitHub write"
+            );
+            let response = transport.send(HttpRequest {
+                method: method.to_owned(),
+                path: path.to_owned(),
+                headers: vec![
+                    (
+                        "Authorization".into(),
+                        format!("Bearer {}", self.token.expose_secret()),
+                    ),
+                    ("User-Agent".into(), "Canban".into()),
+                    ("Accept".into(), "application/vnd.github+json".into()),
+                ],
+                body: (method != "DELETE").then(|| body.clone()),
+            })?;
+            if !(200..300).contains(&response.status) {
+                return Err(crate::HttpError(response.status).into());
+            }
+            ensure!(
+                response.body.len() <= 4 * 1024 * 1024,
+                "GitHub response exceeds 4 MiB"
+            );
+            let bytes = if response.body.is_empty() {
+                b"null".as_slice()
+            } else {
+                response.body.as_slice()
+            };
+            return Ok(serde_json::from_slice(bytes)?);
+        }
         let response = match method {
             "POST" => agent()
                 .post(format!("{}{path}", self.api))
@@ -544,6 +681,8 @@ mod tests {
                 refresh: false,
                 cache_generation: 0,
                 cli: None,
+                transport: None,
+                clock: system_clock(),
             },
             worker,
         )
@@ -934,6 +1073,8 @@ mod cache_tests {
             refresh: false,
             cache_generation: 0,
             cli: None,
+            transport: None,
+            clock: system_clock(),
         }
         .with_cache(cache.clone(), "account-a".into());
         assert_eq!(
@@ -966,6 +1107,8 @@ mod cache_tests {
             refresh: false,
             cache_generation: 0,
             cli: None,
+            transport: None,
+            clock: system_clock(),
         }
         .with_cache(
             crate::cache::Cache::new(dir.path().into()),
@@ -1008,6 +1151,8 @@ mod cache_tests {
             refresh: false,
             cache_generation: 0,
             cli: None,
+            transport: None,
+            clock: system_clock(),
         }
         .with_cache(crate::cache::Cache::new(dir.path().into()), "a".into());
         let barrier = Arc::new(Barrier::new(8));
@@ -1065,6 +1210,8 @@ mod cache_tests {
             refresh: false,
             cache_generation: 0,
             cli: None,
+            transport: None,
+            clock: system_clock(),
         }
         .with_cache(crate::cache::Cache::new(dir.path().into()), "a".into());
         let bg = client.clone().refreshing();
@@ -1111,6 +1258,8 @@ mod cache_tests {
             refresh: false,
             cache_generation: 0,
             cli: None,
+            transport: None,
+            clock: system_clock(),
         };
         let value = client
             .write(

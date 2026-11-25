@@ -12,7 +12,7 @@ mod credentials;
 #[cfg(feature = "client")]
 pub mod models;
 #[cfg(feature = "client")]
-pub use client::{Client, remote_repository, segment};
+pub use client::{Client, HttpRequest, HttpResponse, HttpTransport, remote_repository, segment};
 
 pub fn repository(value: &str) -> anyhow::Result<String> {
     let parts: Vec<_> = value.trim().split('/').collect();

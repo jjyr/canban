@@ -69,11 +69,12 @@ pub(super) fn idle_eligible_without_clock(
     snapshot: &Snapshot,
     run: &AgentRun,
     minutes: u64,
+    at: u64,
 ) -> bool {
     if idle_reclaim_delay_ms(run, minutes).is_none() {
         return false;
     }
-    if !matches!(run.runtime_status(), "idle" | "done")
+    if !matches!(run.runtime_status_at(at), "idle" | "done")
         || !run.close_state.is_empty()
         || run.pending.is_some()
     {
@@ -124,7 +125,7 @@ pub(super) fn idle_candidate_with_extra(
     let Some(delay_ms) = idle_reclaim_delay_ms(run, minutes) else {
         return false;
     };
-    if !idle_eligible_without_clock(snapshot, run, minutes) {
+    if !idle_eligible_without_clock(snapshot, run, minutes, at) {
         return false;
     }
     let Some(anchor) = idle_reclaim_anchor(run) else {
@@ -149,7 +150,7 @@ impl AppServer {
         let Some(run) = &entry.agent else {
             return Ok(());
         };
-        let activity = canban_herdr::activity::get(
+        let activity = self.herdr_activity(
             run.core_id.as_deref().unwrap_or(""),
             run.terminal.as_deref().unwrap_or(""),
         );
@@ -159,7 +160,7 @@ impl AppServer {
             || run.observed.as_ref().map(|v| &v["state"]) != Some(&observed["state"])
             || run.observed.as_ref().map(|v| &v["turn"]) != Some(&observed["turn"])
             || run.connection_state != "connected";
-        let current_at = now();
+        let current_at = self.now_ms();
         let stall_crossed = matches!(status, "idle" | "done")
             && observed["state"] != "finished"
             && run.close_state.is_empty()
@@ -204,7 +205,7 @@ impl AppServer {
                 let Some(a) = &mut current_entry.agent else {
                     return Ok(());
                 };
-                a.lifecycle.observed_at = Some(now());
+                a.lifecycle.observed_at = Some(self.now_ms());
                 if activity.last_at > a.lifecycle.last_interaction_at.unwrap_or(0) {
                     a.lifecycle.last_interaction_at = Some(activity.last_at);
                 }
@@ -236,7 +237,7 @@ impl AppServer {
                         }
                     }
                     if changed || a.lifecycle.idle_since.is_none() {
-                        a.lifecycle.idle_since = Some(now());
+                        a.lifecycle.idle_since = Some(self.now_ms());
                     }
                 } else {
                     if live
@@ -274,7 +275,7 @@ impl AppServer {
                     {
                         let w = RuntimeWait {
                             id: old.map(|w| w.id.clone()).unwrap_or_else(id),
-                            since: old.map(|w| w.since).unwrap_or_else(now),
+                            since: old.map(|w| w.since).unwrap_or_else(|| self.now_ms()),
                             kind,
                             title,
                             message,
@@ -349,9 +350,9 @@ impl AppServer {
             let interactive_followup = is_interactive_followup(run);
             let (deadline_at, reclaiming_soon) = if !auto_reclaiming
                 && !paused
-                && idle_eligible_without_clock(snapshot, run, idle_minutes)
+                && idle_eligible_without_clock(snapshot, run, idle_minutes, self.now_ms())
             {
-                let activity = canban_herdr::activity::get(
+                let activity = self.herdr_activity(
                     run.core_id.as_deref().unwrap_or(""),
                     run.terminal.as_deref().unwrap_or(""),
                 );
@@ -450,7 +451,7 @@ impl AppServer {
     }
 
     pub(super) fn populate_reclaim_status(&self, snapshot: &mut Snapshot) {
-        let at = now();
+        let at = self.now_ms();
         self.presence.prune_expired(at);
         snapshot.reclaim_status = self.compute_reclaim_status(snapshot, at);
     }
@@ -478,10 +479,10 @@ impl AppServer {
             {
                 continue;
             }
-            if !idle_eligible_without_clock(snapshot, run, idle_minutes) {
+            if !idle_eligible_without_clock(snapshot, run, idle_minutes, self.now_ms()) {
                 continue;
             }
-            let activity = canban_herdr::activity::get(
+            let activity = self.herdr_activity(
                 run.core_id.as_deref().unwrap_or(""),
                 run.terminal.as_deref().unwrap_or(""),
             );
@@ -568,13 +569,13 @@ impl AppServer {
     pub(super) fn close_idle(&self, client: &canban_herdr::Client) -> Result<()> {
         let snapshot = self.snapshot()?;
         let idle_minutes = self.config().scheduler.idle_minutes;
-        let check_at = now();
+        let check_at = self.now_ms();
         self.presence.prune_expired(check_at);
         for entry in &snapshot.terminals {
             let Some(run) = &entry.agent else {
                 continue;
             };
-            let activity = canban_herdr::activity::get(
+            let activity = self.herdr_activity(
                 run.core_id.as_deref().unwrap_or(""),
                 run.terminal.as_deref().unwrap_or(""),
             );
@@ -613,7 +614,7 @@ impl AppServer {
                 let Some(a) = &mut current_entry.agent else {
                     return Ok(false);
                 };
-                let lock_at = now();
+                let lock_at = self.now_ms();
                 self.presence.prune_expired(lock_at);
                 let protected =
                     self.presence
@@ -621,8 +622,7 @@ impl AppServer {
                 let viewed_at =
                     self.presence
                         .last_viewed_at(&current_entry.id, Some(&a.card_id), lock_at);
-                let activity =
-                    canban_herdr::activity::get(run.core_id.as_deref().unwrap_or(""), terminal);
+                let activity = self.herdr_activity(run.core_id.as_deref().unwrap_or(""), terminal);
                 if activity.last_at > a.lifecycle.last_interaction_at.unwrap_or(0) {
                     a.lifecycle.last_interaction_at = Some(activity.last_at);
                 }
@@ -633,7 +633,7 @@ impl AppServer {
                 }
                 a.lifecycle.close_reason = "idle".into();
                 a.close_state = "closing".into();
-                a.close_requested_at = Some(now());
+                a.close_requested_at = Some(self.now_ms());
                 let card_id = a.card_id.clone();
                 let run_num = a.number;
                 db.save(&current_entry)?;

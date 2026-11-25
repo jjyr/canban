@@ -1,6 +1,7 @@
 //! Event-driven runtime inventory. No periodic terminal or Git inventory scan.
 use super::*;
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
+use tokio::time::Instant;
 
 const MIN_AGENT_WORK_MS: u64 = 2_000;
 
@@ -35,6 +36,7 @@ impl Inventory {
     pub(super) fn is_working(record: &Value) -> bool {
         record["status"]["state"] == "working" && record["state"] != "finished"
     }
+    #[cfg(test)]
     fn snapshot(&mut self, snapshot: &Value) {
         self.snapshot_at(snapshot, now());
     }
@@ -127,6 +129,7 @@ impl Inventory {
             }
         }
     }
+    #[cfg(test)]
     fn apply(&mut self, message: &Value) -> bool {
         self.apply_at(message, now())
     }
@@ -227,7 +230,7 @@ impl Inventory {
     }
 }
 impl AppServer {
-    pub(super) fn wake_runtime(&self) {
+    pub fn wake_runtime(&self) {
         if let Some(notify) = self.runtime_wake.lock().unwrap().as_ref() {
             notify.notify_one();
         }
@@ -250,9 +253,7 @@ impl AppServer {
         #[cfg(test)]
         if !self.observer_running.load(Ordering::SeqCst) {
             // Explicit synchronous test driver, never used by the running service.
-            let client = canban_herdr::Client {
-                config: self.config(),
-            };
+            let client = self.herdr_client();
             let core = client.status()?["core"]["id"]
                 .as_str()
                 .context("Core identity unavailable")?
@@ -269,12 +270,13 @@ impl AppServer {
             self.apply_refinements(&core, &mut records);
             return Ok((core, records));
         }
+        let now_ms = self.now_ms();
         let (core, mut records) = {
             let state = self.inventory.lock().unwrap();
             ensure!(
                 state.error.is_none()
                     && state.last_at > 0
-                    && now().saturating_sub(state.last_at) < 45_000,
+                    && now_ms.saturating_sub(state.last_at) < 45_000,
                 "{}",
                 state
                     .error
@@ -293,19 +295,17 @@ impl AppServer {
     /// without a round-trip when fresh, falling back to `Client::status()`.
     pub(super) fn verified_core_id(&self) -> Result<String> {
         if self.observer_running.load(Ordering::SeqCst) {
+            let now_ms = self.now_ms();
             let state = self.inventory.lock().unwrap();
             if state.error.is_none()
                 && !state.core.is_empty()
                 && state.last_at > 0
-                && now().saturating_sub(state.last_at) < 45_000
+                && now_ms.saturating_sub(state.last_at) < 45_000
             {
                 return Ok(state.core.clone());
             }
         }
-        let status = canban_herdr::Client {
-            config: self.config(),
-        }
-        .status()?;
+        let status = self.herdr_client().status()?;
         Ok(status["core"]["id"]
             .as_str()
             .context("Core identity unavailable")?
@@ -475,107 +475,213 @@ async fn observer_loop(
         let config = server.config();
         let config_key =
             serde_json::to_vec(&json!([config.hc, config.hc_session, config.hc_env])).unwrap();
+        let injected_backend = server.herdr_backend.clone();
         drop(server);
 
-        let subscribe_cfg = config;
-        let sub_res = tokio::select! {
-            biased;
-            res = stop_rx.changed() => {
-                let _ = res;
-                return;
-            }
-            join_res = tokio::task::spawn_blocking(move || {
-                canban_herdr::Client { config: subscribe_cfg }.subscribe()
-            }) => {
-                match join_res {
-                    Ok(res) => res,
-                    Err(e) => Err(anyhow::anyhow!("Herdr subscribe task failed: {e}")),
-                }
-            }
-        };
-
-        let result: Result<()> = match sub_res {
-            Err(e) => Err(e),
-            Ok(subscription) => {
-                let Some(server) = weak.upgrade() else {
-                    break;
-                };
-                if server.stopped() {
-                    break;
-                }
-                {
-                    let mut inv = server.inventory.lock().unwrap();
-                    if !inv.core.is_empty() && inv.core != subscription.core {
-                        inv.close_all_working(now());
+        let result: Result<()> = if let Some(backend) = injected_backend {
+            let msg_notify = Arc::new(tokio::sync::Notify::new());
+            let wake_notify = Arc::clone(&msg_notify);
+            let sub_res = backend.subscribe(Arc::new(move || wake_notify.notify_one()));
+            match sub_res {
+                Err(e) => Err(e),
+                Ok(subscription) => {
+                    let Some(server) = weak.upgrade() else {
+                        break;
+                    };
+                    if server.stopped() {
+                        break;
                     }
-                    inv.core = subscription.core.clone();
-                    inv.generation += 1;
-                    inv.snapshot(&subscription.snapshot);
-                    inv.last_at = now();
-                    inv.error = None;
-                    server.observed_at.store(inv.last_at, Ordering::SeqCst);
-                }
-                server.contexts.lock().unwrap().reset();
-                server.emit("terminals", None);
-                delay = 1;
-                drop(server);
+                    let ts = server.now_ms();
+                    {
+                        let mut inv = server.inventory.lock().unwrap();
+                        if !inv.core.is_empty() && inv.core != subscription.core {
+                            inv.close_all_working(ts);
+                        }
+                        inv.core = subscription.core.clone();
+                        inv.generation += 1;
+                        inv.snapshot_at(&subscription.snapshot, ts);
+                        inv.last_at = ts;
+                        inv.error = None;
+                        server.observed_at.store(inv.last_at, Ordering::SeqCst);
+                    }
+                    server.contexts.lock().unwrap().reset();
+                    server.emit("terminals", None);
+                    server.wake_runtime();
+                    delay = 1;
+                    drop(server);
 
-                let stream_weak = weak.clone();
-                let stream_key = config_key.clone();
-                match tokio::task::spawn_blocking(move || -> Option<Result<()>> {
+                    let rx = subscription.receiver;
                     loop {
-                        let server = stream_weak.upgrade()?;
+                        let Some(server) = weak.upgrade() else {
+                            return;
+                        };
                         if server.stopped() {
-                            return None;
+                            return;
                         }
-                        let config = server.config();
-                        if serde_json::to_vec(&json!([config.hc, config.hc_session, config.hc_env]))
+                        let mut stream_err: Option<anyhow::Error> = None;
+                        loop {
+                            match rx.try_recv() {
+                                Ok(Ok(message)) => {
+                                    let ts = server.now_ms();
+                                    let (changed, last_at) = {
+                                        let mut inv = server.inventory.lock().unwrap();
+                                        let changed = inv.apply_at(&message, ts);
+                                        (changed, inv.last_at)
+                                    };
+                                    server.observed_at.store(last_at, Ordering::SeqCst);
+                                    if changed {
+                                        server.emit("terminals", None);
+                                        server.wake_runtime();
+                                    }
+                                    if matches!(
+                                        message["params"]["type"].as_str(),
+                                        Some("finished" | "removed")
+                                    ) || message["method"] == "missed"
+                                    {
+                                        server.wake_scripts();
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    stream_err = Some(e);
+                                    break;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    stream_err = Some(anyhow::anyhow!(
+                                        "Herdr event stream closed or overflowed"
+                                    ));
+                                    break;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            }
+                        }
+                        if let Some(err) = stream_err {
+                            break Err(err);
+                        }
+                        let last_at = server.inventory.lock().unwrap().last_at;
+                        let now_ms = server.now_ms();
+                        if now_ms.saturating_sub(last_at) > 45_000 {
+                            break Err(anyhow::anyhow!("Herdr event heartbeat timed out"));
+                        }
+                        let remaining = 45_001u64.saturating_sub(now_ms.saturating_sub(last_at));
+                        drop(server);
+                        tokio::select! {
+                            biased;
+                            _ = stop_rx.changed() => return,
+                            _ = msg_notify.notified() => {}
+                            _ = tokio::time::sleep(Duration::from_millis(remaining.min(5_000))) => {}
+                        }
+                    }
+                }
+            }
+        } else {
+            let subscribe_cfg = config;
+            let sub_res = tokio::select! {
+                biased;
+                res = stop_rx.changed() => {
+                    let _ = res;
+                    return;
+                }
+                join_res = tokio::task::spawn_blocking(move || {
+                    canban_herdr::Client::new(subscribe_cfg).subscribe()
+                }) => {
+                    match join_res {
+                        Ok(res) => res,
+                        Err(e) => Err(anyhow::anyhow!("Herdr subscribe task failed: {e}")),
+                    }
+                }
+            };
+
+            match sub_res {
+                Err(e) => Err(e),
+                Ok(subscription) => {
+                    let Some(server) = weak.upgrade() else {
+                        break;
+                    };
+                    if server.stopped() {
+                        break;
+                    }
+                    let ts = server.now_ms();
+                    {
+                        let mut inv = server.inventory.lock().unwrap();
+                        if !inv.core.is_empty() && inv.core != subscription.core {
+                            inv.close_all_working(ts);
+                        }
+                        inv.core = subscription.core.clone();
+                        inv.generation += 1;
+                        inv.snapshot_at(&subscription.snapshot, ts);
+                        inv.last_at = ts;
+                        inv.error = None;
+                        server.observed_at.store(inv.last_at, Ordering::SeqCst);
+                    }
+                    server.contexts.lock().unwrap().reset();
+                    server.emit("terminals", None);
+                    delay = 1;
+                    drop(server);
+
+                    let stream_weak = weak.clone();
+                    let stream_key = config_key.clone();
+                    match tokio::task::spawn_blocking(move || -> Option<Result<()>> {
+                        loop {
+                            let server = stream_weak.upgrade()?;
+                            if server.stopped() {
+                                return None;
+                            }
+                            let config = server.config();
+                            if serde_json::to_vec(&json!([
+                                config.hc,
+                                config.hc_session,
+                                config.hc_env
+                            ]))
                             .unwrap()
-                            != stream_key
-                        {
-                            return Some(Err(anyhow::anyhow!("Herdr configuration changed")));
-                        }
-                        match subscription.recv_timeout(Duration::from_millis(250)) {
-                            Ok(Ok(message)) => {
-                                let (changed, last_at) = {
-                                    let mut inv = server.inventory.lock().unwrap();
-                                    let changed = inv.apply(&message);
-                                    (changed, inv.last_at)
-                                };
-                                server.observed_at.store(last_at, Ordering::SeqCst);
-                                if changed {
-                                    server.emit("terminals", None);
-                                }
-                                if matches!(
-                                    message["params"]["type"].as_str(),
-                                    Some("finished" | "removed")
-                                ) || message["method"] == "missed"
-                                {
-                                    server.wake_scripts();
-                                }
+                                != stream_key
+                            {
+                                return Some(Err(anyhow::anyhow!("Herdr configuration changed")));
                             }
-                            Ok(Err(e)) => return Some(Err(e)),
-                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                return Some(Err(anyhow::anyhow!(
-                                    "Herdr event stream closed or overflowed"
-                                )));
-                            }
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                if now().saturating_sub(server.inventory.lock().unwrap().last_at)
-                                    > 45_000
-                                {
+                            match subscription.recv_timeout(Duration::from_millis(250)) {
+                                Ok(Ok(message)) => {
+                                    let ts = server.now_ms();
+                                    let (changed, last_at) = {
+                                        let mut inv = server.inventory.lock().unwrap();
+                                        let changed = inv.apply_at(&message, ts);
+                                        (changed, inv.last_at)
+                                    };
+                                    server.observed_at.store(last_at, Ordering::SeqCst);
+                                    if changed {
+                                        server.emit("terminals", None);
+                                    }
+                                    if matches!(
+                                        message["params"]["type"].as_str(),
+                                        Some("finished" | "removed")
+                                    ) || message["method"] == "missed"
+                                    {
+                                        server.wake_scripts();
+                                    }
+                                }
+                                Ok(Err(e)) => return Some(Err(e)),
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                     return Some(Err(anyhow::anyhow!(
-                                        "Herdr event heartbeat timed out"
+                                        "Herdr event stream closed or overflowed"
                                     )));
                                 }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                    if server
+                                        .now_ms()
+                                        .saturating_sub(server.inventory.lock().unwrap().last_at)
+                                        > 45_000
+                                    {
+                                        return Some(Err(anyhow::anyhow!(
+                                            "Herdr event heartbeat timed out"
+                                        )));
+                                    }
+                                }
                             }
                         }
+                    })
+                    .await
+                    {
+                        Ok(Some(res)) => res,
+                        Ok(None) | Err(_) => return,
                     }
-                })
-                .await
-                {
-                    Ok(Some(res)) => res,
-                    Ok(None) | Err(_) => return,
                 }
             }
         };
@@ -642,7 +748,8 @@ async fn delivery_worker_loop(
 ) {
     while !*stop_rx.borrow() {
         let step_weak = weak.clone();
-        let step = tokio::task::spawn_blocking(move || {
+        let inline = weak.upgrade().is_some_and(|s| s.inline_workers);
+        let work = move || {
             let server = step_weak.upgrade()?;
             if server.stopped() {
                 return None;
@@ -670,15 +777,16 @@ async fn delivery_worker_loop(
                 {
                     server.wake_runtime();
                 }
+                let current_ms = server.now_ms();
                 let mut due = |at: u64| {
-                    let duration = Duration::from_millis(at.saturating_sub(now()).max(1));
+                    let duration = Duration::from_millis(at.saturating_sub(current_ms).max(1));
                     wait = Some(wait.map_or(duration, |w| w.min(duration)));
                 };
                 if s.workflow_runs
                     .iter()
                     .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
                 {
-                    due(now().saturating_add(2_000));
+                    due(current_ms.saturating_add(2_000));
                 }
                 for t in &s.terminals {
                     let Some(a) = &t.agent else {
@@ -701,8 +809,14 @@ async fn delivery_worker_loop(
                 }
             }
             Some(wait)
-        })
-        .await;
+        };
+        let step = if inline {
+            let res = work();
+            tokio::task::yield_now().await;
+            Ok(res)
+        } else {
+            tokio::task::spawn_blocking(work).await
+        };
         let Ok(Some(wait)) = step else {
             break;
         };
@@ -719,7 +833,8 @@ async fn script_worker_loop(
 ) {
     while !*stop_rx.borrow() {
         let step_weak = weak.clone();
-        let step = tokio::task::spawn_blocking(move || {
+        let inline = weak.upgrade().is_some_and(|s| s.inline_workers);
+        let work = move || {
             let server = step_weak.upgrade()?;
             if server.stopped() {
                 return None;
@@ -740,8 +855,14 @@ async fn script_worker_loop(
                 }
             }
             Some(wait)
-        })
-        .await;
+        };
+        let step = if inline {
+            let res = work();
+            tokio::task::yield_now().await;
+            Ok(res)
+        } else {
+            tokio::task::spawn_blocking(work).await
+        };
         let Ok(Some(wait)) = step else {
             break;
         };
@@ -761,8 +882,9 @@ async fn runtime_worker_loop(
     let mut queued = Vec::<String>::new();
     while !*stop_rx.borrow() {
         let step_weak = weak.clone();
+        let inline = weak.upgrade().is_some_and(|s| s.inline_workers);
         let prev_queued = std::mem::take(&mut queued);
-        let step = tokio::task::spawn_blocking(move || {
+        let work = move || {
             let server = step_weak.upgrade()?;
             if server.stopped() {
                 return None;
@@ -780,8 +902,9 @@ async fn runtime_worker_loop(
                 .unwrap_or_default();
             server.project_observation_freshness(&mut s);
             let mut wait: Option<Duration> = None;
+            let current_ms = server.now_ms();
             let mut due = |at: u64| {
-                let duration = Duration::from_millis(at.saturating_sub(now()).max(1));
+                let duration = Duration::from_millis(at.saturating_sub(current_ms).max(1));
                 wait = Some(wait.map_or(duration, |w| w.min(duration)));
             };
             if let Some(at) = server.event_deadline() {
@@ -799,7 +922,7 @@ async fn runtime_worker_loop(
             {
                 // Re-check transient main-checkout blockers (dirty tree or switched branch)
                 // so the FIFO merge queue automatically drains once the checkout is clean.
-                due(now().saturating_add(2_000));
+                due(current_ms.saturating_add(2_000));
             }
             for t in &s.terminals {
                 let Some(a) = &t.agent else {
@@ -825,7 +948,7 @@ async fn runtime_worker_loop(
                     due(anchor.saturating_add(AppServer::DELIVERY_AGENT_SETTLE_MS + 1));
                 }
                 if let Some(anchor) = canban_notifications::unreported_idle_anchor(&s, &t.id, a) {
-                    let activity = canban_herdr::activity::get(
+                    let activity = server.herdr_activity(
                         a.core_id.as_deref().unwrap_or(""),
                         a.terminal.as_deref().unwrap_or(""),
                     );
@@ -837,7 +960,7 @@ async fn runtime_worker_loop(
                     }
                 }
             }
-            if let Some(at) = server.reclaim_wake_deadline(&s, now()) {
+            if let Some(at) = server.reclaim_wake_deadline(&s, current_ms) {
                 due(at);
             }
             // Only queued work awaiting a scheduler slot needs retry admission.
@@ -893,8 +1016,14 @@ async fn runtime_worker_loop(
                 wait = Some(wait.map_or(d, |w| w.min(d)));
             }
             Some((wait, retry, backoff, queued))
-        })
-        .await;
+        };
+        let step = if inline {
+            let res = work();
+            tokio::task::yield_now().await;
+            Ok(res)
+        } else {
+            tokio::task::spawn_blocking(work).await
+        };
         let Ok(Some((wait, next_retry, next_backoff, next_queued))) = step else {
             break;
         };

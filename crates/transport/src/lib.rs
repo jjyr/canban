@@ -15,7 +15,10 @@ pub use client::{
     SyncStream, open_mux_bridge, rpc_once, rpc_read_timeout,
 };
 pub use framing::{
-    MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line, write_json_line,
+    AsyncIo, MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line, write_json_line,
     write_json_line_async,
 };
-pub use server::{AcceptedStream, ServerTransportConfig, spawn_tcp_listener, spawn_unix_listener};
+pub use server::{
+    AcceptedStream, ServerTransportConfig, serve_authenticated_stream, spawn_tcp_listener,
+    spawn_unix_listener,
+};

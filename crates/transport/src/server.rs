@@ -6,7 +6,8 @@ use crate::{
         TailscaleSessionRegistry, TcpAuthOutcome,
     },
     framing::{
-        MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line, write_json_line_async,
+        AsyncIo, MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line,
+        write_json_line_async,
     },
 };
 use anyhow::Result;
@@ -136,7 +137,11 @@ pub fn spawn_tcp_listener<H, Fut>(
                             let conn_stop = stop_rx.clone();
                             tokio::spawn(async move {
                                 let _guard = guard;
-                                let _ = serve_tcp_connection(stream, cfg, conn_stop, h).await;
+                                let peer_addr = stream.peer_addr().ok();
+                                let _ = serve_authenticated_stream(
+                                    stream, peer_addr, cfg, conn_stop, false, h,
+                                )
+                                .await;
                             });
                         }
                         Err(_) => break,
@@ -151,17 +156,22 @@ async fn wait_device_revoked(
     device_store: &Arc<DeviceTokenStore>,
     revoke_rx: &mut tokio::sync::broadcast::Receiver<String>,
     device_id: &str,
+    inline_auth: bool,
 ) {
     loop {
         match revoke_rx.recv().await {
             Ok(revoked_id) if revoked_id == device_id => return,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                 if device_id != "legacy-server-token" && !device_id.starts_with("ts:") {
-                    let store = device_store.clone();
-                    let did = device_id.to_owned();
-                    let valid = tokio::task::spawn_blocking(move || store.is_valid_device_id(&did))
-                        .await
-                        .unwrap_or(false);
+                    let valid = if inline_auth {
+                        device_store.is_valid_device_id(device_id)
+                    } else {
+                        let store = device_store.clone();
+                        let did = device_id.to_owned();
+                        tokio::task::spawn_blocking(move || store.is_valid_device_id(&did))
+                            .await
+                            .unwrap_or(false)
+                    };
                     if !valid {
                         return;
                     }
@@ -195,32 +205,40 @@ async fn watch_stop_and_revocation(
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
     mut revoke_rx: tokio::sync::broadcast::Receiver<String>,
     device_id: String,
+    inline_auth: bool,
     conn_stop_tx: tokio::sync::watch::Sender<bool>,
 ) {
     if !*stop_rx.borrow() {
         tokio::select! {
             biased;
             _ = stop_rx.changed() => {}
-            _ = wait_device_revoked(&device_store, &mut revoke_rx, &device_id) => {}
+            _ = wait_device_revoked(&device_store, &mut revoke_rx, &device_id, inline_auth) => {}
         }
     }
     let _ = conn_stop_tx.send(true);
 }
 
-async fn serve_tcp_connection<H, Fut>(
-    stream: tokio::net::TcpStream,
+/// Runs first-frame authentication, `transport.mux` (`yamux/1`) upgrade, and device revocation
+/// enforcement over an arbitrary async byte stream (such as `tokio::net::TcpStream` or a
+/// simulated `turmoil::net::TcpStream`).
+///
+/// Set `inline_auth = true` in deterministic simulations to avoid `spawn_blocking` thread jitter.
+pub async fn serve_authenticated_stream<S, H, Fut>(
+    stream: S,
+    peer_addr: Option<std::net::SocketAddr>,
     cfg: Arc<ServerTransportConfig>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
+    inline_auth: bool,
     handler: Arc<H>,
 ) -> Result<()>
 where
+    S: AsyncIo + 'static,
     H: Fn(AcceptedStream) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     if *stop_rx.borrow() {
         return Ok(());
     }
-    let peer_addr = stream.peer_addr().ok();
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(read_half);
     let line_opt = tokio::select! {
@@ -256,43 +274,47 @@ where
     let device_name = input["params"]["device_name"].as_str().map(str::to_owned);
     let allow_upgrade = method == "transport.mux";
 
-    let (outcome, ephemeral_session_token, is_tailscale_session) =
-        tokio::task::spawn_blocking(move || {
-            if canban_types::is_tailscale_auth(&provided_auth) {
-                if let (Some(verifier), Some(addr)) = (ts_verifier.as_deref(), peer_addr)
-                    && let Some(peer) = verifier.verify_peer(addr)
-                {
-                    let device_id = format!("ts:{}", peer.node_id);
-                    let effective_name = device_name
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(&peer.device_name);
-                    ts_devices.record(&device_id, effective_name);
-                    let session_secret = auth::generate_ephemeral_session_token();
-                    return Ok((
-                        TcpAuthOutcome::Authenticated {
-                            device_id,
-                            upgraded_token: None,
-                            deprecated_legacy: false,
-                        },
-                        Some(session_secret),
-                        true,
-                    ));
-                }
-                return Ok((TcpAuthOutcome::Rejected, None, false));
+    let auth_work = move || {
+        if canban_types::is_tailscale_auth(&provided_auth) {
+            if let (Some(verifier), Some(addr)) = (ts_verifier.as_deref(), peer_addr)
+                && let Some(peer) = verifier.verify_peer(addr)
+            {
+                let device_id = format!("ts:{}", peer.node_id);
+                let effective_name = device_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&peer.device_name);
+                ts_devices.record(&device_id, effective_name);
+                let session_secret = auth::generate_ephemeral_session_token();
+                return Ok((
+                    TcpAuthOutcome::Authenticated {
+                        device_id,
+                        upgraded_token: None,
+                        deprecated_legacy: false,
+                    },
+                    Some(session_secret),
+                    true,
+                ));
             }
-            let res = auth::authenticate_tcp_token(
-                &home,
-                &device_store,
-                &pairing_codes,
-                &provided_auth,
-                device_name.as_deref(),
-                allow_upgrade,
-            )?;
-            Ok::<_, anyhow::Error>((res, None, false))
-        })
-        .await??;
+            return Ok((TcpAuthOutcome::Rejected, None, false));
+        }
+        let res = auth::authenticate_tcp_token(
+            &home,
+            &device_store,
+            &pairing_codes,
+            &provided_auth,
+            device_name.as_deref(),
+            allow_upgrade,
+        )?;
+        Ok::<_, anyhow::Error>((res, None, false))
+    };
+
+    let (outcome, ephemeral_session_token, is_tailscale_session) = if inline_auth {
+        auth_work()?
+    } else {
+        tokio::task::spawn_blocking(auth_work).await??
+    };
 
     let (device_id, upgraded_token, deprecated_legacy) = match outcome {
         TcpAuthOutcome::Authenticated {
@@ -369,14 +391,15 @@ where
         .await??;
 
         let leftover = reader.buffer().to_vec();
-        let tcp = reader.into_inner().unsplit(writer);
+        let inner = reader.into_inner().unsplit(writer);
         return handle_mux_session(
-            tcp,
+            inner,
             leftover,
             cfg,
             device_id,
             session_token,
             stop_rx,
+            inline_auth,
             handler,
         )
         .await;
@@ -384,17 +407,18 @@ where
 
     let leftover = reader.buffer().to_vec();
     let has_pipelined_bytes = !leftover.is_empty();
-    let tcp = reader.into_inner().unsplit(writer);
+    let inner = reader.into_inner().unsplit(writer);
     let (conn_stop_tx, conn_stop_rx) = tokio::sync::watch::channel(false);
     let watcher = tokio::spawn(watch_stop_and_revocation(
         cfg.device_store.clone(),
         stop_rx,
         cfg.revocations.subscribe(),
         device_id.clone(),
+        inline_auth,
         conn_stop_tx,
     ));
     handler(AcceptedStream {
-        stream: TransportStream::tcp_prefixed(leftover, tcp),
+        stream: TransportStream::boxed_prefixed(leftover, inner),
         initial_request: Some(input),
         has_pipelined_bytes,
         device_id: Some(device_id),
@@ -407,20 +431,23 @@ where
     Ok(())
 }
 
-async fn handle_mux_session<H, Fut>(
-    tcp: tokio::net::TcpStream,
+#[allow(clippy::too_many_arguments)]
+async fn handle_mux_session<S, H, Fut>(
+    stream: S,
     leftover: Vec<u8>,
     cfg: Arc<ServerTransportConfig>,
     device_id: String,
     session_token: zeroize::Zeroizing<String>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
+    inline_auth: bool,
     handler: Arc<H>,
 ) -> Result<()>
 where
+    S: AsyncIo + 'static,
     H: Fn(AcceptedStream) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let mut mux_server = crate::mux::accept_mux(PrefixedStream::new(leftover, tcp));
+    let mut mux_server = crate::mux::accept_mux(PrefixedStream::new(leftover, stream));
     let mut revoke_rx = cfg.revocations.subscribe();
     let (conn_stop_tx, conn_stop_rx) = tokio::sync::watch::channel(false);
 
@@ -431,7 +458,7 @@ where
         tokio::select! {
             biased;
             _ = stop_rx.changed() => break,
-            _ = wait_device_revoked(&cfg.device_store, &mut revoke_rx, &device_id) => break,
+            _ = wait_device_revoked(&cfg.device_store, &mut revoke_rx, &device_id, inline_auth) => break,
             stream_opt = mux_server.next_stream() => {
                 let Some(mux_stream) = stream_opt else {
                     break;

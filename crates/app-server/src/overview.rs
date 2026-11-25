@@ -32,9 +32,7 @@ impl AppServer {
                 .to_owned();
             (text, "Saved execution output (read-only)", None)
         } else {
-            let client = canban_herdr::Client {
-                config: self.config(),
-            };
+            let client = self.herdr_client();
             ensure!(
                 client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
                 "Original Herdr core unavailable; retained context only"

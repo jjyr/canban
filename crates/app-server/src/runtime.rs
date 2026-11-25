@@ -13,26 +13,7 @@ impl AppServer {
         self.start_with_listen(None)
     }
 
-    pub fn start_with_listen(
-        self: &Arc<Self>,
-        override_listen: Option<ServerListenConfig>,
-    ) -> Result<Running> {
-        // The lock is held for the lifetime of `Running`, including socket removal on drop.
-        let lock = self._service_lock.try_clone()?;
-        let socket = self.endpoint();
-        if socket.exists() {
-            ensure!(
-                UnixStream::connect(&socket).is_err(),
-                "Another Canban AppServer already owns {}",
-                socket.display()
-            );
-            std::fs::remove_file(&socket)?;
-        }
-        let std_unix = std::os::unix::net::UnixListener::bind(&socket)
-            .context("Could not bind Canban local socket")?;
-        std_unix.set_nonblocking(true)?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    fn run_startup_recovery(&self) -> Result<()> {
         // Verify retained statuses again after restart; never reclaim immediately from old idle time.
         self.store.lock().unwrap().write(|db| {
             for mut item in db.list::<TerminalEntry>()? {
@@ -118,6 +99,103 @@ impl AppServer {
             }
             Ok(())
         })?;
+        Ok(())
+    }
+
+    /// Starts all background workers inside an existing caller-owned Tokio runtime (e.g. a
+    /// `turmoil` simulated host runtime) without binding OS Unix/TCP sockets or spawning update threads.
+    pub fn start_in_runtime(
+        self: &Arc<Self>,
+        handle: tokio::runtime::Handle,
+    ) -> Result<SimRunning> {
+        let lock = self._service_lock.try_clone()?;
+        self.run_startup_recovery()?;
+        *self.runtime_handle.lock().unwrap() = Some(handle.clone());
+        self.migrate_exit_failures()?;
+        self.start_runtime();
+        self.start_github_workers();
+        let weak = Arc::downgrade(self);
+        let github_notify = self.github_sync_notify.clone();
+        let github_stop = self.stop_receiver();
+        handle.spawn(github_sync_loop(weak, github_notify, github_stop));
+        Ok(SimRunning {
+            server: self.clone(),
+            _lock: lock,
+        })
+    }
+
+    /// Builds the server transport configuration for accepting authenticated streams (e.g. over `turmoil`).
+    pub fn transport_config(&self) -> Arc<canban_transport::ServerTransportConfig> {
+        let tailscale_verifier = self.tailscale_verifier_override.lock().unwrap().clone();
+        Arc::new(canban_transport::ServerTransportConfig {
+            home: self.home.clone(),
+            server_id: self.identity.clone(),
+            api_version: API_VERSION,
+            device_store: self.device_store.clone(),
+            pairing_codes: self.pairing_codes.clone(),
+            revocations: self.device_revocations.clone(),
+            active_tcp_connections: self.active_tcp_connections.clone(),
+            tailscale_verifier,
+            tailscale_devices: self.tailscale_devices.clone(),
+        })
+    }
+
+    /// Accepts a single authenticated async byte stream (such as a `turmoil::net::TcpStream`),
+    /// running the full production auth, `yamux/1`, revocation, and JSON-RPC pipeline.
+    pub async fn accept_authenticated_stream<S>(
+        self: Arc<Self>,
+        stream: S,
+        peer_addr: Option<std::net::SocketAddr>,
+    ) -> Result<()>
+    where
+        S: canban_transport::AsyncIo + 'static,
+    {
+        let cfg = self.transport_config();
+        let stop_rx = self.stop_receiver();
+        let inline_auth = self.inline_workers;
+        let weak = Arc::downgrade(&self);
+        let handler = Arc::new(move |accepted: canban_transport::AcceptedStream| {
+            let weak = weak.clone();
+            async move {
+                if let Some(server) = weak.upgrade()
+                    && !server.stopped()
+                {
+                    let _ = serve_stream(server, accepted).await;
+                }
+            }
+        });
+        canban_transport::serve_authenticated_stream(
+            stream,
+            peer_addr,
+            cfg,
+            stop_rx,
+            inline_auth,
+            handler,
+        )
+        .await
+    }
+
+    pub fn start_with_listen(
+        self: &Arc<Self>,
+        override_listen: Option<ServerListenConfig>,
+    ) -> Result<Running> {
+        // The lock is held for the lifetime of `Running`, including socket removal on drop.
+        let lock = self._service_lock.try_clone()?;
+        let socket = self.endpoint();
+        if socket.exists() {
+            ensure!(
+                UnixStream::connect(&socket).is_err(),
+                "Another Canban AppServer already owns {}",
+                socket.display()
+            );
+            std::fs::remove_file(&socket)?;
+        }
+        let std_unix = std::os::unix::net::UnixListener::bind(&socket)
+            .context("Could not bind Canban local socket")?;
+        std_unix.set_nonblocking(true)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        self.run_startup_recovery()?;
 
         let listen_cfg = override_listen.unwrap_or_else(|| network::load_listen_config(&self.home));
 
@@ -373,10 +451,16 @@ async fn serve_stream(
         let srv = server.clone();
         let params = input["params"].clone();
         let tok = auth_token.clone();
-        let call_res = tokio::task::spawn_blocking(move || {
-            srv.call_with_transport_token(&method, params, tok.as_deref().map(String::as_str), true)
-        })
-        .await?;
+        let call_res = server
+            .run_work(move || {
+                srv.call_with_transport_token(
+                    &method,
+                    params,
+                    tok.as_deref().map(String::as_str),
+                    true,
+                )
+            })
+            .await?;
         let (reply, mut deferred_stop) = match call_res {
             Ok((result, pending_stop)) => (
                 json!({"jsonrpc":"2.0","id":id,"result":result}),
@@ -445,14 +529,15 @@ where
         return Ok(());
     }
     let srv = server.clone();
-    let (revision, server_id, github_revision) = tokio::task::spawn_blocking(move || {
-        (
-            srv.state_cursor(),
-            srv.identity.clone(),
-            srv.github_revision.load(Ordering::SeqCst),
-        )
-    })
-    .await?;
+    let (revision, server_id, github_revision) = server
+        .run_work(move || {
+            (
+                srv.state_cursor(),
+                srv.identity.clone(),
+                srv.github_revision.load(Ordering::SeqCst),
+            )
+        })
+        .await?;
     let changed = params["after"] != revision;
     let topics: std::collections::BTreeSet<String> = params["topics"]
         .as_array()
@@ -515,7 +600,7 @@ where
                     "jsonrpc": "2.0",
                     "method": "heartbeat",
                     "params": {
-                        "ts": now(),
+                        "ts": server.now_ms(),
                         "server_id": server.identity,
                     }
                 }))
@@ -613,8 +698,8 @@ async fn github_sync_loop(
     notify: Arc<tokio::sync::Notify>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut next_sync = std::time::Instant::now();
-    let mut next_fast_pr = std::time::Instant::now() + Duration::from_secs(25);
+    let mut next_sync = tokio::time::Instant::now();
+    let mut next_fast_pr = tokio::time::Instant::now() + Duration::from_secs(25);
     let mut prev_auth_state = String::new();
     while !*stop_rx.borrow() {
         let Some(server) = weak.upgrade() else {
@@ -624,6 +709,7 @@ async fn github_sync_loop(
             break;
         }
         let home = server.home.clone();
+        let inline = server.inline_workers;
         drop(server);
         if canban_updater::handoff::active(&home) {
             if !AppServer::wait_or_stop(&notify, &mut stop_rx, Some(Duration::from_millis(250)))
@@ -634,7 +720,7 @@ async fn github_sync_loop(
             continue;
         }
         let step_weak = weak.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
+        let work = move || {
             let server = step_weak.upgrade()?;
             if server.stopped() {
                 return None;
@@ -650,7 +736,7 @@ async fn github_sync_loop(
                 }
                 prev_auth_state = auth_state;
             }
-            let now_instant = std::time::Instant::now();
+            let now_instant = tokio::time::Instant::now();
             if now_instant >= next_sync || server.github_sync_due.swap(false, Ordering::SeqCst) {
                 next_sync = now_instant + Duration::from_secs(120);
                 next_fast_pr = now_instant + Duration::from_secs(25);
@@ -734,8 +820,14 @@ async fn github_sync_loop(
             }
             let authorizing = prev_auth_state == "authorizing";
             Some((next_sync, next_fast_pr, prev_auth_state, authorizing))
-        })
-        .await;
+        };
+        let outcome = if inline {
+            let res = work();
+            tokio::task::yield_now().await;
+            Ok(res)
+        } else {
+            tokio::task::spawn_blocking(work).await
+        };
         let Ok(Some((ns, nfp, pas, authorizing))) = outcome else {
             break;
         };
@@ -744,10 +836,10 @@ async fn github_sync_loop(
         prev_auth_state = pas;
         let mut deadline = next_sync.min(next_fast_pr);
         if authorizing {
-            deadline = deadline.min(std::time::Instant::now() + Duration::from_secs(1));
+            deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(1));
         }
         let delay = deadline
-            .saturating_duration_since(std::time::Instant::now())
+            .saturating_duration_since(tokio::time::Instant::now())
             .max(Duration::from_millis(1));
         if !AppServer::wait_or_stop(&notify, &mut stop_rx, Some(delay)).await {
             break;
@@ -935,7 +1027,7 @@ impl AppServer {
         self.store
             .lock()
             .unwrap()
-            .write(|db| events::pump(db, &self.config()))?;
+            .write(|db| events::pump_at(db, &self.config(), self.now_ms()))?;
         self.request_deliveries();
         self.request_scripts();
         let _ = self.pump_cardless_agents();
@@ -946,9 +1038,7 @@ impl AppServer {
         self.pump_configuration()?;
         self.pump_schedules()?;
         self.pump_merge_batches()?;
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         let bound: Vec<_> = self
             .store
             .lock()
@@ -1056,7 +1146,7 @@ impl AppServer {
                                 let card = db.get::<Card>(&card_id)?;
                                 if card.resolved() {
                                     current.state = "completed".into();
-                                    current.completed_at = Some(now());
+                                    current.completed_at = Some(self.now_ms());
                                     current.close_state = String::new();
                                 } else {
                                     current.state = "failed".into();
@@ -1108,7 +1198,7 @@ impl AppServer {
                 t.agent.as_ref().is_some_and(|a| {
                     a.close_state == "closing"
                         && a.close_requested_at
-                            .is_some_and(|ts| now().saturating_sub(ts) > 30_000)
+                            .is_some_and(|ts| self.now_ms().saturating_sub(ts) > 30_000)
                 })
             })
             .collect();
@@ -1143,7 +1233,7 @@ impl AppServer {
                             if let Some(current) = &mut current_entry.agent
                                 && current.close_state == "closing"
                             {
-                                current.close_requested_at = Some(now());
+                                current.close_requested_at = Some(self.now_ms());
                                 db.save(&current_entry)?;
                             }
                             Ok(())
@@ -1212,7 +1302,7 @@ impl AppServer {
         }
         self.deliver_questions(&client)?;
         self.close_idle(&client)?;
-        let reclaim_at = now();
+        let reclaim_at = self.now_ms();
         self.presence.prune_expired(reclaim_at);
         let mut reclaim_snap = self
             .store
@@ -1465,7 +1555,9 @@ impl AppServer {
             {
                 continue;
             }
-            if att.runtime_status() == "blocked" || att.connection_state != "connected" {
+            if att.runtime_status_at(self.now_ms()) == "blocked"
+                || att.connection_state != "connected"
+            {
                 continue;
             }
             let Some(card) = snapshot.cards.iter().find(|c| c.id == question.card_id) else {
@@ -1677,7 +1769,7 @@ impl AppServer {
         run.workspace = Some(workspace);
         run.lifecycle = Lifecycle::default();
         if run.started_at.is_none() {
-            run.started_at = Some(now());
+            run.started_at = Some(self.now_ms());
         }
         run.state = "starting".into();
         run.core_id = None;
@@ -1745,9 +1837,7 @@ impl AppServer {
             current.agent = Some(run.clone());
             db.save(&current)
         })?;
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
+        let client = self.herdr_client();
         let core_id = self.verified_core_id()?;
         let labels = std::collections::BTreeMap::from([
             ("canban.project".into(), att.project_id.clone()),
@@ -1800,7 +1890,7 @@ impl AppServer {
         run.terminal = Some(terminal_address.clone());
         let delivery_error=terminal.get("first_message").filter(|v|v["sent"]==false).map(|v|format!("Herdr did not deliver the initial task: {v}. Inspect this terminal before retrying."));
         run.observed = Some(canban_herdr::observation(&terminal));
-        run.lifecycle.observed_at = Some(now());
+        run.lifecycle.observed_at = Some(self.now_ms());
         run.connection_state = "connected".into();
         run.state = "running".into();
         // Seed the in-memory inventory immediately so a runtime tick racing ahead
@@ -1948,9 +2038,7 @@ impl AppServer {
             return Ok(());
         }
         let config = self.config();
-        let client = canban_herdr::Client {
-            config: config.clone(),
-        };
+        let client = self.herdr_client_with_config(config.clone());
         for run in runs {
             let Some(step_id) = run.step.clone() else {
                 continue;

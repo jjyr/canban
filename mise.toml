@@ -80,6 +80,18 @@ depends = ["terminal-deps"]
 env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }
 run = "cargo nextest run --workspace --locked"
 
+[tasks.sim]
+description = "Run deterministic simulation tests (all 8 scenarios; pass -- --scenario <name> --seed <N> --seeds <K>)"
+run = "cargo run --locked -p canban-sim --bin canban-sim -- run"
+
+[tasks.sim-chaos]
+description = "Run continuous random-seed chaos DST in release mode (pass -- --seeds <N> --duration <secs> --jobs <W> --ops <K>)"
+run = "cargo run --release --locked -p canban-sim --bin canban-sim -- chaos"
+
+[tasks.sim-replay]
+description = "Deterministically replay a specific DST seed (usage: mise run sim-replay -- <seed> [--scenario <name>])"
+run = "cargo run --locked -p canban-sim --bin canban-sim -- replay"
+
 [tasks.run]
 depends = ["build-binaries"]
 run = "python3 scripts/dev.py start"
