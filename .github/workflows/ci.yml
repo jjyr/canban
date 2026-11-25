@@ -51,6 +51,9 @@ jobs:
       - name: Run unit tests
         if: ${{ !cancelled() }}
         run: mise run test
+      - name: Run Deterministic Simulation Testing (DST)
+        if: ${{ !cancelled() }}
+        run: mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario all --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
       - name: Run script and packaging tests
         if: ${{ !cancelled() }}
         run: |
@@ -79,6 +82,7 @@ jobs:
           path: |
             target/acceptance-logs/
             target/nextest/ci/junit.xml
+            .local/sim-failures/
           if-no-files-found: ignore
 
   linux:
@@ -136,12 +140,17 @@ jobs:
       - name: Run Linux installer regression tests
         if: ${{ !cancelled() }}
         run: python3 scripts/run-acceptance.py -- scripts/test-install.py --bundle .local/canban
+      - name: Run Deterministic Simulation Testing (DST)
+        if: ${{ !cancelled() }}
+        run: mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario all --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
       - name: Upload CI failure logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: ci-linux-${{ matrix.arch }}-logs-${{ github.run_attempt }}
-          path: target/acceptance-logs/
+          path: |
+            target/acceptance-logs/
+            .local/sim-failures/
           if-no-files-found: ignore
 
   cache-prune:

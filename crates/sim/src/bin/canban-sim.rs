@@ -34,11 +34,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run one complete deterministic simulation round (all 8 scenarios + chaos),
+    /// Run one complete deterministic simulation round (all 11 scripted scenarios + chaos),
     /// or replay a specific `--seed` / `--scenario` or `--replay-file`.
     Run {
-        /// Optional scenario name (e.g. `remote_faults`, `github_sync`, `chaos`).
-        /// Omit to run one complete round (all 8 scenarios + chaos).
+        /// Optional scenario name (e.g. `remote_faults`, `github_sync`, `schedules_and_budget`, `chaos`).
+        /// Omit to run one complete round (all 11 scripted scenarios + chaos).
         #[arg(long)]
         scenario: Option<String>,
         /// Deterministic seed (default: 2026). Pass a failing seed to replay it exactly.
@@ -50,6 +50,9 @@ enum Command {
         /// Operations per chaos run.
         #[arg(long, default_value_t = 40)]
         ops: usize,
+        /// When a `chaos` seed fails, automatically run deterministic prefix+ddmin shrinking.
+        #[arg(long)]
+        shrink: bool,
         /// Optional file of previously recorded failing seeds (e.g. `failed-seeds.txt`) to replay.
         #[arg(long)]
         replay_file: Option<PathBuf>,
@@ -69,13 +72,22 @@ enum Command {
         #[arg(long, default_value = ".local/sim-failures")]
         trace_dir: PathBuf,
     },
+    /// Shrink a failing `chaos` seed down to a minimal reproducing operation sequence.
+    Shrink {
+        /// Failing chaos seed to minimize.
+        #[arg(long)]
+        seed: u64,
+        /// Original operation budget of the failing chaos run.
+        #[arg(long, default_value_t = 40)]
+        ops: usize,
+    },
     /// Continuously run random-seed simulations until Ctrl-C, printing failing seeds
     /// (pass `--fail-fast` to stop immediately on the first failure).
     Random {
         /// Stop immediately on the first failing seed instead of continuing until Ctrl-C.
         #[arg(long, short = 'x')]
         fail_fast: bool,
-        /// Target scenario: `chaos` (default), `all` (random mix of all 8 + chaos), or a specific scenario name.
+        /// Target scenario: `chaos` (default), `all` (random mix of all 11 scripted + chaos), or a specific scenario name.
         #[arg(long, default_value = "chaos")]
         scenario: String,
         /// Optional cap on total seeds (omit to run continuously until Ctrl-C).
@@ -357,6 +369,7 @@ fn verify_coverage(
     tracker: &CoverageTracker,
     assert_coverage: bool,
     extra_required: &[String],
+    suite_required: &[&str],
 ) -> Result<()> {
     if !assert_coverage && extra_required.is_empty() {
         return Ok(());
@@ -364,13 +377,44 @@ fn verify_coverage(
     println!("\nProperty coverage summary:\n{}", tracker.summary());
     let mut required: Vec<&str> = Vec::new();
     if assert_coverage {
-        required.push("sim.scenario.started");
-        required.push("sim.scenario.passed");
+        required.extend_from_slice(&[
+            "sim.scenario.started",
+            "sim.scenario.passed",
+            "sim.canonical_digest_mixed",
+            "world.heal_and_quiesce",
+            "oracle.sqlite_integrity_checked",
+        ]);
+        required.extend_from_slice(suite_required);
     }
     for prop in extra_required {
         required.push(prop.as_str());
     }
     tracker.assert_required(&required)
+}
+
+fn print_shrink_report(report: &scenarios::chaos::ShrinkReport) {
+    eprintln!(
+        "\n=== CHAOS SHRINK RESULT ===\nSeed:      {}\nMinimized: {} -> {} ops ({} attempts)\nError:     {}\nMinimal op sequence:",
+        report.seed, report.original_len, report.minimized_len, report.attempts, report.error
+    );
+    for (idx, op) in report.ops.iter().enumerate() {
+        eprintln!("  [{idx:02}] {op:?}");
+    }
+}
+
+fn run_shrink_cmd(seed: u64, ops: usize) -> Result<()> {
+    println!("Shrinking chaos seed={seed} ops={ops}...");
+    let _ = io::stdout().flush();
+    match scenarios::chaos::shrink(seed, ops)? {
+        Some(report) => {
+            print_shrink_report(&report);
+            Ok(())
+        }
+        None => {
+            println!("Seed {seed} (ops={ops}) PASSED without error — nothing to shrink.");
+            Ok(())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,6 +423,7 @@ fn run_suite(
     base_seed: u64,
     seeds: u64,
     ops: usize,
+    shrink_on_fail: bool,
     replay_file: Option<PathBuf>,
     continue_on_error: bool,
     seed_timeout: Option<u64>,
@@ -386,6 +431,7 @@ fn run_suite(
     require_coverage: Vec<String>,
     trace_dir: PathBuf,
 ) -> Result<()> {
+    let is_full_suite = replay_file.is_none() && scenario.is_none();
     let plan: Vec<ReplayEntry> = if let Some(path) = replay_file {
         load_replay_file(&path, ops)?
     } else {
@@ -418,7 +464,7 @@ fn run_suite(
 
     for entry in plan {
         println!(
-            "START {:<16} seed={:<12} ops={}",
+            "START {:<20} seed={:<12} ops={}",
             entry.scenario.name(),
             entry.seed,
             entry.ops,
@@ -435,7 +481,7 @@ fn run_suite(
             Ok(digest) => {
                 passed += 1;
                 println!(
-                    "PASS  {:<16} seed={:<12} digest={:#018x} ({:.2}s)",
+                    "PASS  {:<20} seed={:<12} digest={:#018x} ({:.2}s)",
                     entry.scenario.name(),
                     entry.seed,
                     digest,
@@ -447,7 +493,7 @@ fn run_suite(
                     write_failure_log(&trace_dir, entry.seed, entry.scenario.name(), entry.ops, &e);
                 let replay = replay_cmd(entry.seed, entry.scenario.name(), entry.ops);
                 eprintln!(
-                    "FAIL  {:<16} seed={} ops={}\nReplay: {replay}\n{}Error:  {e:#}",
+                    "FAIL  {:<20} seed={} ops={}\nReplay: {replay}\n{}Error:  {e:#}",
                     entry.scenario.name(),
                     entry.seed,
                     entry.ops,
@@ -455,6 +501,12 @@ fn run_suite(
                         .map(|p| format!("Log:    {}\n", p.display()))
                         .unwrap_or_default(),
                 );
+                if shrink_on_fail
+                    && entry.scenario == Scenario::Chaos
+                    && let Ok(Some(report)) = scenarios::chaos::shrink(entry.seed, entry.ops)
+                {
+                    print_shrink_report(&report);
+                }
                 if !continue_on_error {
                     return Err(e);
                 }
@@ -481,7 +533,33 @@ fn run_suite(
         "\nAll {passed} deterministic simulation run(s) passed in {:.2}s.",
         started.elapsed().as_secs_f64()
     );
-    verify_coverage(&total_coverage, assert_coverage, &require_coverage)?;
+    let suite_req: &[&str] = if is_full_suite {
+        &[
+            "oracle.post_bounce_recovery_checked",
+            "oracle.outbox_file_scanned",
+            "world.quiesce_natural",
+            "notifications.non_empty_both_hosts",
+            "workflow.rework",
+            "workflow.stop",
+            "remote_faults.three_way_auto_merge",
+            "remote_faults.client_bounce_outbox_recovery",
+            "github.collaborator_trust_gating",
+            "github.pagination_multi_page",
+            "env_sync.lww_converged",
+            "reclaim.stuck_exit_kill_fallback",
+            "schedules_budget.herdr_offline_queued_no_livelock",
+            "workflow_faults.condition_external_pr_gated",
+            "multi_client.two_client_three_way_auto_merge",
+        ]
+    } else {
+        &[]
+    };
+    verify_coverage(
+        &total_coverage,
+        assert_coverage,
+        &require_coverage,
+        suite_req,
+    )?;
     Ok(())
 }
 
@@ -686,7 +764,17 @@ fn run_random(
         bail!("{failed} random-sim seed(s) failed");
     }
     let cov = total_coverage.lock().unwrap();
-    verify_coverage(&cov, assert_coverage, &require_coverage)?;
+    let random_req: &[&str] = if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
+        &[
+            "chaos.net_partition",
+            "chaos.server_crash_bounce",
+            "chaos.client_bounce",
+            "chaos.env_save",
+        ]
+    } else {
+        &[]
+    };
+    verify_coverage(&cov, assert_coverage, &require_coverage, random_req)?;
     Ok(())
 }
 
@@ -698,6 +786,7 @@ fn main() -> Result<()> {
             2026,
             1,
             40,
+            false,
             None,
             false,
             None,
@@ -710,6 +799,7 @@ fn main() -> Result<()> {
             seed,
             seeds,
             ops,
+            shrink,
             replay_file,
             continue_on_error,
             seed_timeout,
@@ -721,6 +811,7 @@ fn main() -> Result<()> {
             seed,
             seeds,
             ops,
+            shrink,
             replay_file,
             continue_on_error,
             seed_timeout,
@@ -728,6 +819,7 @@ fn main() -> Result<()> {
             require_coverage,
             trace_dir,
         ),
+        Some(Command::Shrink { seed, ops }) => run_shrink_cmd(seed, ops),
         Some(Command::Random {
             fail_fast,
             scenario,

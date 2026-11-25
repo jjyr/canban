@@ -1,85 +1,110 @@
-//! All 8 deterministic simulation scenarios plus the full-spectrum Chaos workload.
 pub mod card_automation;
 pub mod chaos;
 pub mod client_pages;
 pub mod env_sync;
 pub mod github_sync;
 pub mod herdr_lifecycle;
+pub mod multi_client_sync;
 pub mod notifications;
 pub mod reclaim;
 pub mod remote_faults;
+pub mod schedules_and_budget;
+pub mod workflow_faults;
 
+use crate::world::SimWorld;
 use anyhow::{Result, bail};
+
+/// Mix the UUID-independent canonical state digest of `world` into `world.trace`,
+/// record a coverage hit, and return the final trace digest.
+pub(crate) fn finalize_digest(world: &mut SimWorld) -> u64 {
+    let state_digest = crate::oracle::canonical_state_digest(world);
+    world.trace.mix_u64(state_digest);
+    world.hit("sim.canonical_digest_mixed");
+    world.trace.digest()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scenario {
     CardAutomation,
     RemoteFaults,
-    GithubSync,
+    GitHubSync,
     ClientPages,
     EnvSync,
-    Notifications,
     HerdrLifecycle,
     Reclaim,
+    Notifications,
+    SchedulesAndBudget,
+    WorkflowFaults,
+    MultiClientSync,
     Chaos,
 }
 
 impl Scenario {
-    pub const ALL_NAMED: &'static [Self] = &[
-        Self::CardAutomation,
-        Self::RemoteFaults,
-        Self::GithubSync,
-        Self::ClientPages,
-        Self::EnvSync,
-        Self::Notifications,
-        Self::HerdrLifecycle,
-        Self::Reclaim,
+    pub const ALL_NAMED: &'static [Scenario] = &[
+        Scenario::CardAutomation,
+        Scenario::RemoteFaults,
+        Scenario::GitHubSync,
+        Scenario::ClientPages,
+        Scenario::EnvSync,
+        Scenario::HerdrLifecycle,
+        Scenario::Reclaim,
+        Scenario::Notifications,
+        Scenario::SchedulesAndBudget,
+        Scenario::WorkflowFaults,
+        Scenario::MultiClientSync,
     ];
 
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
-            Self::CardAutomation => "card_automation",
-            Self::RemoteFaults => "remote_faults",
-            Self::GithubSync => "github_sync",
-            Self::ClientPages => "client_pages",
-            Self::EnvSync => "env_sync",
-            Self::Notifications => "notifications",
-            Self::HerdrLifecycle => "herdr_lifecycle",
-            Self::Reclaim => "reclaim",
-            Self::Chaos => "chaos",
+            Scenario::CardAutomation => "card_automation",
+            Scenario::RemoteFaults => "remote_faults",
+            Scenario::GitHubSync => "github_sync",
+            Scenario::ClientPages => "client_pages",
+            Scenario::EnvSync => "env_sync",
+            Scenario::HerdrLifecycle => "herdr_lifecycle",
+            Scenario::Reclaim => "reclaim",
+            Scenario::Notifications => "notifications",
+            Scenario::SchedulesAndBudget => "schedules_and_budget",
+            Scenario::WorkflowFaults => "workflow_faults",
+            Scenario::MultiClientSync => "multi_client_sync",
+            Scenario::Chaos => "chaos",
         }
     }
 
     pub fn parse(s: &str) -> Result<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "1" | "card_automation" | "card-automation" | "automation" => Ok(Self::CardAutomation),
-            "2" | "remote_faults" | "remote-faults" | "remote" => Ok(Self::RemoteFaults),
-            "3" | "github_sync" | "github-sync" | "github" => Ok(Self::GithubSync),
-            "4" | "client_pages" | "client-pages" | "pages" => Ok(Self::ClientPages),
-            "5" | "env_sync" | "env-sync" | "env" => Ok(Self::EnvSync),
-            "6" | "notifications" | "notify" => Ok(Self::Notifications),
-            "7" | "herdr_lifecycle" | "herdr-lifecycle" | "herdr" => Ok(Self::HerdrLifecycle),
-            "8" | "reclaim" | "idle_reclaim" | "idle-reclaim" => Ok(Self::Reclaim),
-            "chaos" | "all-chaos" => Ok(Self::Chaos),
+        match s.trim() {
+            "card_automation" | "card" | "workflow" => Ok(Scenario::CardAutomation),
+            "remote_faults" | "remote" | "faults" => Ok(Scenario::RemoteFaults),
+            "github_sync" | "github" => Ok(Scenario::GitHubSync),
+            "client_pages" | "pages" | "client" => Ok(Scenario::ClientPages),
+            "env_sync" | "env" => Ok(Scenario::EnvSync),
+            "herdr_lifecycle" | "herdr" => Ok(Scenario::HerdrLifecycle),
+            "reclaim" | "idle" => Ok(Scenario::Reclaim),
+            "notifications" | "notif" => Ok(Scenario::Notifications),
+            "schedules_and_budget" | "schedules" | "budget" => Ok(Scenario::SchedulesAndBudget),
+            "workflow_faults" | "wf_faults" => Ok(Scenario::WorkflowFaults),
+            "multi_client_sync" | "multi_client" => Ok(Scenario::MultiClientSync),
+            "chaos" | "fuzz" => Ok(Scenario::Chaos),
             other => bail!(
-                "Unknown scenario '{other}'. Valid: card_automation, remote_faults, github_sync, \
-                 client_pages, env_sync, notifications, herdr_lifecycle, reclaim, chaos"
+                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, chaos"
             ),
         }
     }
 }
 
-/// Runs a single scenario with the given deterministic seed and returns its trace digest.
-pub fn run_scenario(scenario: Scenario, seed: u64, chaos_ops: usize) -> Result<u64> {
+pub fn run_scenario(scenario: Scenario, seed: u64, ops: usize) -> Result<u64> {
     match scenario {
         Scenario::CardAutomation => card_automation::run(seed),
         Scenario::RemoteFaults => remote_faults::run(seed),
-        Scenario::GithubSync => github_sync::run(seed),
+        Scenario::GitHubSync => github_sync::run(seed),
         Scenario::ClientPages => client_pages::run(seed),
         Scenario::EnvSync => env_sync::run(seed),
-        Scenario::Notifications => notifications::run(seed),
         Scenario::HerdrLifecycle => herdr_lifecycle::run(seed),
         Scenario::Reclaim => reclaim::run(seed),
-        Scenario::Chaos => chaos::run(seed, chaos_ops).map(|s| s.digest),
+        Scenario::Notifications => notifications::run(seed),
+        Scenario::SchedulesAndBudget => schedules_and_budget::run(seed),
+        Scenario::WorkflowFaults => workflow_faults::run(seed),
+        Scenario::MultiClientSync => multi_client_sync::run(seed),
+        Scenario::Chaos => chaos::run(seed, ops),
     }
 }

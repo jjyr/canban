@@ -63,6 +63,22 @@ mod tests {
     }
 
     #[test]
+    fn scenario_9_schedules_and_budget() {
+        scenarios::schedules_and_budget::run(202_609)
+            .expect("schedules_and_budget scenario failed");
+    }
+
+    #[test]
+    fn scenario_10_workflow_faults() {
+        scenarios::workflow_faults::run(202_610).expect("workflow_faults scenario failed");
+    }
+
+    #[test]
+    fn scenario_11_multi_client_sync() {
+        scenarios::multi_client_sync::run(202_611).expect("multi_client_sync scenario failed");
+    }
+
+    #[test]
     fn chaos_curated_seeds() {
         for seed in [42_u64, 1337, 202_609] {
             scenarios::chaos::run(seed, 35)
@@ -72,11 +88,48 @@ mod tests {
 
     #[test]
     fn determinism_same_seed_produces_identical_digest() {
-        let d1 = scenarios::client_pages::run(777_001).expect("first run");
-        let d2 = scenarios::client_pages::run(777_001).expect("second run");
+        let d1 = scenarios::chaos::run(777_001, 40).expect("first chaos run");
+        let d2 = scenarios::chaos::run(777_001, 40).expect("second chaos run");
         assert_eq!(
             d1, d2,
-            "Determinism violation: identical seed produced different trace digests ({d1:#x} vs {d2:#x})"
+            "Determinism violation: identical chaos seed produced different trace+canonical digests ({d1:#x} vs {d2:#x})"
+        );
+        let d_other = scenarios::chaos::run(777_002, 40).expect("different seed chaos run");
+        assert_ne!(
+            d1, d_other,
+            "Distinct chaos seeds unexpectedly produced identical digests ({d1:#x})"
+        );
+    }
+
+    #[test]
+    fn chaos_shrink_smoke_test() {
+        // Synthetic 30-op sequence failing iff op 7 and op 22 are both present in order.
+        let synthetic_ops: Vec<usize> = (0..30).collect();
+        let (minimized, attempts, err) = scenarios::chaos::shrink_ops(
+            synthetic_ops,
+            "synthetic invariant failure".into(),
+            64,
+            |cand| {
+                let p7 = cand.iter().position(|&x| x == 7);
+                let p22 = cand.iter().position(|&x| x == 22);
+                match (p7, p22) {
+                    (Some(a), Some(b)) if a < b => Some("synthetic invariant failure".into()),
+                    _ => None,
+                }
+            },
+        );
+        assert_eq!(
+            minimized,
+            vec![7, 22],
+            "shrink_ops failed to minimize sequence to exact 2-op failure core (attempts={attempts})"
+        );
+        assert_eq!(err, "synthetic invariant failure");
+
+        // Running `chaos::shrink` against a passing seed returns `Ok(None)`.
+        let passing = scenarios::chaos::shrink(777_001, 12).expect("shrink passing seed");
+        assert!(
+            passing.is_none(),
+            "Passing seed should produce None ShrinkReport"
         );
     }
 

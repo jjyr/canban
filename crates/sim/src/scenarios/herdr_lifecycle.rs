@@ -1,33 +1,33 @@
-//! Scenario #7 — Herdr state changes -> Terminals & Cards:
-//! `working` -> `idle` -> `done` -> `blocked` (wait notice + dedup + stale-seq rejection) ->
-//! `working` (resolved wait) -> `missed` snapshot resync -> subscriber drop recovery ->
-//! Core restart (`replaced`) -> `lost`/`finished` exit handling, plus `merged_runtime_state()` parity.
+//! Scenario #6 — Herdr terminal event lifecycle:
+//! out-of-order / stale-seq rejection, missed-snapshot reconciliation, subscriber disconnects,
+//! Herdr Core restart (`core.id` change), `terminal.read`/`execution.output` capture,
+//! `herdr.set_offline(true)` outage recovery, `AppServer` `bounce_server` live-terminal reattach,
+//! `max_agents` slot release on `blocked`/`idle`, and UI terminal-to-project + close-fallback invariants.
 use crate::{
     oracle::InvariantOracle,
-    world::{SimWorld, SimWorldConfig},
+    scenarios::finalize_digest,
+    world::{SimWorldConfig, run_with_world},
 };
 use anyhow::{Result, ensure};
 use serde_json::json;
 use std::time::Duration;
 
-const SIMPLE_FLOW: &str = r#"schema: 1
-id: herdr-flow
+const AGENT_YAML: &str = r#"schema: 12
+id: herdr-test
 name: Herdr Lifecycle Flow
 workspace:
   create_worktree: false
   sync_base: false
 on:
-  develop:
-    event: card.column_entered
+  start:
+    event: manual
     start_at: work
-    match:
-      column: develop
 steps:
   - id: work
     uses: agent
     with:
-      profile: developer
-      instruction: Work on card
+      profile: codex
+      instruction: Run simulated agent
     next: finish
   - id: finish
     uses: complete
@@ -36,406 +36,388 @@ steps:
 pub fn run(seed: u64) -> Result<u64> {
     let mut cfg = SimWorldConfig::desktop_default(seed, "herdr_lifecycle");
     cfg.remote_hosts = vec!["remote-a".into()];
-    let mut world = SimWorld::new(cfg)?;
-    let mut oracle = InvariantOracle::default();
 
-    let dir = world.project_dir("herdr-life")?;
-    let proj = world.client_call(
-        "project.create",
-        json!({ "host_id": "remote-a", "name": "Herdr Life", "directory": dir }),
-        None,
-    )?;
-    let pid = proj["id"].as_str().unwrap().to_owned();
+    run_with_world(cfg, |world| {
+        let mut oracle = InvariantOracle::default();
 
-    let sources =
-        world.client_call("workflow.sources", json!({ "project_id": pid }), Some(&pid))?;
-    let _ = world.client_call(
-        "workflow.apply",
-        json!({
-            "project_id": pid,
-            "revision": sources["revision"],
-            "sources": [{ "filename": "herdr-flow.yaml", "source": SIMPLE_FLOW }],
-        }),
-        Some(&pid),
-    )?;
+        let dir = world.project_dir("herdr-life")?;
+        let proj = world.client_call(
+            "project.create",
+            json!({ "host_id": "remote-a", "name": "Herdr Proj", "directory": dir }),
+            None,
+        )?;
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let raw_pid = canban_types::split_qualified_host_id(&pid)
+            .map(|(_, r)| r.to_owned())
+            .unwrap_or_else(|| pid.clone());
 
-    // Card 1: Launch agent terminal on remote-a.
-    let c1 = world.client_call(
-        "card.create",
-        json!({ "project_id": pid, "title": "Herdr Observed Card" }),
-        Some(&pid),
-    )?;
-    let cid1 = c1["id"].as_str().unwrap().to_owned();
-    let raw_cid1 = canban_types::split_qualified_host_id(&cid1)
-        .map(|(_, r)| r.to_owned())
-        .unwrap_or_else(|| cid1.clone());
-    let _ = world.client_call(
-        "card.move",
-        json!({
-            "card_id": cid1,
-            "revision": c1["revision"].as_u64().unwrap(),
-            "stage": "develop",
-        }),
-        Some(&pid),
-    )?;
+        let sources =
+            world.client_call("workflow.sources", json!({ "project_id": pid }), Some(&pid))?;
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid,
+                "revision": sources["revision"],
+                "sources": [{ "filename": "herdr-test.yaml", "source": AGENT_YAML }],
+            }),
+            Some(&pid),
+        )?;
 
-    world.wait_until(10_000, |w| {
-        let snap = w.server("remote-a").unwrap().snapshot()?;
-        Ok(snap.terminals.iter().any(|t| {
-            t.agent.as_ref().is_some_and(|a| {
-                a.card_id == raw_cid1 && a.terminal.is_some() && a.state == "running"
-            })
-        }))
-    })?;
+        let card = world.client_call(
+            "card.create",
+            json!({ "project_id": pid, "title": "Herdr Resilience Card" }),
+            Some(&pid),
+        )?;
+        let cid = card["id"].as_str().unwrap().to_owned();
+        let raw_cid = canban_types::split_qualified_host_id(&cid)
+            .map(|(_, r)| r.to_owned())
+            .unwrap_or_else(|| cid.clone());
 
-    let herdr_a = world.herdr("remote-a").unwrap();
-    let srv_a = world.server("remote-a").unwrap();
-    let addr1 = srv_a
-        .snapshot()?
-        .terminals
-        .iter()
-        .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid1))
-        .unwrap()
-        .agent
-        .as_ref()
-        .unwrap()
-        .terminal
-        .clone()
-        .unwrap();
+        let _ = world.client_call(
+            "workflow.start",
+            json!({
+                "workflow_id": "herdr-test",
+                "card_id": cid,
+                "entry": "start",
+                "request_key": format!("herdr-start-{seed}"),
+            }),
+            Some(&pid),
+        )?;
 
-    // 1. Working -> merged_runtime_state reports active agent parity.
-    world.advance(Duration::from_millis(500))?;
-    oracle.check_step_invariants(&world)?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid && a.terminal.is_some() && a.state == "running"
+                })
+            }))
+        })?;
 
-    // 2. Transition to `idle` and `done`: Card MUST stay in `develop` (orthogonal dimensions!).
-    herdr_a.set_status(&addr1, "idle", Some(2));
-    world.advance(Duration::from_millis(400))?;
-    herdr_a.set_status(&addr1, "done", Some(2));
-    world.advance(Duration::from_millis(400))?;
-    {
-        let snap = srv_a.snapshot()?;
-        let card = snap.cards.iter().find(|c| c.id == raw_cid1).unwrap();
-        ensure!(
-            card.stage == "develop",
-            "Herdr `done` must never advance card stage! Got {}",
-            card.stage
-        );
-        let run = snap
-            .terminals
-            .iter()
-            .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid1))
-            .unwrap()
-            .agent
-            .as_ref()
-            .unwrap();
-        ensure!(
-            run.runtime_status_at(world.now_ms()) == "done" && run.state == "running",
-            "Expected runtime_status=done & run.state=running, got {} / {}",
-            run.runtime_status_at(world.now_ms()),
-            run.state
-        );
-    }
-
-    // 3. Transition to `blocked`: raises durable `execution.input_required` notice (not card human_gate).
-    let blocked_status = json!({
-        "state": "blocked",
-        "kind": "permission",
-        "title": "Run cargo test?",
-        "msg": "Allow command execution?",
-    });
-    herdr_a.set_status_detailed(&addr1, blocked_status.clone(), None);
-    world.wait_until(5_000, |w| {
-        let snap = w.server("remote-a").unwrap().snapshot()?;
-        Ok(snap.terminals.iter().any(|t| {
-            t.agent
-                .as_ref()
-                .is_some_and(|a| a.card_id == raw_cid1 && a.lifecycle.waiting.is_some())
-        }))
-    })?;
-    let notice_count_blocked = srv_a.snapshot()?.notices.len();
-    ensure!(
-        notice_count_blocked >= 1,
-        "Expected blocked wait notice to be created"
-    );
-
-    // Duplicate same blocked status + stale out-of-order seq must NOT duplicate notice or revert status!
-    herdr_a.set_status_detailed(&addr1, blocked_status, None);
-    herdr_a.inject_stale_event(&addr1, 1, "working");
-    world.advance(Duration::from_millis(500))?;
-    {
-        let snap = srv_a.snapshot()?;
-        ensure!(
-            snap.notices.len() == notice_count_blocked,
-            "Duplicate blocked status created extra notices!"
-        );
-        let card = snap.cards.iter().find(|c| c.id == raw_cid1).unwrap();
-        ensure!(
-            card.human_gate.is_none(),
-            "Runtime Herdr wait must not fabricate a workflow human_gate"
-        );
-        let run = snap
-            .terminals
-            .iter()
-            .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid1))
-            .unwrap()
-            .agent
-            .as_ref()
-            .unwrap();
-        ensure!(
-            run.runtime_status_at(world.now_ms()) == "blocked",
-            "Stale seq event corrupted runtime_status to {}!",
-            run.runtime_status_at(world.now_ms())
-        );
-    }
-
-    // 4. Resume `working` -> wait notice auto-marked read & `execution.input_resolved` logged!
-    herdr_a.set_status(&addr1, "working", Some(3));
-    world.wait_until(5_000, |w| {
-        let now_ms = w.now_ms();
-        let snap = w.server("remote-a").unwrap().snapshot()?;
-        Ok(snap.terminals.iter().any(|t| {
-            t.agent.as_ref().is_some_and(|a| {
-                a.card_id == raw_cid1
-                    && a.lifecycle.waiting.is_none()
-                    && a.runtime_status_at(now_ms) == "working"
-            })
-        }))
-    })?;
-    {
-        let snap = srv_a.snapshot()?;
-        ensure!(
-            snap.notices.iter().all(|n| n.read),
-            "Resolved runtime wait notice should be marked read"
-        );
-    }
-
-    // 5. `missed` snapshot resync + subscriber drop recovery.
-    herdr_a.emit_missed_snapshot();
-    world.advance(Duration::from_millis(300))?;
-    herdr_a.drop_subscribers();
-    world.advance(Duration::from_secs(2))?;
-    herdr_a.emit_heartbeat();
-    world.advance(Duration::from_millis(300))?;
-    {
-        let obs = srv_a.call("runtime.observation", json!({}))?;
-        ensure!(
-            obs["connected"] == true,
-            "Observer failed to reconnect after subscriber drop: {obs}"
-        );
-    }
-
-    // 6. Core restart with a new `core_id` -> terminal marked `connection_state == "replaced"`.
-    herdr_a.restart_core("core-remote-a-restarted");
-    world.wait_until(10_000, |w| {
-        let snap = w.server("remote-a").unwrap().snapshot()?;
-        Ok(snap.terminals.iter().any(|t| {
-            t.agent
-                .as_ref()
-                .is_some_and(|a| a.card_id == raw_cid1 && a.connection_state == "replaced")
-        }))
-    })?;
-    oracle.check_step_invariants(&world)?;
-
-    // 7. Card 2 on the restarted Core: `finish_terminal` without explicit report -> classified `failed`!
-    let c2 = world.client_call(
-        "card.create",
-        json!({ "project_id": pid, "title": "Herdr Exit Without Report" }),
-        Some(&pid),
-    )?;
-    let cid2 = c2["id"].as_str().unwrap().to_owned();
-    let raw_cid2 = canban_types::split_qualified_host_id(&cid2)
-        .map(|(_, r)| r.to_owned())
-        .unwrap_or_else(|| cid2.clone());
-    let _ = world.client_call(
-        "card.move",
-        json!({
-            "card_id": cid2,
-            "revision": c2["revision"].as_u64().unwrap(),
-            "stage": "develop",
-        }),
-        Some(&pid),
-    )?;
-
-    world.wait_until(10_000, |w| {
-        let snap = w.server("remote-a").unwrap().snapshot()?;
-        Ok(snap.terminals.iter().any(|t| {
-            t.agent.as_ref().is_some_and(|a| {
-                a.card_id == raw_cid2 && a.terminal.is_some() && a.state == "running"
-            })
-        }))
-    })?;
-    let addr2 = srv_a
-        .snapshot()?
-        .terminals
-        .iter()
-        .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid2))
-        .unwrap()
-        .agent
-        .as_ref()
-        .unwrap()
-        .terminal
-        .clone()
-        .unwrap();
-
-    // Emit `lost` then `finished` with exit code 1 -> must classify as `failed` cleanly.
-    herdr_a.lose_terminal(&addr2, "pty_eof");
-    world.advance(Duration::from_millis(300))?;
-    herdr_a.finish_terminal(&addr2, 1, "exited");
-    world.wait_until(10_000, |w| {
-        let snap = w.server("remote-a").unwrap().snapshot()?;
-        Ok(snap.terminals.iter().any(|t| {
-            t.agent
-                .as_ref()
-                .is_some_and(|a| a.card_id == raw_cid2 && a.state == "failed")
-        }))
-    })?;
-
-    // 8. Independent Terminal creation & close-fallback UX invariants across local + remote-a:
-    //    (a) Creating the first terminal in a Project must land immediately under that Project
-    //        (never transiently in "Other" waiting for background directory discovery).
-    //    (b) Closing/exiting terminals must follow strict 4-tier priority:
-    //        same worktree -> same project -> same host -> cross host.
-    let dir_local = world.project_dir("herdr-local")?;
-    let p_local = world.client_call(
-        "project.create",
-        json!({ "host_id": "local", "name": "Local Project", "directory": dir_local }),
-        None,
-    )?;
-    let pid_local = p_local["id"].as_str().unwrap().to_owned();
-
-    let dir_a2 = world.project_dir("herdr-life-2")?;
-    let p_a2 = world.client_call(
-        "project.create",
-        json!({ "host_id": "remote-a", "name": "Herdr Life 2", "directory": dir_a2 }),
-        None,
-    )?;
-    let pid_a2 = p_a2["id"].as_str().unwrap().to_owned();
-    let subdir_wt = std::path::Path::new(&dir).join("sub-wt");
-    std::fs::create_dir_all(&subdir_wt)?;
-
-    // Create terminals: local project, 2 in remote-a project 1 subdir, 1 in remote-a project 1 root,
-    // and 1 in remote-a project 2 root. Verify immediate project placement on every single creation!
-    let t_local = world.client_call(
-        "terminal.create",
-        json!({ "project_id": pid_local }),
-        Some(&pid_local),
-    )?;
-    let tid_local = t_local["id"].as_str().unwrap().to_owned();
-    world.wait_until(5_000, |w| {
-        Ok(w.client_merged_snapshot()?
-            .terminals
-            .iter()
-            .any(|t| t.id == tid_local))
-    })?;
-    InvariantOracle::assert_terminal_in_project(&world, &tid_local, &pid_local)?;
-
-    let t_ra_root =
-        world.client_call("terminal.create", json!({ "project_id": pid }), Some(&pid))?;
-    let tid_ra_root = t_ra_root["id"].as_str().unwrap().to_owned();
-    world.wait_until(5_000, |w| {
-        Ok(w.client_merged_snapshot()?
-            .terminals
-            .iter()
-            .any(|t| t.id == tid_ra_root))
-    })?;
-    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_root, &pid)?;
-
-    let t_ra_sub1 = world.client_call(
-        "terminal.create",
-        json!({ "project_id": pid, "cwd": subdir_wt.to_string_lossy() }),
-        Some(&pid),
-    )?;
-    let tid_ra_sub1 = t_ra_sub1["id"].as_str().unwrap().to_owned();
-    world.wait_until(5_000, |w| {
-        Ok(w.client_merged_snapshot()?
-            .terminals
-            .iter()
-            .any(|t| t.id == tid_ra_sub1))
-    })?;
-    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_sub1, &pid)?;
-
-    let t_ra_sub2 = world.client_call(
-        "terminal.create",
-        json!({ "project_id": pid, "cwd": subdir_wt.to_string_lossy() }),
-        Some(&pid),
-    )?;
-    let tid_ra_sub2 = t_ra_sub2["id"].as_str().unwrap().to_owned();
-    world.wait_until(5_000, |w| {
-        Ok(w.client_merged_snapshot()?
-            .terminals
-            .iter()
-            .any(|t| t.id == tid_ra_sub2))
-    })?;
-    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_sub2, &pid)?;
-
-    let t_ra_p2 = world.client_call(
-        "terminal.create",
-        json!({ "project_id": pid_a2 }),
-        Some(&pid_a2),
-    )?;
-    let tid_ra_p2 = t_ra_p2["id"].as_str().unwrap().to_owned();
-    world.wait_until(5_000, |w| {
-        Ok(w.client_merged_snapshot()?
-            .terminals
-            .iter()
-            .any(|t| t.id == tid_ra_p2))
-    })?;
-    InvariantOracle::assert_terminal_in_project(&world, &tid_ra_p2, &pid_a2)?;
-
-    // Walk through closing terminals in sequence and assert exact 4-tier fallback priority:
-    // Tier 1 (same worktree/dir) -> Tier 2 (same project) -> Tier 3 (same host) -> Tier 4 (cross host).
-    let snap = world.client_merged_snapshot()?;
-    let rows = canban_ui::terminals::entries(&snap);
-    let mut closing = std::collections::BTreeSet::new();
-
-    // Closing tid_ra_sub2 -> must stay in same directory (`tid_ra_sub1` or same project root if same directory_root).
-    let next1 =
-        InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &tid_ra_sub2)?;
-    ensure!(next1.is_some());
-    closing.insert(tid_ra_sub2.clone());
-
-    let next2 =
-        InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &tid_ra_sub1)?;
-    ensure!(next2.as_deref() == Some(tid_ra_root.as_str()));
-    closing.insert(tid_ra_sub1.clone());
-
-    // Closing last terminal in `pid` (`tid_ra_root`) -> MUST switch to `tid_ra_p2` on SAME host `remote-a`,
-    // NOT `tid_local` on `local`!
-    let next3 =
-        InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &tid_ra_root)?;
-    ensure!(
-        next3.as_deref() == Some(tid_ra_p2.as_str()),
-        "closing {tid_ra_root} on remote-a must prefer same-host {tid_ra_p2}, got {next3:?}"
-    );
-    closing.insert(tid_ra_root.clone());
-
-    // Closing `tid_ra_p2` -> still prefers any remaining live/replaced terminal on `remote-a`
-    // (such as Card 1's replaced agent terminal) over jumping cross-host; once every remaining
-    // `remote-a` terminal is closed, fallback crosses hosts to `tid_local`!
-    let mut cur = tid_ra_p2.clone();
-    loop {
-        let next = InvariantOracle::assert_close_fallback_priority(&snap, &rows, &closing, &cur)?;
-        let Some(next_id) = next else {
-            anyhow::bail!("unexpected empty fallback while {tid_local} is still live");
+        let (tid, herdr_addr) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let t = snap
+                .terminals
+                .iter()
+                .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid))
+                .unwrap();
+            (
+                t.id.clone(),
+                t.agent.as_ref().unwrap().terminal.clone().unwrap(),
+            )
         };
-        closing.insert(cur);
-        if next_id == tid_local {
-            break;
-        }
-        // Any intermediate fallback before `tid_local` MUST still be on `remote-a`!
-        let next_host = rows
-            .iter()
-            .find(|e| e.saved.id == next_id)
-            .map(|e| e.host_id.as_str());
+        let herdr = world.herdr("remote-a").unwrap();
+
+        // 1. Real-time working -> idle -> working transitions.
+        herdr.set_status(&herdr_addr, "idle", Some(1));
+        world.wait_until(5_000, |w| {
+            let srv = w.server("remote-a").unwrap();
+            let now = srv.now_ms();
+            let snap = srv.snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.runtime_status_at(now) == "idle")
+            }))
+        })?;
+
+        herdr.set_status(&herdr_addr, "working", Some(2));
+        world.wait_until(5_000, |w| {
+            let srv = w.server("remote-a").unwrap();
+            let now = srv.now_ms();
+            let snap = srv.snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.runtime_status_at(now) == "working")
+            }))
+        })?;
+        oracle.check_step_invariants(world)?;
+
+        // 2. Output capture via `terminal.read` / `execution.output`.
+        herdr.append_output(&herdr_addr, ["sim-log-line-1", "sim-log-line-2"]);
+        herdr.set_screen(&herdr_addr, "screen-snapshot-ready");
+        let output_res = world.server_call(
+            "remote-a",
+            "execution.output",
+            json!({ "terminal_id": tid }),
+        )?;
+        let out_text = output_res.to_string();
         ensure!(
-            next_host == Some("remote-a"),
-            "expected same-host remote-a fallback before cross-host {tid_local}, got {next_id} on {next_host:?}"
+            out_text.contains("sim-log-line-1") && out_text.contains("sim-log-line-2"),
+            "execution.output did not return SimHerdr terminal.read lines: {out_text}"
         );
-        cur = next_id;
-    }
+        world.hit("herdr.output_capture");
 
-    world.heal_and_quiesce(15_000)?;
-    oracle.check_quiescent_invariants(&world)?;
+        // 3. Stale/out-of-order seq event injection -> MUST be ignored!
+        let current_seq = herdr.seq();
+        herdr.inject_stale_event(&herdr_addr, current_seq.saturating_sub(2).max(1), "error");
+        world.advance(Duration::from_millis(300))?;
+        {
+            let srv = world.server("remote-a").unwrap();
+            let now = srv.now_ms();
+            let snap = srv.snapshot()?;
+            let st = snap
+                .terminals
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.agent.as_ref())
+                .map(|a| a.runtime_status_at(now));
+            ensure!(
+                st == Some("working"),
+                "Stale seq event overwrote newer runtime state! Expected working, got {st:?}"
+            );
+        }
 
-    Ok(world.trace.digest())
+        // 4. Subscriber drop -> automatic reconnect + missed snapshot recovery!
+        herdr.drop_subscribers();
+        world.advance(Duration::from_millis(100))?;
+        herdr.set_status(&herdr_addr, "done", Some(3));
+        herdr.emit_missed_snapshot();
+        world.wait_until(10_000, |w| {
+            let srv = w.server("remote-a").unwrap();
+            let now = srv.now_ms();
+            let snap = srv.snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.runtime_status_at(now) == "done")
+            }))
+        })?;
+        oracle.check_step_invariants(world)?;
+
+        // 5. `herdr.set_offline(true)` outage -> AppServer stays healthy -> restore online!
+        herdr.set_offline(true);
+        world.advance(Duration::from_secs(2))?;
+        oracle.check_step_invariants(world)?;
+        herdr.set_offline(false);
+        herdr.set_status(&herdr_addr, "idle", Some(4));
+        world.wait_until(10_000, |w| {
+            let srv = w.server("remote-a").unwrap();
+            let now = srv.now_ms();
+            let snap = srv.snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.runtime_status_at(now) == "idle")
+            }))
+        })?;
+        world.hit("herdr.offline_recovery");
+
+        // 6. `AppServer` `bounce_server("remote-a")` while Herdr terminal remains live ->
+        //    reattaches cleanly without duplicating or killing the live Herdr terminal!
+        world.bounce_server("remote-a")?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            let rt = w.server("remote-a").unwrap().runtime_state()?;
+            Ok(snap
+                .terminals
+                .iter()
+                .any(|t| t.id == tid && t.agent.as_ref().is_some_and(|a| !a.finished()))
+                && rt.terminals.iter().any(|t| t.id == tid))
+        })?;
+        ensure!(
+            herdr.terminal_addresses().contains(&herdr_addr),
+            "AppServer bounce must leave live Herdr PTY intact"
+        );
+        world.hit("herdr.appserver_bounce_reattach");
+
+        // 7. Herdr Core restart (new `core.id`, all live PTYs vanish) -> AppServer reconciles
+        //    existing terminal to `connection_state == "replaced"`!
+        herdr.restart_core(format!("sim-core-restarted-{seed}"));
+        world.wait_until(15_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.connection_state == "replaced")
+            }))
+        })?;
+        oracle.check_step_invariants(world)?;
+
+        // 8. `max_agents` slot release: Card 1's `replaced` terminal reserves 1 uncertain slot,
+        //    so setting `max_agents: 2` leaves 1 remaining slot for `c_slot1` while `c_slot2`
+        //    queues until `c_slot1` transitions to `blocked` and releases its slot!
+        let _ = world.client_call(
+            "scheduler.configure",
+            json!({ "max_agents": 2 }),
+            Some(&pid),
+        )?;
+        let c_slot1 = world.client_call(
+            "card.create",
+            json!({ "project_id": pid, "title": "Slot Holder 1" }),
+            Some(&pid),
+        )?;
+        let c_slot2 = world.client_call(
+            "card.create",
+            json!({ "project_id": pid, "title": "Slot Waiter 2" }),
+            Some(&pid),
+        )?;
+        let cid_s1 = c_slot1["id"].as_str().unwrap().to_owned();
+        let cid_s2 = c_slot2["id"].as_str().unwrap().to_owned();
+        let raw_s1 = canban_types::split_qualified_host_id(&cid_s1)
+            .map(|(_, r)| r.to_owned())
+            .unwrap_or_else(|| cid_s1.clone());
+        let raw_s2 = canban_types::split_qualified_host_id(&cid_s2)
+            .map(|(_, r)| r.to_owned())
+            .unwrap_or_else(|| cid_s2.clone());
+
+        let _ = world.client_call(
+            "workflow.start",
+            json!({ "workflow_id": "herdr-test", "card_id": cid_s1, "entry": "start", "request_key": format!("slot1-{seed}") }),
+            Some(&pid),
+        )?;
+        let _ = world.client_call(
+            "workflow.start",
+            json!({ "workflow_id": "herdr-test", "card_id": cid_s2, "entry": "start", "request_key": format!("slot2-{seed}") }),
+            Some(&pid),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent
+                    .as_ref()
+                    .is_some_and(|a| a.card_id == raw_s1 && a.terminal.is_some())
+            }))
+        })?;
+        // While s1 is `working`, s2 must stay queued (never exceed max_agents=1).
+        let s1_addr = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .terminals
+            .into_iter()
+            .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_s1))
+            .unwrap()
+            .agent
+            .unwrap()
+            .terminal
+            .unwrap();
+        herdr.set_status(&s1_addr, "working", Some(1));
+        world.advance(Duration::from_millis(600))?;
+        oracle.check_step_invariants(world)?;
+
+        // Transition s1 to `blocked` -> releases agent slot -> s2 launches while s1 stays alive!
+        herdr.set_status(&s1_addr, "blocked", Some(2));
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent
+                    .as_ref()
+                    .is_some_and(|a| a.card_id == raw_s2 && a.terminal.is_some())
+            }))
+        })?;
+        world.hit("herdr.max_agents_slot_release");
+        // Restore default budget for cleanup.
+        let _ = world.client_call(
+            "scheduler.configure",
+            json!({ "max_agents": 8 }),
+            Some(&pid),
+        )?;
+
+        // 9. Preserved UI terminal-to-project grouping and close-fallback invariants across
+        //    2 projects + manual shell terminals (from commit 725e1c6).
+        let dir2 = world.project_dir("herdr-life-p2")?;
+        let proj2 = world.client_call(
+            "project.create",
+            json!({ "host_id": "remote-a", "name": "Herdr Proj 2", "directory": dir2 }),
+            None,
+        )?;
+        let pid2 = proj2["id"].as_str().unwrap().to_owned();
+        let raw_pid2 = canban_types::split_qualified_host_id(&pid2)
+            .map(|(_, r)| r.to_owned())
+            .unwrap_or_else(|| pid2.clone());
+
+        let sh_a1 = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid, "name": "Proj1 Shell A" }),
+            Some(&pid),
+        )?;
+        let sh_a2 = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid, "name": "Proj1 Shell B" }),
+            Some(&pid),
+        )?;
+        let sh_b1 = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid2, "name": "Proj2 Shell A" }),
+            Some(&pid2),
+        )?;
+        let sh_a1_id = sh_a1["id"].as_str().unwrap().to_owned();
+        let sh_a2_id = sh_a2["id"].as_str().unwrap().to_owned();
+        let sh_b1_id = sh_b1["id"].as_str().unwrap().to_owned();
+
+        world.wait_until(10_000, |w| {
+            let merged = w.client_merged_snapshot()?;
+            Ok(merged.terminals.iter().any(|t| t.id == sh_a1_id)
+                && merged.terminals.iter().any(|t| t.id == sh_a2_id)
+                && merged.terminals.iter().any(|t| t.id == sh_b1_id))
+        })?;
+        oracle.check_step_invariants(world)?;
+
+        InvariantOracle::assert_terminal_in_project(world, &sh_a1_id, &pid)?;
+        InvariantOracle::assert_terminal_in_project(world, &sh_a2_id, &pid)?;
+        InvariantOracle::assert_terminal_in_project(world, &sh_b1_id, &pid2)?;
+
+        let snap_ui = world.client_merged_snapshot()?;
+        let rows = canban_ui::terminals::entries(&snap_ui);
+        let empty_closing = std::collections::BTreeSet::new();
+        let fb_same_project = InvariantOracle::assert_close_fallback_priority(
+            &snap_ui,
+            &rows,
+            &empty_closing,
+            &sh_a1_id,
+        )?;
+        let fb_id = fb_same_project
+            .as_deref()
+            .expect("Expected same-project fallback when closing sh_a1_id");
+        let fb_row = rows
+            .iter()
+            .find(|e| e.saved.id == fb_id)
+            .expect("Fallback terminal missing from rows");
+        ensure!(
+            fb_row.project_id.as_deref() == Some(pid.as_str()),
+            "Expected same-project fallback in {pid}, got {fb_id} in {:?}",
+            fb_row.project_id
+        );
+
+        let mut closing_a2 = std::collections::BTreeSet::new();
+        closing_a2.insert(sh_a2_id.clone());
+        let fb_cross_project = InvariantOracle::assert_close_fallback_priority(
+            &snap_ui,
+            &rows,
+            &closing_a2,
+            &sh_a1_id,
+        )?;
+        ensure!(fb_cross_project.is_some());
+
+        for sh_id in [&sh_a1_id, &sh_a2_id, &sh_b1_id] {
+            let _ =
+                world.client_call("terminal.end", json!({ "terminal_id": sh_id }), Some(&pid))?;
+        }
+        ensure!(
+            world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .projects
+                .iter()
+                .any(|p| p.id == raw_pid)
+                && world
+                    .server("remote-a")
+                    .unwrap()
+                    .snapshot()?
+                    .projects
+                    .iter()
+                    .any(|p| p.id == raw_pid2)
+        );
+
+        world.heal_and_quiesce(15_000)?;
+        oracle.check_quiescent_invariants(world)?;
+        Ok(finalize_digest(world))
+    })
 }
