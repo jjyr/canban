@@ -2765,6 +2765,10 @@ pub fn paired_devices_preview() -> canban_ui::presenter::PairedDevicesPreview {
             },
         ],
         has_legacy_token: true,
+        tcp_enabled: true,
+        listening: true,
+        listen_addrs: vec!["100.84.0.2:7680".into()],
+        trust_tailscale_self: true,
         generated_uri: Some("canban://100.84.0.2:7680#pair_demo9f8e7d6c5b4a3210".into()),
         generated_expires_at: Some(t + 240_000),
     }

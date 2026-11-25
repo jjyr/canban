@@ -2858,3 +2858,52 @@ fn colliding_projects_remote_globals_and_call_all_hosts_skip_offline_work_end_to
     let after_relay = after_cfg.relay_endpoint.clone().unwrap();
     assert!(after_relay.starts_with("mux://") && after_relay != before_relay);
 }
+
+#[test]
+fn device_remote_access_set_toggles_tcp_listener_live_and_persists_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let _running = app.start().unwrap();
+
+    let initial = app.call("device.list", json!({})).unwrap();
+    assert_eq!(initial["listening"], false);
+    assert_eq!(initial["tcp_enabled"], false);
+    assert!(app.bound_tcp_addrs().is_empty());
+
+    // Enable TCP listening live on loopback without restarting AppServer.
+    let enabled = app
+        .call(
+            "device.remote_access.set",
+            json!({
+                "tailscale": false,
+                "listen": "127.0.0.1:0",
+                "trust_tailscale_self": true,
+            }),
+        )
+        .unwrap();
+    assert_eq!(enabled["listening"], true);
+    assert_eq!(enabled["tcp_enabled"], true);
+    let addrs = app.bound_tcp_addrs();
+    assert_eq!(addrs.len(), 1);
+    let (_, token) = app.issue_device_token("live-test").unwrap();
+    let client = AppClient::connect_tcp(addrs[0].clone(), token).unwrap();
+    assert_eq!(client.server_id(), Some(app.server_id()));
+    drop(client);
+
+    // Disable remote access live and confirm listener and persisted config clear cleanly.
+    let disabled = app
+        .call(
+            "device.remote_access.set",
+            json!({
+                "tailscale": false,
+                "clear_listen": true,
+            }),
+        )
+        .unwrap();
+    assert_eq!(disabled["listening"], false);
+    assert_eq!(disabled["tcp_enabled"], false);
+    assert!(app.bound_tcp_addrs().is_empty());
+    let persisted = network::load_listen_config(&home);
+    assert!(!persisted.tcp_enabled());
+}

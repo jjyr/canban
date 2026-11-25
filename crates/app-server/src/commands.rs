@@ -77,6 +77,20 @@ impl AppServer {
         Ok(json!({"events": events}))
     }
 
+    fn device_list_payload(&self) -> Value {
+        let bound = self.bound_tcp.lock().unwrap().clone();
+        let listen_cfg = network::load_listen_config(&self.home);
+        json!({
+            "devices": self.paired_devices(),
+            "has_legacy_token": network::read_server_token(&self.home).is_some(),
+            "tcp_enabled": !bound.is_empty() || listen_cfg.tcp_enabled(),
+            "listening": !bound.is_empty(),
+            "listen_addrs": bound,
+            "tailscale_enabled": listen_cfg.tailscale,
+            "trust_tailscale_self": listen_cfg.trust_tailscale_self_enabled(),
+        })
+    }
+
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
         let (value, pending_stop) = self.call_with_transport_token(method, p, None, false)?;
         if pending_stop {
@@ -270,16 +284,41 @@ impl AppServer {
             "app.ping" => Ok(
                 json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_string(),"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
             ),
-            "device.list" => {
-                let bound = self.bound_tcp.lock().unwrap().clone();
-                let listen_cfg = network::load_listen_config(&self.home);
-                Ok(json!({
-                    "devices": self.paired_devices(),
-                    "has_legacy_token": network::read_server_token(&self.home).is_some(),
-                    "tcp_enabled": !bound.is_empty() || listen_cfg.tcp_enabled(),
-                    "listen_addrs": bound,
-                    "trust_tailscale_self": listen_cfg.trust_tailscale_self_enabled(),
-                }))
+            "device.list" => Ok(self.device_list_payload()),
+            "device.remote_access.set" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Changing remote access settings requires an explicit user action"
+                );
+                let mut listen_cfg = network::load_listen_config(&self.home);
+                if let Some(ts) = p["tailscale"].as_bool() {
+                    listen_cfg.tailscale = ts;
+                    if !ts && p["clear_listen"].as_bool().unwrap_or(false) {
+                        listen_cfg.listen = None;
+                    }
+                }
+                if let Some(listen_val) = p.get("listen") {
+                    listen_cfg.listen = listen_val
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                }
+                if let Some(trust) = p["trust_tailscale_self"].as_bool() {
+                    listen_cfg.trust_tailscale_self = trust;
+                }
+                if let Some(port) = p["port"].as_u64() {
+                    ensure!(
+                        port > 0 && port <= u64::from(u16::MAX),
+                        "Invalid TCP port: {port}"
+                    );
+                    listen_cfg.port = port as u16;
+                }
+                if let Some(srv) = self.self_weak.get().and_then(|w| w.upgrade()) {
+                    srv.reconfigure_tcp_listeners(&listen_cfg)?;
+                }
+                network::save_listen_config(&self.home, &listen_cfg)?;
+                Ok(self.device_list_payload())
             }
             "device.invite.create" => {
                 ensure!(
@@ -320,6 +359,7 @@ impl AppServer {
                     "expires_at": expires_at,
                     "addr": preferred_addr,
                     "uri": uri,
+                    "listening": !bound.is_empty(),
                 }))
             }
             "device.revoke" => {

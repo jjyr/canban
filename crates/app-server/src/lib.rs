@@ -51,6 +51,7 @@ pub struct AppServer {
     tailscale_verifier_override: Mutex<Option<Arc<dyn canban_transport::TailscalePeerVerifier>>>,
     started_at: u64,
     bound_tcp: Mutex<Vec<String>>,
+    tcp_listener_stop: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     active_tcp_connections: Arc<AtomicUsize>,
     store: Mutex<Store>,
     config: RwLock<Config>,
@@ -749,6 +750,7 @@ impl AppServer {
             tailscale_verifier_override: Mutex::new(None),
             started_at: now(),
             bound_tcp: Mutex::new(Vec::new()),
+            tcp_listener_stop: Mutex::new(None),
             active_tcp_connections: Arc::new(AtomicUsize::new(0)),
             home,
             store: Mutex::new(store),
@@ -938,6 +940,9 @@ impl AppServer {
     pub(crate) fn trigger_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.stop_tx.send(true);
+        if let Some(tx) = self.tcp_listener_stop.lock().unwrap().take() {
+            let _ = tx.send(true);
+        }
         {
             let mut stopped = self.stop_cond.0.lock().unwrap();
             *stopped = true;

@@ -2756,6 +2756,28 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     let devices_busy = signal(false);
     let devices_err = signal(Option::<String>::None);
 
+    let apply_device_list_payload = move |val: serde_json::Value| {
+        let devices: Vec<PairedDevice> =
+            serde_json::from_value(val["devices"].clone()).unwrap_or_default();
+        let has_legacy_token = val["has_legacy_token"] == true;
+        let tcp_enabled = val["tcp_enabled"] == true;
+        let listen_addrs: Vec<String> =
+            serde_json::from_value(val["listen_addrs"].clone()).unwrap_or_default();
+        let listening = val
+            .get("listening")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(!listen_addrs.is_empty());
+        let trust_tailscale_self = val["trust_tailscale_self"] == true;
+        update_paired_devices(devices_live, |cur| {
+            cur.devices = devices;
+            cur.has_legacy_token = has_legacy_token;
+            cur.tcp_enabled = tcp_enabled;
+            cur.listening = listening;
+            cur.listen_addrs = listen_addrs;
+            cur.trust_tailscale_self = trust_tailscale_self;
+        });
+    };
+
     let reload_devices = move || {
         if !crate::backend::is_connected() || devices_loading.get_untracked() {
             return;
@@ -2766,15 +2788,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
             devices_err,
             "device.list",
             json!({}),
-            move |val| {
-                let devices: Vec<PairedDevice> =
-                    serde_json::from_value(val["devices"].clone()).unwrap_or_default();
-                let has_legacy_token = val["has_legacy_token"] == true;
-                update_paired_devices(devices_live, |cur| {
-                    cur.devices = devices;
-                    cur.has_legacy_token = has_legacy_token;
-                });
-            },
+            apply_device_list_payload,
         );
     };
     reload_devices();
@@ -3093,7 +3107,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                                         },
                                     );
                                 })
-                                .disabled(move || devices_busy.get()),
+                                .disabled(move || devices_busy.get() || !state.listening),
                             )
                             .child(
                                 compact_action("Refresh", Variant::Quiet, move |_| reload_devices())
@@ -3101,6 +3115,156 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                             ),
                     ),
             );
+
+        if state.listening {
+            let primary_addr = state
+                .listen_addrs
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let addr_copy = primary_addr.clone();
+            let addrs_label = state.listen_addrs.join(", ");
+            card = card.child(
+                view()
+                    .px_3p5()
+                    .py_2p5()
+                    .bg(SURFACE)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        view()
+                            .gap_0p5()
+                            .min_w(px(0.))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(live_dot(SUCCESS))
+                                    .child(
+                                        label("Remote Access Active")
+                                            .font_weight(FontWeight::SEMIBOLD),
+                                    )
+                                    .children(
+                                        state
+                                            .trust_tailscale_self
+                                            .then(|| badge("Tailscale Auto-Auth")),
+                                    ),
+                            )
+                            .child(
+                                muted(format!("Listening on {addrs_label}"))
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.5)),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .children((!primary_addr.is_empty()).then(|| {
+                                compact_action("Copy Address", Variant::Secondary, move |_| {
+                                    copy_text(ui, addr_copy.clone());
+                                    ui.notify("Copied remote address");
+                                })
+                            }))
+                            .child(
+                                compact_action("Disable", Variant::Quiet, move |_| {
+                                    if !crate::backend::is_connected() {
+                                        ui.paired_devices_preview.update(|slot| {
+                                            if let Some(p) = slot.as_mut() {
+                                                p.tcp_enabled = false;
+                                                p.listening = false;
+                                                p.listen_addrs.clear();
+                                                p.trust_tailscale_self = false;
+                                            }
+                                        });
+                                        return;
+                                    }
+                                    run_device_rpc(
+                                        ui,
+                                        devices_busy,
+                                        devices_err,
+                                        "device.remote_access.set",
+                                        json!({
+                                            "tailscale": false,
+                                            "clear_listen": true,
+                                        }),
+                                        move |val| {
+                                            apply_device_list_payload(val);
+                                            ui.notify("Disabled remote access on this machine");
+                                        },
+                                    );
+                                })
+                                .disabled(move || devices_busy.get()),
+                            ),
+                    ),
+            );
+        } else {
+            card = card.child(
+                view()
+                    .px_3p5()
+                    .py_2p5()
+                    .bg(ATTENTION_SURFACE)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        view()
+                            .gap_0p5()
+                            .min_w(px(0.))
+                            .child(
+                                label("Remote Access Off").font_weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                muted(format!(
+                                    "{} is only listening on its local socket. Enable Tailscale access so your phone or other machines can connect.",
+                                    crate::platform::LOCAL_HOST_NAME
+                                ))
+                                .text_size(px(11.5)),
+                            ),
+                    )
+                    .child(
+                        compact_action("Enable Tailscale Access", Variant::Primary, move |_| {
+                            if !crate::backend::is_connected() {
+                                ui.paired_devices_preview.update(|slot| {
+                                    let p = slot.get_or_insert_with(Default::default);
+                                    p.tcp_enabled = true;
+                                    p.listening = true;
+                                    p.listen_addrs = vec!["100.84.0.1:7680".into()];
+                                    p.trust_tailscale_self = true;
+                                });
+                                return;
+                            }
+                            run_device_rpc(
+                                ui,
+                                devices_busy,
+                                devices_err,
+                                "device.remote_access.set",
+                                json!({
+                                    "tailscale": true,
+                                    "trust_tailscale_self": true,
+                                }),
+                                move |val| {
+                                    apply_device_list_payload(val);
+                                    ui.notify("Enabled Tailscale remote access");
+                                },
+                            );
+                        })
+                        .disabled(move || devices_busy.get()),
+                    ),
+            );
+        }
 
         if let Some(err) = err_msg {
             card = card.child(
@@ -3838,6 +4002,10 @@ mod tests {
                     },
                 ],
                 has_legacy_token: true,
+                tcp_enabled: true,
+                listening: true,
+                listen_addrs: vec!["100.84.0.1:7680".into()],
+                trust_tailscale_self: true,
                 generated_uri: Some("canban://100.84.0.1:7680#pair_testcode1234567890".into()),
                 generated_expires_at: Some(canban_types::now() + 240_000),
             }));
@@ -3853,6 +4021,9 @@ mod tests {
         let texts = collect_mounted_texts(core.commit().expect("mount batch"));
 
         assert!(texts.iter().any(|t| t == "Paired Devices"));
+        assert!(texts.iter().any(|t| t == "Remote Access Active"));
+        assert!(texts.iter().any(|t| t == "Tailscale Auto-Auth"));
+        assert!(texts.iter().any(|t| t == "Copy Address"));
         assert!(texts.iter().any(|t| t == "Work MacBook Pro"));
         assert!(texts.iter().any(|t| t == "iPhone 17"));
         assert!(texts.iter().any(|t| t == "Pixel 9"));
@@ -3862,6 +4033,29 @@ mod tests {
         assert!(texts.iter().any(|t| t == "Copy URI"));
         assert!(texts.iter().any(|t| t == "Remove Legacy Token"));
         assert!(texts.iter().any(|t| t == "Revoke"));
+    }
+
+    #[test]
+    fn settings_section_shows_enable_tailscale_access_cta_when_not_listening() {
+        #[component]
+        fn ProbeRemoteAccessOff() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.paired_devices_preview
+                .set(Some(PairedDevicesPreview::default()));
+            view()
+                .w(px(1200.))
+                .h(px(1100.))
+                .child(settings_section_view(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(1100.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeRemoteAccessOff>());
+        let texts = collect_mounted_texts(core.commit().expect("mount batch"));
+
+        assert!(texts.iter().any(|t| t == "Remote Access Off"));
+        assert!(texts.iter().any(|t| t == "Enable Tailscale Access"));
     }
 
     #[test]

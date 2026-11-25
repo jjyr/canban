@@ -120,20 +120,6 @@ impl AppServer {
         })?;
 
         let listen_cfg = override_listen.unwrap_or_else(|| network::load_listen_config(&self.home));
-        let mut std_tcp_listeners = Vec::new();
-        if listen_cfg.tcp_enabled() {
-            let bind_addrs = network::resolve_bind_addrs(&listen_cfg)?;
-            let mut actual_addrs = Vec::new();
-            for sa in bind_addrs {
-                let tcp_listener = std::net::TcpListener::bind(sa)
-                    .with_context(|| format!("Could not bind Canban TCP listener on {sa}"))?;
-                let local_addr = tcp_listener.local_addr()?.to_string();
-                actual_addrs.push(local_addr);
-                tcp_listener.set_nonblocking(true)?;
-                std_tcp_listeners.push(tcp_listener);
-            }
-            *self.bound_tcp.lock().unwrap() = actual_addrs;
-        }
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(if cfg!(test) { 2 } else { 4 })
@@ -141,6 +127,7 @@ impl AppServer {
             .thread_name("canban-app-server")
             .build()
             .context("Could not start AppServer Tokio runtime")?;
+        *self.runtime_handle.lock().unwrap() = Some(runtime.handle().clone());
         {
             let _guard = runtime.enter();
             let unix_listener = tokio::net::UnixListener::from_std(std_unix)?;
@@ -160,53 +147,12 @@ impl AppServer {
                     }
                 },
             );
-            if !std_tcp_listeners.is_empty() {
-                let tailscale_verifier = self
-                    .tailscale_verifier_override
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .or_else(|| {
-                        listen_cfg.trust_tailscale_self_enabled().then(|| {
-                            Arc::new(network::SystemTailscaleVerifier::new())
-                                as Arc<dyn canban_transport::TailscalePeerVerifier>
-                        })
-                    });
-                let transport_cfg = Arc::new(canban_transport::ServerTransportConfig {
-                    home: self.home.clone(),
-                    server_id: self.identity.clone(),
-                    api_version: API_VERSION,
-                    device_store: self.device_store.clone(),
-                    pairing_codes: self.pairing_codes.clone(),
-                    revocations: self.device_revocations.clone(),
-                    active_tcp_connections: self.active_tcp_connections.clone(),
-                    tailscale_verifier,
-                    tailscale_devices: self.tailscale_devices.clone(),
-                });
-                for std_tcp in std_tcp_listeners {
-                    let tcp_listener = tokio::net::TcpListener::from_std(std_tcp)?;
-                    let weak_tcp = Arc::downgrade(self);
-                    let cfg = transport_cfg.clone();
-                    canban_transport::spawn_tcp_listener(
-                        runtime.handle(),
-                        tcp_listener,
-                        cfg,
-                        self.stop_receiver(),
-                        move |accepted| {
-                            let weak = weak_tcp.clone();
-                            async move {
-                                if let Some(server) = weak.upgrade()
-                                    && !server.stopped()
-                                {
-                                    let _ = serve_stream(server, accepted).await;
-                                }
-                            }
-                        },
-                    );
-                }
-            }
         }
-        *self.runtime_handle.lock().unwrap() = Some(runtime.handle().clone());
+        if let Err(err) = self.reconfigure_tcp_listeners(&listen_cfg) {
+            self.trigger_stop();
+            *self.runtime_handle.lock().unwrap() = None;
+            return Err(err);
+        }
         self.migrate_exit_failures()?;
         self.start_runtime();
         self.start_github_workers();
@@ -221,6 +167,114 @@ impl AppServer {
             socket_path: socket,
             _lock: lock,
         })
+    }
+
+    /// Rebinds or stops the daemon's TCP remote-access listeners live without restarting `AppServer`.
+    pub(crate) fn reconfigure_tcp_listeners(
+        self: &Arc<Self>,
+        listen_cfg: &canban_types::ServerListenConfig,
+    ) -> Result<Vec<String>> {
+        if !listen_cfg.tcp_enabled() {
+            if let Some(prev) = self.tcp_listener_stop.lock().unwrap().take() {
+                let _ = prev.send(true);
+            }
+            self.bound_tcp.lock().unwrap().clear();
+            return Ok(Vec::new());
+        }
+
+        // Resolve candidate bind addresses before disturbing any active listener.
+        let bind_addrs = network::resolve_bind_addrs(listen_cfg)?;
+        let had_prev = if let Some(prev) = self.tcp_listener_stop.lock().unwrap().take() {
+            let _ = prev.send(true);
+            true
+        } else {
+            false
+        };
+
+        let mut std_tcp_listeners = Vec::with_capacity(bind_addrs.len());
+        let mut actual_addrs = Vec::with_capacity(bind_addrs.len());
+        for sa in bind_addrs {
+            let mut attempt = 0_u8;
+            let tcp_listener = loop {
+                match std::net::TcpListener::bind(sa) {
+                    Ok(listener) => break listener,
+                    Err(err)
+                        if had_prev
+                            && err.kind() == std::io::ErrorKind::AddrInUse
+                            && attempt < 25 =>
+                    {
+                        attempt += 1;
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => {
+                        return Err(err).with_context(|| {
+                            format!("Could not bind Canban TCP listener on {sa}")
+                        });
+                    }
+                }
+            };
+            actual_addrs.push(tcp_listener.local_addr()?.to_string());
+            tcp_listener.set_nonblocking(true)?;
+            std_tcp_listeners.push(tcp_listener);
+        }
+
+        let Some(handle) = self.runtime_handle.lock().unwrap().clone() else {
+            *self.bound_tcp.lock().unwrap() = actual_addrs.clone();
+            return Ok(actual_addrs);
+        };
+
+        let (tcp_stop_tx, tcp_stop_rx) = tokio::sync::watch::channel(self.stopped());
+        let tailscale_verifier = self
+            .tailscale_verifier_override
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| {
+                listen_cfg.trust_tailscale_self_enabled().then(|| {
+                    Arc::new(network::SystemTailscaleVerifier::new())
+                        as Arc<dyn canban_transport::TailscalePeerVerifier>
+                })
+            });
+        let transport_cfg = Arc::new(canban_transport::ServerTransportConfig {
+            home: self.home.clone(),
+            server_id: self.identity.clone(),
+            api_version: API_VERSION,
+            device_store: self.device_store.clone(),
+            pairing_codes: self.pairing_codes.clone(),
+            revocations: self.device_revocations.clone(),
+            active_tcp_connections: self.active_tcp_connections.clone(),
+            tailscale_verifier,
+            tailscale_devices: self.tailscale_devices.clone(),
+        });
+
+        {
+            let _guard = handle.enter();
+            for std_tcp in std_tcp_listeners {
+                let tcp_listener = tokio::net::TcpListener::from_std(std_tcp)?;
+                let weak_tcp = Arc::downgrade(self);
+                let cfg = transport_cfg.clone();
+                canban_transport::spawn_tcp_listener(
+                    &handle,
+                    tcp_listener,
+                    cfg,
+                    tcp_stop_rx.clone(),
+                    move |accepted| {
+                        let weak = weak_tcp.clone();
+                        async move {
+                            if let Some(server) = weak.upgrade()
+                                && !server.stopped()
+                            {
+                                let _ = serve_stream(server, accepted).await;
+                            }
+                        }
+                    },
+                );
+            }
+        }
+
+        *self.tcp_listener_stop.lock().unwrap() = Some(tcp_stop_tx);
+        *self.bound_tcp.lock().unwrap() = actual_addrs.clone();
+        Ok(actual_addrs)
     }
 }
 

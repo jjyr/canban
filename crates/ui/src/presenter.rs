@@ -265,6 +265,10 @@ pub struct Ui {
 pub struct PairedDevicesPreview {
     pub devices: Vec<PairedDevice>,
     pub has_legacy_token: bool,
+    pub tcp_enabled: bool,
+    pub listening: bool,
+    pub listen_addrs: Vec<String>,
+    pub trust_tailscale_self: bool,
     pub generated_uri: Option<String>,
     pub generated_expires_at: Option<u64>,
 }
