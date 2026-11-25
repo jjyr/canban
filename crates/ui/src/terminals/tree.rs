@@ -1,5 +1,6 @@
 //! Unified Project -> Worktree -> Terminal hierarchy.
-//! Only worktree scopes with >= 1 live Terminal are displayed; Project and Worktree levels are foldable.
+//! All registered Projects appear (even with 0 live Terminals so users can spawn terminals or worktrees directly),
+//! while only worktree scopes with >= 1 live Terminal are displayed; Project and Worktree levels are foldable.
 use super::worktrees::{
     WorktreeScope, create_in_scope, entry_scope, scope_git_summary, scope_resolution_label,
 };
@@ -800,7 +801,7 @@ impl TreeNode {
                 }
             }
             Self::Project(_) => {
-                if is_first {
+                if is_first || ui.snapshot.with(|s| s.has_remote_hosts()) {
                     28.
                 } else {
                     38.
@@ -982,27 +983,36 @@ pub(super) fn visible_project_tree<'a>(
         group.1.push(e.saved.id.clone());
     }
     let mut out = Vec::new();
-    // Project ordering is stable; no empty registered Projects enter the tree.
-    for pid in s
-        .projects
-        .iter()
-        .map(|p| Some(p.id.clone()))
-        .chain(std::iter::once(None))
-    {
-        let Some(scopes) = groups.remove(&pid) else {
-            continue;
-        };
-        let project_folded = if let Some(pid) = pid {
-            let folded = folds.contains(&project_fold_key(&pid));
-            out.push(TreeNode::Project(pid));
-            folded
-        } else {
-            out.push(TreeNode::OtherHeader);
-            false
-        };
-        if project_folded {
+    // Project ordering is stable; registered Projects always appear even with 0 live terminals.
+    for pid in s.projects.iter().map(|p| p.id.clone()) {
+        let folded = folds.contains(&project_fold_key(&pid));
+        out.push(TreeNode::Project(pid.clone()));
+        if folded {
+            groups.remove(&Some(pid));
             continue;
         }
+        if let Some(scopes) = groups.remove(&Some(pid)) {
+            for (key, (scope, children)) in scopes {
+                let scope_folded = folds.contains(&scope_fold_key(&key));
+                out.push(TreeNode::Scope(key, scope));
+                if !scope_folded {
+                    out.extend(children.into_iter().map(TreeNode::Terminal));
+                }
+            }
+        }
+    }
+    if let Some(other_scopes) = groups.remove(&None) {
+        out.push(TreeNode::OtherHeader);
+        for (key, (scope, children)) in other_scopes {
+            let scope_folded = folds.contains(&scope_fold_key(&key));
+            out.push(TreeNode::Scope(key, scope));
+            if !scope_folded {
+                out.extend(children.into_iter().map(TreeNode::Terminal));
+            }
+        }
+    }
+    // Any remaining global/orphan project scopes.
+    for (_pid, scopes) in groups {
         for (key, (scope, children)) in scopes {
             let scope_folded = folds.contains(&scope_fold_key(&key));
             out.push(TreeNode::Scope(key, scope));
@@ -1157,7 +1167,18 @@ fn host_heading(ui: Ui, host_id: String, is_first: Memo<bool>) -> impl IntoEleme
             ui.snapshot.with(|s| {
                 let name = s.host_display_name(&host_id).to_owned();
                 let offline = s.is_host_offline(&host_id);
-                let summary = folded.then(|| {
+                let has_children = s.projects.iter().any(|p| s.project_host(&p.id) == host_id)
+                    || ui.closing_terminals.with(|closing| {
+                        ui.terminal_entries.with(|rows| {
+                            rows.iter().any(|e| {
+                                e.listed()
+                                    && !closing.contains(&e.saved.id)
+                                    && (e.host_id == host_id
+                                        || (host_id == "local" && e.host_id.is_empty()))
+                            })
+                        })
+                    });
+                let summary = (folded && has_children).then(|| {
                     ui.closing_terminals.with(|closing| {
                         ui.terminal_entries.with(|rows| {
                             super::labels::group_status_summary(rows.iter().filter(|e| {
@@ -1169,14 +1190,15 @@ fn host_heading(ui: Ui, host_id: String, is_first: Memo<bool>) -> impl IntoEleme
                         })
                     })
                 });
-                (folded, name, offline, summary)
+                (folded, name, offline, has_children, summary)
             })
         }
     });
     let is_folded = computed(move || info.with(|(f, ..)| *f));
     let host_name = computed(move || info.with(|(_, n, ..)| n.clone()));
-    let is_offline = computed(move || info.with(|(_, _, off, _)| *off));
-    let summary = computed(move || info.with(|(_, _, _, s)| *s));
+    let is_offline = computed(move || info.with(|(_, _, off, ..)| *off));
+    let has_children = computed(move || info.with(|(_, _, _, hc, _)| *hc));
+    let summary = computed(move || info.with(|(_, _, _, _, s)| *s));
     let fold_toggle = fold_key.clone();
     let fold_ctx = fold_key;
     let host_menu_ctx = host_id.clone();
@@ -1201,7 +1223,7 @@ fn host_heading(ui: Ui, host_id: String, is_first: Memo<bool>) -> impl IntoEleme
         })
         .child(dynamic(move || {
             icon_tinted(
-                if is_folded.get() {
+                if is_folded.get() || !has_children.get() {
                     Icon::Forward
                 } else {
                     Icon::ChevronDown
@@ -1211,6 +1233,7 @@ fn host_heading(ui: Ui, host_id: String, is_first: Memo<bool>) -> impl IntoEleme
             .w(px(10.))
             .h(px(10.))
             .flex_shrink_0()
+            .opacity(if has_children.get() { 1.0 } else { 0.45 })
         }))
         .child(
             icon_tinted(Icon::Projects, MUTED)
@@ -1249,7 +1272,7 @@ fn host_heading(ui: Ui, host_id: String, is_first: Memo<bool>) -> impl IntoEleme
         .min_w(px(0.))
         .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
             use nsh_core::element::desktop::{MenuItem, popup_menu_at};
-            let (folded, name, offline, _) = info.get_untracked();
+            let (folded, name, offline, ..) = info.get_untracked();
             let hid_open = host_menu_ctx.clone();
             let fold_key = fold_ctx.clone();
             let at = ev.page_position;
@@ -1353,7 +1376,16 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
                     .unwrap_or_default();
                 let offline = s.is_host_offline(s.project_host(&id));
                 let has_remote = s.has_remote_hosts();
-                let summary = folded.then(|| {
+                let has_children = ui.closing_terminals.with(|closing| {
+                    ui.terminal_entries.with(|rows| {
+                        rows.iter().any(|e| {
+                            e.listed()
+                                && !closing.contains(&e.saved.id)
+                                && entry_scope(s, e).project_id(s).as_deref() == Some(id.as_str())
+                        })
+                    })
+                });
+                let summary = (folded && has_children).then(|| {
                     ui.closing_terminals.with(|closing| {
                         ui.terminal_entries.with(|rows| {
                             super::labels::group_status_summary(rows.iter().filter(|e| {
@@ -1365,15 +1397,16 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
                         })
                     })
                 });
-                (folded, name, offline, has_remote, summary)
+                (folded, name, offline, has_remote, has_children, summary)
             })
         }
     });
     let is_folded = computed(move || info.with(|(f, ..)| *f));
     let proj_name = computed(move || info.with(|(_, n, ..)| n.clone()));
     let is_offline = computed(move || info.with(|(_, _, off, ..)| *off));
-    let in_host_group = computed(move || info.with(|(_, _, _, r, _)| *r));
-    let summary = computed(move || info.with(|(_, _, _, _, s)| *s));
+    let in_host_group = computed(move || info.with(|(_, _, _, r, ..)| *r));
+    let has_children = computed(move || info.with(|(_, _, _, _, hc, _)| *hc));
+    let summary = computed(move || info.with(|(_, _, _, _, _, s)| *s));
 
     let pid_wt = id.clone();
     let pid_new = id.clone();
@@ -1409,7 +1442,7 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
         })
         .child(dynamic(move || {
             icon_tinted(
-                if is_folded.get() {
+                if is_folded.get() || !has_children.get() {
                     Icon::Forward
                 } else {
                     Icon::ChevronDown
@@ -1419,6 +1452,7 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
             .w(px(10.))
             .h(px(10.))
             .flex_shrink_0()
+            .opacity(if has_children.get() { 1.0 } else { 0.45 })
         }))
         .child(
             label(move || SharedString::from(proj_name.get().to_uppercase()))
@@ -1450,7 +1484,7 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
         .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
             use nsh_core::element::desktop::{MenuItem, popup_menu_at};
-            let (folded, name, offline, _, _) = info.get_untracked();
+            let (folded, name, offline, ..) = info.get_untracked();
             let pid_new = pid_ctx_new.clone();
             let pid_wt = pid_ctx_wt.clone();
             let fold_key = fold_ctx.clone();

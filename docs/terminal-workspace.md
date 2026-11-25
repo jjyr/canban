@@ -155,13 +155,14 @@ Terminal's task identity.
   or canonical cwd outside Git, with Project/Card/Managed Worktree associations.
   Unregistered directories and repositories remain visible by path. Machines and
   backend hosts are part of directory identity.
-- Only occupied locations and their Project ancestors appear. Empty registered
-  Projects are absent; creating a Terminal and changing directory populates the
-  tree. Non-Project directories and unassigned host locations sit below a subtle
-  `OTHER DIRECTORIES` eyebrow divider, left-aligned rather than indented under the
-  preceding Project, with local `$HOME` prefixes compacted to `~` (preserving full
-  paths in tooltips). Unmatched launch locations remain unassigned until observed.
-  Transient observation/discovery loss retains the last confirmed location
+- All registered Projects appear in stable order (even when they currently have zero
+  live Terminals, so users can hover to create a Terminal or Managed Branch Worktree),
+  while only occupied worktree scopes (`>= 1` live Terminal) appear underneath them.
+  Non-Project directories and unassigned host locations sit below a subtle
+  `OTHER DIRECTORIES` (or `DIRECTORIES` under a host group) eyebrow divider, left-aligned
+  rather than indented under the preceding Project, with local `$HOME` prefixes compacted
+  to `~` (preserving full paths in tooltips). Unmatched launch locations remain unassigned
+  until observed. Transient observation/discovery loss retains the last confirmed location
   for the same Core/Terminal binding.
 - Tabs and terminal cycling use the current location scope. Ordinary directories
   outside Git are separate scopes; subdirectories of one Git checkout share a scope.

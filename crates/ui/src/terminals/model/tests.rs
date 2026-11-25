@@ -3888,8 +3888,14 @@ fn live_directory_projection_moves_agents_without_reassigning_tasks() {
         matches!(entry_scope(&s,e), WorktreeScope::Directory { project: None, ref path, .. } if path == "/external")
     );
     let before = project_tree(&s, std::slice::from_ref(e));
-    assert!(!before.iter().any(|n| matches!(n, TreeNode::Project(_))));
-    assert_eq!(before.first(), Some(&TreeNode::OtherHeader));
+    assert_eq!(
+        before[..3],
+        [
+            TreeNode::Project("p1".into()),
+            TreeNode::Project("p2".into()),
+            TreeNode::OtherHeader,
+        ]
+    );
     let key = location_key(e);
     s.terminal_contexts[0].cwd = Some("/external/tests".into());
     let rows = crate::terminals::entries(&s);
@@ -3903,7 +3909,17 @@ fn live_directory_projection_moves_agents_without_reassigning_tasks() {
     assert_ne!(location_key(e), key);
     assert!(project_tree(&s, std::slice::from_ref(e)).contains(&TreeNode::Terminal(terminal)));
     assert_eq!(e.agent.as_ref().unwrap().card.id, task_card);
-    assert_eq!(project_tree(&s, &[]), vec![TreeNode::Empty]);
+    assert_eq!(
+        project_tree(&s, &[]),
+        vec![
+            TreeNode::Project("p1".into()),
+            TreeNode::Project("p2".into()),
+        ]
+    );
+    assert_eq!(
+        project_tree(&Snapshot::default(), &[]),
+        vec![TreeNode::Empty]
+    );
 }
 
 #[test]
@@ -6385,6 +6401,7 @@ fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects
             "gpu-box".into()
         ))
     );
+    assert!(nodes.contains(&crate::terminals::tree::TreeNode::Project("fiber".into())));
     assert!(nodes.contains(&crate::terminals::tree::TreeNode::Project(rem_fiber_id)));
     assert!(
         nodes.contains(&crate::terminals::tree::TreeNode::HostDirectoriesHeader(
@@ -6392,4 +6409,158 @@ fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects
         ))
     );
     assert!(!nodes.contains(&crate::terminals::tree::TreeNode::OtherHeader));
+}
+
+#[test]
+fn project_heading_to_first_worktree_has_no_extra_vertical_gap_in_single_or_multi_host_mode() {
+    use nsh_core::{
+        ApproxTextEngine, Bounds, Core, MountItem, NodeId, Points, geometry::size, prelude::*,
+    };
+    use std::{cell::Cell, collections::HashMap};
+
+    thread_local! {
+        static MULTI_HOST: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn run_probe(multi_host: bool) -> (HashMap<String, NodeId>, HashMap<NodeId, Bounds<Points>>) {
+        MULTI_HOST.with(|c| c.set(multi_host));
+
+        #[component]
+        fn SpacingProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = crate::presenter::Ui::new();
+            let mut s = fixture();
+            s.projects[0].name = "Alpha".into();
+            s.projects[0].directory = "/repo/p1".into();
+            s.projects[1].name = "EmptyProj".into();
+            s.projects[1].directory = "/repo/p2".into();
+            // Remove p2's terminal so EmptyProj has 0 live terminals.
+            s.terminals.truncate(1);
+            s.cards[0].worktree = Some("/repo/p1-worktrees/c1".into());
+            s.cards[0].branch = Some("canban/1".into());
+            let tid = s.terminals[0].id.clone();
+            s.terminal_contexts.push(TerminalContext {
+                terminal_id: tid,
+                core_id: "core".into(),
+                terminal: "t-c1".into(),
+                cwd: Some("/repo/p1-worktrees/c1".into()),
+                directory_root: Some("/repo/p1-worktrees/c1".into()),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                branch: Some("canban/1".into()),
+                ..Default::default()
+            });
+            if MULTI_HOST.with(Cell::get) {
+                s.register_host_entities("local");
+                s.host_summaries.insert(
+                    "local".into(),
+                    HostSummary {
+                        id: "local".into(),
+                        name: "Local".into(),
+                        is_local: true,
+                        transport_label: "Local socket".into(),
+                        endpoint_label: "~/.canban/app.sock".into(),
+                        ssh_target: None,
+                        server_id: None,
+                        connection: HostConnectionState::Connected {
+                            rtt_ms: 0,
+                            api_version: 1,
+                            version: "1".into(),
+                            platform: "macos".into(),
+                        },
+                        active_agents: 1,
+                        max_agents: 4,
+                        project_count: 2,
+                        reconnect_count: 0,
+                        last_synced_at: None,
+                        pending_mutations: 0,
+                        sync_conflicts: 0,
+                    },
+                );
+                s.merge_remote_snapshot(
+                    Snapshot::default(),
+                    HostSummary {
+                        id: "devpc".into(),
+                        name: "devpc".into(),
+                        is_local: false,
+                        transport_label: "TCP".into(),
+                        endpoint_label: "100.64.0.2:7680".into(),
+                        ssh_target: None,
+                        server_id: None,
+                        connection: HostConnectionState::Connected {
+                            rtt_ms: 8,
+                            api_version: 1,
+                            version: "1".into(),
+                            platform: "linux".into(),
+                        },
+                        active_agents: 0,
+                        max_agents: 4,
+                        project_count: 0,
+                        reconnect_count: 0,
+                        last_synced_at: None,
+                        pending_mutations: 0,
+                        sync_conflicts: 0,
+                    },
+                );
+            }
+            ui.accept_snapshot(s);
+            ui.terminal_width.set(260.);
+            view()
+                .w(px(300.))
+                .h(px(640.))
+                .child(crate::terminals::sidebar_for_test(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(300.), px(640.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<SpacingProbe>());
+        let mut test_ids = HashMap::new();
+        let mut frames = HashMap::new();
+        while let Some(batch) = core.commit() {
+            for item in &batch.items {
+                match item {
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(tid) = &props.test_id {
+                            test_ids.insert(tid.to_string(), *id);
+                        }
+                    }
+                    MountItem::Frame { id, frame } => {
+                        frames.insert(*id, *frame);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (test_ids, frames)
+    }
+
+    // Single-host mode: first Project row is 28px (no top divider, no bottom gap),
+    // first worktree sits immediately below `project:p1` (`gap == 0.0`), and empty second
+    // Project `p2` is still present at 38px (10px top divider + 28px header).
+    let (single_ids, single_frames) = run_probe(false);
+    let single_p1 = single_frames[&single_ids["project:p1"]];
+    let single_wt1 = single_frames[&single_ids["location:local:/repo/p1-worktrees/c1"]];
+    assert_eq!(single_p1.size.height.0, 28.0);
+    assert_eq!(
+        single_wt1.origin.y.0 - (single_p1.origin.y.0 + single_p1.size.height.0),
+        0.0
+    );
+    assert!(
+        single_ids.contains_key("project:p2"),
+        "single-host mode must retain registered projects with 0 live terminals"
+    );
+    assert_eq!(single_frames[&single_ids["project:p2"]].size.height.0, 38.0);
+
+    // Multi-host mode: Project rows sit under HostHeader without a 10px divider, so their
+    // wrapper height must be 28px (not 38px, which previously left a 10px blank gap above the first worktree).
+    let (multi_ids, multi_frames) = run_probe(true);
+    let multi_p1 = multi_frames[&multi_ids["project:p1"]];
+    let multi_wt1 = multi_frames[&multi_ids["location:local:/repo/p1-worktrees/c1"]];
+    assert_eq!(multi_p1.size.height.0, 28.0);
+    assert_eq!(
+        multi_wt1.origin.y.0 - (multi_p1.origin.y.0 + multi_p1.size.height.0),
+        0.0
+    );
+    assert!(multi_ids.contains_key("project:p2"));
+    assert_eq!(multi_frames[&multi_ids["project:p2"]].size.height.0, 28.0);
 }
