@@ -10,6 +10,7 @@ pub mod project_import_export;
 pub mod reclaim;
 pub mod remote_faults;
 pub mod review_and_events;
+pub mod scheduler_cross_contention;
 pub mod schedules_and_budget;
 pub mod sessions_and_adoption;
 pub mod transport_auth;
@@ -46,6 +47,7 @@ pub enum Scenario {
     ProjectImportExport,
     SessionsAndAdoption,
     ReviewAndEvents,
+    SchedulerCrossContention,
     Chaos,
 }
 
@@ -67,6 +69,7 @@ impl Scenario {
         Scenario::ProjectImportExport,
         Scenario::SessionsAndAdoption,
         Scenario::ReviewAndEvents,
+        Scenario::SchedulerCrossContention,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -87,6 +90,7 @@ impl Scenario {
             Scenario::ProjectImportExport => "project_import_export",
             Scenario::SessionsAndAdoption => "sessions_and_adoption",
             Scenario::ReviewAndEvents => "review_and_events",
+            Scenario::SchedulerCrossContention => "scheduler_cross_contention",
             Scenario::Chaos => "chaos",
         }
     }
@@ -111,9 +115,12 @@ impl Scenario {
             }
             "sessions_and_adoption" | "sessions" | "adoption" => Ok(Scenario::SessionsAndAdoption),
             "review_and_events" | "review" | "events" => Ok(Scenario::ReviewAndEvents),
+            "scheduler_cross_contention" | "sched_contention" | "contention" => {
+                Ok(Scenario::SchedulerCrossContention)
+            }
             "chaos" | "fuzz" => Ok(Scenario::Chaos),
             other => bail!(
-                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, transport_auth, workspaces_delivery, project_import_export, sessions_and_adoption, review_and_events, chaos"
+                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, transport_auth, workspaces_delivery, project_import_export, sessions_and_adoption, review_and_events, scheduler_cross_contention, chaos"
             ),
         }
     }
@@ -137,6 +144,7 @@ pub fn run_scenario(scenario: Scenario, seed: u64, ops: usize) -> Result<u64> {
         Scenario::ProjectImportExport => project_import_export::run(seed),
         Scenario::SessionsAndAdoption => sessions_and_adoption::run(seed),
         Scenario::ReviewAndEvents => review_and_events::run(seed),
+        Scenario::SchedulerCrossContention => scheduler_cross_contention::run(seed),
         Scenario::Chaos => chaos::run(seed, ops),
     }
 }

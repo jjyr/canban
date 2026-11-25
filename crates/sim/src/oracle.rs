@@ -34,6 +34,19 @@ pub struct CommittedNoteExpectation {
     pub min_revision: u64,
 }
 
+/// Idempotency intent tracked for a mutating RPC `request_key` (at-most-once model).
+#[derive(Clone, Debug)]
+pub struct RequestKeyAttempt {
+    pub host: String,
+    pub request_key: String,
+    pub kind: String,
+    pub attempts: u64,
+    pub acknowledged: bool,
+    /// Optional unique domain marker (e.g. Card title, Comment body, Note title) used to assert
+    /// `<= 1` (and `== 1` once acknowledged) materialized domain side effects in addition to SQLite `operations`.
+    pub effect_marker: Option<String>,
+}
+
 /// Tracks historical observations across simulation steps to detect regressions
 /// (e.g., revision rollback, `CardRead` regression, lost durable writes, resurrected read
 /// notifications, plaintext secret leaks, or unsafe idle reclamation).
@@ -41,6 +54,8 @@ pub struct CommittedNoteExpectation {
 pub struct InvariantOracle {
     /// Highest observed `Card.revision` per `(host_name, raw_card_id)`.
     pub max_card_revision: BTreeMap<(String, String), u64>,
+    /// Read-Your-Writes / monotonic-read floor per `(client_id, host_id, raw_card_id) -> min_seen_rev`.
+    pub min_seen_rev: BTreeMap<(String, String, String), i64>,
     /// Highest observed `CardRead.sequence` per `(host_name, raw_card_id)`.
     pub max_card_read_seq: BTreeMap<(String, String), u64>,
     /// Highest observed `WorkflowRun.visit` per `(host_name, raw_run_id)`.
@@ -72,6 +87,11 @@ pub struct InvariantOracle {
     pub committed_scheduled_runs: BTreeMap<(String, String), (String, String)>,
     /// Committed Project `Note`s per `(host_name, raw_note_id)` that must survive restarts.
     pub committed_notes: BTreeMap<(String, String), CommittedNoteExpectation>,
+    /// Tracked `request_key` mutating RPC intents per `(server_host_name, request_key)`.
+    pub request_key_attempts: BTreeMap<(String, String), RequestKeyAttempt>,
+    /// Baseline `(dial_count, reconnect_count)` observed when a remote host enters `AuthFailed`,
+    /// used to verify zero background reconnect dials while halted.
+    pub auth_failed_baselines: BTreeMap<(String, String), (u64, u32)>,
 }
 
 impl InvariantOracle {
@@ -282,6 +302,508 @@ impl InvariantOracle {
             .retain(|(h, _), exp| !(h == host_name && exp.project_id == raw_proj));
     }
 
+    /// Records an observed `Card.revision` for `(client, host, card_id)` and immediately fails
+    /// on any monotonic-read regression (`rev < prev`).
+    pub fn observe_card_revision(
+        &mut self,
+        client: &str,
+        host: &str,
+        card_id: &str,
+        rev: i64,
+    ) -> Result<()> {
+        let norm_host = normalize_client_host_id(host);
+        let raw_card = strip_host_prefix(card_id);
+        let key = (client.to_owned(), norm_host.clone(), raw_card.clone());
+        if let Some(&prev) = self.min_seen_rev.get(&key) {
+            ensure!(
+                rev >= prev,
+                "[{client}][{norm_host}] MONOTONIC READ / RYW VIOLATION: Card {raw_card} revision regressed from {prev} to {rev}"
+            );
+            if rev > prev {
+                self.min_seen_rev.insert(key, rev);
+            }
+        } else {
+            self.min_seen_rev.insert(key, rev);
+        }
+        Ok(())
+    }
+
+    /// Extracts a card ID and revision from an RPC write receipt (top-level `id`/`card_id` +
+    /// `revision`, or nested `card`/`card_record`) and records it in the Read-Your-Writes model.
+    pub fn observe_write_receipt(
+        &mut self,
+        client: &str,
+        host: &str,
+        receipt: &serde_json::Value,
+    ) -> Result<()> {
+        let candidate_obj = receipt
+            .get("card")
+            .filter(|v| v.is_object())
+            .or_else(|| receipt.get("card_record").filter(|v| v.is_object()))
+            .unwrap_or(receipt);
+        let card_id = candidate_obj
+            .get("id")
+            .or_else(|| candidate_obj.get("card_id"))
+            .or_else(|| receipt.get("card_id"))
+            .or_else(|| receipt.get("id"))
+            .and_then(serde_json::Value::as_str);
+        let rev = candidate_obj
+            .get("revision")
+            .or_else(|| receipt.get("revision"))
+            .and_then(serde_json::Value::as_i64);
+        if let (Some(cid), Some(r)) = (card_id, rev) {
+            self.observe_card_revision(client, host, cid, r)?;
+        }
+        Ok(())
+    }
+
+    /// Verifies Read-Your-Writes and monotonic-read invariants across every live simulated client
+    /// `merged_snapshot` and every live server `snapshot`.
+    pub fn check_read_your_writes(&mut self, world: &SimWorld) -> Result<()> {
+        world.hit("oracle.read_your_writes_checked");
+
+        // 1. Scan every live client's merged_snapshot for monotonic Card revisions and RYW visibility.
+        for client_name in world.client_names() {
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+            let summaries = world.client_host_summaries_on(&client_name);
+            let sync_items = world.client_sync_items_on(&client_name);
+
+            let conflict_cards: BTreeSet<(String, String)> = sync_items
+                .iter()
+                .filter(|it| matches!(it.state, SyncItemState::Conflict | SyncItemState::Failed))
+                .map(|it| {
+                    (
+                        normalize_client_host_id(&it.host_id),
+                        strip_host_prefix(&it.card_id),
+                    )
+                })
+                .collect();
+
+            let mut client_cards: BTreeMap<(String, String), i64> = BTreeMap::new();
+            for card in &merged.cards {
+                let host_id = merged
+                    .entity_hosts
+                    .get(&card.id)
+                    .map(String::as_str)
+                    .or_else(|| canban_types::split_qualified_host_id(&card.id).map(|(h, _)| h))
+                    .unwrap_or("local");
+                let norm_host = normalize_client_host_id(host_id);
+                let raw_cid = strip_host_prefix(&card.id);
+                let rev = card.revision as i64;
+                self.observe_card_revision(&client_name, &norm_host, &raw_cid, rev)?;
+                client_cards.insert((norm_host, raw_cid), rev);
+            }
+
+            // Ensure every card previously observed/written by this client on a connected live host
+            // has not disappeared or regressed below its recorded floor.
+            let expected_for_client: Vec<(String, String, i64)> = self
+                .min_seen_rev
+                .iter()
+                .filter(|((c, _, _), _)| c == &client_name)
+                .map(|((_, h, cid), &min_rev)| (h.clone(), cid.clone(), min_rev))
+                .collect();
+            for (norm_host, raw_cid, min_rev) in expected_for_client {
+                if conflict_cards.contains(&(norm_host.clone(), raw_cid.clone())) {
+                    continue;
+                }
+                if let Some(&seen_rev) = client_cards.get(&(norm_host.clone(), raw_cid.clone())) {
+                    ensure!(
+                        seen_rev >= min_rev,
+                        "[{client_name}][{norm_host}] RYW VIOLATION: Card {raw_cid} regressed to rev {seen_rev} < {min_rev}"
+                    );
+                    continue;
+                }
+                let host_connected = if norm_host == "local" {
+                    world.server("local-server").is_some()
+                } else {
+                    summaries
+                        .iter()
+                        .find(|s| s.id == norm_host)
+                        .is_some_and(|s| {
+                            matches!(s.connection, HostConnectionState::Connected { .. })
+                        })
+                };
+                if !host_connected {
+                    continue;
+                }
+                let server_key = normalize_server_host_name(&norm_host);
+                if let Some(srv) = world.server(&server_key)
+                    && srv.snapshot()?.cards.iter().any(|c| c.id == raw_cid)
+                {
+                    bail!(
+                        "[{client_name}][{norm_host}] RYW VIOLATION: Card {raw_cid} (min_rev={min_rev}) exists on live connected server but vanished from client merged_snapshot"
+                    );
+                }
+            }
+        }
+
+        // 2. Scan every live server snapshot to verify authoritative revisions never drop below
+        //    any revision previously observed or acknowledged to any client.
+        for (host_name, handle) in &world.servers {
+            let Some(server) = handle.server() else {
+                continue;
+            };
+            let norm_host = normalize_client_host_id(host_name);
+            let snap = server.snapshot()?;
+            let srv_revs: BTreeMap<&str, i64> = snap
+                .cards
+                .iter()
+                .map(|c| (c.id.as_str(), c.revision as i64))
+                .collect();
+            for ((client_name, tracked_host, raw_cid), &min_rev) in &self.min_seen_rev {
+                if tracked_host != &norm_host {
+                    continue;
+                }
+                if let Some(&srv_rev) = srv_revs.get(raw_cid.as_str()) {
+                    ensure!(
+                        srv_rev >= min_rev,
+                        "[{host_name}] SERVER RYW VIOLATION: Card {raw_cid} server rev {srv_rev} < floor {min_rev} seen by client '{client_name}'"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Records a mutating RPC `request_key` attempt on `host` (idempotent across retries, dropped
+    /// replies, `SQLITE_IOERR`, failpoint crashes, and `bounce_server`).
+    pub fn record_request_key_attempt(
+        &mut self,
+        host: &str,
+        request_key: &str,
+        kind: &str,
+        acknowledged: bool,
+    ) {
+        let srv_host = normalize_server_host_name(host);
+        self.request_key_attempts
+            .entry((srv_host.clone(), request_key.to_owned()))
+            .and_modify(|rec| {
+                rec.attempts = rec.attempts.saturating_add(1);
+                rec.acknowledged |= acknowledged;
+                if rec.kind.is_empty() && !kind.is_empty() {
+                    rec.kind = kind.to_owned();
+                }
+            })
+            .or_insert_with(|| RequestKeyAttempt {
+                host: srv_host,
+                request_key: request_key.to_owned(),
+                kind: kind.to_owned(),
+                attempts: 1,
+                acknowledged,
+                effect_marker: None,
+            });
+    }
+
+    /// Records a mutating RPC `request_key` attempt with an optional unique domain marker (such as
+    /// a unique Card title or Comment body) so [`Self::check_at_most_once`] also asserts exact
+    /// domain-level cardinality in addition to SQLite `operations` deduplication.
+    pub fn record_request_key_attempt_with_marker(
+        &mut self,
+        host: &str,
+        request_key: &str,
+        kind: &str,
+        acknowledged: bool,
+        effect_marker: impl Into<String>,
+    ) {
+        self.record_request_key_attempt(host, request_key, kind, acknowledged);
+        let srv_host = normalize_server_host_name(host);
+        if let Some(rec) = self
+            .request_key_attempts
+            .get_mut(&(srv_host, request_key.to_owned()))
+        {
+            rec.effect_marker = Some(effect_marker.into());
+        }
+    }
+
+    /// Verifies At-Most-Once (idempotency) invariants for every tracked `request_key`:
+    /// `<= 1` SQLite `operations` row and materialized domain effect always, and `== 1` once
+    /// the write was acknowledged.
+    pub fn check_at_most_once(&self, world: &SimWorld) -> Result<()> {
+        world.hit("oracle.at_most_once_checked");
+        if self.request_key_attempts.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_host: BTreeMap<&str, Vec<&RequestKeyAttempt>> = BTreeMap::new();
+        for rec in self.request_key_attempts.values() {
+            by_host.entry(rec.host.as_str()).or_default().push(rec);
+        }
+
+        for (host_name, records) in by_host {
+            let Some(handle) = world.servers.get(host_name) else {
+                bail!("At-most-once oracle references unknown server host '{host_name}'");
+            };
+            let db_path = handle.home.join("canban.sqlite");
+            if !db_path.exists() {
+                continue;
+            }
+            let conn = Connection::open_with_flags(
+                &db_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .with_context(|| {
+                format!(
+                    "[{host_name}] failed to open {} read-only for at-most-once check",
+                    db_path.display()
+                )
+            })?;
+            let snap_opt = handle.server().map(|s| s.snapshot()).transpose()?;
+            let events_opt = handle.server().map(|s| s.events()).transpose()?;
+
+            for rec in records {
+                let mut stmt = conn.prepare("SELECT result FROM operations WHERE id=?1")?;
+                let results: Vec<String> = stmt
+                    .query_map([rec.request_key.as_str()], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                ensure!(
+                    results.len() <= 1,
+                    "[{host_name}] AT-MOST-ONCE VIOLATION: request_key={} ({}) has {} operations rows",
+                    rec.request_key,
+                    rec.kind,
+                    results.len()
+                );
+
+                // `batch.report` persists its idempotency record in the `reports` table
+                // (via `report_keys` unique index on `json_extract(data, '$.request_key')`) rather
+                // than `operations`; `execution.report` / `schedule.report` persist in both.
+                let report_rows: Vec<String> = if matches!(
+                    rec.kind.as_str(),
+                    "batch.report" | "execution.report" | "schedule.report"
+                ) {
+                    let mut rstmt = conn.prepare(
+                        "SELECT data FROM reports WHERE json_extract(data, '$.request_key')=?1",
+                    )?;
+                    let rows = rstmt
+                        .query_map([rec.request_key.as_str()], |row| row.get::<_, String>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    ensure!(
+                        rows.len() <= 1,
+                        "[{host_name}] AT-MOST-ONCE VIOLATION: request_key={} ({}) has {} reports rows",
+                        rec.request_key,
+                        rec.kind,
+                        rows.len()
+                    );
+                    rows
+                } else {
+                    Vec::new()
+                };
+
+                if rec.acknowledged {
+                    if rec.kind == "batch.report" {
+                        ensure!(
+                            report_rows.len() == 1,
+                            "[{host_name}] DURABILITY / AT-MOST-ONCE VIOLATION: acknowledged request_key={} ({}) missing from SQLite reports table",
+                            rec.request_key,
+                            rec.kind
+                        );
+                    } else {
+                        ensure!(
+                            results.len() == 1,
+                            "[{host_name}] DURABILITY / AT-MOST-ONCE VIOLATION: acknowledged request_key={} ({}) missing from SQLite operations table",
+                            rec.request_key,
+                            rec.kind
+                        );
+                        if matches!(rec.kind.as_str(), "execution.report" | "schedule.report") {
+                            ensure!(
+                                report_rows.len() == 1,
+                                "[{host_name}] DURABILITY / AT-MOST-ONCE VIOLATION: acknowledged request_key={} ({}) missing from SQLite reports table",
+                                rec.request_key,
+                                rec.kind
+                            );
+                        }
+                    }
+                }
+
+                let parsed_result: Option<serde_json::Value> = results
+                    .first()
+                    .and_then(|raw| serde_json::from_str(raw).ok());
+                if let Some(snap) = snap_opt.as_ref() {
+                    if let Some(res) = parsed_result.as_ref() {
+                        match rec.kind.as_str() {
+                            "card.create" => {
+                                if let Some(cid) = res.get("id").and_then(serde_json::Value::as_str)
+                                {
+                                    let count = snap.cards.iter().filter(|c| c.id == cid).count();
+                                    ensure!(
+                                        count == 1,
+                                        "[{host_name}] AT-MOST-ONCE VIOLATION: card.create request_key={} expected 1 card {cid}, found {count}",
+                                        rec.request_key
+                                    );
+                                }
+                            }
+                            "note.create" => {
+                                if let Some(nid) = res.get("id").and_then(serde_json::Value::as_str)
+                                {
+                                    let count = snap.notes.iter().filter(|n| n.id == nid).count();
+                                    ensure!(
+                                        count == 1,
+                                        "[{host_name}] AT-MOST-ONCE VIOLATION: note.create request_key={} expected 1 note {nid}, found {count}",
+                                        rec.request_key
+                                    );
+                                }
+                            }
+                            "workflow.start" => {
+                                if let Some(rid) = res
+                                    .get("id")
+                                    .or_else(|| res.get("run_id"))
+                                    .and_then(serde_json::Value::as_str)
+                                {
+                                    let count =
+                                        snap.workflow_runs.iter().filter(|r| r.id == rid).count();
+                                    ensure!(
+                                        count == 1,
+                                        "[{host_name}] AT-MOST-ONCE VIOLATION: workflow.start request_key={} expected 1 run {rid}, found {count}",
+                                        rec.request_key
+                                    );
+                                }
+                            }
+                            "terminal.create" | "agent.open" => {
+                                if let Some(tid) = res
+                                    .get("terminal_id")
+                                    .or_else(|| res.get("id"))
+                                    .and_then(serde_json::Value::as_str)
+                                {
+                                    let raw_tid = strip_host_prefix(tid);
+                                    let count =
+                                        snap.terminals.iter().filter(|t| t.id == raw_tid).count();
+                                    ensure!(
+                                        count <= 1,
+                                        "[{host_name}] AT-MOST-ONCE VIOLATION: {} request_key={} duplicated terminal {raw_tid} ({count} entries)",
+                                        rec.kind,
+                                        rec.request_key
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(marker) = rec.effect_marker.as_deref() {
+                        let materialized_count = match rec.kind.as_str() {
+                            "card.create" => {
+                                snap.cards.iter().filter(|c| c.title == marker).count()
+                            }
+                            "note.create" => {
+                                snap.notes.iter().filter(|n| n.title == marker).count()
+                            }
+                            "comment.add" => events_opt
+                                .as_ref()
+                                .map(|evs| {
+                                    evs.iter()
+                                        .filter(|e| {
+                                            e.kind == "comment.created"
+                                                && (e.data["body"].as_str() == Some(marker)
+                                                    || e.message == marker)
+                                        })
+                                        .count()
+                                })
+                                .unwrap_or(0),
+                            "terminal.create" | "agent.open" => snap
+                                .terminals
+                                .iter()
+                                .filter(|t| t.name.as_deref() == Some(marker) || t.id == marker)
+                                .count(),
+                            _ => results.len(),
+                        };
+                        ensure!(
+                            materialized_count <= 1,
+                            "[{host_name}] AT-MOST-ONCE VIOLATION: request_key={} ({}) materialized {materialized_count} effects for marker={marker:?}",
+                            rec.request_key,
+                            rec.kind
+                        );
+                        if rec.acknowledged {
+                            ensure!(
+                                materialized_count == 1,
+                                "[{host_name}] AT-MOST-ONCE VIOLATION: acknowledged request_key={} ({}) expected 1 effect for marker={marker:?}, found {materialized_count}",
+                                rec.request_key,
+                                rec.kind
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Verifies that every remote host slot currently in `HostConnectionState::AuthFailed`
+    /// issues 0 background reconnect attempts (`client_dial_count` and `reconnect_count` stay flat)
+    /// while halted. Records the baseline on first observation and clears it once a host leaves
+    /// `AuthFailed` (e.g. after re-pairing).
+    pub fn check_auth_failed_zero_dials(&mut self, world: &SimWorld) -> Result<()> {
+        world.hit("oracle.auth_failed_zero_dials_checked");
+        for client_name in world.client_names() {
+            let summaries = world.client_host_summaries_on(&client_name);
+            for summary in summaries {
+                let key = (client_name.clone(), summary.id.clone());
+                if matches!(summary.connection, HostConnectionState::AuthFailed { .. }) {
+                    let cur_dials = world.client_dial_count(&client_name, &summary.id);
+                    let cur_reconn = summary.reconnect_count;
+                    if let Some(&(base_dials, base_reconn)) = self.auth_failed_baselines.get(&key) {
+                        ensure!(
+                            cur_dials == base_dials,
+                            "[{client_name}][{}] AUTH_FAILED LIVENESS VIOLATION: halted AuthFailed slot issued {} background dial attempts (base={base_dials}, now={cur_dials})",
+                            summary.id,
+                            cur_dials.saturating_sub(base_dials)
+                        );
+                        ensure!(
+                            cur_reconn == base_reconn,
+                            "[{client_name}][{}] AUTH_FAILED LIVENESS VIOLATION: halted AuthFailed slot incremented reconnect_count (base={base_reconn}, now={cur_reconn})",
+                            summary.id
+                        );
+                    } else {
+                        self.auth_failed_baselines
+                            .insert(key, (cur_dials, cur_reconn));
+                    }
+                } else {
+                    self.auth_failed_baselines.remove(&key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Targeted check asserting that `(client_id, host_id)` is currently in `AuthFailed` and issued
+    /// 0 new dials and 0 new reconnects relative to `(baseline_dials, baseline_reconnects)`.
+    pub fn assert_auth_failed_zero_dials_for(
+        &mut self,
+        world: &SimWorld,
+        client_id: &str,
+        host_id: &str,
+        baseline_dials: u64,
+        baseline_reconnects: u32,
+    ) -> Result<()> {
+        world.hit("oracle.auth_failed_zero_dials_checked");
+        let summary = world
+            .client_host_summaries_on(client_id)
+            .into_iter()
+            .find(|s| s.id == host_id)
+            .with_context(|| {
+                format!("[{client_id}][{host_id}] missing from client host_summaries")
+            })?;
+        ensure!(
+            matches!(summary.connection, HostConnectionState::AuthFailed { .. }),
+            "[{client_id}][{host_id}] expected HostConnectionState::AuthFailed, got {:?}",
+            summary.connection
+        );
+        let cur_dials = world.client_dial_count(client_id, host_id);
+        ensure!(
+            cur_dials == baseline_dials,
+            "[{client_id}][{host_id}] AuthFailed slot issued {} background dial attempts (base={baseline_dials}, now={cur_dials})",
+            cur_dials.saturating_sub(baseline_dials)
+        );
+        ensure!(
+            summary.reconnect_count == baseline_reconnects,
+            "[{client_id}][{host_id}] AuthFailed slot incremented reconnect_count (base={baseline_reconnects}, now={})",
+            summary.reconnect_count
+        );
+        self.auth_failed_baselines.insert(
+            (client_id.to_owned(), host_id.to_owned()),
+            (cur_dials, summary.reconnect_count),
+        );
+        Ok(())
+    }
+
     /// Runs invariants that MUST hold at every step (even mid-partition or mid-chaos).
     pub fn check_step_invariants(&mut self, world: &SimWorld) -> Result<()> {
         self.check_server_monotonicity_and_notifications(world)?;
@@ -298,6 +820,12 @@ impl InvariantOracle {
     /// once network faults are healed and drained.
     pub fn check_quiescent_invariants(&mut self, world: &SimWorld) -> Result<()> {
         self.check_step_invariants(world)?;
+        if !self.min_seen_rev.is_empty() {
+            self.check_read_your_writes(world)?;
+        }
+        if !self.request_key_attempts.is_empty() {
+            self.check_at_most_once(world)?;
+        }
         if self.secrets_queued_offline {
             ensure!(
                 self.outbox_files_scanned > 0,
@@ -783,11 +1311,34 @@ impl InvariantOracle {
                 continue;
             };
             let srv_snap = server.snapshot()?;
-            let srv_active = canban_scheduler::active_count_at(&srv_snap, server.now_ms());
+            let srv_now = server.now_ms();
+            let srv_active = canban_scheduler::active_count_at(&srv_snap, srv_now);
             let max_agents = server.config().scheduler.max_agents;
+            // Per `crates/scheduler/src/lib.rs:123`: `max_agents` is an automatic admission
+            // budget, not a hard cap on retained terminals. When a retained `completed`/`backlog`
+            // Card PTY temporarily releases its slot (e.g. `idle`/`blocked`), the scheduler may
+            // legitimately admit up to `max_agents` new runs; if that retained PTY later resumes
+            // `working` in Herdr (interactive follow-up), `active_count_at` counts it to pause
+            // *further* admissions without implying the scheduler over-admitted.
+            let retained_resumed = srv_snap
+                .terminals
+                .iter()
+                .filter_map(|t| t.agent.as_ref())
+                .filter(|a| {
+                    matches!(a.state.as_str(), "completed" | "backlog")
+                        && a.terminal.is_some()
+                        && !a.finished()
+                        && (a.close_state == "closing"
+                            || !matches!(
+                                a.runtime_status_at(srv_now),
+                                "closed" | "blocked" | "idle" | "done" | "error"
+                            ))
+                })
+                .count();
+            let admitted_active = srv_active.saturating_sub(retained_resumed);
             ensure!(
-                srv_active <= max_agents,
-                "[{host_name}] scheduler active_count_at ({srv_active}) exceeded max_agents ({max_agents})"
+                admitted_active <= max_agents,
+                "[{host_name}] scheduler admitted active count ({admitted_active}, total active_count_at={srv_active}, retained_resumed={retained_resumed}) exceeded max_agents ({max_agents})"
             );
 
             // Terminal binding exclusivity: at most 1 live non-finished AgentRun per (core_id, herdr_addr).
@@ -1180,6 +1731,7 @@ impl InvariantOracle {
                 if h != host_name {
                     continue;
                 }
+                world.hit("oracle.committed_merge_batch_checked");
                 let batch = snap
                     .merge_batches
                     .iter()
@@ -1671,6 +2223,22 @@ fn strip_host_prefix(id: &str) -> String {
     canban_types::split_qualified_host_id(id)
         .map(|(_, raw)| raw.to_owned())
         .unwrap_or_else(|| id.to_owned())
+}
+
+fn normalize_client_host_id(host: &str) -> String {
+    if host == "local-server" {
+        "local".to_owned()
+    } else {
+        host.to_owned()
+    }
+}
+
+fn normalize_server_host_name(host: &str) -> String {
+    if host == "local" {
+        "local-server".to_owned()
+    } else {
+        host.to_owned()
+    }
 }
 
 fn normalize_human_gate(
@@ -2325,4 +2893,222 @@ pub fn canonical_state_digest(world: &SimWorld) -> u64 {
         }
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::{PRIMARY_CLIENT, SimWorld, SimWorldConfig, StorageFaultKind};
+    use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn read_your_writes_detects_revision_regression_and_validates_monotonic_writes() {
+        let mut oracle = InvariantOracle::default();
+        oracle
+            .observe_card_revision(PRIMARY_CLIENT, "remote-a", "remote-a::c1", 1)
+            .unwrap();
+        oracle
+            .observe_card_revision(PRIMARY_CLIENT, "remote-a", "c1", 2)
+            .unwrap();
+        let err = oracle
+            .observe_card_revision(PRIMARY_CLIENT, "remote-a", "c1", 1)
+            .expect_err("revision regression must fail immediately");
+        assert!(format!("{err:#}").contains("MONOTONIC READ / RYW VIOLATION"));
+
+        let mut cfg = SimWorldConfig::desktop_default(889_001, "unit_oracle_ryw");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+        let dir = world.project_dir("ryw-repo").expect("dir");
+        let proj = world
+            .client_call(
+                "project.create",
+                json!({ "host_id": "remote-a", "name": "RYW", "directory": dir }),
+                None,
+            )
+            .expect("project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let created = world
+            .client_call(
+                "card.create",
+                json!({ "project_id": pid, "title": "RYW Card", "request_key": "ryw-create-1" }),
+                Some(&pid),
+            )
+            .expect("card.create");
+        let mut live_oracle = InvariantOracle::default();
+        live_oracle
+            .observe_write_receipt(PRIMARY_CLIENT, "remote-a", &created)
+            .expect("observe create receipt");
+        let updated = world
+            .client_call(
+                "card.update",
+                json!({
+                    "card_id": created["id"],
+                    "revision": created["revision"],
+                    "title": "RYW Card v2",
+                    "request_key": "ryw-update-1",
+                }),
+                Some(&pid),
+            )
+            .expect("card.update");
+        live_oracle
+            .observe_write_receipt(PRIMARY_CLIENT, "remote-a", &updated)
+            .expect("observe update receipt");
+        world.heal_and_quiesce(10_000).expect("heal");
+        live_oracle
+            .check_read_your_writes(&world)
+            .expect("RYW check must pass");
+        assert!(
+            world
+                .coverage_counts()
+                .get("oracle.read_your_writes_checked")
+                .copied()
+                .unwrap_or(0)
+                >= 1
+        );
+    }
+
+    #[test]
+    fn at_most_once_verifies_idempotent_retries_across_ioerror_and_bounce() {
+        let mut cfg = SimWorldConfig::desktop_default(889_002, "unit_oracle_at_most_once");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+        let dir = world.project_dir("amo-repo").expect("dir");
+        let proj = world
+            .client_call(
+                "project.create",
+                json!({ "host_id": "remote-a", "name": "AMO", "directory": dir }),
+                None,
+            )
+            .expect("project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let mut oracle = InvariantOracle::default();
+
+        // Inject SQLITE_IOERR on first attempt -> unacknowledged attempt -> retry succeeds once!
+        let rkey = "amo-card-1";
+        let fixed_id = "amo-fixed-card-1";
+        let title = "Idempotent Card Under IOERR";
+        let payload = json!({
+            "id": fixed_id,
+            "project_id": pid,
+            "title": title,
+            "request_key": rkey,
+        });
+        world
+            .storage_faults("remote-a")
+            .unwrap()
+            .inject_next(StorageFaultKind::IoError);
+        let first = world.client_call("card.create", payload.clone(), Some(&pid));
+        assert!(
+            first.is_err(),
+            "first attempt must hit injected SQLITE_IOERR"
+        );
+        oracle.record_request_key_attempt_with_marker(
+            "remote-a",
+            rkey,
+            "card.create",
+            false,
+            title,
+        );
+        oracle
+            .check_at_most_once(&world)
+            .expect("0 effects allowed while unacknowledged");
+
+        let ack = world
+            .client_call("card.create", payload.clone(), Some(&pid))
+            .expect("retry succeeds");
+        oracle.record_request_key_attempt_with_marker("remote-a", rkey, "card.create", true, title);
+
+        // Duplicate replay after bounce must return exact same ID and keep 1 materialized effect!
+        world.bounce_server("remote-a").expect("bounce");
+        world.heal_and_quiesce(15_000).expect("heal");
+        let replay = world
+            .client_call("card.create", payload, Some(&pid))
+            .expect("idempotent replay");
+        assert_eq!(replay["id"], ack["id"]);
+        oracle.record_request_key_attempt_with_marker("remote-a", rkey, "card.create", true, title);
+        oracle
+            .check_at_most_once(&world)
+            .expect("acknowledged at-most-once must have exactly 1 effect");
+        assert!(
+            world
+                .coverage_counts()
+                .get("oracle.at_most_once_checked")
+                .copied()
+                .unwrap_or(0)
+                >= 1
+        );
+    }
+
+    #[test]
+    fn auth_failed_zero_dials_verifies_halted_revoked_host() {
+        let mut cfg = SimWorldConfig::desktop_default(889_003, "unit_oracle_auth_zero_dials");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+
+        // Revoke the active device token on remote-a and wait for AuthFailed.
+        let devs = world
+            .server_call("remote-a", "device.list", json!({}))
+            .expect("device.list");
+        let dev_id = devs["devices"][0]["id"]
+            .as_str()
+            .expect("device id")
+            .to_owned();
+        let _ = world
+            .server_call("remote-a", "device.revoke", json!({ "device_id": dev_id }))
+            .expect("device.revoke");
+        world
+            .wait_until(10_000, |w| {
+                Ok(w.client_host_summaries().iter().any(|s| {
+                    s.id == "remote-a"
+                        && matches!(s.connection, HostConnectionState::AuthFailed { .. })
+                }))
+            })
+            .expect("wait for AuthFailed");
+
+        let mut oracle = InvariantOracle::default();
+        oracle
+            .check_auth_failed_zero_dials(&world)
+            .expect("capture AuthFailed baseline");
+        let base_dials = world.client_dial_count(PRIMARY_CLIENT, "remote-a");
+        let base_reconn = world
+            .client_host_summaries()
+            .into_iter()
+            .find(|s| s.id == "remote-a")
+            .unwrap()
+            .reconnect_count;
+
+        world.advance(Duration::from_secs(12)).expect("advance");
+        world
+            .client_run_on(PRIMARY_CLIENT, 10_000, |c| async move {
+                c.wake_host("remote-a");
+                c.wake_all();
+                c.on_foreground();
+                c.poll_remotes_once_async().await;
+                Ok(())
+            })
+            .expect("background wakes");
+        world.advance(Duration::from_secs(8)).expect("advance");
+
+        oracle
+            .check_auth_failed_zero_dials(&world)
+            .expect("AuthFailed must issue 0 background dials");
+        oracle
+            .assert_auth_failed_zero_dials_for(
+                &world,
+                PRIMARY_CLIENT,
+                "remote-a",
+                base_dials,
+                base_reconn,
+            )
+            .expect("targeted AuthFailed zero-dial assertion");
+        assert!(
+            world
+                .coverage_counts()
+                .get("oracle.auth_failed_zero_dials_checked")
+                .copied()
+                .unwrap_or(0)
+                >= 2
+        );
+    }
 }

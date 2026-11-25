@@ -16,14 +16,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use canban_app_server::{AppServer, ServerRuntimeEnv, hosts::DesktopGlobalEnvProvider};
 pub use canban_app_server::{FsDurability, ScriptExecutionMode};
 use canban_client::{
-    ClientCapabilities, ClientEvent, InlineHostsFileStore, LocalHostDriver, MultiHostClient,
-    MultiHostClientOptions, RemoteClientConfig,
+    ClientCapabilities, ClientEvent, ConnectFuture, HostConnector, InlineHostsFileStore,
+    LocalHostDriver, MultiHostClient, MultiHostClientOptions, RemoteClientConfig,
 };
 pub use canban_storage::{StorageFaultInjector, StorageFaultKind};
-use canban_transport::{ClientTransport, TailscalePeerIdentity, TailscalePeerVerifier};
+use canban_transport::{
+    ClientTransport, MAX_FRAME_BYTES, TailscalePeerIdentity, TailscalePeerVerifier,
+    read_bounded_line, write_json_line_async,
+};
 use canban_types::{
-    Config, GlobalEnvSyncStatus, HostSummary, HostTransport, RuntimeState, SavedHost, Snapshot,
-    SyncAction, SyncItemState, SyncItemView,
+    Config, FailpointEvent, Failpoints, GlobalEnvSyncStatus, HostSummary, HostTransport,
+    RuntimeState, SavedHost, SchedulerSettings, Snapshot, SyncAction, SyncItemState, SyncItemView,
 };
 use rand::{SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
@@ -43,8 +46,45 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc, oneshot};
 
 pub const SIM_PORT: u16 = 7680;
+/// Simulated local framed JSON-RPC port serving [`AppServer::serve_local_stream`] over `turmoil::net`
+/// when [`SimWorldConfig::framed_local_transport`] is enabled.
+pub const SIM_LOCAL_FRAMED_PORT: u16 = SIM_PORT + 1;
 pub const PRIMARY_CLIENT: &str = "ui-client";
 const MAX_BUFFERED_CLIENT_EVENTS: usize = 2_048;
+
+fn make_observed_failpoints() -> Arc<Failpoints> {
+    let fp = Failpoints::shared();
+    fp.set_observer(Some(Arc::new(|name, ev| match ev {
+        FailpointEvent::Armed => crate::trace::record_fault_armed(name),
+        FailpointEvent::Fired => crate::trace::record_fault_fired(name),
+        FailpointEvent::Reached => {}
+    })));
+    fp
+}
+
+struct CountingHostConnector<C> {
+    inner: C,
+    dial_counts: Arc<Mutex<BTreeMap<String, u64>>>,
+}
+
+impl<C: HostConnector> HostConnector for CountingHostConnector<C> {
+    fn supports(&self, transport: &HostTransport) -> bool {
+        self.inner.supports(transport)
+    }
+
+    fn connect<'a>(
+        &'a self,
+        host_id: &'a str,
+        transport: &'a HostTransport,
+        device_name: &'a str,
+    ) -> ConnectFuture<'a> {
+        {
+            let mut counts = self.dial_counts.lock().unwrap();
+            *counts.entry(host_id.to_owned()).or_insert(0) += 1;
+        }
+        self.inner.connect(host_id, transport, device_name)
+    }
+}
 
 /// Controllable deterministic [`TailscalePeerVerifier`] for DST (`transport_auth`).
 #[derive(Clone, Default)]
@@ -193,6 +233,10 @@ pub struct SimWorldConfig {
     pub script_execution_mode: ScriptExecutionMode,
     /// Optional per-host override for `ServerRuntimeEnv::script_execution_mode`.
     pub host_script_execution_modes: BTreeMap<String, ScriptExecutionMode>,
+    /// When `true`, binds a local framed `turmoil::net::TcpListener` serving
+    /// `AppServer::serve_local_stream` and routes `SimLocalHostDriver` RPCs over framed JSON-RPC
+    /// instead of direct in-process `Arc<AppServer>` calls (default `false` to preserve legacy digests).
+    pub framed_local_transport: bool,
 }
 
 impl SimWorldConfig {
@@ -217,6 +261,7 @@ impl SimWorldConfig {
             desktop_api_overrides: BTreeMap::new(),
             script_execution_mode: ScriptExecutionMode::Auto,
             host_script_execution_modes: BTreeMap::new(),
+            framed_local_transport: false,
         }
     }
 
@@ -241,6 +286,7 @@ impl SimWorldConfig {
             desktop_api_overrides: BTreeMap::new(),
             script_execution_mode: ScriptExecutionMode::Auto,
             host_script_execution_modes: BTreeMap::new(),
+            framed_local_transport: false,
         }
     }
 }
@@ -257,6 +303,74 @@ async fn connect_local_transport(local_tok: String) -> Result<Arc<ClientTranspor
     Ok(Arc::new(transport))
 }
 
+fn decode_framed_jsonrpc_reply(line: &str) -> Result<Value> {
+    let reply: Value = serde_json::from_str(line).context("decode framed local JSON-RPC reply")?;
+    if let Some(err) = reply.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("local framed RPC error");
+        bail!("{msg}");
+    }
+    Ok(reply.get("result").cloned().unwrap_or(Value::Null))
+}
+
+struct FramedLocalConn {
+    reader: tokio::io::BufReader<tokio::io::ReadHalf<turmoil::net::TcpStream>>,
+    writer: tokio::io::WriteHalf<turmoil::net::TcpStream>,
+    next_id: u64,
+}
+
+impl FramedLocalConn {
+    async fn connect() -> Result<Self> {
+        let addr = format!("local-server:{SIM_LOCAL_FRAMED_PORT}");
+        let stream = turmoil::net::TcpStream::connect(addr.as_str())
+            .await
+            .map_err(|e| anyhow!("connect framed local-server ({addr}): {e}"))?;
+        let (read_half, writer) = tokio::io::split(stream);
+        Ok(Self {
+            reader: tokio::io::BufReader::new(read_half),
+            writer,
+            next_id: 0,
+        })
+    }
+
+    async fn rpc(&mut self, method: &str, params: &Value) -> Result<Value> {
+        self.next_id = self.next_id.wrapping_add(1);
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id,
+            "method": method,
+            "params": params,
+        });
+        write_json_line_async(&mut self.writer, &req).await?;
+        let line_opt = read_bounded_line(&mut self.reader, MAX_FRAME_BYTES).await?;
+        let Some(line) = line_opt else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("Framed local AppServer closed stream during {method}"),
+            )
+            .into());
+        };
+        decode_framed_jsonrpc_reply(&line)
+    }
+}
+
+#[derive(Clone, Default)]
+struct FramedLocalCache {
+    server_id: Option<String>,
+    revision: Value,
+    snapshot: Snapshot,
+    runtime_state: RuntimeState,
+    config: Config,
+}
+
+#[derive(Default)]
+struct FramedLocalState {
+    pool: Mutex<Vec<(u64, FramedLocalConn)>>,
+    cache: Mutex<FramedLocalCache>,
+}
+
 struct SimLocalHostDriver {
     home: PathBuf,
     server_slot: Arc<Mutex<Option<Arc<AppServer>>>>,
@@ -264,9 +378,20 @@ struct SimLocalHostDriver {
     token_slot: Arc<Mutex<Option<String>>>,
     transport_state: Arc<Mutex<(u64, Arc<ClientTransport>)>>,
     reconnecting: Arc<AtomicBool>,
+    framed: Option<Arc<FramedLocalState>>,
 }
 
 impl SimLocalHostDriver {
+    fn is_framed(&self) -> bool {
+        self.framed.is_some()
+    }
+
+    fn framed_cached_revision(&self) -> Option<Value> {
+        self.framed
+            .as_ref()
+            .map(|f| f.cache.lock().unwrap().revision.clone())
+    }
+
     async fn refresh_transport(&self) -> Result<()> {
         let target_gen = self.server_boot_gen.load(Ordering::SeqCst);
         let tok = self
@@ -279,6 +404,277 @@ impl SimLocalHostDriver {
         *self.transport_state.lock().unwrap() = (target_gen, fresh);
         Ok(())
     }
+
+    async fn call_framed_async(&self, method: &str, mut params: Value) -> Result<Value> {
+        let framed = self
+            .framed
+            .as_ref()
+            .context("framed_local_transport is disabled on SimLocalHostDriver")?;
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove("host_id");
+        }
+        let target_gen = self.server_boot_gen.load(Ordering::SeqCst);
+        let popped = {
+            let mut pool = framed.pool.lock().unwrap();
+            pool.retain(|(g, _)| *g == target_gen);
+            pool.pop()
+        };
+        let (mut conn, reused) = match popped {
+            Some((_, conn)) => (conn, true),
+            None => (FramedLocalConn::connect().await?, false),
+        };
+        crate::trace::record_coverage_hit("transport.local_framed_rpc");
+        let reply = match conn.rpc(method, &params).await {
+            Ok(v) => v,
+            Err(err)
+                if reused
+                    && err.downcast_ref::<std::io::Error>().is_some()
+                    && self.server_boot_gen.load(Ordering::SeqCst) == target_gen =>
+            {
+                // Idle keep-alive connections are closed by `serve_local_stream` after 60s;
+                // mirror `ClientTransport::call` by transparently retrying once on a fresh stream
+                // when the server generation has not bounced.
+                conn = FramedLocalConn::connect().await?;
+                conn.rpc(method, &params).await?
+            }
+            Err(err) => return Err(err),
+        };
+        {
+            let mut cache = framed.cache.lock().unwrap();
+            match method {
+                "config.agents.save" | "agent.setup" => {
+                    if let Ok(cfg) = serde_json::from_value::<Config>(reply.clone()) {
+                        cache.config = cfg;
+                    }
+                }
+                "scheduler.configure" => {
+                    if let Ok(settings) = serde_json::from_value::<SchedulerSettings>(reply.clone())
+                    {
+                        cache.config.scheduler = settings;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.server_boot_gen.load(Ordering::SeqCst) == target_gen {
+            let mut pool = framed.pool.lock().unwrap();
+            if pool.len() < 4 {
+                pool.push((target_gen, conn));
+            }
+        }
+        Ok(reply)
+    }
+
+    async fn refresh_framed_cache_async(&self) -> Result<()> {
+        let Some(framed) = self.framed.as_ref() else {
+            return Ok(());
+        };
+        let need_server_id = framed.cache.lock().unwrap().server_id.is_none();
+        let ping_sid = if need_server_id {
+            self.call_framed_async("app.ping", json!({}))
+                .await?
+                .get("server_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let mut state = self.call_framed_async("app.state", json!({})).await?;
+        let revision = state["revision"].take();
+        let config: Config = serde_json::from_value(state["config"].take())?;
+        let snapshot: Snapshot = serde_json::from_value(state["snapshot"].take())?;
+        let mut rt_val = self.call_framed_async("runtime.state", json!({})).await?;
+        let runtime_state: RuntimeState = serde_json::from_value(rt_val["runtime"].take())?;
+        let mut cache = framed.cache.lock().unwrap();
+        if let Some(sid) = ping_sid {
+            cache.server_id = Some(sid);
+        }
+        cache.revision = revision;
+        cache.config = config;
+        cache.snapshot = snapshot;
+        cache.runtime_state = runtime_state;
+        Ok(())
+    }
+
+    async fn refresh_framed_runtime_only_async(&self) -> Result<()> {
+        let Some(framed) = self.framed.as_ref() else {
+            return Ok(());
+        };
+        let mut rt_val = self.call_framed_async("runtime.state", json!({})).await?;
+        let runtime_state: RuntimeState = serde_json::from_value(rt_val["runtime"].take())?;
+        framed.cache.lock().unwrap().runtime_state = runtime_state;
+        Ok(())
+    }
+
+    async fn reconnect_framed_async(&self) -> Result<()> {
+        if let Some(framed) = self.framed.as_ref() {
+            framed.pool.lock().unwrap().clear();
+            self.refresh_framed_cache_async().await?;
+        }
+        Ok(())
+    }
+
+    /// Synchronous framed JSON-RPC fallback through `AppServer::serve_local_stream` when
+    /// `LocalHostDriver::call` is invoked synchronously inside `MultiHostClient` while
+    /// `framed_local_transport == true`.
+    fn call_framed_sync(&self, method: &str, mut params: Value) -> Result<Value> {
+        let srv = self
+            .server_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .context("Simulated local AppServer is crashed")?;
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove("host_id");
+        }
+        let method_owned = method.to_owned();
+        crate::trace::record_coverage_hit("transport.local_framed_rpc");
+        let reply = std::thread::scope(|s| -> Result<Value> {
+            let handle = s.spawn(move || -> Result<Value> {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("build scoped framed local runtime")?;
+                rt.block_on(async move {
+                    let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+                    let srv_task = tokio::spawn(Arc::clone(&srv).serve_local_stream(server_io));
+                    let (read_half, mut writer) = tokio::io::split(client_io);
+                    let mut reader = tokio::io::BufReader::new(read_half);
+                    let req = json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": method_owned,
+                        "params": params,
+                    });
+                    write_json_line_async(&mut writer, &req).await?;
+                    let line = read_bounded_line(&mut reader, MAX_FRAME_BYTES)
+                        .await?
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "Framed local stream closed unexpectedly",
+                            )
+                        })?;
+                    drop(writer);
+                    drop(reader);
+                    let _ = srv_task.await;
+                    decode_framed_jsonrpc_reply(&line)
+                })
+            });
+            handle
+                .join()
+                .map_err(|_| anyhow!("framed local sync thread panicked"))?
+        })?;
+        if let Some(framed) = self.framed.as_ref() {
+            let mut cache = framed.cache.lock().unwrap();
+            match method {
+                "config.agents.save" | "agent.setup" => {
+                    if let Ok(cfg) = serde_json::from_value::<Config>(reply.clone()) {
+                        cache.config = cfg;
+                    }
+                }
+                "scheduler.configure" => {
+                    if let Ok(settings) = serde_json::from_value::<SchedulerSettings>(reply.clone())
+                    {
+                        cache.config.scheduler = settings;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(reply)
+    }
+}
+
+async fn run_framed_local_watcher(
+    weak_client: std::sync::Weak<MultiHostClient>,
+    driver: Arc<SimLocalHostDriver>,
+) {
+    let mut last_cursor = Value::Null;
+    loop {
+        if weak_client.strong_count() == 0 {
+            return;
+        }
+        let addr = format!("local-server:{SIM_LOCAL_FRAMED_PORT}");
+        let Ok(stream) = turmoil::net::TcpStream::connect(addr.as_str()).await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        let (read_half, mut writer) = tokio::io::split(stream);
+        let mut reader = tokio::io::BufReader::new(read_half);
+        let sub_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "app.subscribe",
+            "params": {
+                "after": last_cursor,
+                "topics": ["snapshot", "herdr"],
+                "heartbeat_ms": 15_000,
+            }
+        });
+        if write_json_line_async(&mut writer, &sub_req).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        let Ok(Some(hs_line)) = read_bounded_line(&mut reader, MAX_FRAME_BYTES).await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        if let Ok(hs) = decode_framed_jsonrpc_reply(&hs_line) {
+            let changed = hs["changed"].as_bool().unwrap_or(false);
+            if changed {
+                let _ = driver.refresh_framed_cache_async().await;
+            }
+            if !hs["revision"].is_null() {
+                last_cursor = hs["revision"].clone();
+            }
+        }
+        loop {
+            if weak_client.strong_count() == 0 {
+                return;
+            }
+            match read_bounded_line(&mut reader, MAX_FRAME_BYTES).await {
+                Ok(Some(first_line)) => {
+                    // Drain any already-buffered push lines in one batch so multi-event mutations
+                    // trigger a single framed `app.state` refresh instead of one per event.
+                    let mut latest_cursor = Value::Null;
+                    let mut saw_herdr = false;
+                    let mut process_line = |line: &str| {
+                        if let Ok(msg) = serde_json::from_str::<Value>(line)
+                            && msg.get("method").and_then(Value::as_str) == Some("event")
+                        {
+                            let ev_cursor = &msg["params"]["revision"];
+                            if !ev_cursor.is_null() {
+                                latest_cursor = ev_cursor.clone();
+                            }
+                            if msg["params"]["topic"].as_str() == Some("herdr") {
+                                saw_herdr = true;
+                            }
+                        }
+                    };
+                    process_line(&first_line);
+                    while !reader.buffer().is_empty() {
+                        match read_bounded_line(&mut reader, MAX_FRAME_BYTES).await {
+                            Ok(Some(extra)) => process_line(&extra),
+                            _ => break,
+                        }
+                    }
+                    let cursor_changed = !latest_cursor.is_null() && latest_cursor != last_cursor;
+                    if cursor_changed {
+                        if driver.refresh_framed_cache_async().await.is_ok() {
+                            last_cursor = latest_cursor;
+                        }
+                    } else if saw_herdr {
+                        let _ = driver.refresh_framed_runtime_only_async().await;
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl LocalHostDriver for SimLocalHostDriver {
@@ -287,10 +683,20 @@ impl LocalHostDriver for SimLocalHostDriver {
     }
 
     fn endpoint_label(&self) -> String {
-        "turmoil://local-server".into()
+        if self.framed.is_some() {
+            format!("turmoil://local-server:{SIM_LOCAL_FRAMED_PORT}")
+        } else {
+            "turmoil://local-server".into()
+        }
     }
 
     fn server_id(&self) -> Option<String> {
+        if let Some(framed) = self.framed.as_ref() {
+            if self.server_slot.lock().unwrap().is_none() {
+                return None;
+            }
+            return framed.cache.lock().unwrap().server_id.clone();
+        }
         let srv = self.server_slot.lock().unwrap().clone()?;
         srv.call("app.ping", json!({}))
             .ok()?
@@ -371,6 +777,9 @@ impl LocalHostDriver for SimLocalHostDriver {
     }
 
     fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.framed.is_some() {
+            return self.call_framed_sync(method, params);
+        }
         let srv = self
             .server_slot
             .lock()
@@ -381,6 +790,12 @@ impl LocalHostDriver for SimLocalHostDriver {
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
+        if let Some(framed) = self.framed.as_ref() {
+            if self.server_slot.lock().unwrap().is_none() {
+                bail!("Simulated local AppServer is crashed");
+            }
+            return Ok(framed.cache.lock().unwrap().snapshot.clone());
+        }
         let srv = self
             .server_slot
             .lock()
@@ -391,6 +806,12 @@ impl LocalHostDriver for SimLocalHostDriver {
     }
 
     fn runtime_state(&self) -> Result<RuntimeState> {
+        if let Some(framed) = self.framed.as_ref() {
+            if self.server_slot.lock().unwrap().is_none() {
+                bail!("Simulated local AppServer is crashed");
+            }
+            return Ok(framed.cache.lock().unwrap().runtime_state.clone());
+        }
         let srv = self
             .server_slot
             .lock()
@@ -401,6 +822,9 @@ impl LocalHostDriver for SimLocalHostDriver {
     }
 
     fn config(&self) -> Config {
+        if let Some(framed) = self.framed.as_ref() {
+            return framed.cache.lock().unwrap().config.clone();
+        }
         self.server_slot
             .lock()
             .unwrap()
@@ -448,6 +872,7 @@ pub struct SimServerHandle {
     pub exec: Arc<SimExec>,
     pub clock: Arc<TurmoilClock>,
     pub storage_faults: Arc<StorageFaultInjector>,
+    pub failpoints: Arc<Failpoints>,
     pub tailscale_verifier: Arc<Mutex<Option<SimTailscaleVerifier>>>,
     pub desktop_api_override: Arc<Mutex<Option<u32>>>,
     pub server_slot: Arc<Mutex<Option<Arc<AppServer>>>>,
@@ -472,6 +897,8 @@ impl SimServerHandle {
 pub struct SimClientHandle {
     pub name: String,
     pub data_dir: PathBuf,
+    pub failpoints: Arc<Failpoints>,
+    pub dial_counts: Arc<Mutex<BTreeMap<String, u64>>>,
     pub client_slot: Arc<Mutex<Option<Arc<MultiHostClient>>>>,
     pub rt_handle: Arc<Mutex<Option<tokio::runtime::Handle>>>,
     cmd_tx: Arc<Mutex<Option<mpsc::UnboundedSender<ClientCommand>>>>,
@@ -602,6 +1029,7 @@ impl SimWorld {
             let host_github = github.for_host(host_name.clone());
             let exec = SimExec::new(host_name.clone());
             let storage_faults = Arc::new(StorageFaultInjector::new());
+            let failpoints = make_observed_failpoints();
             let tailscale_verifier_slot: Arc<Mutex<Option<SimTailscaleVerifier>>> = Arc::new(
                 Mutex::new(config.tailscale_verifiers.get(host_name).cloned()),
             );
@@ -621,6 +1049,7 @@ impl SimWorld {
             let h_github = host_github.clone();
             let h_exec = exec.clone();
             let h_storage_faults = Arc::clone(&storage_faults);
+            let h_failpoints = Arc::clone(&failpoints);
             let h_ts_verifier = Arc::clone(&tailscale_verifier_slot);
             let h_api_override = Arc::clone(&desktop_api_override_slot);
             let h_slot = Arc::clone(&server_slot);
@@ -632,6 +1061,7 @@ impl SimWorld {
             let h_durability = config.fs_durability;
             let h_sqlite_sync_off = config.sqlite_synchronous_off;
             let h_disable_watchers = config.disable_os_watchers;
+            let h_framed_local = config.framed_local_transport && host_name == "local-server";
             let h_script_mode = config
                 .host_script_execution_modes
                 .get(host_name)
@@ -650,6 +1080,7 @@ impl SimWorld {
                 let host_github = h_github.clone();
                 let exec = h_exec.clone();
                 let storage_faults = Arc::clone(&h_storage_faults);
+                let failpoints = Arc::clone(&h_failpoints);
                 let ts_verifier_slot = Arc::clone(&h_ts_verifier);
                 let api_override_slot = Arc::clone(&h_api_override);
                 let slot = Arc::clone(&h_slot);
@@ -685,7 +1116,7 @@ impl SimWorld {
                         desktop_api_override,
                         script_execution_mode: h_script_mode,
                         storage_faults: Some(storage_faults),
-                        failpoints: None,
+                        failpoints: Some(failpoints),
                     };
                     let server = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env)
                         .map_err(|e| format!("open_with_env({host_label}): {e:#}"))?;
@@ -706,6 +1137,43 @@ impl SimWorld {
                     let listener = turmoil::net::TcpListener::bind(("0.0.0.0", SIM_PORT))
                         .await
                         .map_err(|e| format!("bind({host_label}): {e:#}"))?;
+                    let local_framed_task = if h_framed_local {
+                        let framed_listener =
+                            turmoil::net::TcpListener::bind(("0.0.0.0", SIM_LOCAL_FRAMED_PORT))
+                                .await
+                                .map_err(|e| format!("bind_framed({host_label}): {e:#}"))?;
+                        let framed_srv = Arc::clone(&server);
+                        let mut framed_stop = server.stop_receiver();
+                        Some(tokio::spawn(async move {
+                            loop {
+                                if *framed_stop.borrow() || framed_srv.stopped() {
+                                    break;
+                                }
+                                tokio::select! {
+                                    biased;
+                                    _ = framed_stop.changed() => break,
+                                    res = framed_listener.accept() => {
+                                        match res {
+                                            Ok((stream, _peer)) => {
+                                                let srv = Arc::clone(&framed_srv);
+                                                tokio::spawn(async move {
+                                                    let _ = srv.serve_local_stream(stream).await;
+                                                });
+                                            }
+                                            Err(_) => {
+                                                if *framed_stop.borrow() || framed_srv.stopped() {
+                                                    break;
+                                                }
+                                                tokio::time::sleep(Duration::from_millis(5)).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }))
+                    } else {
+                        None
+                    };
                     *slot.lock().unwrap() = Some(Arc::clone(&server));
                     let res = serve_turmoil_listener_with_faults(
                         Arc::clone(&server),
@@ -714,6 +1182,9 @@ impl SimWorld {
                         Some(host_label.clone()),
                     )
                     .await;
+                    if let Some(task) = local_framed_task {
+                        task.abort();
+                    }
                     *slot.lock().unwrap() = None;
                     *abrupt_slot.lock().unwrap() = None;
                     drop(running);
@@ -731,6 +1202,7 @@ impl SimWorld {
                     exec,
                     clock,
                     storage_faults,
+                    failpoints,
                     tailscale_verifier: tailscale_verifier_slot,
                     desktop_api_override: desktop_api_override_slot,
                     server_slot,
@@ -821,6 +1293,8 @@ impl SimWorld {
         let total_events = Arc::new(AtomicU64::new(0));
         let crashed = Arc::new(AtomicBool::new(false));
         let boot_generation = Arc::new(AtomicU64::new(0));
+        let client_failpoints = make_observed_failpoints();
+        let dial_counts: Arc<Mutex<BTreeMap<String, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
         let ui_data_dir = data_dir.clone();
         let ui_clock = Arc::new(TurmoilClock::new(Arc::clone(&self.shared_elapsed_ms)));
@@ -831,8 +1305,11 @@ impl SimWorld {
         let ui_events = Arc::clone(&client_events);
         let ui_total_events = Arc::clone(&total_events);
         let ui_boot_gen = Arc::clone(&boot_generation);
+        let ui_failpoints = Arc::clone(&client_failpoints);
+        let ui_dial_counts = Arc::clone(&dial_counts);
         let ui_seed = self.config.seed;
         let ui_durability = self.config.fs_durability;
+        let ui_framed_local = self.config.framed_local_transport;
         let ui_policy = self.stream_fault_policy.clone();
         let ui_name = client_name.to_owned();
 
@@ -869,6 +1346,8 @@ impl SimWorld {
             let local_driver_holder = Arc::clone(&ui_local_driver);
             let events_sink = Arc::clone(&ui_events);
             let total_events_ctr = Arc::clone(&ui_total_events);
+            let failpoints = Arc::clone(&ui_failpoints);
+            let dial_counts = Arc::clone(&ui_dial_counts);
             let boot_gen = ui_boot_gen.fetch_add(1, Ordering::SeqCst);
             let client_id_gen =
                 canban_types::deterministic_id_gen(derive_host_seed(ui_seed, &ui_name, boot_gen));
@@ -884,7 +1363,8 @@ impl SimWorld {
             async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<ClientCommand>();
                 #[allow(clippy::type_complexity)]
-                let (local_driver, global_env_provider, capabilities): (
+                let (concrete_local_driver, local_driver, global_env_provider, capabilities): (
+                    Option<Arc<SimLocalHostDriver>>,
                     Option<Arc<dyn LocalHostDriver>>,
                     Option<Arc<dyn canban_client::GlobalEnvSyncProvider>>,
                     ClientCapabilities,
@@ -896,6 +1376,7 @@ impl SimWorld {
                     let transport = connect_local_transport(local_tok)
                         .await
                         .map_err(|e| format!("{e:#}"))?;
+                    let framed = ui_framed_local.then(|| Arc::new(FramedLocalState::default()));
                     let concrete_driver = Arc::new(SimLocalHostDriver {
                         home: local_home.clone(),
                         server_slot: srv_slot,
@@ -903,18 +1384,27 @@ impl SimWorld {
                         token_slot: tok_slot,
                         transport_state: Arc::new(Mutex::new((connected_gen, transport))),
                         reconnecting: Arc::new(AtomicBool::new(false)),
+                        framed,
                     });
+                    if ui_framed_local {
+                        concrete_driver
+                            .refresh_framed_cache_async()
+                            .await
+                            .map_err(|e| format!("initial framed local sync: {e:#}"))?;
+                    }
                     *local_driver_holder.lock().unwrap() = Some(Arc::clone(&concrete_driver));
-                    let driver: Arc<dyn LocalHostDriver> = concrete_driver;
+                    let driver: Arc<dyn LocalHostDriver> =
+                        Arc::clone(&concrete_driver) as Arc<dyn LocalHostDriver>;
                     let env_provider: Arc<dyn canban_client::GlobalEnvSyncProvider> =
                         Arc::new(DesktopGlobalEnvProvider::new(local_home).with_id_gen(env_id_gen));
                     (
+                        Some(concrete_driver),
                         Some(driver),
                         Some(env_provider),
                         ClientCapabilities::desktop(),
                     )
                 } else {
-                    (None, None, ClientCapabilities::mobile())
+                    (None, None, None, ClientCapabilities::mobile())
                 };
 
                 let mut rc_cfg = RemoteClientConfig::new(data_dir.clone());
@@ -924,11 +1414,15 @@ impl SimWorld {
                     ui_durability,
                 ));
                 let rt_cur = tokio::runtime::Handle::current();
-                let client = MultiHostClient::from_options_with_runtime_and_id_gen(
+                let connector = Arc::new(CountingHostConnector {
+                    inner: FaultyTurmoilConnector::new(policy),
+                    dial_counts,
+                });
+                let client = MultiHostClient::from_options_with_runtime_id_gen_and_failpoints(
                     MultiHostClientOptions {
                         config: rc_cfg,
                         host_store,
-                        connector: Arc::new(FaultyTurmoilConnector::new(policy)),
+                        connector,
                         capabilities,
                         local_host: local_driver,
                         global_env_provider,
@@ -938,8 +1432,14 @@ impl SimWorld {
                     },
                     rt_cur.clone(),
                     client_id_gen,
+                    Some(failpoints),
                 )
                 .map_err(|e| format!("MultiHostClient init: {e:#}"))?;
+
+                if ui_framed_local && let Some(driver) = concrete_local_driver {
+                    let weak_client = Arc::downgrade(&client);
+                    tokio::spawn(run_framed_local_watcher(weak_client, driver));
+                }
 
                 // On first boot, register initial remote hosts. On subsequent bounces after
                 // `crash_client()`, `hosts.json` + `.outbox.json` already exist and were loaded
@@ -1004,6 +1504,8 @@ impl SimWorld {
             SimClientHandle {
                 name: client_name.to_owned(),
                 data_dir,
+                failpoints: client_failpoints,
+                dial_counts,
                 client_slot,
                 rt_handle,
                 cmd_tx: cmd_tx_slot,
@@ -1203,37 +1705,90 @@ impl SimWorld {
         }
     }
 
+    fn resolve_server_name<'a>(&'a self, name: &'a str) -> &'a str {
+        if name == "local"
+            && !self.servers.contains_key("local")
+            && self.servers.contains_key("local-server")
+        {
+            "local-server"
+        } else {
+            name
+        }
+    }
+
     pub fn server(&self, name: &str) -> Option<Arc<AppServer>> {
-        self.servers.get(name).and_then(|s| s.server())
+        let key = self.resolve_server_name(name);
+        self.servers.get(key).and_then(|s| s.server())
     }
 
     pub fn herdr(&self, name: &str) -> Option<Arc<SimHerdr>> {
-        self.servers.get(name).map(|s| Arc::clone(&s.herdr))
+        let key = self.resolve_server_name(name);
+        self.servers.get(key).map(|s| Arc::clone(&s.herdr))
     }
 
     pub fn github_host(&self, name: &str) -> Option<Arc<SimGitHubHost>> {
-        self.servers.get(name).map(|s| Arc::clone(&s.github))
+        let key = self.resolve_server_name(name);
+        self.servers.get(key).map(|s| Arc::clone(&s.github))
     }
 
     pub fn exec_runner(&self, name: &str) -> Option<Arc<SimExec>> {
-        self.servers.get(name).map(|s| Arc::clone(&s.exec))
+        let key = self.resolve_server_name(name);
+        self.servers.get(key).map(|s| Arc::clone(&s.exec))
     }
 
     /// Returns the per-host [`StorageFaultInjector`] attached to `host_name` (persists across
     /// `bounce_server` on the same host and is cleared by `heal_and_quiesce`).
     pub fn storage_faults(&self, host_name: &str) -> Option<&Arc<StorageFaultInjector>> {
-        self.servers.get(host_name).map(|s| &s.storage_faults)
+        let key = self.resolve_server_name(host_name);
+        self.servers.get(key).map(|s| &s.storage_faults)
+    }
+
+    /// Returns the per-host [`Failpoints`] registry attached to `host` (persists across
+    /// `bounce_server` on the same host, mirrors arm/fire events into coverage telemetry,
+    /// and is cleared by `heal_and_quiesce`). Panics if `host` is not a registered server host.
+    pub fn failpoints(&self, host: &str) -> Arc<Failpoints> {
+        self.try_failpoints(host)
+            .unwrap_or_else(|| panic!("Unknown simulated server host '{host}'"))
+    }
+
+    /// Non-panicking lookup for the per-host [`Failpoints`] registry attached to `host`.
+    pub fn try_failpoints(&self, host: &str) -> Option<Arc<Failpoints>> {
+        let key = self.resolve_server_name(host);
+        self.servers.get(key).map(|s| Arc::clone(&s.failpoints))
+    }
+
+    /// Returns the per-client [`Failpoints`] registry attached to `client` (persists across
+    /// `bounce_client`, mirrors arm/fire events into coverage telemetry, and is cleared by
+    /// `heal_and_quiesce`). Panics if `client` is not a registered simulated client.
+    pub fn client_failpoints(&self, client: &str) -> Arc<Failpoints> {
+        self.try_client_failpoints(client)
+            .unwrap_or_else(|| panic!("Unknown simulated client host '{client}'"))
+    }
+
+    /// Non-panicking lookup for the per-client [`Failpoints`] registry attached to `client`.
+    pub fn try_client_failpoints(&self, client: &str) -> Option<Arc<Failpoints>> {
+        self.clients.get(client).map(|c| Arc::clone(&c.failpoints))
+    }
+
+    /// Returns the total number of remote connector dial attempts initiated by `client_id`
+    /// toward `host_id` across the lifetime of this simulation world.
+    pub fn client_dial_count(&self, client_id: &str, host_id: &str) -> u64 {
+        self.clients
+            .get(client_id)
+            .and_then(|c| c.dial_counts.lock().unwrap().get(host_id).copied())
+            .unwrap_or(0)
     }
 
     /// Traced direct RPC against a server host (`AppServer::call`), recording the actor in `trace`.
     pub fn server_call(&mut self, host: &str, method: &str, params: Value) -> Result<Value> {
+        let key = self.resolve_server_name(host).to_owned();
         let srv = self
-            .server(host)
+            .server(&key)
             .with_context(|| format!("Server host '{host}' is not running"))?;
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),
-            host,
+            &key,
             "server.rpc",
             method,
         );
@@ -1401,6 +1956,11 @@ impl SimWorld {
             .with_context(|| {
                 format!("Simulated client '{client_id}' is crashed or uninitialized")
             })?;
+        let local_driver_opt = self
+            .clients
+            .get(client_id)
+            .and_then(|c| c.local_driver.lock().unwrap().clone())
+            .filter(|d| d.is_framed());
         let m = method.to_owned();
         let active = active_project_id.map(str::to_owned);
         self.trace.record_actor(
@@ -1417,7 +1977,29 @@ impl SimWorld {
             .send(ClientCommand {
                 run: Box::new(move |c| {
                     Box::pin(async move {
-                        let res = c.call_routed_async(&m_run, params, active.as_deref()).await;
+                        let res = if let Some(driver) = local_driver_opt
+                            && c.resolve_target_host(&m_run, &params, active.as_deref()) == "local"
+                            && !(m_run == "notifications.read_all"
+                                && params["host_id"].is_null()
+                                && params["project_id"]
+                                    .as_str()
+                                    .is_none_or(|s| s.trim().is_empty()))
+                        {
+                            let is_global_env =
+                                m_run == "env.save" && params["scope"].as_str() == Some("global");
+                            match driver.call_framed_async(&m_run, params).await {
+                                Ok(val) => {
+                                    let _ = driver.refresh_framed_cache_async().await;
+                                    if is_global_env {
+                                        c.wake_all();
+                                    }
+                                    Ok(val)
+                                }
+                                Err(err) => Err(err),
+                            }
+                        } else {
+                            c.call_routed_async(&m_run, params, active.as_deref()).await
+                        };
                         let _ = tx.send(res);
                     })
                 }),
@@ -1475,6 +2057,11 @@ impl SimWorld {
     ) -> Result<Value> {
         let m = method.to_owned();
         let active = active_project_id.map(str::to_owned);
+        let local_driver_opt = self
+            .clients
+            .get(client_id)
+            .and_then(|c| c.local_driver.lock().unwrap().clone())
+            .filter(|d| d.is_framed());
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),
@@ -1483,6 +2070,33 @@ impl SimWorld {
             format!("{m} has_active={}", active.is_some()),
         );
         self.client_exec_on(client_id, 120_000, move |c| async move {
+            if let Some(driver) = local_driver_opt
+                && c.resolve_target_host(&m, &params, active.as_deref()) == "local"
+                && !(m == "notifications.read_all"
+                    && params["host_id"].is_null()
+                    && params["project_id"]
+                        .as_str()
+                        .is_none_or(|s| s.trim().is_empty()))
+            {
+                let is_global_env = m == "env.save" && params["scope"].as_str() == Some("global");
+                let val = driver.call_framed_async(&m, params).await?;
+                if !matches!(
+                    m.as_str(),
+                    "app.ping"
+                        | "app.state"
+                        | "runtime.state"
+                        | "schedule.list"
+                        | "workflow.sources"
+                        | "viewer.presence"
+                        | "review.preview"
+                ) {
+                    let _ = driver.refresh_framed_cache_async().await;
+                }
+                if is_global_env {
+                    c.wake_all();
+                }
+                return Ok(val);
+            }
             c.call_routed_async(&m, params, active.as_deref()).await
         })
     }
@@ -1556,7 +2170,15 @@ impl SimWorld {
 
     /// Reads `"ui-client"`'s merged snapshot via an async round-trip inside `"ui-client"`'s Turmoil task.
     pub fn client_merged_snapshot_exec(&mut self) -> Result<Snapshot> {
-        let val = self.client_exec(30_000, |c| async move {
+        let local_driver_opt = self
+            .clients
+            .get(PRIMARY_CLIENT)
+            .and_then(|c| c.local_driver.lock().unwrap().clone())
+            .filter(|d| d.is_framed());
+        let val = self.client_exec(30_000, move |c| async move {
+            if let Some(driver) = local_driver_opt {
+                driver.refresh_framed_cache_async().await?;
+            }
             let snap = c.merged_snapshot()?;
             Ok(serde_json::to_value(snap)?)
         })?;
@@ -1846,7 +2468,8 @@ impl SimWorld {
     /// Abruptly crashes an `AppServer` host (`SIGKILL` semantics: sets `SimRunning::set_abrupt_crash(true)`
     /// to skip graceful `finish_agent_work()`, drops its Tokio runtime & sockets, and preserves SQLite).
     pub fn crash_server(&mut self, name: &str) -> Result<()> {
-        let Some(handle) = self.servers.get(name) else {
+        let name = self.resolve_server_name(name).to_owned();
+        let Some(handle) = self.servers.get(&name) else {
             bail!("Unknown server host '{name}'");
         };
         if let Some(flag) = handle.abrupt_crash.lock().unwrap().as_ref() {
@@ -1857,14 +2480,14 @@ impl SimWorld {
             drop(srv);
         }
         handle.crashed.store(true, Ordering::SeqCst);
-        self.faulted_hosts.insert(name.to_owned());
-        self.sim.crash(name);
+        self.faulted_hosts.insert(name.clone());
+        self.sim.crash(name.as_str());
         self.fault_count += 1;
         self.hit("fault.server_crash_abrupt");
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),
-            name,
+            &name,
             "fault.crash",
             "abrupt SIGKILL",
         );
@@ -1874,7 +2497,8 @@ impl SimWorld {
 
     /// Gracefully stops an `AppServer` host (runs `SimRunning` graceful teardown including `finish_agent_work()`).
     pub fn stop_server_graceful(&mut self, name: &str) -> Result<()> {
-        let Some(handle) = self.servers.get(name) else {
+        let name = self.resolve_server_name(name).to_owned();
+        let Some(handle) = self.servers.get(&name) else {
             bail!("Unknown server host '{name}'");
         };
         if let Some(flag) = handle.abrupt_crash.lock().unwrap().as_ref() {
@@ -1885,12 +2509,12 @@ impl SimWorld {
             drop(srv);
         }
         handle.crashed.store(true, Ordering::SeqCst);
-        self.sim.crash(name);
+        self.sim.crash(name.as_str());
         self.hit("fault.server_stop_graceful");
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),
-            name,
+            &name,
             "fault.stop",
             "graceful",
         );
@@ -1899,8 +2523,10 @@ impl SimWorld {
     }
 
     /// Restarts a crashed (or running) `AppServer` host on the same SQLite directory.
+    /// Accepts `"local"` as an alias for `"local-server"`.
     pub fn bounce_server(&mut self, name: &str) -> Result<()> {
-        let Some(handle) = self.servers.get(name) else {
+        let name = self.resolve_server_name(name).to_owned();
+        let Some(handle) = self.servers.get(&name) else {
             bail!("Unknown server host '{name}'");
         };
         if let Some(flag) = handle.abrupt_crash.lock().unwrap().as_ref() {
@@ -1912,19 +2538,19 @@ impl SimWorld {
         }
         handle.crashed.store(false, Ordering::SeqCst);
         handle.ever_bounced.store(true, Ordering::SeqCst);
-        self.faulted_hosts.insert(name.to_owned());
-        self.sim.bounce(name);
+        self.faulted_hosts.insert(name.clone());
+        self.sim.bounce(name.as_str());
         self.hit("fault.server_bounce");
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),
-            name,
+            &name,
             "fault.bounce",
             "restart",
         );
         for _ in 0..400 {
             self.step_once()?;
-            if self.servers[name].server().is_some() {
+            if self.servers[&name].server().is_some() {
                 if name == "local-server" {
                     let local_drivers: Vec<(String, Arc<SimLocalHostDriver>)> = self
                         .clients
@@ -1941,6 +2567,9 @@ impl SimWorld {
                     for (cname, driver) in local_drivers {
                         let _ = self.client_exec_on(&cname, 10_000, move |_| async move {
                             driver.refresh_transport().await?;
+                            if driver.is_framed() {
+                                driver.reconnect_framed_async().await?;
+                            }
                             Ok(Value::Null)
                         });
                     }
@@ -2071,8 +2700,31 @@ impl SimWorld {
         })
     }
 
-    /// Waits for natural unassisted reconnect, outbox drain, and global env sync WITHOUT
-    /// forcefully kicking `reconnect`, `clear_retry_backoff`, or `poll_remotes_once_async`.
+    fn all_framed_local_caches_converged(&self) -> bool {
+        if !self.config.framed_local_transport {
+            return true;
+        }
+        let Some(local_srv) = self.server("local-server") else {
+            return false;
+        };
+        let Ok(state) = local_srv.call("app.state", json!({})) else {
+            return false;
+        };
+        let expected_rev = &state["revision"];
+        for handle in self.clients.values() {
+            if let Some(driver) = handle.local_driver.lock().unwrap().clone()
+                && driver.is_framed()
+                && driver.framed_cached_revision().as_ref() != Some(expected_rev)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Waits for natural unassisted reconnect, outbox drain, framed local watcher convergence,
+    /// Herdr observation, and global env sync WITHOUT forcefully kicking `reconnect`,
+    /// `clear_retry_backoff`, or `poll_remotes_once_async`.
     /// Returns `Err(...)` with full diagnostic state if convergence does not complete in time.
     pub fn quiesce_natural(&mut self, max_virtual_ms: u64) -> Result<()> {
         self.trace.record_actor(
@@ -2095,7 +2747,10 @@ impl SimWorld {
             if !iter.is_multiple_of(5) {
                 continue;
             }
-            if self.all_clients_quiesced() {
+            if self.all_clients_quiesced()
+                && self.all_servers_herdr_observed()
+                && self.all_framed_local_caches_converged()
+            {
                 stable_checks += 1;
                 if stable_checks >= 5 {
                     converged = true;
@@ -2120,7 +2775,7 @@ impl SimWorld {
         Ok(())
     }
 
-    /// Heals all temporary network/GitHub/Herdr/stream/clock faults and restarts any crashed
+    /// Heals all temporary network/GitHub/Herdr/stream/clock/failpoint faults and restarts any crashed
     /// servers or clients, wakes client reconnect loops inside their Turmoil runtimes, and
     /// advances virtual time until all enabled remote hosts reconnect, drain pending outbox
     /// items, and converge.
@@ -2138,6 +2793,10 @@ impl SimWorld {
         self.github.clear_injected_faults();
         for h in self.servers.values() {
             h.storage_faults.clear();
+            h.failpoints.clear();
+        }
+        for c in self.clients.values() {
+            c.failpoints.clear();
         }
 
         let crashed_servers: Vec<String> = self
@@ -2255,11 +2914,108 @@ impl SimWorld {
         // and do NOT advance virtual time afterward so no background timer mutates server state
         // between the final poll and subsequent quiescent oracle assertions.
         self.advance(Duration::from_millis(200))?;
-        for cname in &client_names {
-            self.client_exec_on(cname, 15_000, |c| async move {
-                c.poll_remotes_once_async().await;
-                Ok(json!({}))
-            })?;
+        if client_names.len() <= 1 {
+            for cname in &client_names {
+                let local_driver_opt = self
+                    .clients
+                    .get(cname)
+                    .and_then(|h| h.local_driver.lock().unwrap().clone())
+                    .filter(|d| d.is_framed());
+                self.client_exec_on(cname, 15_000, move |c| async move {
+                    c.poll_remotes_once_async().await;
+                    if let Some(driver) = local_driver_opt {
+                        driver.refresh_framed_cache_async().await?;
+                    }
+                    Ok(json!({}))
+                })?;
+            }
+        } else {
+            // Multi-client worlds: dispatch the final poll to ALL clients in the exact same
+            // virtual tick and verify server revisions stayed stable across the poll so a periodic
+            // background tick (e.g. `github_sync_loop`) firing mid-poll cannot leave one client
+            // 1 RTT behind another.
+            let capture_server_revs = |w: &SimWorld| -> BTreeMap<String, Value> {
+                let mut revs = BTreeMap::new();
+                for (host, h) in &w.servers {
+                    if let Some(srv) = h.server()
+                        && let Ok(st) = srv.call("app.state", json!({}))
+                    {
+                        revs.insert(host.clone(), st["revision"].clone());
+                    }
+                }
+                revs
+            };
+            for attempt in 0..3 {
+                let revs_before = capture_server_revs(self);
+                let mut pending = Vec::with_capacity(client_names.len());
+                for cname in &client_names {
+                    let Some(handle) = self.clients.get(cname) else {
+                        continue;
+                    };
+                    let Some(tx) = handle.cmd_tx.lock().unwrap().clone() else {
+                        continue;
+                    };
+                    let local_driver_opt = handle
+                        .local_driver
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .filter(|d| d.is_framed());
+                    let (resp_tx, resp_rx) = oneshot::channel();
+                    tx.send(ClientCommand {
+                        run: Box::new(move |client| {
+                            Box::pin(async move {
+                                client.poll_remotes_once_async().await;
+                                let res = if let Some(driver) = local_driver_opt {
+                                    driver
+                                        .refresh_framed_cache_async()
+                                        .await
+                                        .map(|()| json!({}))
+                                } else {
+                                    Ok(json!({}))
+                                };
+                                let _ = resp_tx.send(res);
+                            })
+                        }),
+                    })
+                    .map_err(|_| anyhow!("Client '{cname}' command channel closed"))?;
+                    pending.push((cname.clone(), resp_rx));
+                }
+                let poll_deadline = self
+                    .sim
+                    .elapsed()
+                    .saturating_add(Duration::from_millis(15_000));
+                while !pending.is_empty() && self.sim.elapsed() < poll_deadline {
+                    self.step_once()?;
+                    let mut i = 0;
+                    while i < pending.len() {
+                        match pending[i].1.try_recv() {
+                            Ok(Ok(_)) => {
+                                pending.remove(i);
+                            }
+                            Ok(Err(e)) => return Err(e),
+                            Err(oneshot::error::TryRecvError::Empty) => {
+                                i += 1;
+                            }
+                            Err(oneshot::error::TryRecvError::Closed) => {
+                                bail!(
+                                    "Client '{}' dropped final heal_and_quiesce poll channel",
+                                    pending[i].0
+                                );
+                            }
+                        }
+                    }
+                }
+                if !pending.is_empty() {
+                    bail!(
+                        "Final multi-client heal_and_quiesce poll timed out after 15000ms (attempt {})",
+                        attempt + 1
+                    );
+                }
+                if capture_server_revs(self) == revs_before {
+                    break;
+                }
+            }
         }
         self.hit("world.heal_and_quiesce");
         Ok(())
@@ -2757,5 +3513,162 @@ mod tests {
             .expect("write after heal_and_quiesce must succeed");
         assert!(ok["id"].as_str().is_some());
         assert_eq!(post_ptr.triggered_count(), 1);
+    }
+
+    #[test]
+    fn failpoints_persist_across_bounce_emit_observer_telemetry_and_clear_on_heal() {
+        use canban_types::{
+            FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB, FP_OUTBOX_MID_WRITE_TRUNCATE, FailpointAction,
+        };
+
+        crate::trace::reset_thread_coverage();
+        let mut cfg = SimWorldConfig::desktop_default(888_030, "unit_failpoints_wiring");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+
+        let host_fp_pre = world.failpoints("remote-a");
+        let local_fp = world.failpoints("local");
+        assert!(Arc::ptr_eq(&local_fp, &world.failpoints("local-server")));
+        let client_fp_pre = world.client_failpoints(PRIMARY_CLIENT);
+        assert!(world.try_failpoints("no-such-host").is_none());
+        assert!(world.try_client_failpoints("no-such-client").is_none());
+
+        world.bounce_server("remote-a").expect("bounce remote-a");
+        world.bounce_client().expect("bounce ui-client");
+        assert!(
+            Arc::ptr_eq(&host_fp_pre, &world.failpoints("remote-a")),
+            "per-host Failpoints must persist across bounce_server"
+        );
+        assert!(
+            Arc::ptr_eq(&client_fp_pre, &world.client_failpoints(PRIMARY_CLIENT)),
+            "per-client Failpoints must persist across bounce_client"
+        );
+
+        // Arm & fire a server failpoint via terminal.create -> observer mirrors into thread coverage.
+        let dir = world.project_dir("fp-wire-dir").expect("dir");
+        host_fp_pre.arm(
+            FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+            FailpointAction::FailOnce("unit-herdr-fp".into()),
+        );
+        let created = world
+            .server_call(
+                "remote-a",
+                "terminal.create",
+                json!({ "cwd": dir, "request_key": "unit-fp-term" }),
+            )
+            .expect("terminal.create returns unknown entry on failpoint");
+        assert_eq!(created["runtime"]["state"], "unknown");
+        assert_eq!(
+            host_fp_pre
+                .stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)
+                .fired,
+            1
+        );
+
+        // Arm an unhit client failpoint and verify heal_and_quiesce disarms it cleanly.
+        client_fp_pre.arm(
+            FP_OUTBOX_MID_WRITE_TRUNCATE,
+            FailpointAction::FailAlways("unit-cleared-on-heal".into()),
+        );
+        assert!(client_fp_pre.is_armed(FP_OUTBOX_MID_WRITE_TRUNCATE));
+        world.heal_and_quiesce(15_000).expect("heal_and_quiesce");
+        assert!(
+            !client_fp_pre.is_armed(FP_OUTBOX_MID_WRITE_TRUNCATE),
+            "heal_and_quiesce must disarm client failpoints"
+        );
+
+        let cov = crate::trace::take_thread_coverage();
+        assert_eq!(
+            cov.fault_armed_count(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB),
+            1
+        );
+        assert_eq!(
+            cov.fault_fired_count(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB),
+            1
+        );
+        assert_eq!(cov.fault_armed_count(FP_OUTBOX_MID_WRITE_TRUNCATE), 1);
+    }
+
+    #[test]
+    fn framed_local_transport_routes_over_serve_local_stream_and_recovers_after_bounce() {
+        crate::trace::reset_thread_coverage();
+        let mut cfg = SimWorldConfig::desktop_default(888_040, "unit_framed_local");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        cfg.framed_local_transport = true;
+        let mut world = SimWorld::new(cfg).expect("world init with framed_local_transport");
+
+        let dir = world.project_dir("framed-local-repo").expect("dir");
+        let proj = world
+            .client_call(
+                "project.create",
+                json!({ "host_id": "local", "name": "Framed Local Proj", "directory": dir }),
+                None,
+            )
+            .expect("framed local project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let card = world
+            .client_call(
+                "card.create",
+                json!({ "project_id": pid, "title": "Framed Local Card" }),
+                Some(&pid),
+            )
+            .expect("framed local card.create");
+        let cid = card["id"].as_str().unwrap().to_owned();
+
+        // Verify local merged snapshot reflects the framed write immediately.
+        let snap = world.client_merged_snapshot().expect("merged snapshot");
+        assert!(snap.cards.iter().any(|c| c.id == cid));
+
+        // Bounce `"local"` using the alias -> old framed listener stops, client reconnects to new listener!
+        let spawned = world
+            .client_spawn(
+                "card.update",
+                json!({
+                    "card_id": cid,
+                    "revision": card["revision"],
+                    "title": "Mid-Bounce Framed Write",
+                    "request_key": "framed-mid-bounce-1",
+                }),
+                Some(&pid),
+            )
+            .expect("spawn framed local rpc");
+        world.bounce_server("local").expect("bounce_server(local)");
+        let _mid_res = world.await_call(spawned, 10_000);
+
+        // Post-bounce framed RPC succeeds cleanly over the restarted local listener.
+        let ping = world
+            .client_call("app.ping", json!({ "host_id": "local" }), None)
+            .expect("post-bounce framed local app.ping");
+        assert!(ping["server_id"].as_str().is_some());
+
+        // Direct server mutation converges naturally via framed_local_watcher + quiesce_natural!
+        let _ = world
+            .server_call(
+                "local",
+                "card.create",
+                json!({ "project_id": pid, "title": "Server Direct Framed Watch" }),
+            )
+            .expect("server_call local card.create");
+        world
+            .quiesce_natural(15_000)
+            .expect("natural quiesce with framed local transport");
+        let post_snap = world.client_merged_snapshot().expect("post merged snap");
+        assert!(
+            post_snap
+                .cards
+                .iter()
+                .any(|c| c.title == "Server Direct Framed Watch"),
+            "framed_local_watcher must converge server-side local writes naturally"
+        );
+        crate::oracle::InvariantOracle::default()
+            .check_quiescent_invariants(&world)
+            .expect("quiescent invariants with framed_local_transport");
+        world.flush_coverage();
+        let cov = crate::trace::take_thread_coverage();
+        assert!(
+            cov.count("transport.local_framed_rpc") >= 4,
+            "expected transport.local_framed_rpc coverage hits, got {}",
+            cov.count("transport.local_framed_rpc")
+        );
     }
 }

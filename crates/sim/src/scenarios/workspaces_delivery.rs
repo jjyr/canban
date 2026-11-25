@@ -500,6 +500,7 @@ pub fn run(seed: u64) -> Result<u64> {
             );
             (b.id.clone(), b.worktree.clone())
         };
+        oracle.record_committed_merge_batch("remote-a", &batch_id, &pid);
         world.hit("delivery.test_failure_rework");
         oracle.check_step_invariants(world)?;
 
@@ -899,6 +900,7 @@ pub fn run(seed: u64) -> Result<u64> {
             );
             (b.id.clone(), b.worktree.clone(), sha3)
         };
+        oracle.record_committed_merge_batch("remote-a", &conflict_batch_id, &pid);
         world.hit("delivery.multi_card_batch");
         oracle.check_step_invariants(world)?;
 
