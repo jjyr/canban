@@ -103,7 +103,8 @@ impl AppServer {
             canban_herdr::refresh_local_shell_path_if_stale(std::time::Duration::from_secs(2));
         }
         let config = self.config();
-        let build = canban_updater::Build::current();
+        let api_version = self.api_version();
+        let build = self.effective_build();
         let uptime_ms = self.now_ms().saturating_sub(self.started_at);
         let listen_cfg = network::load_listen_config(&self.home);
         let bound_tcp = self.bound_tcp.lock().unwrap().clone();
@@ -234,7 +235,7 @@ impl AppServer {
                 "auth_token_configured": has_token || paired_devices_count > 0,
                 "legacy_token_configured": has_token,
                 "paired_device_count": paired_devices_count,
-                "api_version": API_VERSION,
+                "api_version": api_version,
                 "build": build,
             },
             "storage": {
@@ -289,8 +290,8 @@ impl AppServer {
             "hostname": network::hostname_with(self.exec_runner.as_ref()),
             "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             "version": env!("CARGO_PKG_VERSION"),
-            "api_version": API_VERSION,
-            "build": canban_updater::Build::current(),
+            "api_version": self.api_version(),
+            "build": self.effective_build(),
             "auth_required": true,
         })
     }

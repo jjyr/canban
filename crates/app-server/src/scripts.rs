@@ -584,7 +584,7 @@ impl AppServer {
     }
 
     pub(crate) fn pump_scripts(&self) -> Result<bool> {
-        if self.observer_running.load(Ordering::SeqCst) {
+        if self.observer_running.load(Ordering::SeqCst) && self.exec_runner.is_system() {
             self.pump_scripts_herdr()
         } else {
             self.pump_scripts_inline()
@@ -1240,7 +1240,7 @@ impl AppServer {
                 }
             };
             let hc_env = self.config().hc_env;
-            let (exit_code, timed_out) = run_local_process_with_policy_unset_and_runner(
+            match run_local_process_with_policy_unset_and_runner(
                 &prep.argv,
                 &prep.cwd,
                 &prep.env,
@@ -1250,8 +1250,15 @@ impl AppServer {
                 &prep.raw_log_file,
                 prep.timeout_secs,
                 self.exec_runner.as_ref(),
-            )?;
-            self.finalize_prepared_script(&run, &step_id, &prep, "", exit_code, timed_out)?;
+            ) {
+                Ok((exit_code, timed_out)) => {
+                    self.finalize_prepared_script(&run, &step_id, &prep, "", exit_code, timed_out)?;
+                }
+                Err(e) => {
+                    let msg = format!("Failed to execute script `{step_id}`: {e:#}");
+                    self.finalize_prepared_script(&run, &step_id, &prep, &msg, None, false)?;
+                }
+            }
         }
         let has_waiting = self
             .store
@@ -1464,6 +1471,9 @@ pub(crate) fn run_local_process_with_policy_unset_and_runner(
             .truncate(true)
             .open(log_path)?;
         log_file.write_all(&out.stdout)?;
+        if !out.stdout.is_empty() && !out.stdout.ends_with(b"\n") && !out.stderr.is_empty() {
+            log_file.write_all(b"\n")?;
+        }
         log_file.write_all(&out.stderr)?;
         return Ok((Some(i64::from(out.status_code)), false));
     }

@@ -251,7 +251,12 @@ impl TailscaleSessionRegistry {
 
 /// Generates an ephemeral per-session secret for `enc:v1:` Vault sealing on Tailscale connections.
 pub fn generate_ephemeral_session_token() -> String {
-    generate_prefixed_secret("ts_sess_")
+    generate_ephemeral_session_token_with(&canban_types::SystemIdGen)
+}
+
+/// Deterministic / injected-`IdGen` variant of [`generate_ephemeral_session_token`].
+pub fn generate_ephemeral_session_token_with(id_gen: &dyn IdGen) -> String {
+    generate_prefixed_secret_with("ts_sess_", id_gen)
 }
 
 /// Broadcast bus notifying active transport sessions immediately when a device token is revoked.
@@ -323,10 +328,6 @@ impl<T: Serialize + DeserializeOwned + Default> JsonSecretFile<T> {
     }
 }
 
-fn generate_prefixed_secret(prefix: &str) -> String {
-    generate_prefixed_secret_with(prefix, &canban_types::SystemIdGen)
-}
-
 fn generate_prefixed_secret_with(prefix: &str, id_gen: &dyn IdGen) -> String {
     format!("{prefix}{}{}", id_gen.next_token(), id_gen.next_token())
 }
@@ -362,6 +363,11 @@ impl DeviceTokenStore {
     pub fn with_fs_sync(mut self, fs_sync: bool) -> Self {
         self.file.fs_sync = fs_sync;
         self
+    }
+
+    /// Generates an ephemeral Tailscale session token using this store's configured [`IdGen`].
+    pub fn generate_ephemeral_session_token(&self) -> String {
+        generate_ephemeral_session_token_with(self.id_gen.as_ref())
     }
 
     pub fn issue_device(&self, name: &str) -> Result<(PairedDevice, String)> {
@@ -870,5 +876,24 @@ mod tests {
         assert_eq!(reloaded.verify(&tok).map(|d| d.id), Some(dev.id.clone()));
         assert!(devices.revoke(&dev.id).unwrap());
         assert!(reloaded.verify(&tok).is_none());
+    }
+
+    #[test]
+    fn ephemeral_tailscale_session_token_is_deterministic_with_injected_id_gen() {
+        use canban_types::DeterministicIdGen;
+
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_a = DeviceTokenStore::open(dir_a.path())
+            .with_id_gen(DeterministicIdGen::arc(42))
+            .with_fs_sync(false);
+        let store_b = DeviceTokenStore::open(dir_b.path())
+            .with_id_gen(DeterministicIdGen::arc(42))
+            .with_fs_sync(false);
+
+        let tok_a = store_a.generate_ephemeral_session_token();
+        let tok_b = store_b.generate_ephemeral_session_token();
+        assert!(tok_a.starts_with("ts_sess_"));
+        assert_eq!(tok_a, tok_b);
     }
 }

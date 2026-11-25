@@ -235,9 +235,10 @@ fn production_sources_have_no_stray_wall_clock_calls() {
     let mut files = Vec::new();
     collect_rs_files(&workspace_root.join("crates/app-server/src"), &mut files);
     collect_rs_files(&workspace_root.join("crates/storage/src"), &mut files);
+    collect_rs_files(&workspace_root.join("crates/context/src"), &mut files);
     assert!(
         !files.is_empty(),
-        "expected production source files under app-server and storage"
+        "expected production source files under app-server, storage, and context"
     );
 
     let mut violations = Vec::new();

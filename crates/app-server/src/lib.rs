@@ -37,6 +37,8 @@ pub struct ServerRuntimeEnv {
     pub fs_durability: canban_context::FsDurability,
     pub sqlite_synchronous_off: bool,
     pub disable_os_watchers: bool,
+    pub tailscale_verifier: Option<Arc<dyn canban_transport::TailscalePeerVerifier>>,
+    pub desktop_api_override: Option<u32>,
 }
 
 impl Default for ServerRuntimeEnv {
@@ -51,6 +53,8 @@ impl Default for ServerRuntimeEnv {
             fs_durability: canban_context::FsDurability::Full,
             sqlite_synchronous_off: false,
             disable_os_watchers: false,
+            tailscale_verifier: None,
+            desktop_api_override: None,
         }
     }
 }
@@ -93,6 +97,7 @@ pub struct AppServer {
     device_revocations: canban_transport::RevocationBus,
     tailscale_devices: Arc<canban_transport::TailscaleSessionRegistry>,
     tailscale_verifier_override: Mutex<Option<Arc<dyn canban_transport::TailscalePeerVerifier>>>,
+    desktop_api_override: Mutex<Option<u32>>,
     started_at: u64,
     bound_tcp: Mutex<Vec<String>>,
     tcp_listener_stop: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
@@ -640,8 +645,14 @@ impl AppServer {
             fs_durability,
             sqlite_synchronous_off,
             disable_os_watchers,
+            tailscale_verifier,
+            desktop_api_override,
         } = env;
-        let development = instance::bundled()?;
+        let development = if exec_runner.is_system() {
+            instance::bundled()?
+        } else {
+            None
+        };
         if let Some(instance) = &development {
             instance.check_home(&home)?;
         }
@@ -901,7 +912,8 @@ impl AppServer {
             pairing_codes,
             device_revocations,
             tailscale_devices,
-            tailscale_verifier_override: Mutex::new(None),
+            tailscale_verifier_override: Mutex::new(tailscale_verifier),
+            desktop_api_override: Mutex::new(desktop_api_override),
             bound_tcp: Mutex::new(Vec::new()),
             tcp_listener_stop: Mutex::new(None),
             active_tcp_connections: Arc::new(AtomicUsize::new(0)),
@@ -1243,6 +1255,20 @@ impl AppServer {
         verifier: Option<Arc<dyn canban_transport::TailscalePeerVerifier>>,
     ) {
         *self.tailscale_verifier_override.lock().unwrap() = verifier;
+    }
+    pub fn api_version(&self) -> u32 {
+        self.desktop_api_override
+            .lock()
+            .unwrap()
+            .unwrap_or(API_VERSION)
+    }
+    pub fn set_desktop_api_override(&self, api: Option<u32>) {
+        *self.desktop_api_override.lock().unwrap() = api;
+    }
+    pub(crate) fn effective_build(&self) -> canban_updater::Build {
+        let mut build = canban_updater::Build::current();
+        build.api = self.api_version();
+        build
     }
     pub fn bound_tcp_addrs(&self) -> Vec<String> {
         self.bound_tcp.lock().unwrap().clone()
@@ -1808,6 +1834,697 @@ mod runtime_env_tests {
             after_crash.agent.as_ref().unwrap().state,
             "running",
             "abrupt crash must skip finish_agent_work()"
+        );
+    }
+
+    #[test]
+    fn uses_script_routes_through_injected_exec_runner_even_when_observer_running() {
+        struct MockScriptRunner {
+            recorded: Mutex<Vec<CommandSpec>>,
+        }
+
+        impl CommandRunner for MockScriptRunner {
+            fn run(&self, spec: &CommandSpec) -> Result<ExecOutput> {
+                self.recorded.lock().unwrap().push(spec.clone());
+                if spec.program == "git" {
+                    return Ok(ExecOutput {
+                        status_code: 128,
+                        stdout: Vec::new(),
+                        stderr: b"not a git repository\n".to_vec(),
+                    });
+                }
+                let step = spec
+                    .env_set
+                    .get("CANBAN_STEP_ID")
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if step == "pass_step" {
+                    if let Some(out_file) = spec.env_set.get("CANBAN_OUTPUT") {
+                        std::fs::write(out_file, "verdict=green\n").unwrap();
+                    }
+                    if let Some(env_file) = spec.env_set.get("CANBAN_ENV") {
+                        std::fs::write(env_file, "FROM_SCRIPT=yes\n").unwrap();
+                    }
+                    return Ok(ExecOutput {
+                        status_code: 0,
+                        stdout: b"script ok\n".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if step == "fail_step" {
+                    return Ok(ExecOutput {
+                        status_code: 2,
+                        stdout: b"running check".to_vec(),
+                        stderr: b"boom from mock script\n".to_vec(),
+                    });
+                }
+                anyhow::bail!("unexpected command in MockScriptRunner: {:?}", spec)
+            }
+
+            fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+                None
+            }
+
+            fn shell_env(&self) -> canban_exec::shell_env::ShellEnvSnapshot {
+                canban_exec::shell_env::ShellEnvSnapshot::default()
+            }
+
+            fn hostname(&self) -> String {
+                "sim-script-host".into()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let runner = Arc::new(MockScriptRunner {
+            recorded: Mutex::new(Vec::new()),
+        });
+        let env = ServerRuntimeEnv {
+            exec_runner: runner.clone(),
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            inline_workers: true,
+            ..Default::default()
+        };
+        let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+        let workflow_yaml = r#"schema: 8
+id: script-test
+name: Script Test
+workspace:
+  create_worktree: false
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: qa
+    name: QA
+on:
+  enter_develop:
+    event: card.column_entered
+    match:
+      column: develop
+    start_at: pass_step
+  enter_qa:
+    event: card.column_entered
+    match:
+      column: qa
+    start_at: fail_step
+steps:
+  - id: pass_step
+    stage: develop
+    uses: script
+    with:
+      run: echo should-not-spawn-host-sh
+    next: done_pass
+  - id: done_pass
+    stage: develop
+    uses: complete
+  - id: fail_step
+    stage: qa
+    uses: script
+    with:
+      run: exit 2
+"#;
+        let project: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({
+                    "name": "ScriptProj",
+                    "directory": repo,
+                    "workflow_yaml": workflow_yaml,
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Simulate active daemon observer (`observer_running == true`) to prove non-system
+        // runners bypass Herdr PTYs and execute `uses: script` via `self.exec_runner()`.
+        app.observer_running.store(true, Ordering::SeqCst);
+
+        let card_pass: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": "Pass Card"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "card.move",
+            json!({"card_id": card_pass.id, "revision": card_pass.revision, "stage": "develop"}),
+        )
+        .unwrap();
+        app.pump_scripts().unwrap();
+
+        let runs = app.snapshot().unwrap().workflow_runs;
+        let pass_run = runs
+            .iter()
+            .find(|r| r.card_id.as_deref() == Some(card_pass.id.as_str()))
+            .expect("pass workflow run");
+        assert_eq!(pass_run.state, "completed");
+        assert_eq!(pass_run.outputs["pass_step"]["verdict"], "green");
+        assert_eq!(pass_run.outputs["pass_step"]["outcome"], "success");
+        assert_eq!(pass_run.outputs["pass_step"]["exit_code"], 0);
+        assert_eq!(
+            pass_run
+                .custom_env_for_step(None)
+                .get("FROM_SCRIPT")
+                .map(String::as_str),
+            Some("yes")
+        );
+
+        let card_fail: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": "Fail Card"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "card.move",
+            json!({"card_id": card_fail.id, "revision": card_fail.revision, "stage": "qa"}),
+        )
+        .unwrap();
+        app.pump_scripts().unwrap();
+
+        let snap = app.snapshot().unwrap();
+        let fail_run = snap
+            .workflow_runs
+            .iter()
+            .find(|r| r.card_id.as_deref() == Some(card_fail.id.as_str()))
+            .expect("fail workflow run");
+        assert_eq!(fail_run.state, "waiting_approval");
+        assert_eq!(fail_run.outputs["fail_step"]["exit_code"], 2);
+        assert_eq!(fail_run.outputs["fail_step"]["outcome"], "failed");
+        let fail_card = snap.cards.iter().find(|c| c.id == card_fail.id).unwrap();
+        assert!(
+            fail_card.human_gate.is_some(),
+            "failing script without on_failure must raise a human gate"
+        );
+        let log_rel = fail_run.outputs["fail_step"]["path"].as_str().unwrap();
+        let log_text = std::fs::read_to_string(app.home.join(log_rel)).unwrap();
+        assert!(log_text.contains("running check\nboom from mock script"));
+
+        let recorded = runner.recorded.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|c| c.env_set.get("CANBAN_STEP_ID").map(String::as_str) == Some("pass_step")),
+            "pass_step must execute through injected CommandRunner"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|c| c.env_set.get("CANBAN_STEP_ID").map(String::as_str) == Some("fail_step")),
+            "fail_step must execute through injected CommandRunner"
+        );
+    }
+
+    #[test]
+    fn merge_batch_routes_git_and_test_command_through_injected_exec_runner() {
+        struct MockBatchRunner {
+            source: PathBuf,
+            card_wt: PathBuf,
+            batch_wt: Mutex<Option<PathBuf>>,
+            target_head: Mutex<String>,
+            batch_head: Mutex<String>,
+            fail_tests: AtomicBool,
+            test_commands_seen: Mutex<Vec<String>>,
+        }
+
+        impl MockBatchRunner {
+            fn ok(s: &str) -> ExecOutput {
+                ExecOutput {
+                    status_code: 0,
+                    stdout: s.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                }
+            }
+            fn err(code: i32, s: &str) -> ExecOutput {
+                ExecOutput {
+                    status_code: code,
+                    stdout: Vec::new(),
+                    stderr: s.as_bytes().to_vec(),
+                }
+            }
+        }
+
+        impl CommandRunner for MockBatchRunner {
+            fn run(&self, spec: &CommandSpec) -> Result<ExecOutput> {
+                if spec.program == "/bin/sh" {
+                    let cmd = spec.args.last().cloned().unwrap_or_default();
+                    self.test_commands_seen.lock().unwrap().push(cmd);
+                    if self.fail_tests.load(Ordering::SeqCst) {
+                        return Ok(ExecOutput {
+                            status_code: 1,
+                            stdout: b"test suite failed\n".to_vec(),
+                            stderr: b"failing_test panicked\n".to_vec(),
+                        });
+                    }
+                    return Ok(Self::ok("test suite ok\n"));
+                }
+                assert_eq!(spec.program, "git", "unexpected command: {:?}", spec);
+                let mut dir: Option<PathBuf> = spec.cwd.clone();
+                let mut i = 0;
+                while i < spec.args.len() {
+                    match spec.args[i].as_str() {
+                        "--no-optional-locks" => i += 1,
+                        "-C" => {
+                            dir = spec.args.get(i + 1).map(PathBuf::from);
+                            i += 2;
+                        }
+                        _ => break,
+                    }
+                }
+                let sub = &spec.args[i..];
+                let cwd = dir.unwrap_or_default();
+                let is_source = cwd == self.source;
+                let is_batch = self
+                    .batch_wt
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|p| *p == cwd);
+                let target_head = self.target_head.lock().unwrap().clone();
+                let batch_head = self.batch_head.lock().unwrap().clone();
+
+                let out = match sub.first().map(String::as_str) {
+                    Some("check-ref-format") => Self::ok(""),
+                    Some("symbolic-ref") => {
+                        if is_source {
+                            Self::ok("main\n")
+                        } else if cwd == self.card_wt {
+                            Self::ok("batch-proj/1\n")
+                        } else {
+                            Self::err(1, "detached")
+                        }
+                    }
+                    Some("rev-parse") => {
+                        if sub.iter().any(|a| a == "--is-inside-work-tree") {
+                            Self::ok("true\n")
+                        } else if sub.iter().any(|a| a == "--git-common-dir") {
+                            Self::ok(&format!("{}\n", self.source.join(".git").display()))
+                        } else if sub.iter().any(|a| a == "--git-path") {
+                            let rel = sub.last().map(String::as_str).unwrap_or("");
+                            Self::ok(&format!(
+                                "{}\n",
+                                self.source.join(".git").join(rel).display()
+                            ))
+                        } else if sub
+                            .iter()
+                            .any(|a| a == "MERGE_HEAD" || a == "CHERRY_PICK_HEAD")
+                        {
+                            Self::err(128, "none")
+                        } else if sub.iter().any(|a| a == "refs/heads/main^{commit}") {
+                            Self::ok(&format!("{target_head}\n"))
+                        } else if sub.iter().any(|a| a == "HEAD") {
+                            if is_source {
+                                Self::ok(&format!("{target_head}\n"))
+                            } else if is_batch {
+                                Self::ok(&format!("{batch_head}\n"))
+                            } else {
+                                Self::ok("2222222222222222222222222222222222222222\n")
+                            }
+                        } else {
+                            Self::ok(&format!("{target_head}\n"))
+                        }
+                    }
+                    Some("status") => Self::ok(""),
+                    Some("diff") => {
+                        if sub.iter().any(|a| a == "--quiet") {
+                            Self::err(1, "")
+                        } else {
+                            Self::ok("")
+                        }
+                    }
+                    Some("merge-base") => Self::err(1, ""),
+                    Some("worktree") => {
+                        if sub.get(1).map(String::as_str) == Some("add")
+                            && let Some(path_str) = sub.get(3)
+                        {
+                            let p = PathBuf::from(path_str);
+                            std::fs::create_dir_all(&p).unwrap();
+                            *self.batch_wt.lock().unwrap() = Some(p);
+                        }
+                        Self::ok("")
+                    }
+                    Some("config") => Self::ok("Sim\n"),
+                    Some("merge") => {
+                        if is_source && sub.iter().any(|a| a == "--ff-only") {
+                            let next = sub.last().cloned().unwrap_or_default();
+                            *self.target_head.lock().unwrap() = next;
+                        }
+                        Self::ok("")
+                    }
+                    Some("commit") => {
+                        if is_batch {
+                            *self.batch_head.lock().unwrap() =
+                                "3333333333333333333333333333333333333333".into();
+                        }
+                        Self::ok("")
+                    }
+                    Some("remote") => Self::err(2, "no remote"),
+                    Some("checkout") | Some("reset") | Some("clean") | Some("rebase")
+                    | Some("cherry-pick") | Some("update-ref") | Some("for-each-ref") => {
+                        Self::ok("")
+                    }
+                    other => panic!("unexpected git subcommand {other:?}: {sub:?}"),
+                };
+                Ok(out)
+            }
+
+            fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+                None
+            }
+
+            fn shell_env(&self) -> canban_exec::shell_env::ShellEnvSnapshot {
+                canban_exec::shell_env::ShellEnvSnapshot::default()
+            }
+
+            fn hostname(&self) -> String {
+                "sim-batch-host".into()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repo");
+        let card_wt = home.join("worktrees/repo-sim/1");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&card_wt).unwrap();
+        let canon_repo = std::fs::canonicalize(&repo).unwrap();
+
+        let runner = Arc::new(MockBatchRunner {
+            source: canon_repo.clone(),
+            card_wt: card_wt.clone(),
+            batch_wt: Mutex::new(None),
+            target_head: Mutex::new("1111111111111111111111111111111111111111".into()),
+            batch_head: Mutex::new("1111111111111111111111111111111111111111".into()),
+            fail_tests: AtomicBool::new(true),
+            test_commands_seen: Mutex::new(Vec::new()),
+        });
+        let env = ServerRuntimeEnv {
+            exec_runner: runner.clone(),
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            inline_workers: true,
+            ..Default::default()
+        };
+        let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+        let workflow_yaml = r#"schema: 8
+id: batch-deliver-test
+name: Batch Deliver Test
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: review
+    name: Review
+on:
+  enter_review:
+    event: card.column_entered
+    match:
+      column: review
+    start_at: ship
+steps:
+  - id: ship
+    stage: review
+    uses: deliver
+    with:
+      target_branch: main
+      strategy: squash
+      sync_upstream: false
+      batch_size: 2
+      test_command: mock-suite --all
+      max_conflict_attempts: 0
+"#;
+        let project: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({
+                    "name": "BatchProj",
+                    "directory": repo,
+                    "target_branch": "main",
+                    "workflow_yaml": workflow_yaml,
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let card: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": "Batch Card"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut c: Card = db.get(&card.id)?;
+                c.worktree = Some(card_wt.to_string_lossy().into_owned());
+                c.branch = Some("batch-proj/1".into());
+                db.save(&c)
+            })
+            .unwrap();
+
+        // First attempt: mock `test_command` fails -> delivery held cleanly for human review.
+        app.call(
+            "card.move",
+            json!({"card_id": card.id, "revision": card.revision, "stage": "review"}),
+        )
+        .unwrap();
+        let snap1 = app.snapshot().unwrap();
+        let c1 = snap1.cards.iter().find(|c| c.id == card.id).unwrap();
+        assert!(
+            c1.human_gate
+                .as_ref()
+                .is_some_and(|g| g.reason.contains("Batch tests failed")),
+            "expected batch test failure human gate, got {:?}",
+            c1.human_gate
+        );
+        assert_eq!(
+            runner.test_commands_seen.lock().unwrap().as_slice(),
+            &["mock-suite --all"]
+        );
+
+        // Second attempt: mock `test_command` passes -> fast-forward + merged resolution!
+        runner.fail_tests.store(false, Ordering::SeqCst);
+        app.call(
+            "workflow.deliver",
+            json!({"card_id": c1.id, "revision": c1.revision}),
+        )
+        .unwrap();
+        let snap2 = app.snapshot().unwrap();
+        let c2 = snap2.cards.iter().find(|c| c.id == card.id).unwrap();
+        assert_eq!(
+            c2.resolution.as_ref().map(|r| r.kind.as_str()),
+            Some("merged")
+        );
+        assert_eq!(
+            c2.delivery.as_ref().map(|d| d.commit.as_str()),
+            Some("3333333333333333333333333333333333333333")
+        );
+        assert_eq!(runner.test_commands_seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn runtime_env_wires_tailscale_verifier_desktop_api_override_and_auth_flows() {
+        struct StaticTailscaleVerifier;
+        impl canban_transport::TailscalePeerVerifier for StaticTailscaleVerifier {
+            fn verify_peer(
+                &self,
+                _peer_addr: std::net::SocketAddr,
+            ) -> Option<canban_transport::TailscalePeerIdentity> {
+                Some(canban_transport::TailscalePeerIdentity {
+                    node_id: "nSimTail01".into(),
+                    device_name: "Sim iPad".into(),
+                    login_name: "sim@example.invalid".into(),
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let override_api = API_VERSION.saturating_sub(2);
+        let env = ServerRuntimeEnv {
+            id_gen: canban_types::DeterministicIdGen::arc(77),
+            exec_runner: Arc::new(StaticHostRunner {
+                hostname: "dst-auth-host".into(),
+            }),
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            inline_workers: true,
+            tailscale_verifier: Some(Arc::new(StaticTailscaleVerifier)),
+            desktop_api_override: Some(override_api),
+            ..Default::default()
+        };
+        let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+        // 1. desktop_api_override surfaces on api_version(), app.ping, build.api, and transport_config.
+        assert_eq!(app.api_version(), override_api);
+        let ping = app.call("app.ping", json!({})).unwrap();
+        assert_eq!(ping["api_version"], override_api);
+        assert_eq!(ping["build"]["api"], override_api);
+        assert_eq!(app.transport_config().api_version, override_api);
+
+        // 2. device.invite.create works under non-system CommandRunner without spawning host tailscale.
+        let invite = app
+            .call("device.invite.create", json!({"ttl_secs": 300}))
+            .unwrap();
+        let code = invite["code"].as_str().unwrap().to_owned();
+        assert!(canban_types::is_pairing_code(&code));
+
+        // 3. Full in-memory transport flows over tokio::io::duplex:
+        //    - Single-use pairing code -> upgraded device token -> live RevocationBus kick
+        //    - Tailscale WhoIs via ServerRuntimeEnv::tailscale_verifier -> deterministic ts_sess_ token -> enc:v1: env.save
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            let srv = Arc::clone(&app);
+            let srv_task = tokio::spawn(async move {
+                let _ = srv.accept_authenticated_stream(server_io, None).await;
+            });
+            let transport = canban_transport::ClientTransport::connect_stream_async(
+                client_io,
+                "sim-host:7680".into(),
+                code.clone(),
+                "Paired Laptop".into(),
+            )
+            .await
+            .unwrap();
+            let upgraded = transport
+                .upgraded_token()
+                .expect("pairing code must exchange for device token")
+                .to_owned();
+            assert!(canban_types::is_device_token(&upgraded));
+            let remote_ping = transport.call_async("app.ping", &json!({})).await.unwrap();
+            assert_eq!(remote_ping["api_version"], override_api);
+
+            // Replaying the single-use pairing code fails.
+            let (replay_client, replay_server) = tokio::io::duplex(16 * 1024);
+            let srv_replay = Arc::clone(&app);
+            let replay_task = tokio::spawn(async move {
+                let _ = srv_replay
+                    .accept_authenticated_stream(replay_server, None)
+                    .await;
+            });
+            let replay_err = canban_transport::ClientTransport::connect_stream_async(
+                replay_client,
+                "sim-host:7680".into(),
+                code,
+                "Replay Device".into(),
+            )
+            .await
+            .err()
+            .expect("single-use pairing code replay must fail");
+            assert!(replay_err.to_string().contains("auth_failed"));
+            let _ = replay_task.await;
+
+            // Live revocation via device.revoke kicks the active yamux/1 session.
+            let paired = app.paired_devices();
+            let dev_id = paired
+                .iter()
+                .find(|d| d.name == "Paired Laptop")
+                .expect("paired device present")
+                .id
+                .clone();
+            let revoked = app
+                .call("device.revoke", json!({"device_id": dev_id}))
+                .unwrap();
+            assert_eq!(revoked["revoked"], true);
+            srv_task.await.unwrap();
+            assert!(
+                transport.call_async("app.ping", &json!({})).await.is_err(),
+                "revoked yamux/1 session must reject subsequent RPCs"
+            );
+
+            // Tailscale WhoIs auth issues ephemeral ts_sess_ token usable for enc:v1: secret sealing.
+            let (ts_client, ts_server) = tokio::io::duplex(64 * 1024);
+            let peer: std::net::SocketAddr = "100.84.0.9:51234".parse().unwrap();
+            let srv_ts = Arc::clone(&app);
+            let ts_task = tokio::spawn(async move {
+                let _ = srv_ts
+                    .accept_authenticated_stream(ts_server, Some(peer))
+                    .await;
+            });
+            let ts_transport = canban_transport::ClientTransport::connect_stream_async(
+                ts_client,
+                "100.84.0.1:7680".into(),
+                TAILSCALE_AUTH_SENTINEL.into(),
+                "Sim iPad".into(),
+            )
+            .await
+            .unwrap();
+            let sess_tok = ts_transport
+                .active_token()
+                .expect("tailscale ephemeral session token")
+                .to_owned();
+            assert!(sess_tok.starts_with("ts_sess_"));
+            let sealed = canban_storage::vault::seal_transport(
+                &sess_tok,
+                "SIM_SECRET",
+                "super-secret-value",
+            )
+            .unwrap();
+            assert!(sealed.starts_with(canban_storage::vault::TRANSPORT_SEAL_PREFIX));
+            let saved = ts_transport
+                .call_async(
+                    "env.save",
+                    &json!({
+                        "scope": "global",
+                        "entries": {
+                            "SIM_SECRET": { "kind": "secret", "value": sealed }
+                        }
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(saved["scope"], "global");
+            assert_eq!(saved["env"]["SIM_SECRET"]["kind"], "secret");
+            assert_eq!(saved["env"]["SIM_SECRET"]["configured"], true);
+            {
+                let store = app.store.lock().unwrap();
+                let decrypted = canban_storage::env::list_decrypted_scope(
+                    store.db().conn,
+                    &app.home,
+                    canban_storage::env::SCOPE_GLOBAL,
+                    "",
+                )
+                .unwrap();
+                assert_eq!(
+                    decrypted.get("SIM_SECRET").map(|(v, _)| v.as_str()),
+                    Some("super-secret-value")
+                );
+            }
+            ts_transport.close();
+            let _ = ts_task.await;
+        });
+
+        // Clearing desktop_api_override restores default API_VERSION.
+        app.set_desktop_api_override(None);
+        assert_eq!(app.api_version(), API_VERSION);
+        assert_eq!(
+            app.call("app.ping", json!({})).unwrap()["api_version"],
+            API_VERSION
         );
     }
 }

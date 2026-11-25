@@ -141,13 +141,14 @@ impl AppServer {
                     self.id_gen.as_ref(),
                 )?
                 else {
+                    let api_version = self.api_version();
                     return Ok(json!({
                         "updated": false,
                         "version": current.version,
-                        "api_version": API_VERSION,
+                        "api_version": api_version,
                         "message": format!(
                             "Daemon is already on the latest published release ({}, API v{}).",
-                            current.version, API_VERSION
+                            current.version, api_version
                         ),
                     }));
                 };

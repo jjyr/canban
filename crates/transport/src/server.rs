@@ -286,7 +286,7 @@ where
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&peer.device_name);
                 ts_devices.record(&device_id, effective_name);
-                let session_secret = auth::generate_ephemeral_session_token();
+                let session_secret = device_store.generate_ephemeral_session_token();
                 return Ok((
                     TcpAuthOutcome::Authenticated {
                         device_id,

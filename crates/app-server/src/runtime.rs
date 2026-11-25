@@ -134,7 +134,7 @@ impl AppServer {
         Arc::new(canban_transport::ServerTransportConfig {
             home: self.home.clone(),
             server_id: self.identity.clone(),
-            api_version: API_VERSION,
+            api_version: self.api_version(),
             device_store: self.device_store.clone(),
             pairing_codes: self.pairing_codes.clone(),
             revocations: self.device_revocations.clone(),
@@ -306,22 +306,24 @@ impl AppServer {
         };
 
         let (tcp_stop_tx, tcp_stop_rx) = tokio::sync::watch::channel(self.stopped());
-        let tailscale_verifier = self
-            .tailscale_verifier_override
-            .lock()
-            .unwrap()
-            .clone()
-            .or_else(|| {
-                listen_cfg.trust_tailscale_self_enabled().then(|| {
-                    Arc::new(network::SystemTailscaleVerifier::new_with_clock(
-                        self.clock.clone(),
-                    )) as Arc<dyn canban_transport::TailscalePeerVerifier>
-                })
-            });
+        let tailscale_verifier =
+            self.tailscale_verifier_override
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| {
+                    (listen_cfg.trust_tailscale_self_enabled() && self.exec_runner.is_system())
+                        .then(|| {
+                            Arc::new(network::SystemTailscaleVerifier::new_with_clock(
+                                self.clock.clone(),
+                            ))
+                                as Arc<dyn canban_transport::TailscalePeerVerifier>
+                        })
+                });
         let transport_cfg = Arc::new(canban_transport::ServerTransportConfig {
             home: self.home.clone(),
             server_id: self.identity.clone(),
-            api_version: API_VERSION,
+            api_version: self.api_version(),
             device_store: self.device_store.clone(),
             pairing_codes: self.pairing_codes.clone(),
             revocations: self.device_revocations.clone(),
@@ -569,7 +571,7 @@ where
         "result": {
             "subscribed": true,
             "server_id": server_id,
-            "api_version": API_VERSION,
+            "api_version": server.api_version(),
             "revision": revision,
             "changed": changed,
             "github_revision": github_revision,

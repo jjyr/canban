@@ -518,16 +518,24 @@ impl AppServer {
         &self,
         timeout: Duration,
     ) -> Result<GithubActionGateGuard<'_>> {
-        let deadline = std::time::Instant::now() + timeout;
+        let timeout_ms = if timeout.is_zero() {
+            0
+        } else {
+            u64::try_from(timeout.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1)
+        };
+        let deadline_ms = self.now_ms().saturating_add(timeout_ms);
         let mut busy = self.github_action_gate.0.lock().unwrap();
         while *busy {
-            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            let remaining_ms = deadline_ms.saturating_sub(self.now_ms());
+            if remaining_ms == 0 {
                 bail!("Another GitHub action is pending (timed out waiting for lock)");
-            };
+            }
             let (next_busy, wait_res) = self
                 .github_action_gate
                 .1
-                .wait_timeout(busy, remaining)
+                .wait_timeout(busy, Duration::from_millis(remaining_ms))
                 .unwrap();
             busy = next_busy;
             if wait_res.timed_out() && *busy {

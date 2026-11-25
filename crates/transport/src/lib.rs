@@ -9,7 +9,8 @@ pub mod server;
 pub use auth::{
     DeviceTokenStore, PairingCodeStore, RevocationBus, TailscalePeerIdentity,
     TailscalePeerVerifier, TailscaleSessionRegistry, TcpAuthOutcome, authenticate_tcp_token,
-    authenticate_tcp_token_at,
+    authenticate_tcp_token_at, generate_ephemeral_session_token,
+    generate_ephemeral_session_token_with,
 };
 pub use client::{
     ClientEndpoint, ClientTransport, DAEMON_UPDATE_RPC_READ_TIMEOUT, DEFAULT_RPC_READ_TIMEOUT,

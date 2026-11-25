@@ -39,6 +39,9 @@ impl Ops {
             host: canban_herdr::host::Host::local_with_runner(runner),
         }
     }
+    pub fn runner(&self) -> &std::sync::Arc<dyn canban_exec::CommandRunner> {
+        self.host.runner()
+    }
     fn git(&self, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
         let mut argv = vec!["git", "-C", dir.to_str().context("Invalid path")?];
         argv.extend(args);
@@ -632,7 +635,7 @@ impl Ops {
             .unwrap_or("");
         let fallback_branch = card.branch.as_deref().unwrap_or("");
         let cwd = Path::new(path);
-        if !cwd.is_dir() {
+        if !self.host.is_dir(cwd) {
             return None;
         }
         let out = self

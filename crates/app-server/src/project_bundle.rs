@@ -432,7 +432,7 @@ impl AppServer {
                 .iter()
                 .filter(|c| c.removed_at.is_none())
                 .collect();
-            let content_card_ids: HashSet<String> =
+            let content_card_ids: BTreeSet<String> =
                 content_cards.iter().map(|c| c.id.clone()).collect();
 
             let events: Vec<Event> = {
@@ -948,7 +948,7 @@ impl AppServer {
             "Bundle manifest project_id ({}) does not match records.json ({pid})",
             loaded.manifest.project_id
         );
-        let imported_card_ids: HashSet<String> =
+        let imported_card_ids: BTreeSet<String> =
             records.cards.iter().map(|c| c.id.clone()).collect();
         ensure!(
             records.cards.iter().all(|c| c.project_id == pid),
@@ -1566,6 +1566,12 @@ impl AppServer {
                         .cmp(&b.manifest.project_name.to_lowercase())
                 })
                 .then_with(|| a.manifest.project_id.cmp(&b.manifest.project_id))
+        });
+        errors.sort_by(|a, b| {
+            a["path"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(b["path"].as_str().unwrap_or_default())
         });
         Ok(ArchivedScanResult { entries, errors })
     }

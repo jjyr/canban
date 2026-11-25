@@ -260,11 +260,15 @@ impl Ops {
     }
     pub(crate) fn r_common(&self, dir: &Path) -> Result<PathBuf> {
         let path = PathBuf::from(self.r_text(dir, &["rev-parse", "--git-common-dir"])?);
-        self.host.canonical(&if path.is_absolute() {
+        let resolved = if path.is_absolute() {
             path
         } else {
             dir.join(path)
-        })
+        };
+        if !self.host.runner().is_system() {
+            return Ok(self.host.canonical(&resolved).unwrap_or(resolved));
+        }
+        self.host.canonical(&resolved)
     }
     pub fn current_branch(&self, directory: &str) -> Option<String> {
         let out = self

@@ -210,8 +210,11 @@ impl Ops {
             self.r_checked(&wt, &["clean", "-fd"])?;
         } else {
             if self.host.exists(&wt) {
-                let wt_s = wt.to_string_lossy();
-                let _ = self.host.run(source, &["rm", "-rf", &wt_s], None);
+                if self.host.is_dir(&wt) {
+                    let _ = std::fs::remove_dir_all(&wt);
+                } else {
+                    let _ = std::fs::remove_file(&wt);
+                }
             }
             if let Some(parent) = wt.parent() {
                 self.host.mkdir(parent)?;
@@ -838,6 +841,404 @@ mod tests {
         assert_eq!(
             fs::read_to_string(f.source.join("shared.txt")).unwrap(),
             "resolved\n"
+        );
+    }
+
+    #[test]
+    fn ops_batch_and_publish_route_exclusively_through_injected_command_runner() {
+        use canban_exec::{CommandRunner, CommandSpec, ExecOutput, ShellEnvSnapshot};
+        use std::sync::{Arc, Mutex};
+
+        struct MockGitRunner {
+            source: PathBuf,
+            worktree: PathBuf,
+            batch_wt: PathBuf,
+            target_head: Mutex<String>,
+            batch_head: Mutex<String>,
+            test_fail: Mutex<bool>,
+            recorded: Mutex<Vec<CommandSpec>>,
+        }
+
+        impl MockGitRunner {
+            fn ok(s: &str) -> ExecOutput {
+                ExecOutput {
+                    status_code: 0,
+                    stdout: s.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                }
+            }
+            fn err(code: i32, s: &str) -> ExecOutput {
+                ExecOutput {
+                    status_code: code,
+                    stdout: Vec::new(),
+                    stderr: s.as_bytes().to_vec(),
+                }
+            }
+        }
+
+        impl CommandRunner for MockGitRunner {
+            fn run(&self, spec: &CommandSpec) -> Result<ExecOutput> {
+                self.recorded.lock().unwrap().push(spec.clone());
+                if spec.program == "/bin/sh" {
+                    let fail = *self.test_fail.lock().unwrap();
+                    return Ok(if fail {
+                        ExecOutput {
+                            status_code: 2,
+                            stdout: b"running tests\n".to_vec(),
+                            stderr: b"assertion failed\n".to_vec(),
+                        }
+                    } else {
+                        Self::ok("all tests passed\n")
+                    });
+                }
+                assert_eq!(
+                    spec.program, "git",
+                    "unexpected non-git subprocess: {:?}",
+                    spec
+                );
+
+                // Parse `-C <dir>` / `--no-optional-locks`
+                let mut dir: Option<PathBuf> = spec.cwd.clone();
+                let mut i = 0;
+                while i < spec.args.len() {
+                    match spec.args[i].as_str() {
+                        "--no-optional-locks" => i += 1,
+                        "-C" => {
+                            dir = spec.args.get(i + 1).map(PathBuf::from);
+                            i += 2;
+                        }
+                        _ => break,
+                    }
+                }
+                let sub = &spec.args[i..];
+                let cwd = dir.unwrap_or_default();
+                let is_source = cwd == self.source;
+                let is_batch = cwd == self.batch_wt;
+                let target_head = self.target_head.lock().unwrap().clone();
+                let batch_head = self.batch_head.lock().unwrap().clone();
+
+                let out = match sub.first().map(String::as_str) {
+                    Some("check-ref-format") => Self::ok(""),
+                    Some("symbolic-ref") => {
+                        if is_source {
+                            Self::ok("main\n")
+                        } else if cwd == self.worktree {
+                            Self::ok("demo/1\n")
+                        } else {
+                            Self::err(1, "not a symbolic ref")
+                        }
+                    }
+                    Some("rev-parse") => {
+                        if sub.iter().any(|a| a == "--is-inside-work-tree") {
+                            Self::ok("true\n")
+                        } else if sub.iter().any(|a| a == "--git-common-dir") {
+                            Self::ok(&format!("{}\n", self.source.join(".git").display()))
+                        } else if sub.iter().any(|a| a == "--git-path") {
+                            let rel = sub.last().map(String::as_str).unwrap_or("");
+                            Self::ok(&format!(
+                                "{}\n",
+                                self.source.join(".git").join(rel).display()
+                            ))
+                        } else if sub
+                            .iter()
+                            .any(|a| a == "MERGE_HEAD" || a == "CHERRY_PICK_HEAD")
+                        {
+                            Self::err(128, "not in merge/cherry-pick")
+                        } else if sub.iter().any(|a| a == "refs/heads/main^{commit}") {
+                            Self::ok(&format!("{target_head}\n"))
+                        } else if sub.iter().any(|a| a == "HEAD") {
+                            if is_source {
+                                Self::ok(&format!("{target_head}\n"))
+                            } else if is_batch {
+                                Self::ok(&format!("{batch_head}\n"))
+                            } else {
+                                Self::ok("cccccccccccccccccccccccccccccccccccccccc\n")
+                            }
+                        } else {
+                            Self::ok(&format!("{target_head}\n"))
+                        }
+                    }
+                    Some("status") => Self::ok(""),
+                    Some("diff") => {
+                        if sub.iter().any(|a| a == "--quiet") {
+                            // Report staged diff present for squash commit
+                            Self::err(1, "")
+                        } else {
+                            Self::ok("")
+                        }
+                    }
+                    Some("merge-base") => {
+                        if sub.iter().any(|a| a == "--is-ancestor") {
+                            if sub.get(2).map(String::as_str) == Some(target_head.as_str())
+                                && sub.get(3).map(String::as_str) == Some("HEAD")
+                            {
+                                Self::ok("")
+                            } else {
+                                Self::err(1, "")
+                            }
+                        } else {
+                            Self::ok(&format!("{target_head}\n"))
+                        }
+                    }
+                    Some("worktree") => {
+                        if sub.get(1).map(String::as_str) == Some("add") {
+                            fs::create_dir_all(&self.batch_wt).unwrap();
+                        }
+                        Self::ok("")
+                    }
+                    Some("config") => Self::ok("Tester\n"),
+                    Some("merge") => {
+                        if is_source && sub.iter().any(|a| a == "--ff-only") {
+                            let next = sub.last().cloned().unwrap_or_default();
+                            *self.target_head.lock().unwrap() = next;
+                        }
+                        Self::ok("")
+                    }
+                    Some("commit") => {
+                        if is_batch {
+                            *self.batch_head.lock().unwrap() =
+                                "dddddddddddddddddddddddddddddddddddddddd".into();
+                        }
+                        Self::ok("")
+                    }
+                    Some("update-ref") => Self::ok(""),
+                    Some("for-each-ref") => Self::ok("refs/canban/batch/b1/target\n"),
+                    Some("remote") => Self::ok("https://example.invalid/repo.git\n"),
+                    Some("push") => Self::ok(""),
+                    Some("checkout") | Some("reset") | Some("clean") | Some("rebase")
+                    | Some("cherry-pick") => Self::ok(""),
+                    other => panic!("unexpected git subcommand {other:?}: {sub:?}"),
+                };
+                Ok(out)
+            }
+
+            fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+                None
+            }
+
+            fn shell_env(&self) -> ShellEnvSnapshot {
+                ShellEnvSnapshot::default()
+            }
+
+            fn hostname(&self) -> String {
+                "mock-git-host".into()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let source = dir.path().join("source");
+        let wt = home.join("worktrees/demo-abcd/1");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&wt).unwrap();
+
+        let project = Project {
+            id: "abcd1234".into(),
+            name: "Demo".into(),
+            directory: source.to_string_lossy().into_owned(),
+            workflow: canban_types::Workflow::default(),
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            target_branch: Some("main".into()),
+            created_at: 1,
+        };
+        let batch_wt = merge_queue_worktree_path(&home, &project);
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "project_id": project.id,
+            "number": 1,
+            "title": "Mock card",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "branch": "demo/1",
+            "worktree": wt.to_string_lossy(),
+            "created_at": 1
+        }))
+        .unwrap();
+
+        let runner = Arc::new(MockGitRunner {
+            source: source.clone(),
+            worktree: wt.clone(),
+            batch_wt: batch_wt.clone(),
+            target_head: Mutex::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            batch_head: Mutex::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            test_fail: Mutex::new(true),
+            recorded: Mutex::new(Vec::new()),
+        });
+        let ops = Ops::local_with_runner(runner.clone());
+        assert!(!ops.runner().is_system());
+
+        ops.validate_branch_name("demo/1").unwrap();
+        let (branch, target_head) = ops
+            .check_main_checkout_ready(&project, Some("main"))
+            .unwrap();
+        assert_eq!(branch, "main");
+        assert_eq!(target_head, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(ops.card_worktree_ready_for_batch(&project, &card));
+
+        let outcome = ops
+            .integrate_batch(
+                &home,
+                &project,
+                "main",
+                &target_head,
+                MergeStrategy::Squash,
+                &[(card.clone(), "run-1".into())],
+            )
+            .unwrap();
+        let BatchIntegrationOutcome::Clean {
+            worktree: resolved_wt,
+            head_sha,
+            ..
+        } = outcome
+        else {
+            panic!("expected clean mock integration");
+        };
+        assert_eq!(resolved_wt, batch_wt);
+        assert_eq!(head_sha, "dddddddddddddddddddddddddddddddddddddddd");
+
+        let log = home.join("batch.log");
+        let failed = ops
+            .run_batch_tests(&resolved_wt, "cargo test --workspace", &log)
+            .unwrap();
+        assert!(!failed.passed);
+        assert_eq!(failed.exit_code, Some(2));
+        assert!(failed.tail.contains("assertion failed"));
+
+        *runner.test_fail.lock().unwrap() = false;
+        let passed = ops
+            .run_batch_tests(&resolved_wt, "cargo test --workspace", &log)
+            .unwrap();
+        assert!(passed.passed);
+        assert_eq!(passed.exit_code, Some(0));
+        assert!(passed.tail.contains("all tests passed"));
+
+        ops.write_batch_refs(&project, "b1", &target_head, &[(1, head_sha.clone())])
+            .unwrap();
+        ops.cleanup_batch_refs(&project, "b1");
+        assert_eq!(
+            ops.verify_clean_batch_worktree(&resolved_wt, &target_head)
+                .unwrap(),
+            head_sha
+        );
+        ops.fast_forward_target(&project, "main", &target_head, &head_sha)
+            .unwrap();
+
+        // Publish helpers also route exclusively through the injected runner.
+        assert_eq!(
+            ops.push_remote(&project, &card).unwrap(),
+            "https://example.invalid/repo.git"
+        );
+        ops.verify_clean_head(
+            wt.to_str().unwrap(),
+            "cccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+
+        let cmds = runner.recorded.lock().unwrap();
+        assert!(cmds.iter().any(|c| c.program == "git"));
+        assert!(cmds.iter().any(|c| c.program == "/bin/sh"));
+        assert!(
+            cmds.iter()
+                .all(|c| c.program == "git" || c.program == "/bin/sh"),
+            "no unexpected programs (like rm) may be invoked: {:?}",
+            cmds.iter().map(|c| &c.program).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ops_runs_cleanly_against_real_temp_bare_repo_via_custom_command_runner() {
+        use canban_exec::{CommandRunner, CommandSpec, ExecOutput, ShellEnvSnapshot, SystemRunner};
+        use std::sync::{Arc, Mutex};
+
+        struct DelegatingFixtureRunner {
+            recorded: Mutex<Vec<String>>,
+        }
+
+        impl CommandRunner for DelegatingFixtureRunner {
+            fn run(&self, spec: &CommandSpec) -> Result<ExecOutput> {
+                self.recorded.lock().unwrap().push(format!(
+                    "{} {}",
+                    spec.program,
+                    spec.args.join(" ")
+                ));
+                SystemRunner.run(spec)
+            }
+
+            fn find_executable(&self, name: &str) -> Option<PathBuf> {
+                SystemRunner.find_executable(name)
+            }
+
+            fn shell_env(&self) -> ShellEnvSnapshot {
+                ShellEnvSnapshot::default()
+            }
+
+            fn hostname(&self) -> String {
+                "fixture-host".into()
+            }
+        }
+
+        let f = BatchFixture::new();
+        let remote = f._dir.path().join("remote.git");
+        fs::create_dir_all(&remote).unwrap();
+        git_run(&remote, &["init", "--bare"]);
+        git_run(
+            &f.source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_run(&f.source, &["push", "origin", "main"]);
+
+        let c1 = f.make_card(1, "feature.txt", "hello\n", "feat: fixture card");
+        let runner = Arc::new(DelegatingFixtureRunner {
+            recorded: Mutex::new(Vec::new()),
+        });
+        let ops = Ops::local_with_runner(runner.clone());
+
+        let (_, target_head) = ops
+            .check_main_checkout_ready(&f.project, Some("main"))
+            .unwrap();
+        let outcome = ops
+            .integrate_batch(
+                &f.home,
+                &f.project,
+                "main",
+                &target_head,
+                MergeStrategy::Rebase,
+                &[(c1, "run-1".into())],
+            )
+            .unwrap();
+        let BatchIntegrationOutcome::Clean {
+            worktree, head_sha, ..
+        } = outcome
+        else {
+            panic!("expected clean integration on real bare-repo fixture");
+        };
+        let log = f.home.join("fixture-test.log");
+        let test_res = ops
+            .run_batch_tests(&worktree, "test -f feature.txt && echo ok", &log)
+            .unwrap();
+        assert!(test_res.passed);
+        ops.fast_forward_target(&f.project, "main", &target_head, &head_sha)
+            .unwrap();
+        let pushed_remote = ops.push_target_branch(&f.project, "main").unwrap();
+        assert_eq!(pushed_remote.as_deref(), Some("origin"));
+        assert_eq!(
+            git_run(&remote, &["rev-parse", "refs/heads/main"]),
+            head_sha
+        );
+        assert!(
+            runner
+                .recorded
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("push --porcelain origin")),
+            "expected git push through custom CommandRunner"
         );
     }
 }

@@ -244,10 +244,17 @@ impl AppServer {
             "env.save" => self.env_save(p, transport_token),
             "env.global.sync" => self.global_env_sync(p, transport_token),
             "env.preview" => self.env_preview(p),
-            "host.discover" => Ok(serde_json::to_value(network::discover_all())?),
+            "host.discover" => {
+                let catalog = if self.exec_runner.is_system() {
+                    network::discover_all()
+                } else {
+                    DiscoveryCatalog::default()
+                };
+                Ok(serde_json::to_value(catalog)?)
+            }
             "host.discover_canban" => {
                 let has_override = self.tailscale_verifier_override.lock().unwrap().is_some();
-                let (hosts, ts_avail) = if has_override {
+                let (hosts, ts_avail) = if has_override || !self.exec_runner.is_system() {
                     network::discover_canban_hosts_with_status(&self.home, &self.identity, None)
                 } else {
                     network::discover_canban_hosts(&self.home, &self.identity)
@@ -286,7 +293,7 @@ impl AppServer {
                 )
             }
             "app.ping" => Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_with(self.exec_runner.as_ref()),"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":self.api_version(),"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_with(self.exec_runner.as_ref()),"build":self.effective_build(),"updates_disabled":self.updates_disabled}),
             ),
             "device.list" => Ok(self.device_list_payload()),
             "device.remote_access.set" => {
@@ -355,9 +362,14 @@ impl AppServer {
                             .map(canban_types::normalize_daemon_addr)
                     })
                     .or_else(|| {
-                        network::detect_tailscale_ipv4()
-                            .ok()
-                            .map(|ip| format!("{ip}:{}", listen_cfg.port))
+                        self.exec_runner
+                            .is_system()
+                            .then(|| {
+                                network::detect_tailscale_ipv4()
+                                    .ok()
+                                    .map(|ip| format!("{ip}:{}", listen_cfg.port))
+                            })
+                            .flatten()
                     });
                 let uri = preferred_addr
                     .as_deref()
