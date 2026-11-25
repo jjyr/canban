@@ -4,12 +4,13 @@
 use anyhow::Result;
 use futures_util::task::AtomicWaker;
 use std::{
+    collections::HashMap,
     future::poll_fn,
     io,
     pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context as TaskContext, Poll},
 };
@@ -53,8 +54,91 @@ impl<T: AsyncWrite + Unpin> futures_io::AsyncWrite for TokioCompat<T> {
     }
 }
 
+type StreamWakers = (Arc<AtomicWaker>, Arc<AtomicWaker>);
+
+/// Shared close signal that wakes every live [`MuxStream`] reader/writer as soon as the
+/// underlying `yamux` connection closes.
+///
+/// Workaround for `yamux 0.14.1`: `Connection::poll_close` transitions `Active -> Closing`
+/// via `Active::close()`, which drops `Active.streams` without calling `drop_all_streams()`,
+/// leaving streams parked inside `AsyncRead::poll_read` without waking their reader wakers.
+struct CloseSignal {
+    closed: AtomicBool,
+    next_id: AtomicU64,
+    streams: Mutex<HashMap<u64, StreamWakers>>,
+}
+
+impl CloseSignal {
+    fn new() -> Self {
+        Self {
+            closed: AtomicBool::new(false),
+            next_id: AtomicU64::new(1),
+            streams: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn register_stream(&self) -> (u64, Arc<AtomicWaker>, Arc<AtomicWaker>) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let read_waker = Arc::new(AtomicWaker::new());
+        let write_waker = Arc::new(AtomicWaker::new());
+        let mut guard = self.streams.lock().unwrap();
+        if !self.closed.load(Ordering::SeqCst) {
+            guard.insert(id, (Arc::clone(&read_waker), Arc::clone(&write_waker)));
+        }
+        (id, read_waker, write_waker)
+    }
+
+    fn unregister_stream(&self, id: u64) {
+        if let Ok(mut guard) = self.streams.lock() {
+            guard.remove(&id);
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let wakers: Vec<_> = {
+            let mut guard = self.streams.lock().unwrap();
+            guard.drain().map(|(_, pair)| pair).collect()
+        };
+        for (read_waker, write_waker) in wakers {
+            read_waker.wake();
+            write_waker.wake();
+        }
+    }
+}
+
 /// A single bidirectional logical stream inside a `yamux/1` multiplexed TCP connection.
-pub struct MuxStream(yamux::Stream);
+pub struct MuxStream {
+    inner: yamux::Stream,
+    id: u64,
+    close_signal: Arc<CloseSignal>,
+    read_waker: Arc<AtomicWaker>,
+    write_waker: Arc<AtomicWaker>,
+}
+
+impl MuxStream {
+    fn new(inner: yamux::Stream, close_signal: Arc<CloseSignal>) -> Self {
+        let (id, read_waker, write_waker) = close_signal.register_stream();
+        Self {
+            inner,
+            id,
+            close_signal,
+            read_waker,
+            write_waker,
+        }
+    }
+}
+
+impl Drop for MuxStream {
+    fn drop(&mut self) {
+        self.close_signal.unregister_stream(self.id);
+    }
+}
 
 impl AsyncRead for MuxStream {
     fn poll_read(
@@ -63,13 +147,20 @@ impl AsyncRead for MuxStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let slice = buf.initialize_unfilled();
-        match futures_io::AsyncRead::poll_read(Pin::new(&mut self.0), cx, slice) {
+        match futures_io::AsyncRead::poll_read(Pin::new(&mut self.inner), cx, slice) {
             Poll::Ready(Ok(n)) => {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                self.read_waker.register(cx.waker());
+                std::sync::atomic::fence(Ordering::SeqCst);
+                if self.close_signal.closed.load(Ordering::SeqCst) {
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending
+            }
         }
     }
 }
@@ -80,15 +171,54 @@ impl AsyncWrite for MuxStream {
         cx: &mut TaskContext<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        futures_io::AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf)
+        match futures_io::AsyncWrite::poll_write(Pin::new(&mut self.inner), cx, buf) {
+            Poll::Ready(res) => Poll::Ready(res),
+            Poll::Pending => {
+                self.write_waker.register(cx.waker());
+                std::sync::atomic::fence(Ordering::SeqCst);
+                if self.close_signal.closed.load(Ordering::SeqCst) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "Multiplexed connection closed",
+                    )));
+                }
+                Poll::Pending
+            }
+        }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        futures_io::AsyncWrite::poll_flush(Pin::new(&mut self.0), cx)
+        match futures_io::AsyncWrite::poll_flush(Pin::new(&mut self.inner), cx) {
+            Poll::Ready(res) => Poll::Ready(res),
+            Poll::Pending => {
+                self.write_waker.register(cx.waker());
+                std::sync::atomic::fence(Ordering::SeqCst);
+                if self.close_signal.closed.load(Ordering::SeqCst) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "Multiplexed connection closed",
+                    )));
+                }
+                Poll::Pending
+            }
+        }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        futures_io::AsyncWrite::poll_close(Pin::new(&mut self.0), cx)
+        match futures_io::AsyncWrite::poll_close(Pin::new(&mut self.inner), cx) {
+            Poll::Ready(res) => Poll::Ready(res),
+            Poll::Pending => {
+                self.write_waker.register(cx.waker());
+                std::sync::atomic::fence(Ordering::SeqCst);
+                if self.close_signal.closed.load(Ordering::SeqCst) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "Multiplexed connection closed",
+                    )));
+                }
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -97,10 +227,16 @@ struct MuxDriver<T> {
     open_rx: mpsc::Receiver<oneshot::Sender<Result<MuxStream>>>,
     inbound_tx: mpsc::UnboundedSender<MuxStream>,
     close_waker: Arc<AtomicWaker>,
-    closed_flag: Arc<AtomicBool>,
+    close_signal: Arc<CloseSignal>,
     pending_open: Option<oneshot::Sender<Result<MuxStream>>>,
     closing: bool,
     close_on_open_drop: bool,
+}
+
+impl<T> Drop for MuxDriver<T> {
+    fn drop(&mut self) {
+        self.close_signal.close();
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> MuxDriver<T> {
@@ -119,12 +255,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> MuxDriver<T> {
 
     fn poll_drive(&mut self, cx: &mut TaskContext<'_>) -> Poll<()> {
         self.close_waker.register(cx.waker());
-        if self.closed_flag.load(Ordering::Acquire) {
+        if self.close_signal.is_closed() {
             self.closing = true;
         }
 
         loop {
             if self.closing {
+                self.close_signal.close();
                 self.reject_pending("Multiplexed connection closed");
                 return Poll::Ready(());
             }
@@ -148,7 +285,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> MuxDriver<T> {
                 match self.conn.poll_new_outbound(cx) {
                     Poll::Ready(Ok(stream)) => {
                         if let Some(tx) = self.pending_open.take() {
-                            let _ = tx.send(Ok(MuxStream(stream)));
+                            let _ =
+                                tx.send(Ok(MuxStream::new(stream, Arc::clone(&self.close_signal))));
                         }
                         continue;
                     }
@@ -169,11 +307,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> MuxDriver<T> {
 
             match self.conn.poll_next_inbound(cx) {
                 Poll::Ready(Some(Ok(stream))) => {
-                    let _ = self.inbound_tx.send(MuxStream(stream));
+                    let _ = self
+                        .inbound_tx
+                        .send(MuxStream::new(stream, Arc::clone(&self.close_signal)));
                     continue;
                 }
                 Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
-                    self.closed_flag.store(true, Ordering::Release);
+                    self.close_signal.close();
                     self.reject_pending("Multiplexed connection closed");
                     return Poll::Ready(());
                 }
@@ -186,13 +326,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> MuxDriver<T> {
 #[derive(Clone)]
 pub struct MuxClient {
     open_tx: mpsc::Sender<oneshot::Sender<Result<MuxStream>>>,
-    closed_flag: Arc<AtomicBool>,
+    close_signal: Arc<CloseSignal>,
     close_waker: Arc<AtomicWaker>,
 }
 
 impl MuxClient {
     pub fn is_closed(&self) -> bool {
-        self.closed_flag.load(Ordering::Acquire) || self.open_tx.is_closed()
+        self.close_signal.is_closed() || self.open_tx.is_closed()
     }
 
     pub async fn open_stream(&self) -> Result<MuxStream> {
@@ -219,14 +359,14 @@ impl MuxClient {
     }
 
     pub fn close(&self) {
-        self.closed_flag.store(true, Ordering::Release);
+        self.close_signal.close();
         self.close_waker.wake();
     }
 }
 
 pub struct MuxServer {
     inbound_rx: mpsc::UnboundedReceiver<MuxStream>,
-    closed_flag: Arc<AtomicBool>,
+    close_signal: Arc<CloseSignal>,
     close_waker: Arc<AtomicWaker>,
 }
 
@@ -236,7 +376,7 @@ impl MuxServer {
     }
 
     pub fn close(&self) {
-        self.closed_flag.store(true, Ordering::Release);
+        self.close_signal.close();
         self.close_waker.wake();
     }
 }
@@ -256,7 +396,7 @@ fn spawn_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let conn = yamux::Connection::new(TokioCompat(io), cfg, mode);
     let (open_tx, open_rx) = mpsc::channel(128);
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel();
-    let closed_flag = Arc::new(AtomicBool::new(false));
+    let close_signal = Arc::new(CloseSignal::new());
     let close_waker = Arc::new(AtomicWaker::new());
     let close_on_open_drop = matches!(mode, yamux::Mode::Client);
 
@@ -265,7 +405,7 @@ fn spawn_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         open_rx,
         inbound_tx,
         close_waker: close_waker.clone(),
-        closed_flag: closed_flag.clone(),
+        close_signal: close_signal.clone(),
         pending_open: None,
         closing: false,
         close_on_open_drop,
@@ -278,7 +418,7 @@ fn spawn_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
                 poll_fn(|cx| driver.conn.poll_close(cx)),
             )
             .await;
-            driver.closed_flag.store(true, Ordering::Release);
+            driver.close_signal.close();
         }
     });
 
@@ -287,7 +427,7 @@ fn spawn_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         (
             Some(MuxClient {
                 open_tx,
-                closed_flag,
+                close_signal,
                 close_waker,
             }),
             None,
@@ -298,7 +438,7 @@ fn spawn_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             None,
             Some(MuxServer {
                 inbound_rx,
-                closed_flag,
+                close_signal,
                 close_waker,
             }),
         )
@@ -452,5 +592,84 @@ mod tests {
             "closing a stalled mux must not block indefinitely"
         );
         assert!(client.open_stream().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mux_close_wakes_in_flight_stream_reader_immediately() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let client = connect_mux(client_io);
+        let mut server = accept_mux(server_io);
+
+        let (received_tx, received_rx) = oneshot::channel::<()>();
+        let (release_srv_tx, release_srv_rx) = oneshot::channel::<()>();
+        let srv_task = tokio::spawn(async move {
+            let mut stream = server.next_stream().await.expect("inbound mux stream");
+            let mut req = [0u8; 5];
+            stream.read_exact(&mut req).await.unwrap();
+            assert_eq!(&req, b"ping\n");
+            let _ = received_tx.send(());
+            // Hold stream open without replying until the test finishes (simulating an in-flight RPC).
+            let _ = release_srv_rx.await;
+            // Closing server while a peer or local reader is parked must also finish cleanly.
+            server.close();
+        });
+
+        let stream = client.open_stream().await.unwrap();
+        let (mut r, mut w) = tokio::io::split(stream);
+        w.write_all(b"ping\n").await.unwrap();
+        w.flush().await.unwrap();
+        received_rx.await.unwrap();
+
+        // Spawn a reader that genuinely parks inside `MuxStream::poll_read` waiting for a reply.
+        let read_task = tokio::spawn(async move {
+            let mut buf = [0u8; 32];
+            r.read(&mut buf).await
+        });
+        tokio::task::yield_now().await;
+
+        // Closing the mux client must immediately wake the parked reader with EOF rather than
+        // stalling until an outer RPC read timeout expires.
+        client.close();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), read_task)
+            .await
+            .expect("in-flight stream reader must wake promptly on mux close")
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0, "closed mux stream must surface EOF to parked reader");
+
+        let _ = release_srv_tx.send(());
+        srv_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mux_server_close_wakes_parked_inbound_stream_reader_immediately() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let client = connect_mux(client_io);
+        let mut server = accept_mux(server_io);
+
+        let mut client_stream = client.open_stream().await.unwrap();
+        client_stream.write_all(b"hi").await.unwrap();
+        client_stream.flush().await.unwrap();
+
+        let mut inbound = server.next_stream().await.expect("inbound stream");
+        let mut head = [0u8; 2];
+        inbound.read_exact(&mut head).await.unwrap();
+        assert_eq!(&head, b"hi");
+
+        let read_task = tokio::spawn(async move {
+            let mut buf = [0u8; 16];
+            inbound.read(&mut buf).await
+        });
+        tokio::task::yield_now().await;
+
+        server.close();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), read_task)
+            .await
+            .expect("parked server-side stream reader must wake promptly on server close")
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0);
+
+        client.close();
     }
 }

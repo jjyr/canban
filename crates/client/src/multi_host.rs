@@ -7088,7 +7088,7 @@ mod tests {
                                 .await;
                             }
                             Some("app.state") => {
-                                if drop_ref.swap(false, Ordering::SeqCst) {
+                                if drop_ref.load(Ordering::SeqCst) {
                                     // Simulate transient transport drop on the refresh call!
                                     break;
                                 }
@@ -7165,7 +7165,7 @@ mod tests {
                                     }),
                                 )
                                 .await;
-                                sub_notify.notify_waiters();
+                                sub_notify.notify_one();
                                 let mut buf = String::new();
                                 while matches!(reader.read_line(&mut buf).await, Ok(n) if n > 0) {
                                     buf.clear();
@@ -7198,7 +7198,7 @@ mod tests {
             })
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), subscribed_notify.notified())
+        tokio::time::timeout(Duration::from_secs(10), subscribed_notify.notified())
             .await
             .expect("supervisor subscribed before outbox test");
 
@@ -7244,9 +7244,26 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].state, SyncItemState::Queued);
 
-        // Reconnect and drain again: fresh snapshot (rev 5) merges cleanly and applies body edit!
+        // Restore server refresh availability, reconnect, and wait for the full post-condition
+        // (no `Queued` or `InFlight` items remaining, whether drained by `poll_remotes_once_async`
+        // or an overlapping `host_supervisor_task` pass).
+        drop_next_refresh.store(false, Ordering::SeqCst);
         client.poll_remotes_once_async().await;
-        let items_after = client.sync_items();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let items_after = loop {
+            let items = client.sync_items();
+            let pending = items
+                .iter()
+                .any(|i| matches!(i.state, SyncItemState::Queued | SyncItemState::InFlight));
+            if !pending {
+                break items;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "queued edit did not finish draining after reconnect; remaining={items:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         assert!(
             items_after.is_empty(),
             "queued edit must drain cleanly after reconnect; remaining={items_after:?}"
@@ -7482,7 +7499,7 @@ mod tests {
                                     }),
                                 )
                                 .await;
-                                sub_notify.notify_waiters();
+                                sub_notify.notify_one();
                                 let mut buf = String::new();
                                 while matches!(reader.read_line(&mut buf).await, Ok(n) if n > 0) {
                                     buf.clear();
@@ -7515,7 +7532,7 @@ mod tests {
             })
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), subscribed_notify.notified())
+        tokio::time::timeout(Duration::from_secs(10), subscribed_notify.notified())
             .await
             .expect("supervisor subscribed before outbox test");
 
