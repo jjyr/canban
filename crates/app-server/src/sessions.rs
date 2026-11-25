@@ -477,6 +477,17 @@ impl AppServer {
         )?;
         promoted_entry.agent.as_mut().unwrap().input_path = input.clone();
         let _ = pending;
+        let prompt = std::fs::read_to_string(self.home.join(&input))?;
+        let card_number = card.number.to_string();
+        let text = canban_context::render_template(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/continue_assignment.txt"
+            ))
+            .trim_end(),
+            &[("card_number", &card_number), ("prompt", &prompt)],
+        );
+        let mut delivering_questions = Vec::new();
         self.store.lock().unwrap().write(|db| {
             let mut current: TerminalEntry = db.get(&entry.id)?;
             current.agent = promoted_entry.agent.clone();
@@ -486,7 +497,8 @@ impl AppServer {
                 .into_iter()
                 .filter(|q| q.terminal_id.as_deref() == Some(&entry.id) && q.state == "pending")
             {
-                q.state = "delivered".into();
+                q.state = "delivering".into();
+                delivering_questions.push(q.id.clone());
                 db.save(&q)?;
             }
             log(
@@ -500,29 +512,65 @@ impl AppServer {
                 self.now_ms(),
             )
         })?;
-        let prompt = std::fs::read_to_string(self.home.join(&input))?;
-        let card_number = card.number.to_string();
-        let text = canban_context::render_template(
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../prompts/runtime/continue_assignment.txt"
-            ))
-            .trim_end(),
-            &[("card_number", &card_number), ("prompt", &prompt)],
-        );
         let send_res = client
             .call("terminal.send", json!({"terminal":terminal,"text":text}))
             .and_then(|_| self.check_failpoint(canban_types::FP_HERDR_AFTER_SEND_BEFORE_DB));
         if let Err(e) = send_res {
+            let err_msg = format!("Assignment delivery uncertain: {e:#}");
+            let failed_at = self.now_ms();
             self.store.lock().unwrap().write(|db| {
                 let mut current: TerminalEntry = db.get(&entry.id)?;
                 if let Some(run) = &mut current.agent {
                     run.state = "unknown".into();
-                    run.error = Some(format!("Assignment delivery uncertain: {e:#}"));
+                    run.error = Some(err_msg.clone());
                 }
-                db.save(&current)
+                db.save(&current)?;
+                let mut marked_unknown = false;
+                for qid in &delivering_questions {
+                    if let Ok(mut q) = db.get::<Question>(qid)
+                        && q.state == "delivering"
+                    {
+                        q.state = "delivery_unknown".into();
+                        q.error = Some(err_msg.clone());
+                        db.save(&q)?;
+                        marked_unknown = true;
+                    }
+                }
+                let mut c: Card = db.get(&card.id)?;
+                let notice = if marked_unknown {
+                    "Assignment and question delivery needs inspection; open the Agent terminal. It was not automatically resent."
+                } else {
+                    "Assignment delivery needs inspection; open the Agent terminal. It was not automatically resent."
+                };
+                attention(db, &mut c, notice, failed_at)?;
+                if let Some(gate) = &mut c.human_gate
+                    && gate.terminal_id.is_none()
+                {
+                    gate.terminal_id = Some(entry.id.clone());
+                }
+                c.revision += 1;
+                db.save(&c)?;
+                Ok(())
             })?;
+            if !delivering_questions.is_empty() {
+                self.emit("question", Some(card.id.clone()));
+            }
+            self.emit("runtime", Some(card.id.clone()));
             return Err(e);
+        }
+        if !delivering_questions.is_empty() {
+            self.store.lock().unwrap().write(|db| {
+                for qid in &delivering_questions {
+                    if let Ok(mut q) = db.get::<Question>(qid)
+                        && q.state == "delivering"
+                    {
+                        q.state = "delivered".into();
+                        db.save(&q)?;
+                    }
+                }
+                Ok(())
+            })?;
+            self.emit("question", Some(card.id.clone()));
         }
         self.emit("runtime", Some(card.id.clone()));
         Ok(())

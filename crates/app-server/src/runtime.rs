@@ -2121,6 +2121,97 @@ impl AppServer {
         Ok(())
     }
 
+    /// Lists Herdr terminals either from fresh RPC (`fresh = true`) or the cached observer
+    /// inventory first (`fresh = false`), falling back to the alternate source when unavailable.
+    pub(super) fn list_herdr_terminals(
+        &self,
+        client: &canban_herdr::Client,
+        fresh: bool,
+    ) -> Option<Vec<Value>> {
+        let from_client = || {
+            client
+                .terminals()
+                .ok()
+                .and_then(|v| v["terminals"].as_array().cloned())
+        };
+        let from_inventory = || self.runtime_inventory().ok().map(|(_, records)| records);
+        if fresh {
+            from_client().or_else(from_inventory)
+        } else {
+            from_inventory().or_else(from_client)
+        }
+    }
+
+    /// Finds a live (non-finished) Herdr terminal matching the workflow run/step/visit labels.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn find_live_labeled_terminal(
+        &self,
+        client: &canban_herdr::Client,
+        fresh: bool,
+        run_label_key: &str,
+        run_id: &str,
+        step_label_key: &str,
+        step_id: &str,
+        visit_label_key: &str,
+        visit: &str,
+    ) -> Option<String> {
+        let terminals = self.list_herdr_terminals(client, fresh)?;
+        terminals.into_iter().find_map(|v| {
+            let live = v["state"] != "finished";
+            let matches_run = v["labels"][run_label_key].as_str() == Some(run_id);
+            let matches_step = v["labels"][step_label_key].as_str() == Some(step_id);
+            let matches_visit = v["labels"][visit_label_key]
+                .as_str()
+                .is_none_or(|vis| vis == visit);
+            if live && matches_run && matches_step && matches_visit {
+                v["address"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Best-effort kills an orphaned Herdr PTY and returns `true` only once the PTY is confirmed
+    /// terminated, already finished/absent on a reachable core, or belonged to a superseded core.
+    /// Returns `false` if Herdr is unreachable so callers can persist `orphan_kill_pending` and
+    /// retry cleanup on the next tick without launching duplicates.
+    pub(super) fn confirm_orphan_terminal_terminated(
+        &self,
+        client: &canban_herdr::Client,
+        addr: &str,
+        expected_core: Option<&str>,
+    ) -> bool {
+        if addr.is_empty() {
+            return true;
+        }
+        if let Some(cid) = expected_core
+            && let Ok(actual_core) = self.verified_core_id()
+            && actual_core != cid
+        {
+            return true;
+        }
+        if client
+            .call("terminal.kill", json!({ "terminal": addr }))
+            .is_ok()
+        {
+            return true;
+        }
+        if let Ok(v) = client.get(addr) {
+            return v["state"] == "finished";
+        }
+        if let Ok(list) = client.terminals()
+            && let Some(arr) = list["terminals"].as_array()
+        {
+            return !arr
+                .iter()
+                .any(|v| v["address"].as_str() == Some(addr) && v["state"] != "finished");
+        }
+        false
+    }
+
     /// Drives cardless `WorkflowRun`s (`card_id: None`) paused at `waiting_agent` steps.
     pub(crate) fn pump_cardless_agents(&self) -> Result<()> {
         if !self.observer_running.load(Ordering::SeqCst) {
@@ -2144,6 +2235,7 @@ impl AppServer {
             let Some(step_id) = run.step.clone() else {
                 continue;
             };
+            let visit_str = run.visit.to_string();
             if let Some(meta) = run.inputs.get("agent_terminal").filter(|v| {
                 v.is_object()
                     && v.get("step_id")
@@ -2156,10 +2248,53 @@ impl AppServer {
                 let Some(addr) = meta["address"].as_str() else {
                     continue;
                 };
-                let (finished, exit_code) = match client.get(addr) {
-                    Ok(v) if v["state"] == "finished" => (true, v["exit_code"].as_i64()),
-                    Ok(_) => (false, None),
-                    Err(_) => (true, None),
+                let expected_core = meta["core_id"].as_str();
+                if meta["orphan_kill_pending"].as_bool() == Some(true) {
+                    if self.confirm_orphan_terminal_terminated(&client, addr, expected_core) {
+                        let err_msg = meta["error"]
+                            .as_str()
+                            .unwrap_or("Cardless agent launch failed after spawning PTY");
+                        let _ = self.store.lock().unwrap().write(|db| {
+                            let mut current: WorkflowRun = db.get(&run.id)?;
+                            if current.active()
+                                && current.state == "waiting_agent"
+                                && current.step.as_deref() == Some(&step_id)
+                                && current.visit == run.visit
+                            {
+                                canban_workflow_engine::runtime::complete_cardless_agent_at(
+                                    db,
+                                    &mut current,
+                                    json!({
+                                        "error": err_msg,
+                                        "message": err_msg,
+                                        "terminal": addr,
+                                        "orphan_terminated": true,
+                                    }),
+                                    "failed",
+                                    self.now_ms(),
+                                )?;
+                            }
+                            Ok(())
+                        });
+                        self.emit("application", None);
+                        self.request_scripts();
+                        self.wake_runtime();
+                    }
+                    continue;
+                }
+                let core_changed = expected_core.is_some_and(|cid| {
+                    self.verified_core_id()
+                        .ok()
+                        .is_some_and(|actual| actual != cid)
+                });
+                let (finished, exit_code) = if core_changed {
+                    (true, None)
+                } else {
+                    match client.get(addr) {
+                        Ok(v) if v["state"] == "finished" => (true, v["exit_code"].as_i64()),
+                        Ok(_) => (false, None),
+                        Err(_) => (true, None),
+                    }
                 };
                 if finished {
                     let report_state = if exit_code == Some(0) {
@@ -2195,6 +2330,55 @@ impl AppServer {
                 continue;
             }
 
+            // Before launching a fresh PTY, check whether an unrecorded live PTY for this
+            // exact `(run.id, step_id, visit)` already exists in Herdr (e.g. abrupt crash
+            // after `terminal.run` before SQLite persisted `agent_terminal`) and reattach.
+            if let Some(existing_addr) = self.find_live_labeled_terminal(
+                &client,
+                false,
+                "canban.workflow_run",
+                &run.id,
+                "canban.workflow_step",
+                &step_id,
+                "canban.workflow_visit",
+                &visit_str,
+            ) {
+                let core_id = self.verified_core_id().ok();
+                let attached = self.store.lock().unwrap().write(|db| {
+                    let mut current: WorkflowRun = db.get(&run.id)?;
+                    if current.active()
+                        && current.state == "waiting_agent"
+                        && current.step.as_deref() == Some(&step_id)
+                        && current.visit == run.visit
+                    {
+                        let started_at = self.now_ms();
+                        current.inputs["agent_terminal"] = json!({
+                            "address": existing_addr,
+                            "core_id": core_id,
+                            "step_id": step_id,
+                            "visit": run.visit,
+                            "started_at": started_at,
+                        });
+                        current.updated_at = started_at;
+                        db.save(&current)?;
+                        return Ok(true);
+                    }
+                    Ok(false)
+                });
+                match attached {
+                    Ok(true) => self.emit("application", None),
+                    Ok(false) => {
+                        let _ = self.confirm_orphan_terminal_terminated(
+                            &client,
+                            &existing_addr,
+                            core_id.as_deref(),
+                        );
+                    }
+                    Err(_) => {}
+                }
+                continue;
+            }
+
             // Respect global `max_agents` capacity before launching a new cardless agent.
             let has_slot = self.snapshot().ok().is_some_and(|s| {
                 canban_scheduler::active_count_at(&s, self.now_ms()) < config.scheduler.max_agents
@@ -2225,7 +2409,7 @@ impl AppServer {
                     canban_workflow_engine::runtime::complete_cardless_agent_at(
                         db,
                         &mut current,
-                        json!({"error": "No configured agent profile"}),
+                        json!({"error": "No configured agent profile", "message": "No configured agent profile"}),
                         "failed",
                         self.now_ms(),
                     )
@@ -2314,27 +2498,165 @@ impl AppServer {
                 config.terminal_env_mode.is_inherit(),
                 source_trust,
             );
+            let core_id = self.verified_core_id().ok();
             let labels = std::collections::BTreeMap::from([
                 ("canban.project".into(), run.project_id.clone()),
                 ("canban.workflow_run".into(), run.id.clone()),
                 ("canban.workflow_step".into(), step_id.clone()),
+                ("canban.workflow_visit".into(), visit_str.clone()),
             ]);
-            match client
-                .launch_with_policy_unset_and_size(
-                    spec.argv,
-                    &spec.cwd,
-                    spec.env,
-                    labels,
-                    env_policy,
-                    &unset_keys,
-                    Some(self.resolve_launch_terminal_size(None)),
-                )
-                .and_then(|launched| {
-                    self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
-                    Ok(launched)
-                }) {
+            match client.launch_with_policy_unset_and_size(
+                spec.argv,
+                &spec.cwd,
+                spec.env,
+                labels,
+                env_policy,
+                &unset_keys,
+                Some(self.resolve_launch_terminal_size(None)),
+            ) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
+                    let commit_res: Result<bool> = (|| {
+                        self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
+                        ensure!(
+                            !addr.is_empty(),
+                            "Cardless agent launch receipt has no terminal address"
+                        );
+                        let mut attached = false;
+                        self.store.lock().unwrap().write(|db| {
+                            let mut current: WorkflowRun = db.get(&run.id)?;
+                            if current.active()
+                                && current.state == "waiting_agent"
+                                && current.step.as_deref() == Some(&step_id)
+                                && current.visit == run.visit
+                            {
+                                let started_at = self.now_ms();
+                                current.inputs["agent_terminal"] = json!({
+                                    "address": addr,
+                                    "core_id": core_id,
+                                    "step_id": step_id,
+                                    "visit": run.visit,
+                                    "started_at": started_at,
+                                });
+                                current.updated_at = started_at;
+                                db.save(&current)?;
+                                attached = true;
+                            }
+                            Ok(())
+                        })?;
+                        Ok(attached)
+                    })();
+                    match commit_res {
+                        Ok(true) => {
+                            self.emit("application", None);
+                        }
+                        Ok(false) => {
+                            let _ = self.confirm_orphan_terminal_terminated(
+                                &client,
+                                &addr,
+                                core_id.as_deref(),
+                            );
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "Failed to record cardless agent `{step_id}` after launch: {e:#}"
+                            );
+                            if self.confirm_orphan_terminal_terminated(
+                                &client,
+                                &addr,
+                                core_id.as_deref(),
+                            ) {
+                                let _ = self.store.lock().unwrap().write(|db| {
+                                    let mut current: WorkflowRun = db.get(&run.id)?;
+                                    if current.active()
+                                        && current.state == "waiting_agent"
+                                        && current.step.as_deref() == Some(&step_id)
+                                        && current.visit == run.visit
+                                    {
+                                        canban_workflow_engine::runtime::complete_cardless_agent_at(
+                                            db,
+                                            &mut current,
+                                            json!({
+                                                "error": msg,
+                                                "message": msg,
+                                                "terminal": addr,
+                                                "orphan_terminated": true,
+                                            }),
+                                            "failed",
+                                            self.now_ms(),
+                                        )?;
+                                    }
+                                    Ok(())
+                                });
+                            } else {
+                                let _ = self.store.lock().unwrap().write(|db| {
+                                    let mut current: WorkflowRun = db.get(&run.id)?;
+                                    if current.active()
+                                        && current.state == "waiting_agent"
+                                        && current.step.as_deref() == Some(&step_id)
+                                        && current.visit == run.visit
+                                    {
+                                        let started_at = self.now_ms();
+                                        current.inputs["agent_terminal"] = json!({
+                                            "address": addr,
+                                            "core_id": core_id,
+                                            "step_id": step_id,
+                                            "visit": run.visit,
+                                            "started_at": started_at,
+                                            "orphan_kill_pending": true,
+                                            "error": msg,
+                                        });
+                                        current.updated_at = started_at;
+                                        db.save(&current)?;
+                                    }
+                                    Ok(())
+                                });
+                            }
+                            self.emit("application", None);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Failed to launch cardless agent `{step_id}`: {e:#}");
+                    if let Some(orphan_addr) = self.find_live_labeled_terminal(
+                        &client,
+                        true,
+                        "canban.workflow_run",
+                        &run.id,
+                        "canban.workflow_step",
+                        &step_id,
+                        "canban.workflow_visit",
+                        &visit_str,
+                    ) && !self.confirm_orphan_terminal_terminated(
+                        &client,
+                        &orphan_addr,
+                        core_id.as_deref(),
+                    ) {
+                        let _ = self.store.lock().unwrap().write(|db| {
+                            let mut current: WorkflowRun = db.get(&run.id)?;
+                            if current.active()
+                                && current.state == "waiting_agent"
+                                && current.step.as_deref() == Some(&step_id)
+                                && current.visit == run.visit
+                            {
+                                let started_at = self.now_ms();
+                                current.inputs["agent_terminal"] = json!({
+                                    "address": orphan_addr,
+                                    "core_id": core_id,
+                                    "step_id": step_id,
+                                    "visit": run.visit,
+                                    "started_at": started_at,
+                                    "orphan_kill_pending": true,
+                                    "error": msg,
+                                });
+                                current.updated_at = started_at;
+                                db.save(&current)?;
+                            }
+                            Ok(())
+                        });
+                        self.emit("application", None);
+                        continue;
+                    }
                     let _ = self.store.lock().unwrap().write(|db| {
                         let mut current: WorkflowRun = db.get(&run.id)?;
                         if current.active()
@@ -2342,31 +2664,15 @@ impl AppServer {
                             && current.step.as_deref() == Some(&step_id)
                             && current.visit == run.visit
                         {
-                            let started_at = self.now_ms();
-                            current.inputs["agent_terminal"] = json!({
-                                "address": addr,
-                                "step_id": step_id,
-                                "visit": run.visit,
-                                "started_at": started_at,
-                            });
-                            current.updated_at = started_at;
-                            db.save(&current)?;
+                            canban_workflow_engine::runtime::complete_cardless_agent_at(
+                                db,
+                                &mut current,
+                                json!({"error": msg, "message": msg}),
+                                "failed",
+                                self.now_ms(),
+                            )?;
                         }
                         Ok(())
-                    });
-                    self.emit("application", None);
-                }
-                Err(e) => {
-                    let msg = format!("Failed to launch cardless agent `{step_id}`: {e:#}");
-                    let _ = self.store.lock().unwrap().write(|db| {
-                        let mut current: WorkflowRun = db.get(&run.id)?;
-                        canban_workflow_engine::runtime::complete_cardless_agent_at(
-                            db,
-                            &mut current,
-                            json!({"error": msg}),
-                            "failed",
-                            self.now_ms(),
-                        )
                     });
                     self.emit("application", None);
                 }

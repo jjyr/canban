@@ -1059,6 +1059,7 @@ impl AppServer {
                 continue;
             };
             let timeout_secs = script_timeout_secs(timeout_minutes, timeout_seconds);
+            let visit_str = run.visit.to_string();
 
             if let Some(meta) = run.inputs.get("script_terminal").filter(|v| v.is_object()) {
                 let Some(addr) = meta["address"].as_str() else {
@@ -1087,6 +1088,26 @@ impl AppServer {
                             continue_on_error,
                         });
                     };
+
+                if meta["orphan_kill_pending"].as_bool() == Some(true) {
+                    if self.confirm_orphan_terminal_terminated(&client, addr, expected_core) {
+                        let err_msg = meta["error"]
+                            .as_str()
+                            .unwrap_or("Script launch failed after spawning PTY");
+                        if env_file.as_os_str().is_empty() {
+                            let _ = self.finalize_script_error_only(
+                                &run.id,
+                                &step_id,
+                                run.visit,
+                                err_msg,
+                                continue_on_error,
+                            );
+                        } else {
+                            finalize_meta(err_msg, None, false);
+                        }
+                    }
+                    continue;
+                }
 
                 if let Ok(actual_core) = self.verified_core_id()
                     && let Some(cid) = expected_core
@@ -1133,6 +1154,60 @@ impl AppServer {
                 continue;
             }
 
+            // Before preparing and spawning a new script PTY, sweep any live orphan PTY
+            // left by an abrupt crash between `terminal.run` and SQLite commit.
+            if let Some(orphan_addr) = self.find_live_labeled_terminal(
+                &client,
+                false,
+                "canban.script_run",
+                &run.id,
+                "canban.script_step",
+                &step_id,
+                "canban.script_visit",
+                &visit_str,
+            ) {
+                let core_id = self.verified_core_id().ok();
+                let msg = format!(
+                    "Found unrecorded live script terminal `{orphan_addr}` for `{step_id}`; terminated without re-running"
+                );
+                if self.confirm_orphan_terminal_terminated(
+                    &client,
+                    &orphan_addr,
+                    core_id.as_deref(),
+                ) {
+                    let _ = self.finalize_script_error_only(
+                        &run.id,
+                        &step_id,
+                        run.visit,
+                        &msg,
+                        continue_on_error,
+                    );
+                } else {
+                    let _ = self.store.lock().unwrap().write(|db| {
+                        let mut current: WorkflowRun = db.get(&run.id)?;
+                        if current.active()
+                            && current.state == "waiting_script"
+                            && current.step.as_deref() == Some(&step_id)
+                            && current.visit == run.visit
+                        {
+                            let started_at = self.now_ms();
+                            current.inputs["script_terminal"] = json!({
+                                "address": orphan_addr,
+                                "core_id": core_id,
+                                "started_at": started_at,
+                                "orphan_kill_pending": true,
+                                "error": msg,
+                            });
+                            current.updated_at = started_at;
+                            db.save(&current)?;
+                        }
+                        Ok(())
+                    });
+                    self.emit("application", run.card_id.clone());
+                }
+                continue;
+            }
+
             let prep = match self.prepare_script(&run, &step_id) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1152,52 +1227,158 @@ impl AppServer {
                 ("canban.project".into(), run.project_id.clone()),
                 ("canban.script_run".into(), run.id.clone()),
                 ("canban.script_step".into(), step_id.clone()),
+                ("canban.script_visit".into(), visit_str.clone()),
             ]);
             if let Some(cid) = &run.card_id {
                 labels.insert("canban.card_id".into(), cid.clone());
             }
             let wrapped = wrapped_herdr_argv(&prep.raw_log_file, &prep.argv);
-            match client
-                .launch_with_policy_unset_and_size(
-                    wrapped,
-                    &prep.cwd.to_string_lossy(),
-                    prep.env.clone(),
-                    labels,
-                    prep.env_policy,
-                    &prep.unset_keys,
-                    Some(self.resolve_launch_terminal_size(None)),
-                )
-                .and_then(|launched| {
-                    self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
-                    Ok(launched)
-                }) {
+            match client.launch_with_policy_unset_and_size(
+                wrapped,
+                &prep.cwd.to_string_lossy(),
+                prep.env.clone(),
+                labels,
+                prep.env_policy,
+                &prep.unset_keys,
+                Some(self.resolve_launch_terminal_size(None)),
+            ) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
-                    let _ = self.store.lock().unwrap().write(|db| {
-                        let mut current: WorkflowRun = db.get(&run.id)?;
-                        if current.state == "waiting_script"
-                            && current.step.as_deref() == Some(&step_id)
-                            && current.visit == run.visit
-                        {
-                            let started_at = self.now_ms();
-                            current.inputs["script_terminal"] = json!({
-                                "address": addr,
-                                "core_id": core_id,
-                                "env_file": prep.env_file,
-                                "output_file": prep.output_file,
-                                "script_file": prep.script_file,
-                                "raw_log_file": prep.raw_log_file,
-                                "started_at": started_at,
-                            });
-                            current.updated_at = started_at;
-                            db.save(&current)?;
+                    let commit_res: Result<bool> = (|| {
+                        self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
+                        ensure!(
+                            !addr.is_empty(),
+                            "Script launch receipt has no terminal address"
+                        );
+                        let mut attached = false;
+                        self.store.lock().unwrap().write(|db| {
+                            let mut current: WorkflowRun = db.get(&run.id)?;
+                            if current.active()
+                                && current.state == "waiting_script"
+                                && current.step.as_deref() == Some(&step_id)
+                                && current.visit == run.visit
+                            {
+                                let started_at = self.now_ms();
+                                current.inputs["script_terminal"] = json!({
+                                    "address": addr,
+                                    "core_id": core_id,
+                                    "env_file": prep.env_file,
+                                    "output_file": prep.output_file,
+                                    "script_file": prep.script_file,
+                                    "raw_log_file": prep.raw_log_file,
+                                    "started_at": started_at,
+                                });
+                                current.updated_at = started_at;
+                                db.save(&current)?;
+                                attached = true;
+                            }
+                            Ok(())
+                        })?;
+                        Ok(attached)
+                    })();
+                    match commit_res {
+                        Ok(true) => {
+                            self.emit("application", run.card_id.clone());
                         }
-                        Ok(())
-                    });
-                    self.emit("application", run.card_id.clone());
+                        Ok(false) => {
+                            let _ = self.confirm_orphan_terminal_terminated(
+                                &client,
+                                &addr,
+                                core_id.as_deref(),
+                            );
+                            for f in [
+                                &prep.env_file,
+                                &prep.output_file,
+                                &prep.script_file,
+                                &prep.raw_log_file,
+                            ] {
+                                let _ = std::fs::remove_file(f);
+                            }
+                        }
+                        Err(e) => {
+                            let msg =
+                                format!("Failed to record script `{step_id}` after launch: {e:#}");
+                            if self.confirm_orphan_terminal_terminated(
+                                &client,
+                                &addr,
+                                core_id.as_deref(),
+                            ) {
+                                let _ = self.finalize_prepared_script(
+                                    &run, &step_id, &prep, &msg, None, false,
+                                );
+                            } else {
+                                let _ = self.store.lock().unwrap().write(|db| {
+                                    let mut current: WorkflowRun = db.get(&run.id)?;
+                                    if current.active()
+                                        && current.state == "waiting_script"
+                                        && current.step.as_deref() == Some(&step_id)
+                                        && current.visit == run.visit
+                                    {
+                                        let started_at = self.now_ms();
+                                        current.inputs["script_terminal"] = json!({
+                                            "address": addr,
+                                            "core_id": core_id,
+                                            "env_file": prep.env_file,
+                                            "output_file": prep.output_file,
+                                            "script_file": prep.script_file,
+                                            "raw_log_file": prep.raw_log_file,
+                                            "started_at": started_at,
+                                            "orphan_kill_pending": true,
+                                            "error": msg,
+                                        });
+                                        current.updated_at = started_at;
+                                        db.save(&current)?;
+                                    }
+                                    Ok(())
+                                });
+                                self.emit("application", run.card_id.clone());
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     let msg = format!("Failed to launch script `{step_id}`: {e:#}");
+                    if let Some(orphan_addr) = self.find_live_labeled_terminal(
+                        &client,
+                        true,
+                        "canban.script_run",
+                        &run.id,
+                        "canban.script_step",
+                        &step_id,
+                        "canban.script_visit",
+                        &visit_str,
+                    ) && !self.confirm_orphan_terminal_terminated(
+                        &client,
+                        &orphan_addr,
+                        core_id.as_deref(),
+                    ) {
+                        let _ = self.store.lock().unwrap().write(|db| {
+                            let mut current: WorkflowRun = db.get(&run.id)?;
+                            if current.active()
+                                && current.state == "waiting_script"
+                                && current.step.as_deref() == Some(&step_id)
+                                && current.visit == run.visit
+                            {
+                                let started_at = self.now_ms();
+                                current.inputs["script_terminal"] = json!({
+                                    "address": orphan_addr,
+                                    "core_id": core_id,
+                                    "env_file": prep.env_file,
+                                    "output_file": prep.output_file,
+                                    "script_file": prep.script_file,
+                                    "raw_log_file": prep.raw_log_file,
+                                    "started_at": started_at,
+                                    "orphan_kill_pending": true,
+                                    "error": msg,
+                                });
+                                current.updated_at = started_at;
+                                db.save(&current)?;
+                            }
+                            Ok(())
+                        });
+                        self.emit("application", run.card_id.clone());
+                        continue;
+                    }
                     let _ = self.finalize_prepared_script(&run, &step_id, &prep, &msg, None, false);
                 }
             }

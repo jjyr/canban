@@ -30,6 +30,8 @@ struct MockHerdr {
     run_calls: AtomicUsize,
     send_calls: AtomicUsize,
     kill_calls: Mutex<Vec<String>>,
+    fail_kill: AtomicBool,
+    fail_send: AtomicBool,
 }
 
 impl MockHerdr {
@@ -41,7 +43,19 @@ impl MockHerdr {
             run_calls: AtomicUsize::new(0),
             send_calls: AtomicUsize::new(0),
             kill_calls: Mutex::new(Vec::new()),
+            fail_kill: AtomicBool::new(false),
+            fail_send: AtomicBool::new(false),
         })
+    }
+
+    fn live_addresses(&self) -> Vec<String> {
+        self.terminals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, v)| v["state"] != "finished")
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     fn seed_terminal(&self, address: &str, cwd: &str, labels: Value) {
@@ -94,17 +108,23 @@ impl HerdrBackend for MockHerdr {
             }
             "terminal.send" => {
                 self.send_calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail_send.load(Ordering::SeqCst) {
+                    anyhow::bail!("simulated terminal.send transport error");
+                }
                 Ok(json!({ "ok": true }))
             }
             "terminal.kill" => {
                 let addr = params["terminal"].as_str().unwrap_or("").to_owned();
+                if self.fail_kill.load(Ordering::SeqCst) {
+                    anyhow::bail!("simulated terminal.kill transport error for {addr}");
+                }
                 self.kill_calls.lock().unwrap().push(addr.clone());
                 if let Some(t) = self.terminals.lock().unwrap().get_mut(&addr) {
                     t["state"] = json!("finished");
                 }
                 Ok(json!({ "ok": true }))
             }
-            "terminal.read" => Ok(json!({ "output": "" })),
+            "terminal.read" => Ok(json!({ "output": "", "text": "" })),
             other => anyhow::bail!("unexpected MockHerdr call: {other}"),
         }
     }
@@ -1303,4 +1323,631 @@ fn serve_local_stream_handles_framed_json_rpc_over_generic_async_io() {
         drop(reader);
         srv_task.await.unwrap().unwrap();
     });
+}
+
+#[test]
+fn failpoint_pump_cardless_agents_after_terminal_run_kills_orphan_pty_and_retries_kill_on_outage() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let herdr = MockHerdr::new("core-cardless-fp1");
+    let fp = Failpoints::shared();
+    let clock = FixedClock::new(1_700_000_000_000);
+    let env = ServerRuntimeEnv {
+        clock: clock.clone(),
+        id_gen: DeterministicIdGen::arc(61),
+        herdr_backend: Some(herdr.clone()),
+        inline_workers: true,
+        fs_durability: FsDurability::NoSync,
+        sqlite_synchronous_off: true,
+        disable_os_watchers: true,
+        failpoints: Some(fp.clone()),
+        ..Default::default()
+    };
+    let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+    app.observer_running.store(true, Ordering::SeqCst);
+    app.config.write().unwrap().profiles = vec![Profile {
+        id: "developer".into(),
+        enabled: true,
+        argv: Some(vec!["/bin/echo".into(), "{prompt}".into()]),
+        ..Default::default()
+    }];
+    app.config.write().unwrap().default_agent = "developer".into();
+
+    let project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "CardlessFP1",
+                "directory": repo,
+                "workspace": {"create_worktree": false, "sync_base": false},
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let cardless_yaml = r#"schema: 12
+id: cardless:agent-fp1
+name: Cardless Agent FP1
+on:
+  triage_event:
+    event: github.issue.opened
+    start_at: triage
+    cardless: true
+steps:
+  - id: triage
+    uses: agent
+    with:
+      profile: developer
+      instruction: Triage the issue
+    next: done
+  - id: done
+    uses: complete
+"#;
+    let flow = canban_workflow_engine::source::parse(cardless_yaml)
+        .unwrap()
+        .compile()
+        .unwrap();
+
+    // Part A: FP #1 fires after `terminal.run` while Herdr is reachable -> orphan PTY is killed immediately.
+    let run1 = app
+        .store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            canban_workflow_engine::runtime::start_cardless_at(
+                db,
+                &project.id,
+                flow.clone(),
+                1,
+                "triage_event",
+                None,
+                clock.now_ms(),
+            )
+        })
+        .unwrap();
+    assert_eq!(run1.state, "waiting_agent");
+
+    fp.arm(
+        FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+        FailpointAction::FailOnce("simulated crash after cardless terminal.run".into()),
+    );
+    app.pump_cardless_agents().unwrap();
+
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fp.stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB).fired, 1);
+    assert_eq!(
+        herdr.kill_calls.lock().unwrap().as_slice(),
+        &["sim-term-1".to_owned()]
+    );
+    assert!(
+        herdr.live_addresses().is_empty(),
+        "must not leak any live orphan PTY after cardless FP #1: {:?}",
+        herdr.live_addresses()
+    );
+    let snap1 = app.snapshot().unwrap();
+    let live_run1 = snap1
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run1.id)
+        .unwrap();
+    assert_eq!(live_run1.state, "failed");
+    assert!(live_run1.error.is_some());
+    assert!(live_run1.inputs.get("agent_terminal").is_none());
+
+    // Subsequent pump must not relaunch a duplicate PTY.
+    app.pump_cardless_agents().unwrap();
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 1);
+
+    // Part B: FP #1 fires AND `terminal.kill` transiently fails -> tracks `orphan_kill_pending`,
+    // refuses duplicate launch while Herdr is failing, then kills & fails cleanly once Herdr recovers.
+    let run2 = app
+        .store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            canban_workflow_engine::runtime::start_cardless_at(
+                db,
+                &project.id,
+                flow,
+                1,
+                "triage_event",
+                None,
+                clock.now_ms(),
+            )
+        })
+        .unwrap();
+    herdr.fail_kill.store(true, Ordering::SeqCst);
+    fp.arm(
+        FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+        FailpointAction::FailOnce("simulated crash + kill outage".into()),
+    );
+    app.pump_cardless_agents().unwrap();
+
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fp.stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB).fired, 2);
+    let mid_snap = app.snapshot().unwrap();
+    let pending_run2 = mid_snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run2.id)
+        .unwrap();
+    assert_eq!(pending_run2.state, "waiting_agent");
+    assert_eq!(
+        pending_run2.inputs["agent_terminal"]["address"],
+        json!("sim-term-2")
+    );
+    assert_eq!(
+        pending_run2.inputs["agent_terminal"]["orphan_kill_pending"],
+        json!(true)
+    );
+
+    // Retrying while kill still fails must NOT launch a third PTY.
+    app.pump_cardless_agents().unwrap();
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 2);
+
+    // Once Herdr recovers, the next pump terminates `sim-term-2` and marks the run failed.
+    herdr.fail_kill.store(false, Ordering::SeqCst);
+    app.pump_cardless_agents().unwrap();
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        herdr.kill_calls.lock().unwrap().as_slice(),
+        &["sim-term-1".to_owned(), "sim-term-2".to_owned()]
+    );
+    assert!(herdr.live_addresses().is_empty());
+    let final_snap = app.snapshot().unwrap();
+    let done_run2 = final_snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run2.id)
+        .unwrap();
+    assert_eq!(done_run2.state, "failed");
+    assert!(done_run2.inputs.get("agent_terminal").is_none());
+}
+
+#[test]
+fn failpoint_pump_scripts_herdr_after_terminal_run_kills_orphan_pty_and_retries_kill_on_outage() {
+    struct NoSpawnRunner;
+    impl CommandRunner for NoSpawnRunner {
+        fn run(&self, spec: &CommandSpec) -> Result<ExecOutput> {
+            anyhow::bail!("unexpected OS spawn: {} {:?}", spec.program, spec.args);
+        }
+        fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+            None
+        }
+        fn shell_env(&self) -> canban_exec::shell_env::ShellEnvSnapshot {
+            canban_exec::shell_env::ShellEnvSnapshot {
+                shell: "/bin/sh".into(),
+                vars: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+                path_entries: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+                full_env_captured: true,
+            }
+        }
+        fn hostname(&self) -> String {
+            "script-fp1-host".into()
+        }
+        fn is_system(&self) -> bool {
+            false
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let herdr = MockHerdr::new("core-script-fp1");
+    let fp = Failpoints::shared();
+    let clock = FixedClock::new(1_700_000_000_000);
+    let env = ServerRuntimeEnv {
+        clock: clock.clone(),
+        id_gen: DeterministicIdGen::arc(62),
+        herdr_backend: Some(herdr.clone()),
+        exec_runner: Arc::new(NoSpawnRunner),
+        inline_workers: true,
+        fs_durability: FsDurability::NoSync,
+        sqlite_synchronous_off: true,
+        disable_os_watchers: true,
+        failpoints: Some(fp.clone()),
+        script_execution_mode: ScriptExecutionMode::Herdr,
+        ..Default::default()
+    };
+    let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+    let wf_yaml = r#"schema: 12
+id: herdr-script-fp1
+name: Herdr Script FP1
+workspace:
+  create_worktree: false
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+on:
+  start:
+    event: manual
+    start_at: check
+steps:
+  - id: check
+    stage: backlog
+    uses: script
+    with:
+      run: echo hi
+      timeout_seconds: 30
+    next: done
+  - id: done
+    stage: backlog
+    uses: complete
+"#;
+    let project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "ScriptFP1",
+                "directory": repo,
+                "workflow_yaml": wf_yaml,
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": project.id, "title": "Script FP1 card"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Part A: FP #1 fires after `terminal.run` in `pump_scripts_herdr` -> kills orphan PTY immediately
+    // and pauses the Card workflow for human approval with attention & human_gate.
+    fp.arm(
+        FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+        FailpointAction::FailOnce("simulated crash after script terminal.run".into()),
+    );
+    app.call(
+        "workflow.start",
+        json!({ "workflow_id": "herdr-script-fp1", "card_id": card.id, "entry": "start" }),
+    )
+    .unwrap();
+
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fp.stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB).fired, 1);
+    assert_eq!(
+        herdr.kill_calls.lock().unwrap().as_slice(),
+        &["sim-term-1".to_owned()]
+    );
+    assert!(
+        herdr.live_addresses().is_empty(),
+        "must not leak any live orphan script PTY after FP #1: {:?}",
+        herdr.live_addresses()
+    );
+    let snap1 = app.snapshot().unwrap();
+    let run1 = snap1
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id.as_deref() == Some(card.id.as_str()))
+        .unwrap();
+    assert_eq!(run1.state, "waiting_approval");
+    assert!(run1.inputs.get("script_terminal").is_none());
+    let live_card = snap1.cards.iter().find(|c| c.id == card.id).unwrap();
+    assert!(live_card.attention.is_some());
+    assert!(live_card.human_gate.is_some());
+
+    // Subsequent pump must not launch a duplicate PTY.
+    assert!(!app.pump_scripts().unwrap());
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 1);
+
+    // Part B: Cardless script hits FP #1 while `terminal.kill` transiently fails -> tracks
+    // `orphan_kill_pending`, avoids duplicate launches, then kills & fails cleanly once Herdr recovers.
+    let cardless_script_yaml = r#"schema: 12
+id: cardless:script-fp1
+name: Cardless Script FP1
+on:
+  hook:
+    event: github.issue.opened
+    start_at: check
+    cardless: true
+steps:
+  - id: check
+    uses: script
+    with:
+      run: echo cardless
+      timeout_seconds: 30
+    next: done
+  - id: done
+    uses: complete
+"#;
+    let cardless_flow = canban_workflow_engine::source::parse(cardless_script_yaml)
+        .unwrap()
+        .compile()
+        .unwrap();
+    let run2 = app
+        .store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            canban_workflow_engine::runtime::start_cardless_at(
+                db,
+                &project.id,
+                cardless_flow,
+                1,
+                "hook",
+                None,
+                clock.now_ms(),
+            )
+        })
+        .unwrap();
+    assert_eq!(run2.state, "waiting_script");
+
+    herdr.fail_kill.store(true, Ordering::SeqCst);
+    fp.arm(
+        FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+        FailpointAction::FailOnce("simulated crash + kill outage for script".into()),
+    );
+    assert!(app.pump_scripts().unwrap());
+
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fp.stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB).fired, 2);
+    let mid_snap = app.snapshot().unwrap();
+    let pending_run2 = mid_snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run2.id)
+        .unwrap();
+    assert_eq!(pending_run2.state, "waiting_script");
+    assert_eq!(
+        pending_run2.inputs["script_terminal"]["address"],
+        json!("sim-term-2")
+    );
+    assert_eq!(
+        pending_run2.inputs["script_terminal"]["orphan_kill_pending"],
+        json!(true)
+    );
+
+    // Retrying while kill still fails must NOT launch a third PTY.
+    assert!(app.pump_scripts().unwrap());
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 2);
+
+    // Once Herdr recovers, next pump terminates `sim-term-2` and marks the cardless run failed.
+    herdr.fail_kill.store(false, Ordering::SeqCst);
+    assert!(!app.pump_scripts().unwrap());
+    assert_eq!(herdr.run_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        herdr.kill_calls.lock().unwrap().as_slice(),
+        &["sim-term-1".to_owned(), "sim-term-2".to_owned()]
+    );
+    assert!(herdr.live_addresses().is_empty());
+    let final_snap = app.snapshot().unwrap();
+    let done_run2 = final_snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run2.id)
+        .unwrap();
+    assert_eq!(done_run2.state, "failed");
+    assert!(done_run2.inputs.get("script_terminal").is_none());
+}
+
+#[test]
+fn continue_assignment_question_delivery_ordering_on_send_error_and_failpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let herdr = MockHerdr::new("core-continue-fp2");
+    let fp = Failpoints::shared();
+    let clock = FixedClock::new(1_700_000_000_000);
+    let env = ServerRuntimeEnv {
+        clock: clock.clone(),
+        id_gen: DeterministicIdGen::arc(63),
+        herdr_backend: Some(herdr.clone()),
+        inline_workers: true,
+        fs_durability: FsDurability::NoSync,
+        sqlite_synchronous_off: true,
+        disable_os_watchers: true,
+        failpoints: Some(fp.clone()),
+        ..Default::default()
+    };
+    let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+    let project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "ContinueOrdering",
+                "directory": repo,
+                "workspace": {"create_worktree": false, "sync_base": false},
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let setup_retained_with_question = |title: &str, herdr_addr: &str, body: &str| {
+        herdr.seed_terminal(herdr_addr, &repo.to_string_lossy(), json!({}));
+        let card: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": title}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let opened = app
+            .call(
+                "agent.open",
+                json!({"card_id": card.id, "profile_id": "developer"}),
+            )
+            .unwrap();
+        let tid = opened["terminal_id"].as_str().unwrap().to_owned();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut entry: TerminalEntry = db.get(&tid)?;
+                let run = entry.agent.as_mut().unwrap();
+                run.state = "completed".into();
+                run.core_id = Some("core-continue-fp2".into());
+                run.terminal = Some(herdr_addr.into());
+                run.cwd = repo.to_string_lossy().into_owned();
+                run.connection_state = "connected".into();
+                run.observed = Some(json!({"state": "live", "status": {"state": "idle"}}));
+                run.lifecycle.observed_at = Some(clock.now_ms());
+                let profile = run.profile.clone();
+                run.pending = Some(QueuedAssignment {
+                    stage: card.stage.clone(),
+                    trigger: ExecutionTrigger::Interactive,
+                    profile,
+                    instruction: "Follow up on the pending question".into(),
+                    on_completed: None,
+                    require_human_review: false,
+                    workflow_run_id: None,
+                    workflow_step: None,
+                    queued_at: clock.now_ms(),
+                });
+                db.save(&entry)
+            })
+            .unwrap();
+        app.call(
+            "comment.add",
+            json!({"view": "full", "card_id": card.id, "body": body}),
+        )
+        .unwrap();
+        let snap = app.snapshot().unwrap();
+        let entry = snap
+            .terminals
+            .iter()
+            .find(|t| t.id == tid)
+            .cloned()
+            .unwrap();
+        let qid = snap
+            .questions
+            .iter()
+            .find(|q| q.card_id == card.id)
+            .map(|q| q.id.clone())
+            .expect("pending question created");
+        // Ensure the pending question is bound to this retained terminal before continue_assignment.
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut q: Question = db.get(&qid)?;
+                q.terminal_id = Some(tid.clone());
+                q.state = "pending".into();
+                db.save(&q)
+            })
+            .unwrap();
+        (card.id, tid, qid, entry)
+    };
+
+    // Case A: `terminal.send` itself errors -> pending Question must become `delivery_unknown` (never `delivered`).
+    let (card_a, tid_a, qid_a, entry_a) =
+        setup_retained_with_question("Send error", "t-continue-a", "@developer handle case A");
+    herdr.fail_send.store(true, Ordering::SeqCst);
+    let snap_before_a = app.snapshot().unwrap();
+    let err_a = app
+        .continue_assignment(&entry_a, &snap_before_a)
+        .unwrap_err();
+    assert!(format!("{err_a:#}").contains("simulated terminal.send transport error"));
+    assert_eq!(herdr.send_calls.load(Ordering::SeqCst), 1);
+
+    let snap_a = app.snapshot().unwrap();
+    let q_a = snap_a.questions.iter().find(|q| q.id == qid_a).unwrap();
+    assert_eq!(q_a.state, "delivery_unknown");
+    assert!(q_a.error.is_some());
+    let run_a = snap_a
+        .terminals
+        .iter()
+        .find(|t| t.id == tid_a)
+        .unwrap()
+        .agent
+        .as_ref()
+        .unwrap();
+    assert_eq!(run_a.state, "unknown");
+    let live_card_a = snap_a.cards.iter().find(|c| c.id == card_a).unwrap();
+    assert!(live_card_a.attention.is_some());
+    assert!(live_card_a.human_gate.is_some());
+
+    // `deliver_questions` must NOT blindly resend the `delivery_unknown` question.
+    herdr.fail_send.store(false, Ordering::SeqCst);
+    app.deliver_questions(&app.herdr_client()).unwrap();
+    assert_eq!(herdr.send_calls.load(Ordering::SeqCst), 1);
+
+    // Case B: `terminal.send` succeeds, then FP #2 fires before post-send DB commit -> `delivery_unknown` (never `delivered`).
+    let (card_b, tid_b, qid_b, entry_b) =
+        setup_retained_with_question("FP2 after send", "t-continue-b", "@developer handle case B");
+    fp.arm(
+        FP_HERDR_AFTER_SEND_BEFORE_DB,
+        FailpointAction::FailOnce("simulated crash after continue terminal.send".into()),
+    );
+    let snap_before_b = app.snapshot().unwrap();
+    let err_b = app
+        .continue_assignment(&entry_b, &snap_before_b)
+        .unwrap_err();
+    assert!(format!("{err_b:#}").contains(FP_HERDR_AFTER_SEND_BEFORE_DB));
+    assert_eq!(herdr.send_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fp.stats_for(FP_HERDR_AFTER_SEND_BEFORE_DB).fired, 1);
+
+    let snap_b = app.snapshot().unwrap();
+    let q_b = snap_b.questions.iter().find(|q| q.id == qid_b).unwrap();
+    assert_eq!(q_b.state, "delivery_unknown");
+    assert!(q_b.error.is_some());
+    let run_b = snap_b
+        .terminals
+        .iter()
+        .find(|t| t.id == tid_b)
+        .unwrap()
+        .agent
+        .as_ref()
+        .unwrap();
+    assert_eq!(run_b.state, "unknown");
+    let live_card_b = snap_b.cards.iter().find(|c| c.id == card_b).unwrap();
+    assert!(live_card_b.attention.is_some());
+    assert!(live_card_b.human_gate.is_some());
+
+    // Retrying `deliver_questions` must not resend; explicit `agent.reply` reconciles cleanly to `replied`.
+    app.deliver_questions(&app.herdr_client()).unwrap();
+    assert_eq!(herdr.send_calls.load(Ordering::SeqCst), 2);
+    let reply_b = app
+        .call(
+            "agent.reply",
+            json!({"question_id": qid_b, "body": "Handled B", "request_key": "continue-fp2-reply"}),
+        )
+        .unwrap();
+    assert_eq!(reply_b["accepted"], true);
+    assert_eq!(
+        app.snapshot()
+            .unwrap()
+            .questions
+            .iter()
+            .find(|q| q.id == qid_b)
+            .unwrap()
+            .state,
+        "replied"
+    );
+
+    // Case C: Happy path -> Question commits `delivered` only after `terminal.send` succeeds.
+    let (_card_c, tid_c, qid_c, entry_c) =
+        setup_retained_with_question("Happy continue", "t-continue-c", "@developer handle case C");
+    let snap_before_c = app.snapshot().unwrap();
+    app.continue_assignment(&entry_c, &snap_before_c).unwrap();
+    assert_eq!(herdr.send_calls.load(Ordering::SeqCst), 3);
+
+    let snap_c = app.snapshot().unwrap();
+    let q_c = snap_c.questions.iter().find(|q| q.id == qid_c).unwrap();
+    assert_eq!(q_c.state, "delivered");
+    let run_c = snap_c
+        .terminals
+        .iter()
+        .find(|t| t.id == tid_c)
+        .unwrap()
+        .agent
+        .as_ref()
+        .unwrap();
+    assert_eq!(run_c.state, "running");
 }
