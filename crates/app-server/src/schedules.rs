@@ -5,7 +5,7 @@
 use super::*;
 use canban_scheduler::timers::{
     ScheduleAction, compute_next_run_at, evaluate_schedules, next_schedule_deadline,
-    next_scheduled_run,
+    next_scheduled_run_at,
 };
 use canban_types::cron::CronTimeZone;
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,13 +57,13 @@ pub(super) fn sync_scope_schedules(
     scope_id: &str,
     project_opt: Option<&Project>,
     active_sources: &[WorkflowSource],
+    now_ms: u64,
 ) -> Result<()> {
     let existing: Vec<ScheduleState> = db
         .list::<ScheduleState>()?
         .into_iter()
         .filter(|s| s.project_id == scope_id)
         .collect();
-    let now_ms = now();
     let mut keep_ids = BTreeSet::new();
 
     for source in active_sources {
@@ -178,8 +178,7 @@ pub(super) fn sync_scope_schedules(
 /// Reconciles persisted schedule timers and in-flight runs on `AppServer::open` startup:
 /// - Advances any past `next_run_at <= now` directly to the next future occurrence (never replays missed offline ticks).
 /// - Marks any interrupted `"starting"` Cardless run without a terminal receipt as `"unknown"`.
-pub(super) fn reconcile_startup(db: Db<'_>) -> Result<()> {
-    let now_ms = now();
+pub(super) fn reconcile_startup(db: Db<'_>, now_ms: u64) -> Result<()> {
     for mut state in db.list::<ScheduleState>()? {
         if !state.enabled {
             if state.next_run_at.is_some() || state.queued_triggers > 0 {
@@ -245,6 +244,7 @@ fn trim_schedule_history(db: Db<'_>, schedule_id: &str) -> Result<()> {
 /// Fires one scheduled task invocation (either cron tick or manual `schedule.trigger`),
 /// creating either a scheduled Board Card + `WorkflowRun` or a queued Cardless `ScheduledRun`
 /// (with lazy `TerminalEntry` creation when `start_step` is an `Agent` step).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn fire_schedule(
     db: Db<'_>,
     home: &Path,
@@ -253,6 +253,8 @@ pub(super) fn fire_schedule(
     scheduled_at: u64,
     trigger_kind: &str,
     allow_disabled_manual: bool,
+    now_ms: u64,
+    id_gen: &dyn canban_types::IdGen,
 ) -> Result<(ScheduledRun, Option<String>)> {
     let mut state: ScheduleState = db
         .get(schedule_id)
@@ -296,9 +298,8 @@ pub(super) fn fire_schedule(
             (!s.is_empty()).then(|| s.to_owned())
         });
     let run_number = db.counter(&format!("schedule-run:{}", state.id))?;
-    let short = id();
+    let short = id_gen.next_id();
     let run_id = format!("scheduled:{}:{short}", state.project_id);
-    let now_ms = now();
     let tz = CronTimeZone::parse(rule.timezone.as_deref()).unwrap_or(CronTimeZone::Local);
 
     let (scheduled_run, created_card_id) = if let Some(card_cfg) = &rule.card {
@@ -359,7 +360,8 @@ pub(super) fn fire_schedule(
             .unwrap_or_default();
 
         let card_num = db.counter(&format!("cards:{}", project.id))?;
-        let mut card = canban_kanban::card(project, card_num, title.trim(), &body)?;
+        let mut card = canban_kanban::card_at(project, card_num, title.trim(), &body, now_ms)?;
+        card.id = id_gen.next_id();
         card.stage = target_column;
         card.created_by = format!("schedule:{}", state.workflow_name);
         card.schedule_source = Some(ScheduleSourceRef {
@@ -398,9 +400,11 @@ pub(super) fn fire_schedule(
                 "run_number": run_number,
                 "trigger_kind": trigger_kind,
             }),
+            now_ms,
         )?;
 
-        let wf_run = super::workflow::start_scheduled(db, config, &mut card, rev, &state.rule_id)?;
+        let wf_run =
+            super::workflow::start_scheduled(db, config, &mut card, rev, &state.rule_id, now_ms)?;
         let initial_state = if wf_run.active() {
             "running".to_owned()
         } else {
@@ -551,11 +555,12 @@ fn record_skipped_overlap(
     schedule_id: &str,
     scheduled_at: u64,
     next_run_at: Option<u64>,
+    now_ms: u64,
+    id_gen: &dyn canban_types::IdGen,
 ) -> Result<()> {
     let mut state: ScheduleState = db.get(schedule_id)?;
     let run_number = db.counter(&format!("schedule-run:{}", state.id))?;
-    let now_ms = now();
-    let run_id = format!("scheduled:{}:{}", state.project_id, id());
+    let run_id = format!("scheduled:{}:{}", state.project_id, id_gen.next_id());
     let run = ScheduledRun {
         host_id: String::new(),
         id: run_id.clone(),
@@ -604,7 +609,7 @@ fn record_skipped_overlap(
 impl AppServer {
     /// Returns the earliest wakeup deadline across enabled schedules and settling Cardless PTYs.
     pub(super) fn schedule_deadline(&self, snapshot: &Snapshot) -> Option<u64> {
-        let now_ms = now();
+        let now_ms = self.now_ms();
         let mut earliest = next_schedule_deadline(&snapshot.schedule_states);
         let mut consider = |at: u64| {
             earliest = Some(earliest.map_or(at, |cur| cur.min(at)));
@@ -667,7 +672,7 @@ impl AppServer {
         }
         run.state = "cancelled".into();
         run.error = Some("Scheduled Agent terminal closed by user".into());
-        run.completed_at = Some(now());
+        run.completed_at = Some(self.now_ms());
         db.save(run)?;
         Ok(())
     }
@@ -745,7 +750,7 @@ impl AppServer {
             }
         }
         if !updates.is_empty() {
-            let now_ms = now();
+            let now_ms = self.now_ms();
             self.store.lock().unwrap().write(|db| {
                 for (rid, st, step, tid, err, done) in updates {
                     if let Ok(mut cur) = db.get::<ScheduledRun>(&rid) {
@@ -777,7 +782,8 @@ impl AppServer {
 
     fn evaluate_and_fire_due_schedules(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
-        let actions = evaluate_schedules(&snapshot, now());
+        let now_ms = self.now_ms();
+        let actions = evaluate_schedules(&snapshot, now_ms);
         if actions.is_empty() {
             return Ok(());
         }
@@ -785,6 +791,7 @@ impl AppServer {
         let mut emitted_cards = Vec::new();
         let mut changed = false;
         self.store.lock().unwrap().write(|db| {
+            let tick_ms = self.now_ms();
             for action in actions {
                 match action {
                     ScheduleAction::AdvanceOnly {
@@ -797,7 +804,7 @@ impl AppServer {
                             if clear_queued {
                                 st.queued_triggers = 0;
                             }
-                            st.updated_at = now();
+                            st.updated_at = tick_ms;
                             db.save(&st)?;
                             changed = true;
                         }
@@ -807,7 +814,14 @@ impl AppServer {
                         scheduled_at,
                         next_run_at,
                     } => {
-                        record_skipped_overlap(db, &schedule_id, scheduled_at, next_run_at)?;
+                        record_skipped_overlap(
+                            db,
+                            &schedule_id,
+                            scheduled_at,
+                            next_run_at,
+                            tick_ms,
+                            self.id_gen.as_ref(),
+                        )?;
                         changed = true;
                     }
                     ScheduleAction::QueueOverlap {
@@ -817,7 +831,7 @@ impl AppServer {
                         if let Ok(mut st) = db.get::<ScheduleState>(&schedule_id) {
                             st.queued_triggers = 1;
                             st.next_run_at = next_run_at;
-                            st.updated_at = now();
+                            st.updated_at = tick_ms;
                             db.save(&st)?;
                             changed = true;
                         }
@@ -834,7 +848,7 @@ impl AppServer {
                             } else {
                                 st.next_run_at = next_run_at;
                             }
-                            st.updated_at = now();
+                            st.updated_at = tick_ms;
                             db.save(&st)?;
                         }
                         if let Ok((_, card_id)) = fire_schedule(
@@ -845,6 +859,8 @@ impl AppServer {
                             scheduled_at,
                             "cron",
                             false,
+                            tick_ms,
+                            self.id_gen.as_ref(),
                         ) {
                             if let Some(cid) = card_id {
                                 emitted_cards.push(cid);
@@ -876,7 +892,7 @@ impl AppServer {
 
     fn observe_and_reclaim_cardless_schedules(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
-        let now_ms = now();
+        let now_ms = self.now_ms();
         let client = self.herdr_client();
         for run in snapshot.scheduled_runs.iter().filter(|r| !r.creates_card) {
             let Some(tid) = run.terminal_id.as_deref() else {
@@ -1223,7 +1239,9 @@ impl AppServer {
 impl AppServer {
     fn launch_queued_cardless_schedules(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
-        let Some(queued) = next_scheduled_run(&snapshot, self.config().scheduler.max_agents) else {
+        let Some(queued) =
+            next_scheduled_run_at(&snapshot, self.config().scheduler.max_agents, self.now_ms())
+        else {
             return Ok(());
         };
         let _gate = self.terminal_gate.lock().unwrap();
@@ -1233,8 +1251,10 @@ impl AppServer {
             if run.state != "queued" || run.creates_card {
                 return Ok(None);
             }
+            let now_ms = self.now_ms();
             if run.terminal_id.is_some()
-                && canban_scheduler::active_count(&current) >= self.config().scheduler.max_agents
+                && canban_scheduler::active_count_at(&current, now_ms)
+                    >= self.config().scheduler.max_agents
             {
                 return Ok(None);
             }
@@ -1246,9 +1266,9 @@ impl AppServer {
             let rev: WorkflowRevision = super::workflow::published(db, &run.workflow_id)?;
             run.state = "starting".into();
             if run.started_at.is_none() {
-                run.started_at = Some(now());
+                run.started_at = Some(now_ms);
             }
-            run.updated_at = now();
+            run.updated_at = now_ms;
             db.save(&run)?;
             if let Some(tid) = run.terminal_id.as_deref()
                 && let Ok(mut entry) = db.get::<TerminalEntry>(tid)
@@ -1271,7 +1291,7 @@ impl AppServer {
                 if !matches!(cur.state.as_str(), "completed" | "failed" | "blocked") {
                     cur.state = "failed".into();
                     cur.error = Some(err_msg.clone());
-                    cur.completed_at = Some(now());
+                    cur.completed_at = Some(self.now_ms());
                     db.save(&cur)?;
                 }
                 if let Some(tid) = cur.terminal_id.as_deref()
@@ -1367,7 +1387,7 @@ impl AppServer {
                     env: step_env,
                     next,
                 } => {
-                    let step_started_at = now();
+                    let step_started_at = self.now_ms();
                     run.current_step = Some(step_id.clone());
                     run.state = "running".into();
                     let _ = self.store.lock().unwrap().write(|db| {
@@ -1432,7 +1452,7 @@ impl AppServer {
                             &log_file,
                             timeout_secs,
                         )?;
-                    let duration_ms = now().saturating_sub(step_started_at);
+                    let duration_ms = self.now_ms().saturating_sub(step_started_at);
                     if let Ok(raw_env) = std::fs::read_to_string(&env_file)
                         && let Ok(parsed) = crate::scripts::parse_key_value_file(&raw_env)
                     {
@@ -1531,8 +1551,9 @@ impl AppServer {
                         let mut deferred = false;
                         self.store.lock().unwrap().write(|db| {
                             let snap = db.snapshot()?;
-                            let slot_free =
-                                canban_scheduler::active_count(&snap) < config.scheduler.max_agents;
+                            let now_ms = self.now_ms();
+                            let slot_free = canban_scheduler::active_count_at(&snap, now_ms)
+                                < config.scheduler.max_agents;
                             let entry = TerminalEntry {
                                 id: run.id.clone(),
                                 conversation_id: None,
@@ -1544,7 +1565,7 @@ impl AppServer {
                                 )),
                                 origin_card_id: None,
                                 agent_engine: Some(profile_agent_engine(&prof)),
-                                created_at: now(),
+                                created_at: now_ms,
                                 runtime: Some(TerminalRuntime {
                                     core_id: None,
                                     terminal: None,
@@ -1632,7 +1653,7 @@ impl AppServer {
             step_prof.or(run.profile_id.as_deref()),
         )?;
         let session_id = if prof.command().iter().any(|s| s.contains("{session_id}")) {
-            Some(super::runtime::uuid_session_id())
+            Some(self.next_uuid())
         } else {
             None
         };
@@ -1814,7 +1835,7 @@ impl AppServer {
             if out_path.is_some() {
                 cur.output_path = out_path;
             }
-            cur.completed_at = Some(now());
+            cur.completed_at = Some(self.now_ms());
             db.save(&cur)?;
             if let Some(tid) = cur.terminal_id.as_deref()
                 && let Ok(mut entry) = db.get::<TerminalEntry>(tid)
@@ -2001,7 +2022,7 @@ impl AppServer {
             "Card-backed scheduled runs report against their Card"
         );
 
-        let report_id = id();
+        let report_id = self.next_id();
         let report_path = if let Some(body) = p["body"].as_str() {
             let path = self
                 .schedule_run_dir(&self.home, &run_check)
@@ -2036,7 +2057,7 @@ impl AppServer {
                 })
                 .unwrap_or_else(|| self.config().default_agent);
             let actor = format!("agent:{profile_label}");
-            let now_ms = now();
+            let now_ms = self.now_ms();
             let report = Report {
                 id: report_id.clone(),
                 terminal_id: cur.terminal_id.clone(),
@@ -2179,12 +2200,13 @@ impl AppServer {
                     let scope_id = resolve_filter_scope(db, &p)?
                         .unwrap_or_else(|| GLOBAL_PROJECT_ID.to_owned());
                     let is_global = is_global_project_id(&scope_id);
+                    let now_ms = self.now_ms();
                     let project_opt: Option<Project> = if is_global {
-                        authoring::initialize_global(&self.home, db, &config)?;
+                        authoring::initialize_global(&self.home, db, &config, now_ms)?;
                         None
                     } else {
                         let proj: Project = db.get(&scope_id)?;
-                        authoring::initialize(&self.home, db, &config, &proj)?;
+                        authoring::initialize(&self.home, db, &config, &proj, now_ms)?;
                         Some(proj)
                     };
 
@@ -2322,7 +2344,7 @@ impl AppServer {
                         cand
                     };
 
-                    let short = id();
+                    let short = self.next_id();
                     let wf_id = if is_global {
                         format!("global:schedule-{short}")
                     } else {
@@ -2352,9 +2374,13 @@ impl AppServer {
                     inputs.push(json!({"filename": filename, "source": yaml}));
 
                     if let Some(proj) = project_opt.as_ref() {
-                        authoring::publish_collection(&self.home, db, proj, &config, &inputs)?;
+                        authoring::publish_collection(
+                            &self.home, db, proj, &config, &inputs, now_ms,
+                        )?;
                     } else {
-                        authoring::publish_global_collection(&self.home, db, &config, &inputs)?;
+                        authoring::publish_global_collection(
+                            &self.home, db, &config, &inputs, now_ms,
+                        )?;
                     }
 
                     let created = db
@@ -2406,14 +2432,17 @@ impl AppServer {
                         }
                     };
                     let config = self.config();
+                    let now_ms = self.now_ms();
                     let (run, card_id) = fire_schedule(
                         db,
                         &self.home,
                         &config,
                         &schedule_id,
-                        now(),
+                        now_ms,
                         "manual",
                         true,
+                        now_ms,
+                        self.id_gen.as_ref(),
                     )?;
                     created_card = card_id;
                     Ok(serde_json::to_value(run)?)
@@ -2449,12 +2478,13 @@ impl AppServer {
                         )
                     };
                     let config = self.config();
+                    let now_ms = self.now_ms();
                     let project_opt = if is_global_project_id(&pid) {
-                        authoring::initialize_global(&self.home, db, &config)?;
+                        authoring::initialize_global(&self.home, db, &config, now_ms)?;
                         None
                     } else {
                         let proj: Project = db.get(&pid)?;
-                        authoring::initialize(&self.home, db, &config, &proj)?;
+                        authoring::initialize(&self.home, db, &config, &proj, now_ms)?;
                         Some(proj)
                     };
                     let current = authoring::scope_template_files(db, &pid)?;
@@ -2485,9 +2515,13 @@ impl AppServer {
                     }
                     ensure!(found, "Workflow file `{filename}` not found");
                     if let Some(project) = project_opt.as_ref() {
-                        authoring::publish_collection(&self.home, db, project, &config, &inputs)?;
+                        authoring::publish_collection(
+                            &self.home, db, project, &config, &inputs, now_ms,
+                        )?;
                     } else {
-                        authoring::publish_global_collection(&self.home, db, &config, &inputs)?;
+                        authoring::publish_global_collection(
+                            &self.home, db, &config, &inputs, now_ms,
+                        )?;
                     }
                     let updated = db
                         .list::<ScheduleState>()?
@@ -2524,12 +2558,13 @@ impl AppServer {
                         )
                     };
                     let config = self.config();
+                    let now_ms = self.now_ms();
                     let project_opt = if is_global_project_id(&pid) {
-                        authoring::initialize_global(&self.home, db, &config)?;
+                        authoring::initialize_global(&self.home, db, &config, now_ms)?;
                         None
                     } else {
                         let proj: Project = db.get(&pid)?;
-                        authoring::initialize(&self.home, db, &config, &proj)?;
+                        authoring::initialize(&self.home, db, &config, &proj, now_ms)?;
                         Some(proj)
                     };
                     let current = authoring::scope_template_files(db, &pid)?;
@@ -2566,9 +2601,13 @@ impl AppServer {
                     }
                     ensure!(found, "Workflow file `{filename}` not found");
                     if let Some(project) = project_opt.as_ref() {
-                        authoring::publish_collection(&self.home, db, project, &config, &inputs)?;
+                        authoring::publish_collection(
+                            &self.home, db, project, &config, &inputs, now_ms,
+                        )?;
                     } else {
-                        authoring::publish_global_collection(&self.home, db, &config, &inputs)?;
+                        authoring::publish_global_collection(
+                            &self.home, db, &config, &inputs, now_ms,
+                        )?;
                     }
                     Ok(json!({ "deleted": true, "project_id": pid, "filename": filename, "rule_id": rule_id }))
                 })?;

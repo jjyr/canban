@@ -4,9 +4,15 @@ use canban_workflow_engine::runtime as engine;
 fn latest(db: Db<'_>, id: &str) -> Result<WorkflowRevision> {
     engine::latest(db, id)
 }
-pub(super) fn stop_card(db: Db<'_>, config: &Config, card: &str, state: &str) -> Result<()> {
+pub(super) fn stop_card(
+    db: Db<'_>,
+    config: &Config,
+    card: &str,
+    state: &str,
+    now_ms: u64,
+) -> Result<()> {
     crate::scripts::kill_card_scripts_db(db, config, card);
-    engine::stop_card(db, card, state)
+    engine::stop_card_at(db, card, state, now_ms)
 }
 pub(super) fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
     engine::initialize(db, config)
@@ -17,17 +23,20 @@ pub(super) fn reported(
     card: &mut Card,
     terminal: Option<&TerminalEntry>,
     report: &Report,
+    now_ms: u64,
 ) -> Result<()> {
-    engine::reported(db, config, card, terminal, report, enqueue)
+    engine::reported_at(db, config, card, terminal, report, enqueue, now_ms)
 }
 pub(super) fn advance(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
     terminal: Option<&TerminalEntry>,
+    now_ms: u64,
 ) -> Result<()> {
-    engine::advance(db, config, card, terminal, enqueue)
+    engine::advance_at(db, config, card, terminal, enqueue, now_ms)
 }
+#[allow(clippy::too_many_arguments)]
 fn approve(
     db: Db<'_>,
     config: &Config,
@@ -35,8 +44,9 @@ fn approve(
     run: &mut WorkflowRun,
     rework: bool,
     feedback: Option<&str>,
+    now_ms: u64,
 ) -> Result<()> {
-    engine::approve_with_feedback(db, config, card, run, rework, feedback, enqueue)
+    engine::approve_with_feedback_at(db, config, card, run, rework, feedback, enqueue, now_ms)
 }
 #[allow(
     clippy::too_many_arguments,
@@ -51,11 +61,13 @@ fn start(
     entry: &str,
     event: Option<String>,
     legacy: bool,
+    now_ms: u64,
 ) -> Result<WorkflowRun> {
-    engine::start(
-        db, config, card, flow, revision, entry, event, legacy, enqueue,
+    engine::start_at(
+        db, config, card, flow, revision, entry, event, legacy, enqueue, now_ms,
     )
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn adopt_stage(
     db: Db<'_>,
     config: &Config,
@@ -63,6 +75,7 @@ pub(super) fn adopt_stage(
     terminal: Option<&mut TerminalEntry>,
     stage: &str,
     event: Option<String>,
+    now_ms: u64,
 ) -> Result<Option<WorkflowRun>> {
     let mut sources: Vec<_> = db
         .list::<WorkflowSource>()?
@@ -98,7 +111,7 @@ pub(super) fn adopt_stage(
             });
         if let Some(entry) = matched_entry {
             let w = published(db, &source.workflow_id)?;
-            let run = engine::start_adopted(
+            let run = engine::start_adopted_at(
                 db,
                 config,
                 card,
@@ -109,6 +122,7 @@ pub(super) fn adopt_stage(
                 w.workflow_id.starts_with("delivery:"),
                 terminal,
                 enqueue,
+                now_ms,
             )?;
             return Ok(Some(run));
         }
@@ -125,6 +139,7 @@ pub(super) fn start_event(
     w: WorkflowRevision,
     entry: &str,
     event: &str,
+    now_ms: u64,
 ) -> Result<WorkflowRun> {
     start(
         db,
@@ -135,6 +150,7 @@ pub(super) fn start_event(
         entry,
         Some(event.into()),
         w.workflow_id.starts_with("delivery:"),
+        now_ms,
     )
 }
 pub(super) fn start_scheduled(
@@ -143,6 +159,7 @@ pub(super) fn start_scheduled(
     card: &mut Card,
     w: WorkflowRevision,
     entry: &str,
+    now_ms: u64,
 ) -> Result<WorkflowRun> {
     start(
         db,
@@ -153,16 +170,18 @@ pub(super) fn start_scheduled(
         entry,
         None,
         w.workflow_id.starts_with("delivery:"),
+        now_ms,
     )
 }
-pub(super) fn reconcile(db: Db<'_>) -> Result<()> {
-    engine::reconcile(db)
+pub(super) fn reconcile(db: Db<'_>, now_ms: u64) -> Result<()> {
+    engine::reconcile_at(db, now_ms)
 }
 impl AppServer {
     /// Releases workflow runs waiting at `admit` gates when capacity allows.
     /// Runs before scheduler dispatch so admitted Agent work is queued in Board order.
-    pub(crate) fn pump_admissions(&self) -> Result<()> {
+    pub(crate) fn pump_admissions(&self) -> Result<bool> {
         let config = self.config();
+        let now_ms = self.now_ms();
         let admitted = self.store.lock().unwrap().write(|db| {
             let waiting: bool = db.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE json_extract(data,'$.state')='waiting_capacity')",
@@ -175,7 +194,7 @@ impl AppServer {
             // Admission never consumes Timeline/report/GitHub history. Loading that
             // history here puts its full cost on every mutation's response path.
             let snapshot = db.admission_snapshot()?;
-            let ids = canban_scheduler::admissions(&snapshot, config.scheduler.max_agents);
+            let ids = canban_scheduler::admissions_at(&snapshot, config.scheduler.max_agents, now_ms);
             let mut cards = Vec::new();
             for id in ids {
                 let mut run: WorkflowRun = db.get(&id)?;
@@ -186,15 +205,16 @@ impl AppServer {
                     continue;
                 };
                 let mut card: Card = db.get(card_id)?;
-                engine::admit(db, &config, &mut card, &mut run, enqueue)?;
+                engine::admit_at(db, &config, &mut card, &mut run, enqueue, now_ms)?;
                 cards.push(card.id);
             }
             Ok(cards)
         })?;
+        let changed = !admitted.is_empty();
         for card in admitted {
             self.emit("application", Some(card));
         }
-        Ok(())
+        Ok(changed)
     }
     pub(super) fn workflow_call(&self, method: &str, p: Value) -> Result<Value> {
         match method {
@@ -351,7 +371,8 @@ impl AppServer {
                     w.revision,
                     strp(&p, "entry")?,
                     None,
-                    false
+                    false,
+                    self.now_ms(),
                 )?))
             }),
             "workflow.stop" => self.mutate(method, &p, |db| {
@@ -362,7 +383,7 @@ impl AppServer {
                 );
                 ensure!(run.active(), "Workflow already ended");
                 if let Some(card_id) = run.card_id.as_deref() {
-                    stop_card(db, &self.config(), card_id, "cancelled")?;
+                    stop_card(db, &self.config(), card_id, "cancelled", self.now_ms())?;
                     let mut card: Card = db.get(card_id)?;
                     card.human_gate = None;
                     card.attention = None;
@@ -370,7 +391,7 @@ impl AppServer {
                     db.save(&card)?;
                 } else {
                     crate::scripts::kill_run_scripts_db(db, &self.config(), &run.id);
-                    engine::stop_run(db, &run.id, "cancelled")?;
+                    engine::stop_run_at(db, &run.id, "cancelled", self.now_ms())?;
                 }
                 Ok(json!({"stopped":true,"live_agents_terminated":false}))
             }),
@@ -400,6 +421,7 @@ impl AppServer {
                         &mut run,
                         decision == "rework",
                         p["feedback"].as_str(),
+                        self.now_ms(),
                     )?;
                     Ok(json!(run))
                 })?;
@@ -440,14 +462,18 @@ impl AppServer {
                             )
                         });
                         if is_deliver && run.state == "waiting_approval" {
-                            approve(db, &config, &mut card, &mut run, false, None)?;
+                            approve(db, &config, &mut card, &mut run, false, None, self.now_ms())?;
                             return Ok(json!(run));
                         }
                         if is_deliver && run.state == "waiting_delivery" {
+                            let now_ms = self.now_ms();
                             if card.hold_auto_merge || run.inputs["queued_at"].as_u64().is_none() {
-                                run.inputs["queued_at"] =
-                                    json!(engine::next_merge_queued_at(db, &card.project_id)?);
-                                run.updated_at = now();
+                                run.inputs["queued_at"] = json!(engine::next_merge_queued_at_ms(
+                                    db,
+                                    &card.project_id,
+                                    now_ms
+                                )?);
+                                run.updated_at = now_ms;
                                 db.save(&run)?;
                             }
                             card.hold_auto_merge = false;
@@ -460,7 +486,7 @@ impl AppServer {
                         if is_deliver
                             && matches!(run.state.as_str(), "failed" | "blocked" | "waiting_agent")
                         {
-                            engine::requeue_delivery(db, &mut card, &mut run)?;
+                            engine::requeue_delivery_at(db, &mut card, &mut run, self.now_ms())?;
                             return Ok(json!(run));
                         }
                         bail!("Card workflow is currently active at another step");
@@ -524,6 +550,7 @@ impl AppServer {
                         &step_id,
                         None,
                         legacy,
+                        self.now_ms(),
                     )?;
                     Ok(json!(run))
                 })?;
@@ -565,8 +592,9 @@ impl AppServer {
                 .find(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
             {
                 let mut run = run;
+                let now_ms = self.now_ms();
                 if run.state == "waiting_approval" {
-                    approve(db, &config, &mut card, &mut run, false, None)?;
+                    approve(db, &config, &mut card, &mut run, false, None, now_ms)?;
                 } else if let Some(tid) = gate.terminal_id {
                     let mut prev_entry: TerminalEntry = db.get(&tid)?;
                     let prev = prev_entry
@@ -576,9 +604,9 @@ impl AppServer {
                     if prev.state == "completed" {
                         card.human_gate = None;
                         card.attention = None;
-                        advance(db, &config, &mut card, Some(&prev_entry))?;
+                        advance(db, &config, &mut card, Some(&prev_entry), now_ms)?;
                     } else if run.step_is_deliver() {
-                        engine::requeue_delivery(db, &mut card, &mut run)?;
+                        engine::requeue_delivery_at(db, &mut card, &mut run, now_ms)?;
                     } else {
                         ensure!(
                             prev.terminal.is_none()
@@ -594,7 +622,7 @@ impl AppServer {
                             ),
                             "Inspect the uncertain execution before retrying"
                         );
-                        crate::sessions::retry_agent(db, &card, &mut prev_entry)?;
+                        crate::sessions::retry_agent(db, &card, &mut prev_entry, now_ms)?;
                         run.terminal_id = Some(prev_entry.id);
                         run.state = "waiting_agent".into();
                         db.save(&run)?;
@@ -602,7 +630,7 @@ impl AppServer {
                         card.attention = None;
                     }
                 } else {
-                    stop_card(db, &config, &card.id, "superseded")?;
+                    stop_card(db, &config, &card.id, "superseded", now_ms)?;
                     card.human_gate = None;
                     card.attention = None;
                     let stage = card.stage.clone();
@@ -619,6 +647,7 @@ impl AppServer {
                             &stage,
                             None,
                             false,
+                            now_ms,
                         )?;
                     }
                 }
@@ -644,7 +673,12 @@ impl AppServer {
                                         .is_some_and(|v| v["state"] == "finished"),
                                 "Answer the live Agent first, or end it before retrying"
                             );
-                            crate::sessions::retry_agent(db, &card, &mut prev_entry)?;
+                            crate::sessions::retry_agent(
+                                db,
+                                &card,
+                                &mut prev_entry,
+                                self.now_ms(),
+                            )?;
                         }
                     }
                 }
@@ -659,6 +693,7 @@ impl AppServer {
                     "Human reviewed and continued the workflow",
                     None,
                     json!({}),
+                    self.now_ms(),
                 )?;
             }
             db.save(&card)?;

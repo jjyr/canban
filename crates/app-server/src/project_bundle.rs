@@ -829,7 +829,7 @@ impl AppServer {
                 codec: "zstd".into(),
                 sqlite_schema: canban_storage::migrations::CURRENT,
                 include_archived,
-                created_at: now(),
+                created_at: self.now_ms(),
                 source_server_id: self.identity.clone(),
                 project_id: pid.clone(),
                 project_name: project.name.clone(),
@@ -1133,7 +1133,7 @@ impl AppServer {
                 db.get::<Project>(&pid).is_err(),
                 "Project {pid} already exists on this host"
             );
-            let now_ms = now();
+            let now_ms = self.now_ms();
             let highwater = super::events::highwater(db)?;
 
             let mut project = records.project.clone();

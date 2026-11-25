@@ -1,4 +1,11 @@
 use super::*;
+
+const UTC_DAY_MS: u64 = 86_400_000;
+
+fn same_or_later_utc_day(ts_ms: u64, now_ms: u64) -> bool {
+    ts_ms / UTC_DAY_MS >= now_ms / UTC_DAY_MS
+}
+
 pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>> {
     Ok(canban_types::agent_activity_warning(
         &card.id,
@@ -160,7 +167,7 @@ impl AppServer {
             let plan=self.ops().review_preview(&project,&card,p["target_branch"].as_str())?;
             ensure!(plan.token==strp(&p,"token")?,"Review is stale; refresh the diff before accepting");
             ensure!(plan.merge_allowed,"{}",plan.reason.as_deref().unwrap_or("Merge unavailable"));
-            log(db,&card,"review.merge_started","user","Accepted reviewed changes for commit/merge",None,json!({"request_key":key,"target_branch":plan.target_branch,"target_head":plan.target_head,"card_head":plan.card_head,"strategy":strategy,"token":plan.token}))?;
+            log(db,&card,"review.merge_started","user","Accepted reviewed changes for commit/merge",None,json!({"request_key":key,"target_branch":plan.target_branch,"target_head":plan.target_head,"card_head":plan.card_head,"strategy":strategy,"token":plan.token}),self.now_ms())?;
             execute=true;context=Some((card,project,plan,strategy));
             Ok(json!({"state":"unknown","request_key":key,"message":"Merge intent saved; inspect Git heads before repeating an uncertain delivery"}))
         })?;
@@ -189,9 +196,10 @@ impl AppServer {
         );
         let value=self.store.lock().unwrap().write(|db|{
             let mut current:Card=db.get(&card.id)?;
+            let now_ms = self.now_ms();
             let value=match result {
                 Ok(commit)=>{
-                    let resolved_at = now();
+                    let resolved_at = now_ms;
                     current.delivery_mode=Some(DeliveryMode::Local);
                     current.delivery=Some(Delivery{target_branch:plan.target_branch.clone(),commit:commit.clone(),request_key:key.clone(),merged_at:resolved_at});
                     current.resolution=Some(CardResolution{resolved_at,kind:"merged".into(),reason:None,actor:"user".into()});
@@ -206,13 +214,14 @@ impl AppServer {
                             })
                         {
                             completed_deliver = true;
-                            canban_workflow_engine::runtime::complete_delivery(
+                            canban_workflow_engine::runtime::complete_delivery_at(
                                 db,
                                 &self.config(),
                                 &mut current,
                                 &mut active_run,
                                 json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"manual":true}),
                                 enqueue,
+                                resolved_at,
                             )?;
                         }
                     }
@@ -222,15 +231,21 @@ impl AppServer {
                     {
                         let att: TerminalEntry = db.get(&tid)?;
                         if att.agent.as_ref().is_some_and(|a| a.state == "completed") {
-                            crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
+                            crate::workflow::advance(
+                                db,
+                                &self.config(),
+                                &mut current,
+                                Some(&att),
+                                resolved_at,
+                            )?;
                         }
                     }
-                    log(db,&current,"review.merged","user",&format!("Merged into {}",plan.target_branch),None,json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key}))?;
+                    log(db,&current,"review.merged","user",&format!("Merged into {}",plan.target_branch),None,json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key}),resolved_at)?;
                     json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"card_id":card.id})
                 }
                 Err(error)=>{
-                    let message=format!("{error:#}");attention(db,&mut current,&message)?;
-                    log(db,&current,"review.merge_failed","system",&message,None,json!({"target_branch":plan.target_branch,"request_key":key}))?;
+                    let message=format!("{error:#}");attention(db,&mut current,&message,now_ms)?;
+                    log(db,&current,"review.merge_failed","system",&message,None,json!({"target_branch":plan.target_branch,"request_key":key}),now_ms)?;
                     json!({"state":"failed","message":message,"target_branch":plan.target_branch,"card_id":card.id})
                 }
             };
@@ -250,7 +265,7 @@ impl AppServer {
         Ok(value)
     }
     pub(crate) fn try_auto_archive_resolved(&self, card_id: &str) -> Result<bool> {
-        self.try_auto_archive_resolved_at(card_id, now())
+        self.try_auto_archive_resolved_at(card_id, self.now_ms())
     }
 
     pub(crate) fn try_auto_archive_resolved_at(&self, card_id: &str, now_ms: u64) -> Result<bool> {
@@ -267,17 +282,12 @@ impl AppServer {
             {
                 return Ok(false);
             }
-            // Fast path: keep Cards resolved today visible on the Board until the next local calendar day
+            // Fast path: keep Cards resolved today visible on the Board until the next UTC calendar day
             // before scanning terminals and events.
-            if let Some(ts) = card.resolved_at() {
-                let same_local_day: bool = db.conn.query_row(
-                    "SELECT date(?1 / 1000, 'unixepoch', 'localtime') >= date(?2 / 1000, 'unixepoch', 'localtime')",
-                    params![ts as i64, now_ms as i64],
-                    |r| r.get(0),
-                )?;
-                if same_local_day {
-                    return Ok(false);
-                }
+            if let Some(ts) = card.resolved_at()
+                && same_or_later_utc_day(ts, now_ms)
+            {
+                return Ok(false);
             }
             if activity_warning(db, &card)?.is_some() {
                 return Ok(false);
@@ -307,17 +317,12 @@ impl AppServer {
             }) {
                 return Ok(false);
             }
-            // Keep Cards resolved today visible on the Board until the next local calendar day.
+            // Keep Cards resolved today visible on the Board until the next UTC calendar day.
             let resolved_at = card
                 .resolved_at()
                 .or_else(|| last_lifecycle.as_ref().map(|e| e.created_at))
                 .unwrap_or(card.created_at);
-            let same_local_day: bool = db.conn.query_row(
-                "SELECT date(?1 / 1000, 'unixepoch', 'localtime') >= date(?2 / 1000, 'unixepoch', 'localtime')",
-                params![resolved_at as i64, now_ms as i64],
-                |r| r.get(0),
-            )?;
-            if same_local_day {
+            if same_or_later_utc_day(resolved_at, now_ms) {
                 return Ok(false);
             }
             let project: Project = db.get(&card.project_id)?;
@@ -342,29 +347,19 @@ impl AppServer {
     }
 
     pub(crate) fn pump_resolved_archives(&self) -> Result<()> {
-        let now_ms = now();
+        let now_ms = self.now_ms();
         let candidates: Vec<String> = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            let today: String = db.conn.query_row(
-                "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
-                params![now_ms as i64],
-                |r| r.get(0),
-            )?;
             let mut ids = Vec::new();
             for c in db.list::<Card>()? {
                 if !c.active() || !c.resolved() || c.attention.is_some() || c.human_gate.is_some() {
                     continue;
                 }
-                if let Some(ts) = c.resolved_at() {
-                    let resolved_day: String = db.conn.query_row(
-                        "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
-                        params![ts as i64],
-                        |r| r.get(0),
-                    )?;
-                    if resolved_day >= today {
-                        continue;
-                    }
+                if let Some(ts) = c.resolved_at()
+                    && same_or_later_utc_day(ts, now_ms)
+                {
+                    continue;
                 }
                 ids.push(c.id);
             }
@@ -376,7 +371,7 @@ impl AppServer {
         Ok(())
     }
 
-    pub(crate) fn pump_deliveries(&self) -> Result<()> {
+    pub(crate) fn pump_deliveries(&self) -> Result<bool> {
         let project_ids: Vec<String> = {
             let store = self.store.lock().unwrap();
             let db = store.db();
@@ -389,16 +384,20 @@ impl AppServer {
             }
             ids.into_iter().collect()
         };
+        let mut any_changed = false;
         for project_id in project_ids {
-            self.pump_project_delivery_queue(&project_id)?;
+            if self.pump_project_delivery_queue(&project_id)? {
+                any_changed = true;
+            }
         }
-        Ok(())
+        Ok(any_changed)
     }
 
-    fn pump_project_delivery_queue(&self, project_id: &str) -> Result<()> {
+    fn pump_project_delivery_queue(&self, project_id: &str) -> Result<bool> {
         let Some(_queue_gate) = self.try_lock_delivery_queue(project_id) else {
-            return Ok(());
+            return Ok(false);
         };
+        let mut any_changed = false;
         // Bound iterations per pump pass to guard against pathological retry loops.
         for _ in 0..64 {
             // Reconcile any newly-held cards in `waiting_delivery` so they leave the active queue
@@ -430,20 +429,25 @@ impl AppServer {
                     .collect()
             };
             for (card_id, run_id) in held_runs {
-                self.store.lock().unwrap().write(|db| {
+                let held = self.store.lock().unwrap().write(|db| {
                     let mut current_card: Card = db.get(&card_id)?;
                     let mut current_run: WorkflowRun = db.get(&run_id)?;
                     if current_run.state == "waiting_delivery" && current_card.hold_auto_merge {
-                        canban_workflow_engine::runtime::hold_delivery(
+                        canban_workflow_engine::runtime::hold_delivery_at(
                             db,
                             &mut current_card,
                             &mut current_run,
                             "Auto-merge held by user; approve or resume to merge",
+                            self.now_ms(),
                         )?;
+                        return Ok(true);
                     }
-                    Ok(())
+                    Ok(false)
                 })?;
-                self.emit("application", Some(card_id));
+                if held {
+                    any_changed = true;
+                    self.emit("application", Some(card_id));
+                }
             }
 
             let head_run = {
@@ -476,18 +480,22 @@ impl AppServer {
                 crate::merge_batch::BatchSelection::Empty
                 | crate::merge_batch::BatchSelection::HoldQueue => break,
                 crate::merge_batch::BatchSelection::Single(run_id) => {
-                    if !self.execute_workflow_delivery(&run_id)? {
+                    let (advance, mutated) = self.execute_workflow_delivery(&run_id)?;
+                    any_changed |= mutated;
+                    if !advance {
                         break;
                     }
                 }
                 crate::merge_batch::BatchSelection::Batch { run_ids } => {
-                    if !self.execute_batch_delivery(project_id, &run_ids)? {
+                    let (advance, mutated) = self.execute_batch_delivery(project_id, &run_ids)?;
+                    any_changed |= mutated;
+                    if !advance {
                         break;
                     }
                 }
             }
         }
-        Ok(())
+        Ok(any_changed)
     }
 
     pub(super) fn set_queue_pause_reason(
@@ -512,7 +520,7 @@ impl AppServer {
             } else if let Some(obj) = current_run.inputs.as_object_mut() {
                 obj.remove("queue_pause_reason");
             }
-            current_run.updated_at = now();
+            current_run.updated_at = self.now_ms();
             db.save(&current_run)?;
             changed = true;
             Ok(())
@@ -528,26 +536,25 @@ impl AppServer {
     pub(crate) const DELIVERY_AGENT_SETTLE_MS: u64 = 180_000;
 
     /// Executes one step for the head-of-line `waiting_delivery` run.
-    /// Returns `Ok(true)` when this run exited the head of the queue (merged or stepped aside
-    /// to a human gate) so the caller can immediately advance to the next Card in line, or
-    /// `Ok(false)` when this run still holds the head of the queue (settling, conflict handed
-    /// to `@merger`, or waiting on a transient main-checkout condition).
-    fn execute_workflow_delivery(&self, run_id: &str) -> Result<bool> {
+    /// Returns `Ok((advance_queue, mutated))`: `advance_queue` is `true` when this run exited
+    /// the head of the queue (merged or stepped aside to a human gate) so the caller can
+    /// immediately advance to the next Card in line; `mutated` is `true` when DB state changed.
+    fn execute_workflow_delivery(&self, run_id: &str) -> Result<(bool, bool)> {
         let (card, project, run, has_pending_attempts, settling_agent) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let Ok(run) = db.get::<WorkflowRun>(run_id) else {
-                return Ok(false);
+                return Ok((false, false));
             };
             if run.state != "waiting_delivery" {
-                return Ok(false);
+                return Ok((false, false));
             }
             let Some(card_id) = run.card_id.as_deref() else {
-                return Ok(false);
+                return Ok((false, false));
             };
             let card: Card = db.get(card_id)?;
             if !card.active() {
-                return Ok(false);
+                return Ok((false, false));
             }
             let project: Project = db.get(&card.project_id)?;
             let project = self.bound_project(&project, &card);
@@ -560,7 +567,7 @@ impl AppServer {
                             "queued" | "starting" | "running" | "working" | "unknown"
                         ))
             });
-            let now_ms = now();
+            let now_ms = self.now_ms();
             let settling_agent = terminals.into_iter().any(|t| {
                 let Some(a) = &t.agent else {
                     return false;
@@ -581,45 +588,53 @@ impl AppServer {
         };
         let config = self.config();
         if card.hold_auto_merge {
-            self.store.lock().unwrap().write(|db| {
+            let mutated = self.store.lock().unwrap().write(|db| {
                 let mut current_card: Card = db.get(&card.id)?;
                 let mut current_run: WorkflowRun = db.get(&run.id)?;
                 if current_run.state == "waiting_delivery" {
-                    canban_workflow_engine::runtime::hold_delivery(
+                    canban_workflow_engine::runtime::hold_delivery_at(
                         db,
                         &mut current_card,
                         &mut current_run,
                         "Auto-merge held by user; approve or resume to merge",
+                        self.now_ms(),
                     )?;
+                    return Ok(true);
                 }
-                Ok(())
+                Ok(false)
             })?;
-            self.emit("application", Some(card.id));
-            return Ok(true);
+            if mutated {
+                self.emit("application", Some(card.id));
+            }
+            return Ok((true, mutated));
         }
         // No worktree means there is nothing to merge (e.g. create_worktree: false);
         // complete the step without waiting on Agent terminals.
         if card.worktree.is_none() {
-            self.store.lock().unwrap().write(|db| {
+            let mutated = self.store.lock().unwrap().write(|db| {
                 let mut current_card: Card = db.get(&card.id)?;
                 let mut current_run: WorkflowRun = db.get(&run.id)?;
                 if current_run.state == "waiting_delivery" {
-                    canban_workflow_engine::runtime::complete_delivery(
+                    canban_workflow_engine::runtime::complete_delivery_at(
                         db,
                         &config,
                         &mut current_card,
                         &mut current_run,
                         json!({"state":"delivered","mode":"no_worktree"}),
                         enqueue,
+                        self.now_ms(),
                     )?;
+                    return Ok(true);
                 }
-                Ok(())
+                Ok(false)
             })?;
-            self.emit("application", Some(card.id));
-            return Ok(true);
+            if mutated {
+                self.emit("application", Some(card.id));
+            }
+            return Ok((true, mutated));
         }
         if has_pending_attempts || settling_agent {
-            return Ok(false);
+            return Ok((false, false));
         }
         let _merging = self.track_merging(&card.id);
         let target_branch = run.inputs["target_branch"].as_str();
@@ -648,8 +663,8 @@ impl AppServer {
             Ok(guard) => Some(guard),
             Err(reason) => {
                 let pause_msg = format!("Merge queue waiting: {reason}");
-                self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
-                return Ok(false);
+                let changed = self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
+                return Ok((false, changed));
             }
         };
         if sync_upstream
@@ -662,46 +677,54 @@ impl AppServer {
             }) = e.downcast_ref::<canban_workspaces::review::DeliveryError>()
             {
                 let pause_msg = format!("Merge queue waiting: {busy}");
-                self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
-                return Ok(false);
+                let changed = self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
+                return Ok((false, changed));
             }
             let reason = format!("Auto-merge paused (upstream sync): {e:#}");
-            self.store.lock().unwrap().write(|db| {
+            let mutated = self.store.lock().unwrap().write(|db| {
                 let mut current_card: Card = db.get(&card.id)?;
                 let mut current_run: WorkflowRun = db.get(&run.id)?;
                 if current_run.state == "waiting_delivery" {
-                    canban_workflow_engine::runtime::hold_delivery(
+                    canban_workflow_engine::runtime::hold_delivery_at(
                         db,
                         &mut current_card,
                         &mut current_run,
                         &reason,
+                        self.now_ms(),
                     )?;
+                    return Ok(true);
                 }
-                Ok(())
+                Ok(false)
             })?;
-            self.emit("review", Some(card.id));
-            return Ok(true);
+            if mutated {
+                self.emit("review", Some(card.id));
+            }
+            return Ok((true, mutated));
         }
         let plan = match ops.review_preview(&workspace_project, &card, target_branch) {
             Ok(plan) => plan,
             Err(e) => {
                 checkout_gate.take();
                 let reason = format!("Auto-merge paused: {e:#}");
-                self.store.lock().unwrap().write(|db| {
+                let mutated = self.store.lock().unwrap().write(|db| {
                     let mut current_card: Card = db.get(&card.id)?;
                     let mut current_run: WorkflowRun = db.get(&run.id)?;
                     if current_run.state == "waiting_delivery" {
-                        canban_workflow_engine::runtime::hold_delivery(
+                        canban_workflow_engine::runtime::hold_delivery_at(
                             db,
                             &mut current_card,
                             &mut current_run,
                             &reason,
+                            self.now_ms(),
                         )?;
+                        return Ok(true);
                     }
-                    Ok(())
+                    Ok(false)
                 })?;
-                self.emit("review", Some(card.id));
-                return Ok(true);
+                if mutated {
+                    self.emit("review", Some(card.id));
+                }
+                return Ok((true, mutated));
             }
         };
         if !plan.merge_allowed {
@@ -715,8 +738,8 @@ impl AppServer {
                 && canban_workspaces::review::is_main_checkout_busy_reason(raw_reason)
             {
                 let pause_msg = format!("Merge queue waiting: {raw_reason}");
-                self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
-                return Ok(false);
+                let changed = self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
+                return Ok((false, changed));
             }
             let reason = format!(
                 "Auto-merge paused: {}",
@@ -725,13 +748,14 @@ impl AppServer {
                     .unwrap_or("Merge unavailable; human review required")
             );
             let mut dispatched_conflict = false;
-            self.store.lock().unwrap().write(|db| {
+            let mutated = self.store.lock().unwrap().write(|db| {
                 let mut current_card: Card = db.get(&card.id)?;
                 let mut current_run: WorkflowRun = db.get(&run.id)?;
                 if current_run.state == "waiting_delivery" {
+                    let now_ms = self.now_ms();
                     if let Some((ref conflict_branch, ref conflict_head, ref files)) =
                         pending_conflict
-                        && canban_workflow_engine::runtime::rework_conflict(
+                        && canban_workflow_engine::runtime::rework_conflict_at(
                             db,
                             &config,
                             &mut current_card,
@@ -740,25 +764,30 @@ impl AppServer {
                             conflict_head,
                             files,
                             enqueue,
+                            now_ms,
                         )?
                     {
                         dispatched_conflict = true;
-                        return Ok(());
+                        return Ok(true);
                     }
-                    canban_workflow_engine::runtime::hold_delivery(
+                    canban_workflow_engine::runtime::hold_delivery_at(
                         db,
                         &mut current_card,
                         &mut current_run,
                         &reason,
+                        now_ms,
                     )?;
+                    return Ok(true);
                 }
-                Ok(())
+                Ok(false)
             })?;
-            self.emit("review", Some(card.id));
-            return Ok(!dispatched_conflict);
+            if mutated {
+                self.emit("review", Some(card.id));
+            }
+            return Ok((!dispatched_conflict, mutated));
         }
         // Main checkout is clean and ready: clear any previous transient wait reason.
-        let _ = self.set_queue_pause_reason(&card.id, &run.id, None);
+        let cleared_pause = self.set_queue_pause_reason(&card.id, &run.id, None)?;
         let key = format!("workflow-deliver:{}:{}", run.id, run.visit);
         let message = format!("Canban #{}: {}", card.number, card.title);
         let result = ops.review_merge_with_strategy(
@@ -778,6 +807,7 @@ impl AppServer {
         checkout_gate.take();
         let mut merged_and_completed = false;
         let mut advance_queue = true;
+        let mut mutated = cleared_pause;
         self.store.lock().unwrap().write(|db| {
             let mut current_card: Card = db.get(&card.id)?;
             let mut current_run: WorkflowRun = db.get(&run.id)?;
@@ -785,9 +815,11 @@ impl AppServer {
                 advance_queue = false;
                 return Ok(());
             }
+            let now_ms = self.now_ms();
+            mutated = true;
             match result {
                 Ok(commit) => {
-                    let resolved_at = now();
+                    let resolved_at = now_ms;
                     current_card.delivery_mode = Some(DeliveryMode::Local);
                     current_card.delivery = Some(Delivery {
                         target_branch: plan.target_branch.clone(),
@@ -818,12 +850,14 @@ impl AppServer {
                                 &reason,
                                 None,
                                 json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                                resolved_at,
                             )?;
-                            canban_workflow_engine::runtime::hold_delivery(
+                            canban_workflow_engine::runtime::hold_delivery_at(
                                 db,
                                 &mut current_card,
                                 &mut current_run,
                                 &reason,
+                                resolved_at,
                             )?;
                         }
                         Some(Ok(Some(remote_name))) => {
@@ -839,14 +873,16 @@ impl AppServer {
                                 ),
                                 None,
                                 json!({"commit":commit,"target_branch":plan.target_branch,"synced_upstream":true,"remote":remote_name,"request_key":key,"workflow_run_id":run.id}),
+                                resolved_at,
                             )?;
-                            canban_workflow_engine::runtime::complete_delivery(
+                            canban_workflow_engine::runtime::complete_delivery_at(
                                 db,
                                 &config,
                                 &mut current_card,
                                 &mut current_run,
                                 json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"synced_upstream":true,"remote":remote_name}),
                                 enqueue,
+                                resolved_at,
                             )?;
                         }
                         Some(Ok(None)) => {
@@ -859,14 +895,16 @@ impl AppServer {
                                 &format!("Auto-merged into {}", plan.target_branch),
                                 None,
                                 json!({"commit":commit,"target_branch":plan.target_branch,"synced_upstream":false,"reason":"no_remote","request_key":key,"workflow_run_id":run.id}),
+                                resolved_at,
                             )?;
-                            canban_workflow_engine::runtime::complete_delivery(
+                            canban_workflow_engine::runtime::complete_delivery_at(
                                 db,
                                 &config,
                                 &mut current_card,
                                 &mut current_run,
                                 json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"synced_upstream":false,"reason":"no_remote"}),
                                 enqueue,
+                                resolved_at,
                             )?;
                         }
                         None => {
@@ -882,14 +920,16 @@ impl AppServer {
                                 ),
                                 None,
                                 json!({"commit":commit,"target_branch":plan.target_branch,"synced_upstream":false,"request_key":key,"workflow_run_id":run.id}),
+                                resolved_at,
                             )?;
-                            canban_workflow_engine::runtime::complete_delivery(
+                            canban_workflow_engine::runtime::complete_delivery_at(
                                 db,
                                 &config,
                                 &mut current_card,
                                 &mut current_run,
                                 json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"synced_upstream":false}),
                                 enqueue,
+                                resolved_at,
                             )?;
                         }
                     }
@@ -907,13 +947,14 @@ impl AppServer {
                                 "Target branch advanced during delivery; retrying",
                                 None,
                                 json!({"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                                now_ms,
                             )?;
                             return Ok(());
                         }
                         Some(DeliveryError::MainCheckoutBusy { reason: busy }) => {
                             current_run.inputs["queue_pause_reason"] =
                                 json!(format!("Merge queue waiting: {busy}"));
-                            current_run.updated_at = now();
+                            current_run.updated_at = now_ms;
                             db.save(&current_run)?;
                             advance_queue = false;
                             return Ok(());
@@ -923,7 +964,7 @@ impl AppServer {
                             target_head,
                             files,
                             ..
-                        }) if canban_workflow_engine::runtime::rework_conflict(
+                        }) if canban_workflow_engine::runtime::rework_conflict_at(
                             db,
                             &config,
                             &mut current_card,
@@ -932,6 +973,7 @@ impl AppServer {
                             target_head,
                             files,
                             enqueue,
+                            now_ms,
                         )? =>
                         {
                             advance_queue = false;
@@ -948,12 +990,14 @@ impl AppServer {
                         &reason,
                         None,
                         json!({"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                        now_ms,
                     )?;
-                    canban_workflow_engine::runtime::hold_delivery(
+                    canban_workflow_engine::runtime::hold_delivery_at(
                         db,
                         &mut current_card,
                         &mut current_run,
                         &reason,
+                        now_ms,
                     )?;
                 }
             }
@@ -965,7 +1009,7 @@ impl AppServer {
             let _ = self.try_auto_archive_resolved(&card.id);
         }
         self.emit("review", Some(card.id));
-        Ok(advance_queue)
+        Ok((advance_queue, mutated))
     }
 
     pub(super) fn git_compare(&self, p: Value) -> Result<Value> {
@@ -1226,7 +1270,7 @@ impl AppServer {
                         let move_key = p["request_key"]
                             .as_str()
                             .map(|k| format!("{k}:move"))
-                            .unwrap_or_else(|| format!("review-move-{}", id()));
+                            .unwrap_or_else(|| format!("review-move-{}", self.next_id()));
                         let _ = self.call(
                             "card.move",
                             json!({
@@ -1243,7 +1287,7 @@ impl AppServer {
                 let comment_key = p["request_key"]
                     .as_str()
                     .map(str::to_owned)
-                    .unwrap_or_else(|| format!("review-comment-{}", id()));
+                    .unwrap_or_else(|| format!("review-comment-{}", self.next_id()));
                 let event = self.call(
                     "comment.add",
                     json!({
@@ -1273,7 +1317,7 @@ impl AppServer {
                 let create_key = p["request_key"]
                     .as_str()
                     .map(|k| format!("{k}:create"))
-                    .unwrap_or_else(|| format!("review-card-{}", id()));
+                    .unwrap_or_else(|| format!("review-card-{}", self.next_id()));
                 let created = self.call(
                     "card.create",
                     json!({
@@ -1293,7 +1337,7 @@ impl AppServer {
                     let ask_key = p["request_key"]
                         .as_str()
                         .map(|k| format!("{k}:ask"))
-                        .unwrap_or_else(|| format!("review-ask-{}", id()));
+                        .unwrap_or_else(|| format!("review-ask-{}", self.next_id()));
                     let _ = self.call(
                         "comment.add",
                         json!({
@@ -1339,7 +1383,8 @@ impl AppServer {
         )?;
         let compare_ref = p["compare_ref"].as_str().unwrap_or("WORKDIR");
         let isolate = p["create_worktree"].as_bool().unwrap_or(false);
-        let run_slug = &id()[..8];
+        let run_id = self.next_id();
+        let run_slug = &run_id[..run_id.len().min(8)];
         let cwd = if isolate {
             self.ops()
                 .prepare_review_worktree(&self.home, &project, compare_ref, run_slug)?
@@ -1371,19 +1416,19 @@ impl AppServer {
                 .command()
                 .iter()
                 .any(|s| s.contains("{session_id}"))
-                .then(id);
+                .then(|| self.next_id());
             let label = p["context_label"].as_str().unwrap_or("Diff Review");
             let title = format!("@{} · {}", profile.id, label);
             let title_trimmed: String = title.chars().take(76).collect();
             let item = TerminalEntry {
-                id: format!("review-agent-{}", id()),
+                id: format!("review-agent-{}", self.next_id()),
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
                 name: Some(title_trimmed),
                 origin_project_id: Some(project.id.clone()),
                 origin_card_id: None,
                 agent_engine: Some(agent_engine),
-                created_at: now(),
+                created_at: self.now_ms(),
                 runtime: Some(TerminalRuntime {
                     core_id: None,
                     terminal: None,
@@ -1615,7 +1660,7 @@ impl AppServer {
                 .execute("DELETE FROM editor_drafts WHERE id=?1", [&key])?;
             Ok(())
         })?;
-        let cleared_at = now();
+        let cleared_at = self.now_ms();
         self.emit("review", Some(card.id.clone()));
         Ok(json!({
             "cleared": true,
@@ -1734,7 +1779,7 @@ impl AppServer {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
-                .unwrap_or_else(id);
+                .unwrap_or_else(|| self.next_id());
             comments.push(ReviewDraftComment {
                 id: cid,
                 path,
@@ -1817,7 +1862,7 @@ impl AppServer {
             verdict: verdict.clone(),
             comments,
             author: top_author,
-            updated_at: now(),
+            updated_at: self.now_ms(),
         };
         let encoded = serde_json::to_string(&draft)?;
         ensure!(
@@ -1991,6 +2036,7 @@ impl AppServer {
                 ExecutionTrigger::Custom("diff_review".into()),
                 Some(&profile_id),
                 Some(instruction),
+                self.now_ms(),
             )?
             .context("Agent review could not be queued")?;
             current.revision += 1;

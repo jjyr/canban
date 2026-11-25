@@ -157,7 +157,8 @@ pub fn parse_tailscale_whois_json(
 
 /// Verifies incoming Tailscale TCP connections against the local `tailscaled` daemon (`whois`).
 pub struct SystemTailscaleVerifier {
-    cached_self_user: Mutex<Option<(u64, std::time::Instant)>>,
+    clock: Arc<dyn canban_types::Clock>,
+    cached_self_user: Mutex<Option<(u64, u64)>>,
 }
 
 impl Default for SystemTailscaleVerifier {
@@ -168,21 +169,27 @@ impl Default for SystemTailscaleVerifier {
 
 impl SystemTailscaleVerifier {
     pub fn new() -> Self {
+        Self::new_with_clock(canban_types::system_clock())
+    }
+
+    pub fn new_with_clock(clock: Arc<dyn canban_types::Clock>) -> Self {
         Self {
+            clock,
             cached_self_user: Mutex::new(None),
         }
     }
 
     fn self_user_id(&self) -> Option<u64> {
-        const SELF_CACHE_TTL: Duration = Duration::from_secs(60);
+        const SELF_CACHE_TTL_MS: u64 = 60_000;
+        let now_ms = self.clock.now_ms();
         if let Some((uid, fetched_at)) = *self.cached_self_user.lock().unwrap()
-            && fetched_at.elapsed() < SELF_CACHE_TTL
+            && now_ms.saturating_sub(fetched_at) < SELF_CACHE_TTL_MS
         {
             return Some(uid);
         }
         let status_json = run_tailscale(&["status", "--json"]).ok()?;
         let self_id = parse_tailscale_self_identity(&status_json).ok()?;
-        *self.cached_self_user.lock().unwrap() = Some((self_id.user_id, std::time::Instant::now()));
+        *self.cached_self_user.lock().unwrap() = Some((self_id.user_id, now_ms));
         Some(self_id.user_id)
     }
 }

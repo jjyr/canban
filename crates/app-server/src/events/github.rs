@@ -105,6 +105,7 @@ pub(crate) fn record_written_receipt(
     repository: &str,
     kind: &str,
     item_id: u64,
+    now_ms: u64,
 ) -> Result<()> {
     if item_id == 0 {
         return Ok(());
@@ -115,7 +116,7 @@ pub(crate) fn record_written_receipt(
     );
     db.conn.execute(
         "INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-        params![key, json!({"recorded_at": now()}).to_string()],
+        params![key, json!({"recorded_at": now_ms}).to_string()],
     )?;
     Ok(())
 }
@@ -160,8 +161,9 @@ pub(crate) fn observe_batch(
     repository: &str,
     items: &[Value],
     kind: Option<&str>,
+    now_ms: u64,
 ) -> Result<()> {
-    observe_batch_with_context(db, repository, items, kind, None, None)
+    observe_batch_with_context(db, repository, items, kind, None, None, now_ms)
 }
 
 pub(crate) fn observe_batch_with_context(
@@ -171,6 +173,7 @@ pub(crate) fn observe_batch_with_context(
     kind: Option<&str>,
     baseline_at: Option<&str>,
     current_login: Option<&str>,
+    now_ms: u64,
 ) -> Result<()> {
     let cards = relation_index(&db.list::<Card>()?);
     for item in items {
@@ -192,6 +195,7 @@ pub(crate) fn observe_batch_with_context(
             Some(&cards),
             baseline_at,
             current_login,
+            now_ms,
         )?;
     }
     Ok(())
@@ -203,6 +207,7 @@ pub(crate) fn observe_repo_comments_batch(
     comments: &[Value],
     collection_known: bool,
     current_login: Option<&str>,
+    now_ms: u64,
 ) -> Result<()> {
     let all_cards = db.list::<Card>()?;
     let cards = relation_index(&all_cards);
@@ -234,6 +239,7 @@ pub(crate) fn observe_repo_comments_batch(
             Some(&cards),
             None,
             current_login,
+            now_ms,
         )?;
     }
     Ok(())
@@ -312,6 +318,7 @@ fn observe_with_cards(
     cards: Option<&Relations>,
     baseline_at: Option<&str>,
     current_login: Option<&str>,
+    now_ms: u64,
 ) -> Result<()> {
     let object = subject(db, repository, kind, number)?;
     let item = if section == "overview" {
@@ -511,7 +518,7 @@ fn observe_with_cards(
             continue;
         }
         let url = value["html_url"].as_str().unwrap_or("");
-        db.append(canban_timeline::event(
+        db.append(canban_timeline::event_at(
             "",
             "",
             &format!("github.{kind}.{action}"),
@@ -536,6 +543,7 @@ fn observe_with_cards(
                 "observation": "poll",
                 "baseline": is_baseline,
             }),
+            now_ms,
         ))?;
     }
     db.conn.execute("INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![item,serde_json::to_string(&new)?])?;
@@ -592,6 +600,7 @@ impl AppServer {
             }
         };
         let current_login = self.github.status().login;
+        let now_ms = self.now_ms();
         self.store.lock().unwrap().write(|db| {
             if section == "overview" {
                 observe_with_cards(
@@ -605,6 +614,7 @@ impl AppServer {
                     None,
                     None,
                     current_login.as_deref(),
+                    now_ms,
                 )?;
             } else {
                 let key = format!("collection:{path}");
@@ -632,6 +642,7 @@ impl AppServer {
                         None,
                         None,
                         current_login.as_deref(),
+                        now_ms,
                     )?;
                 }
                 db.conn.execute(
@@ -659,9 +670,10 @@ pub(crate) fn complete_collection(
     section: &str,
     items: &[Value],
 ) -> Result<()> {
-    complete_collection_with_login(db, repo, number, kind, section, items, None)
+    complete_collection_with_login(db, repo, number, kind, section, items, None, now())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn complete_collection_with_login(
     db: Db<'_>,
     repo: &str,
@@ -670,6 +682,7 @@ pub(crate) fn complete_collection_with_login(
     section: &str,
     items: &[Value],
     current_login: Option<&str>,
+    now_ms: u64,
 ) -> Result<()> {
     let key = format!("complete:{repo}:{kind}:{number}:{section}");
     let old: Option<String> = db
@@ -698,6 +711,7 @@ pub(crate) fn complete_collection_with_login(
             None,
             None,
             current_login,
+            now_ms,
         )?;
     }
     let related: Vec<_> = db
@@ -711,7 +725,7 @@ pub(crate) fn complete_collection_with_login(
         .collect();
     let changed = old.is_none() || ids != before;
     for removed in before.into_iter().filter(|id| !ids.contains(id)) {
-        db.append(canban_timeline::event("","",&format!("github.{kind}.{}",if section=="checks"{"check_removed"}else if section=="reviews"{"review_removed"}else{"comment_deleted"}),"github","Remote collection item removed",json!({"origin":"github","repository":repo,"number":number,"subject":subject(db,repo,kind,number)?,"section":section,"item_id":removed,"related_cards":related,"observation":"complete_poll"})))?;
+        db.append(canban_timeline::event_at("","",&format!("github.{kind}.{}",if section=="checks"{"check_removed"}else if section=="reviews"{"review_removed"}else{"comment_deleted"}),"github","Remote collection item removed",json!({"origin":"github","repository":repo,"number":number,"subject":subject(db,repo,kind,number)?,"section":section,"item_id":removed,"related_cards":related,"observation":"complete_poll"}), now_ms))?;
     }
     if changed {
         db.conn.execute("INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![key,serde_json::to_string(&ids)?])?;

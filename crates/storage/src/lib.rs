@@ -748,8 +748,9 @@ impl Db<'_> {
         max_age_ms: u64,
         keep_recent: usize,
         max_journal_offset: u64,
+        now_ms: u64,
     ) -> Result<usize> {
-        let cutoff = now().saturating_sub(max_age_ms);
+        let cutoff = now_ms.saturating_sub(max_age_ms);
         let mut q = self.conn.prepare(
             "SELECT e.id, COALESCE(CAST(json_extract(e.data, '$.created_at') AS INTEGER), 0) AS created_at \
              FROM events e \
@@ -968,8 +969,8 @@ impl Db<'_> {
         Ok(())
     }
 
-    pub fn prune_activity_segments(&self, max_age_ms: u64) -> Result<usize> {
-        let cutoff = now().saturating_sub(max_age_ms);
+    pub fn prune_activity_segments(&self, max_age_ms: u64, now_ms: u64) -> Result<usize> {
+        let cutoff = now_ms.saturating_sub(max_age_ms);
         let deleted = self.conn.execute(
             "DELETE FROM activity_segments WHERE end_ms < ?1",
             params![cutoff as i64],

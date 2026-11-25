@@ -423,6 +423,7 @@ fn github_issue_upsert_triggers_only_from_local_instructions_not_remote_issue_bo
                 &project,
                 &json!({}),
                 &[instructions],
+                app.now_ms(),
             )?;
             Ok(card.id)
         })
@@ -1287,6 +1288,7 @@ steps:
                 Some("issue"),
                 Some(baseline),
                 Some("bot-owner"),
+                app.now_ms(),
             )?;
             crate::events::pump(db, &app.config())?;
             Ok(())
@@ -1387,7 +1389,13 @@ fn github_receipt_marks_self_action_and_pr_card_avoids_double_fire() {
             });
             db.save(&c)?;
             // Record a Canban-written comment receipt for comment_id 8888 (posted by a different GH_TOKEN login).
-            crate::events::github::record_written_receipt(db, "acme/widgets", "comment", 8888)?;
+            crate::events::github::record_written_receipt(
+                db,
+                "acme/widgets",
+                "comment",
+                8888,
+                app.now_ms(),
+            )?;
             // Observe an issue comment on issue #50 matching receipt 8888 under a different login.
             crate::events::github::observe_repo_comments_batch(
                 db,
@@ -1402,6 +1410,7 @@ fn github_receipt_marks_self_action_and_pr_card_avoids_double_fire() {
                 })],
                 true,
                 Some("primary-user"),
+                app.now_ms(),
             )?;
             // Observe a PR comment on PR #77 (which has a linked PR Card) -> must NOT emit duplicate `github.pr.comment_created`.
             crate::events::github::observe_repo_comments_batch(
@@ -1417,6 +1426,7 @@ fn github_receipt_marks_self_action_and_pr_card_avoids_double_fire() {
                 })],
                 true,
                 Some("primary-user"),
+                app.now_ms(),
             )?;
             Ok(())
         })
@@ -1569,7 +1579,13 @@ fn github_observation_canonicalizes_labels_and_head_across_api_and_compact_shape
         .lock()
         .unwrap()
         .write(|db| {
-            crate::events::github::observe_batch(db, "acme/widgets", &[rest_pr], Some("pr"))
+            crate::events::github::observe_batch(
+                db,
+                "acme/widgets",
+                &[rest_pr],
+                Some("pr"),
+                app.now_ms(),
+            )
         })
         .unwrap();
 
@@ -1615,12 +1631,19 @@ fn github_observation_canonicalizes_labels_and_head_across_api_and_compact_shape
         .lock()
         .unwrap()
         .write(|db| {
-            crate::events::github::observe_batch(db, "acme/widgets", &[compact_issue], Some("pr"))?;
+            crate::events::github::observe_batch(
+                db,
+                "acme/widgets",
+                &[compact_issue],
+                Some("pr"),
+                app.now_ms(),
+            )?;
             crate::events::github::observe_batch(
                 db,
                 "acme/widgets",
                 &[rest_pr_volatile_repo],
                 Some("pr"),
+                app.now_ms(),
             )
         })
         .unwrap();
@@ -1656,7 +1679,13 @@ fn github_observation_canonicalizes_labels_and_head_across_api_and_compact_shape
         .lock()
         .unwrap()
         .write(|db| {
-            crate::events::github::observe_batch(db, "acme/widgets", &[changed_pr], Some("pr"))
+            crate::events::github::observe_batch(
+                db,
+                "acme/widgets",
+                &[changed_pr],
+                Some("pr"),
+                app.now_ms(),
+            )
         })
         .unwrap();
 

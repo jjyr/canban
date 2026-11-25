@@ -29,6 +29,7 @@ mod updates;
 #[derive(Clone)]
 pub struct ServerRuntimeEnv {
     pub clock: Arc<dyn canban_types::Clock>,
+    pub id_gen: Arc<dyn canban_types::IdGen>,
     pub herdr_backend: Option<Arc<dyn canban_herdr::HerdrBackend>>,
     pub github_transport: Option<Arc<dyn canban_github::HttpTransport>>,
     pub inline_workers: bool,
@@ -42,6 +43,7 @@ impl Default for ServerRuntimeEnv {
     fn default() -> Self {
         Self {
             clock: canban_types::system_clock(),
+            id_gen: canban_types::system_id_gen(),
             herdr_backend: None,
             github_transport: None,
             inline_workers: false,
@@ -59,6 +61,7 @@ pub struct AppServer {
     _service_lock: std::fs::File,
     self_weak: OnceLock<std::sync::Weak<Self>>,
     clock: Arc<dyn canban_types::Clock>,
+    id_gen: Arc<dyn canban_types::IdGen>,
     herdr_backend: Option<Arc<dyn canban_herdr::HerdrBackend>>,
     github_transport: Option<Arc<dyn canban_github::HttpTransport>>,
     inline_workers: bool,
@@ -83,7 +86,7 @@ pub struct AppServer {
     push_tx: tokio::sync::broadcast::Sender<state::PushEvent>,
     github_cli: Arc<canban_github::cli::Service>,
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
-    branch_pr_probes: Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+    branch_pr_probes: Mutex<std::collections::BTreeMap<(String, String), u64>>,
     identity: String,
     device_store: Arc<auth::DeviceTokenStore>,
     pairing_codes: Arc<auth::PairingCodeStore>,
@@ -124,6 +127,10 @@ pub struct AppServer {
     script_wake: Mutex<Option<Arc<tokio::sync::Notify>>>,
     contexts: Mutex<directory::ContextQueue>,
     context_notify: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) runtime_worker_ticks: AtomicU64,
+    #[cfg(test)]
+    pub(crate) delivery_worker_passes: AtomicU64,
 }
 // A concurrently spawned child can briefly inherit the open file description
 // before exec closes it. Closing just our descriptor would leave its flock held.
@@ -268,6 +275,10 @@ fn revise(c: &Card, p: &Value) -> Result<()> {
             .context("Expected card revision is required")?,
     )
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped timeline append with explicit timestamp"
+)]
 fn log(
     db: Db<'_>,
     c: &Card,
@@ -276,6 +287,7 @@ fn log(
     message: &str,
     terminal_id: Option<String>,
     mut data: Value,
+    now_ms: u64,
 ) -> Result<()> {
     if let Some(tid) = terminal_id
         && let Some(obj) = data.as_object_mut()
@@ -283,17 +295,18 @@ fn log(
         obj.entry("terminal_id".to_owned())
             .or_insert_with(|| json!(tid));
     }
-    db.append(canban_timeline::event(
+    db.append(canban_timeline::event_at(
         &c.project_id,
         &c.id,
         kind,
         actor,
         message,
         data,
+        now_ms,
     ))?;
     Ok(())
 }
-fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
+fn attention(db: Db<'_>, card: &mut Card, message: &str, now_ms: u64) -> Result<()> {
     card.attention = Some(message.into());
     if card.human_gate.is_none() {
         card.human_gate = Some(HumanGate {
@@ -302,10 +315,11 @@ fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
             next_stage: None,
         });
     }
-    db.save(&canban_notifications::attention(
+    db.save(&canban_notifications::attention_at(
         &card.project_id,
         &card.id,
         message,
+        now_ms,
     ))?;
     Ok(())
 }
@@ -501,6 +515,7 @@ fn enqueue(
     trigger: ExecutionTrigger,
     explicit: Option<&str>,
     instruction: Option<String>,
+    now_ms: u64,
 ) -> Result<Option<TerminalEntry>> {
     ensure!(
         card.removed_at.is_none(),
@@ -517,7 +532,7 @@ fn enqueue(
     ) {
         Ok(p) => p,
         Err(e) => {
-            attention(db, card, &e.to_string())?;
+            attention(db, card, &e.to_string(), now_ms)?;
             log(
                 db,
                 card,
@@ -526,11 +541,12 @@ fn enqueue(
                 &e.to_string(),
                 None,
                 json!({}),
+                now_ms,
             )?;
             return Ok(None);
         }
     };
-    let context = crate::sessions::conversation(db, card, &profile)?;
+    let context = crate::sessions::conversation(db, card, &profile, now_ms)?;
     let mut entry: TerminalEntry = db.get(&context.id)?;
     let instruction_str = instruction.unwrap_or_else(|| stage.instruction.clone());
     let on_completed = if explicit.is_some() {
@@ -556,13 +572,13 @@ fn enqueue(
             require_human_review,
             workflow_run_id: None,
             workflow_step: None,
-            queued_at: now(),
+            queued_at: now_ms,
         });
         agent.number.saturating_add(1)
     } else {
         let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
         let prior_agent = entry.agent.clone();
-        let mut run = canban_scheduler::agent_run(
+        let mut run = canban_scheduler::agent_run_at(
             &project.id,
             &card.id,
             number,
@@ -571,6 +587,7 @@ fn enqueue(
             profile,
             instruction_str,
             on_completed,
+            now_ms,
         );
         run.card_number = card.number;
         run.require_human_review = require_human_review;
@@ -604,6 +621,7 @@ fn enqueue(
         &format!("Queued @{profile_id}"),
         Some(entry.id.clone()),
         json!({"trigger":trigger,"stage":stage.id,"run_number":run_number}),
+        now_ms,
     )?;
     Ok(Some(entry))
 }
@@ -614,6 +632,7 @@ impl AppServer {
     pub fn open_with_env(home: PathBuf, cli: PathBuf, env: ServerRuntimeEnv) -> Result<Arc<Self>> {
         let ServerRuntimeEnv {
             clock,
+            id_gen,
             herdr_backend,
             github_transport,
             inline_workers,
@@ -629,7 +648,11 @@ impl AppServer {
         let updates_disabled = development.is_some();
         let _startup = canban_updater::handoff::startup_guard(&home)?;
         let startup_progress =
-            startup_progress::StartupProgressWriter::new_with_durability(&home, fs_durability);
+            startup_progress::StartupProgressWriter::new_with_durability_and_clock(
+                &home,
+                fs_durability,
+                clock.clone(),
+            );
         startup_progress.set("lock", "LOCK", "Acquiring local service lock…");
         let service_lock = canban_updater::service_lock(&home)?;
         let _ = canban_updater::recover_stale_state(&home);
@@ -658,7 +681,7 @@ impl AppServer {
             .open(&identity_path)?;
         identity_file.lock()?;
         if identity_file.metadata()?.len() == 0 {
-            identity_file.write_all(token_id().as_bytes())?;
+            identity_file.write_all(id_gen.next_token().as_bytes())?;
             if fs_durability == canban_context::FsDurability::Full {
                 identity_file.sync_all()?;
             }
@@ -741,17 +764,18 @@ impl AppServer {
             }
             canban_workflow_engine::validate(&project.workflow)?;
         }
-        Self::publish_migration_with_durability(&home, migration, fs_durability)?;
+        Self::publish_migration_with_durability(&home, migration, fs_durability, id_gen.as_ref())?;
         let mut project_count = 0usize;
+        let startup_now_ms = clock.now_ms();
         store.write(|db| {
             workflow::initialize(db, &config)?;
             let projects = db.list::<Project>()?;
             project_count = projects.len();
             for project in projects {
-                authoring::initialize(&home, db, &config, &project)?;
+                authoring::initialize(&home, db, &config, &project, startup_now_ms)?;
             }
-            authoring::initialize_global(&home, db, &config)?;
-            schedules::reconcile_startup(db)?;
+            authoring::initialize_global(&home, db, &config, startup_now_ms)?;
+            schedules::reconcile_startup(db, startup_now_ms)?;
             Ok(())
         })?;
         startup_progress.set(
@@ -781,10 +805,18 @@ impl AppServer {
         let push_seq = Arc::new(AtomicU64::new(0));
         let (push_tx, _) = tokio::sync::broadcast::channel(256);
         let (stop_tx, _) = tokio::sync::watch::channel(false);
-        let device_store = Arc::new(auth::DeviceTokenStore::open(&home));
-        let pairing_codes = Arc::new(auth::PairingCodeStore::open(&home));
+        let device_store = Arc::new(
+            auth::DeviceTokenStore::open_with_clock(&home, clock.clone())
+                .with_id_gen(id_gen.clone()),
+        );
+        let pairing_codes = Arc::new(
+            auth::PairingCodeStore::open_with_clock(&home, clock.clone())
+                .with_id_gen(id_gen.clone()),
+        );
         let device_revocations = canban_transport::RevocationBus::new();
-        let tailscale_devices = Arc::new(canban_transport::TailscaleSessionRegistry::new());
+        let tailscale_devices = Arc::new(
+            canban_transport::TailscaleSessionRegistry::new_with_clock(clock.clone()),
+        );
 
         {
             let hook_changes = db_changes.clone();
@@ -824,7 +856,8 @@ impl AppServer {
             _service_lock: service_lock,
             self_weak: OnceLock::new(),
             started_at: clock.now_ms(),
-            clock,
+            clock: clock.clone(),
+            id_gen: id_gen.clone(),
             herdr_backend,
             github_transport,
             inline_workers,
@@ -839,7 +872,7 @@ impl AppServer {
             github_jobs: Mutex::new(Default::default()),
             github_job_notify: Arc::new(tokio::sync::Notify::new()),
             github_revision,
-            state_instance: id(),
+            state_instance: id_gen.next_id(),
             db_changes,
             state_revision,
             observed_at,
@@ -851,11 +884,15 @@ impl AppServer {
                     .and_then(|b| serde_json::from_slice(&b).ok())
                     .unwrap_or_default(),
             ),
-            branch_pr_probes: Mutex::new(std::collections::HashMap::new()),
-            github_cli: Arc::new(canban_github::cli::Service::new(
+            branch_pr_probes: Mutex::new(std::collections::BTreeMap::new()),
+            github_cli: Arc::new(canban_github::cli::Service::new_with_clock(
                 home.join("cache/github/gh"),
+                clock.clone(),
             )),
-            github: Arc::new(canban_github::auth::Service::new(home.clone())),
+            github: Arc::new(canban_github::auth::Service::new_with_clock(
+                home.clone(),
+                clock,
+            )),
             identity,
             device_store,
             pairing_codes,
@@ -896,6 +933,10 @@ impl AppServer {
             script_wake: Mutex::new(None),
             contexts: Mutex::new(Default::default()),
             context_notify: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            runtime_worker_ticks: AtomicU64::new(0),
+            #[cfg(test)]
+            delivery_worker_passes: AtomicU64::new(0),
         });
         let _ = server.self_weak.set(Arc::downgrade(&server));
         Ok(server)
@@ -923,12 +964,13 @@ impl AppServer {
         home: &Path,
         bytes: Option<Vec<u8>>,
         durability: canban_context::FsDurability,
+        id_gen: &dyn canban_types::IdGen,
     ) -> Result<()> {
         if let Some(bytes) = bytes {
             let path = home.join("config/agents.json");
             let backup = home
                 .join("config")
-                .join(format!("agents.legacy-{}.json", id()));
+                .join(format!("agents.legacy-{}.json", id_gen.next_id()));
             canban_context::atomic_with_durability(&backup, &std::fs::read(&path)?, durability)?;
             canban_context::atomic_with_durability(&path, &bytes, durability)?;
         }
@@ -995,6 +1037,15 @@ impl AppServer {
     }
     pub fn now_ms(&self) -> u64 {
         self.clock.now_ms()
+    }
+    pub fn id_gen(&self) -> &Arc<dyn canban_types::IdGen> {
+        &self.id_gen
+    }
+    pub(crate) fn next_id(&self) -> String {
+        self.id_gen.next_id()
+    }
+    pub(crate) fn next_uuid(&self) -> String {
+        self.id_gen.next_uuid().hyphenated().to_string()
     }
     pub fn exec_runner(&self) -> &Arc<dyn canban_exec::CommandRunner> {
         &self.exec_runner
@@ -1422,7 +1473,8 @@ impl AppServer {
                 a.started_at = Some(ev.created_at);
             }
         }
-        snapshot.reminders = canban_notifications::reminders_from_events(&snapshot, &card_events);
+        snapshot.reminders =
+            canban_notifications::reminders_from_events_at(&snapshot, &card_events, self.now_ms());
         snapshot.sound_event_ids =
             canban_notifications::sound_event_ids_from_events(&snapshot, &card_events);
         Ok(snapshot)

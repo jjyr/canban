@@ -4912,7 +4912,7 @@ fn failed_rebase_conflict_delivery_retries_via_workflow_deliver_without_burning_
             agent.terminal = None;
             agent.error = Some("git switch: simulated branch exists".into());
             db.save(&entry)?;
-            crate::workflow::reconcile(db)?;
+            crate::workflow::reconcile(db, app.now_ms())?;
             Ok(())
         })
         .unwrap();
@@ -5769,7 +5769,7 @@ fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
             agent.terminal = None;
             agent.error = Some("simulated merger failure".into());
             db.save(&entry)?;
-            crate::workflow::reconcile(db)?;
+            crate::workflow::reconcile(db, app.now_ms())?;
             Ok(())
         })
         .unwrap();

@@ -88,6 +88,7 @@ fn origin(db: Db<'_>, p: &Value, project: &str) -> Result<Origin> {
         terminal_id: active_entry.map(|t| t.id),
     })
 }
+#[allow(clippy::too_many_arguments)]
 fn emit(
     db: Db<'_>,
     note: &Note,
@@ -95,9 +96,11 @@ fn emit(
     message: String,
     origin: &Origin,
     data: Value,
+    now_ms: u64,
+    id_gen: &dyn canban_types::IdGen,
 ) -> Result<()> {
     db.save(&NoteEvent {
-        id: id(),
+        id: id_gen.next_id(),
         project_id: note.project_id.clone(),
         note_id: note.id.clone(),
         sequence: db.counter(&format!("note-timeline:{}", note.id))?,
@@ -107,10 +110,10 @@ fn emit(
         card_id: origin.card.clone(),
         revision: note.revision,
         data,
-        created_at: now(),
+        created_at: now_ms,
     })
 }
-fn revision(db: Db<'_>, n: &Note) -> Result<()> {
+fn revision(db: Db<'_>, n: &Note, now_ms: u64) -> Result<()> {
     db.save(&NoteRevision {
         id: format!("{}:{}", n.id, n.revision),
         project_id: n.project_id.clone(),
@@ -118,7 +121,7 @@ fn revision(db: Db<'_>, n: &Note) -> Result<()> {
         revision: n.revision,
         title: n.title.clone(),
         body: n.body.clone(),
-        created_at: now(),
+        created_at: now_ms,
     })
 }
 /// Parse Markdown links rather than treating examples inside code as references.
@@ -163,7 +166,14 @@ fn links(body: &str) -> Result<Vec<String>> {
     Ok(ids.into_iter().collect())
 }
 
-pub(super) fn relate_card(db: Db<'_>, note_id: &str, card: &Card, linked: bool) -> Result<()> {
+pub(super) fn relate_card(
+    db: Db<'_>,
+    note_id: &str,
+    card: &Card,
+    linked: bool,
+    now_ms: u64,
+    id_gen: &dyn canban_types::IdGen,
+) -> Result<()> {
     let mut note: Note = db.get(note_id)?;
     ensure!(
         note.project_id == card.project_id,
@@ -199,6 +209,8 @@ pub(super) fn relate_card(db: Db<'_>, note_id: &str, card: &Card, linked: bool) 
             ..Default::default()
         },
         json!({"card_id":card.id}),
+        now_ms,
+        id_gen,
     )
 }
 
@@ -264,7 +276,8 @@ impl AppServer {
             let _:Project=db.get(&project)?;
             if let Some(scope)=resolved_param_pid.as_deref(){ensure!(scope==project,"Note belongs to a different Project");}
             let source=origin(db,&p,&project)?;
-            let mut n=old.clone().unwrap_or_else(||Note{id:id(),project_id:project.clone(),title:String::new(),body:String::new(),revision:0,created_at:now(),updated_at:now(),links:Vec::new(),card_ids:Vec::new()});
+            let now_ms = self.now_ms();
+            let mut n=old.clone().unwrap_or_else(||Note{id:self.next_id(),project_id:project.clone(),title:String::new(),body:String::new(),revision:0,created_at:now_ms,updated_at:now_ms,links:Vec::new(),card_ids:Vec::new()});
             if old.is_some(){ensure!(p["revision"].as_u64()==Some(n.revision),"Note revision conflict: reload the saved version; your draft has not been changed");}
             if let Some(title)=p["title"].as_str(){n.title=title.trim().into();}
             if let Some(body)=p["body"].as_str(){n.body=body.into();}
@@ -273,18 +286,18 @@ impl AppServer {
             n.links=links(&n.body)?;
             for target in &n.links {if let Ok(other)=db.get::<Note>(target){ensure!(other.project_id==project,"Linked Note belongs to a different Project");}}
             if old.as_ref().is_some_and(|o|o.title==n.title && o.body==n.body && o.links==n.links){return Ok(serde_json::to_value(n)?)}
-            n.revision+=1;n.updated_at=now();
+            n.revision+=1;n.updated_at=now_ms;
             if let Some(card)=&source.card && !n.card_ids.contains(card){n.card_ids.push(card.clone());}
-            db.save(&n)?;revision(db,&n)?;
+            db.save(&n)?;revision(db,&n,now_ms)?;
             let kind=if old.is_none(){"note.created"}else if old.as_ref().is_some_and(|o|o.title!=n.title){"note.renamed"}else{"note.updated"};
-            emit(db,&n,kind,format!("{} {}",if old.is_none(){"Created"}else if kind=="note.renamed"{"Renamed"}else{"Updated"},n.title),&source,json!({"previous_revision":old.as_ref().map(|o|o.revision),"links":n.links}))?;
+            emit(db,&n,kind,format!("{} {}",if old.is_none(){"Created"}else if kind=="note.renamed"{"Renamed"}else{"Updated"},n.title),&source,json!({"previous_revision":old.as_ref().map(|o|o.revision),"links":n.links}),now_ms,self.id_gen.as_ref())?;
             let previous=old.as_ref().map(|o|o.links.clone()).unwrap_or_default();
             for target in previous.iter().chain(&n.links).collect::<BTreeSet<_>>() {
                 let before=previous.contains(target);let after=n.links.contains(target);
                 if before==after {continue}
-                if let Ok(other)=db.get::<Note>(target) {emit(db,&other,if after{"note.referenced"}else{"note.unreferenced"},format!("{} {}",if after{"Referenced by"}else{"Reference removed from"},n.title),&source,json!({"source_note_id":n.id}))?;}
+                if let Ok(other)=db.get::<Note>(target) {emit(db,&other,if after{"note.referenced"}else{"note.unreferenced"},format!("{} {}",if after{"Referenced by"}else{"Reference removed from"},n.title),&source,json!({"source_note_id":n.id}),now_ms,self.id_gen.as_ref())?;}
             }
-            if let Some(card)=&source.card {let card:Card=db.get(card)?;log(db,&card,kind,&source.actor,&format!("Updated Note · {}",n.title),source.terminal_id.clone(),json!({"note_id":n.id,"revision":n.revision}))?;}
+            if let Some(card)=&source.card {let card:Card=db.get(card)?;log(db,&card,kind,&source.actor,&format!("Updated Note · {}",n.title),source.terminal_id.clone(),json!({"note_id":n.id,"revision":n.revision}),now_ms)?;}
             Ok(serde_json::to_value(n)?)
         })
     }

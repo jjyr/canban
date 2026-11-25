@@ -286,7 +286,7 @@ impl AppServer {
         let cards_by_id: std::collections::BTreeMap<&str, &Card> =
             cards.iter().map(|c| (c.id.as_str(), c)).collect();
         let terminals: Vec<TerminalEntry> = db.list()?;
-        let now_ms = now();
+        let now_ms = self.now_ms();
         let Some(head_card) = head
             .card_id
             .as_deref()
@@ -349,13 +349,14 @@ impl AppServer {
     }
 
     /// Executes one batch delivery cycle for `run_ids` in `project_id`.
-    /// Returns `Ok(true)` when the queue can continue advancing, `Ok(false)` when the queue head
-    /// is paused (dirty main checkout) or handed off to a `@merger` batch session.
+    /// Returns `Ok((advance_queue, mutated))`: `advance_queue` is `true` when the queue can
+    /// continue advancing, `false` when the queue head is paused or handed off to `@merger`;
+    /// `mutated` is `true` when DB state changed.
     pub(super) fn execute_batch_delivery(
         &self,
         project_id: &str,
         run_ids: &[String],
-    ) -> Result<bool> {
+    ) -> Result<(bool, bool)> {
         let config = self.config();
         let (project, candidates) = {
             let store = self.store.lock().unwrap();
@@ -383,7 +384,7 @@ impl AppServer {
             (project, items)
         };
         if candidates.is_empty() {
-            return Ok(true);
+            return Ok((true, false));
         }
         let card_ids: Vec<String> = candidates.iter().map(|(c, _)| c.id.clone()).collect();
         let _merging = self.track_merging_many(&card_ids);
@@ -418,12 +419,12 @@ impl AppServer {
             let _checkout_gate = match self.try_lock_checkout(&project, sync_holder) {
                 Ok(guard) => guard,
                 Err(reason) => {
-                    self.set_queue_pause_reason(
+                    let changed = self.set_queue_pause_reason(
                         &head_card_id,
                         &head_run_id,
                         Some(&format!("Merge queue waiting: {reason}")),
                     )?;
-                    return Ok(false);
+                    return Ok((false, changed));
                 }
             };
             if cfg.sync_upstream
@@ -434,29 +435,33 @@ impl AppServer {
                 if let Some(DeliveryError::MainCheckoutBusy { reason }) =
                     e.downcast_ref::<DeliveryError>()
                 {
-                    self.set_queue_pause_reason(
+                    let changed = self.set_queue_pause_reason(
                         &head_card_id,
                         &head_run_id,
                         Some(&format!("Merge queue waiting: {reason}")),
                     )?;
-                    return Ok(false);
+                    return Ok((false, changed));
                 }
                 let reason = format!("Auto-merge paused (upstream sync): {e:#}");
-                self.store.lock().unwrap().write(|db| {
+                let mutated = self.store.lock().unwrap().write(|db| {
                     let mut current_card: Card = db.get(&head_card_id)?;
                     let mut current_run: WorkflowRun = db.get(&head_run_id)?;
                     if current_run.state == "waiting_delivery" {
-                        canban_workflow_engine::runtime::hold_delivery(
+                        canban_workflow_engine::runtime::hold_delivery_at(
                             db,
                             &mut current_card,
                             &mut current_run,
                             &reason,
+                            self.now_ms(),
                         )?;
+                        return Ok(true);
                     }
-                    Ok(())
+                    Ok(false)
                 })?;
-                self.emit("review", Some(head_card_id));
-                return Ok(true);
+                if mutated {
+                    self.emit("review", Some(head_card_id));
+                }
+                return Ok((true, mutated));
             }
 
             match ops.check_main_checkout_ready(&project, cfg.target_branch.as_deref()) {
@@ -466,12 +471,12 @@ impl AppServer {
                     if let Some(DeliveryError::MainCheckoutBusy { reason }) =
                         e.downcast_ref::<DeliveryError>()
                     {
-                        self.set_queue_pause_reason(
+                        let changed = self.set_queue_pause_reason(
                             &head_card_id,
                             &head_run_id,
                             Some(&format!("Merge queue waiting: {reason}")),
                         )?;
-                        return Ok(false);
+                        return Ok((false, changed));
                     }
                     return Err(e);
                 }
@@ -481,11 +486,11 @@ impl AppServer {
             self.set_queue_pause_reason(&card.id, &run.id, None)?;
         }
 
-        let short_id = id();
+        let short_id = self.next_id();
         let batch_id = format!("merge-queue:{project_id}:{short_id}");
         let worktree_path =
             canban_workspaces::batch::merge_queue_worktree_path(&self.home, &project);
-        let started_at = now();
+        let started_at = self.now_ms();
         let placeholder_items: Vec<MergeBatchItem> = candidates
             .iter()
             .map(|(card, run)| MergeBatchItem {
@@ -561,7 +566,7 @@ impl AppServer {
             } => {
                 batch.worktree = worktree.to_string_lossy().into_owned();
                 batch.items = items.clone();
-                batch.updated_at = now();
+                batch.updated_at = self.now_ms();
                 if let Some(cmd) = cfg.test_command.as_deref() {
                     batch.state = "testing".into();
                     self.store.lock().unwrap().write(|db| db.save(&batch))?;
@@ -575,7 +580,9 @@ impl AppServer {
                     if !test_outcome.passed {
                         batch.failure_kind = Some("test_failure".into());
                         batch.test_output = Some(test_outcome.tail);
-                        return self.handoff_failed_batch(&project, &cfg, &mut batch, &candidates);
+                        let advance =
+                            self.handoff_failed_batch(&project, &cfg, &mut batch, &candidates)?;
+                        return Ok((advance, true));
                     }
                 }
 
@@ -598,6 +605,7 @@ impl AppServer {
                                 .write(|db| delete_batch_row(db, &batch_id));
                             match err.downcast_ref::<DeliveryError>() {
                                 Some(DeliveryError::TargetAdvanced) => {
+                                    let now_ms = self.now_ms();
                                     self.store.lock().unwrap().write(|db| {
                                         for (card, run) in &candidates {
                                             if let Ok(c) = db.get::<Card>(&card.id) {
@@ -609,22 +617,23 @@ impl AppServer {
                                                     "Target branch advanced during batch delivery; retrying",
                                                     None,
                                                     json!({"target_branch":target_branch,"batch_id":batch_id,"workflow_run_id":run.id}),
+                                                    now_ms,
                                                 )?;
                                             }
                                         }
                                         Ok(())
                                     })?;
                                     self.emit("review", None);
-                                    return Ok(true);
+                                    return Ok((true, true));
                                 }
                                 Some(DeliveryError::MainCheckoutBusy { reason }) => {
-                                    self.set_queue_pause_reason(
+                                    let changed = self.set_queue_pause_reason(
                                         &head_card_id,
                                         &head_run_id,
                                         Some(&format!("Merge queue waiting: {reason}")),
                                     )?;
                                     self.emit("review", None);
-                                    return Ok(false);
+                                    return Ok((false, changed));
                                 }
                                 _ => return Err(err),
                             }
@@ -646,7 +655,7 @@ impl AppServer {
                     "Auto-merged",
                     "system",
                 )?;
-                Ok(true)
+                Ok((true, true))
             }
             BatchIntegrationOutcome::Conflict {
                 worktree,
@@ -660,7 +669,8 @@ impl AppServer {
                 batch.failure_kind = Some("conflict".into());
                 batch.conflict_card_number = Some(conflict_card_number);
                 batch.conflict_files = conflict_files;
-                self.handoff_failed_batch(&project, &cfg, &mut batch, &candidates)
+                let advance = self.handoff_failed_batch(&project, &cfg, &mut batch, &candidates)?;
+                Ok((advance, true))
             }
         }
     }
@@ -715,8 +725,9 @@ impl AppServer {
                 let mut card: Card = db.get(&offending_card_id)?;
                 let mut run: WorkflowRun = db.get(&offending_run_id)?;
                 if run.state == "waiting_delivery" {
-                    canban_workflow_engine::runtime::hold_delivery(
-                        db, &mut card, &mut run, &reason,
+                    let now_ms = self.now_ms();
+                    canban_workflow_engine::runtime::hold_delivery_at(
+                        db, &mut card, &mut run, &reason, now_ms,
                     )?;
                     log(
                         db,
@@ -730,6 +741,7 @@ impl AppServer {
                         &reason,
                         None,
                         json!({"batch_id":batch.id,"workflow_run_id":run.id}),
+                        now_ms,
                     )?;
                 }
                 Ok(())
@@ -749,10 +761,11 @@ impl AppServer {
             .iter()
             .map(|(c, _)| (c.id.clone(), c.clone()))
             .collect();
+        let queued_now = self.now_ms();
         batch.prompt = render_batch_prompt(project, batch, &card_map);
         batch.state = "queued".into();
-        batch.queued_at = Some(now());
-        batch.updated_at = now();
+        batch.queued_at = Some(queued_now);
+        batch.updated_at = queued_now;
 
         let offending_num = offending.0.number;
         let step_key_fallback = "deliver".to_owned();
@@ -764,6 +777,7 @@ impl AppServer {
         let agent_engine = profile_res.as_ref().ok().map(profile_agent_engine);
         let failure_kind = batch.failure_kind.clone().unwrap_or_default();
         self.store.lock().unwrap().write(|db| {
+            let now_ms = self.now_ms();
             db.save(batch)?;
             let number = db.counter("terminal-number")?;
             let entry = TerminalEntry {
@@ -776,7 +790,7 @@ impl AppServer {
                 agent_engine: agent_engine.clone(),
                 runtime: None,
                 agent: None,
-                created_at: now(),
+                created_at: now_ms,
             };
             db.save(&entry)?;
             for (card, _) in candidates {
@@ -801,7 +815,7 @@ impl AppServer {
                 current_run.state = "waiting_batch".into();
                 current_run.terminal_id = Some(batch.id.clone());
                 current_run.inputs["batch_id"] = json!(batch.id);
-                current_run.updated_at = now();
+                current_run.updated_at = now_ms;
                 let step_key = current_run
                     .step
                     .clone()
@@ -812,7 +826,7 @@ impl AppServer {
                     "decision": if is_conflict { "merge_conflict" } else { "batch_test_failure" },
                     "profile_id": batch.profile_id,
                     "batch_id": batch.id,
-                    "at": now(),
+                    "at": now_ms,
                 }));
                 db.save(&current_run)?;
                 let msg = if is_conflict {
@@ -843,6 +857,7 @@ impl AppServer {
                         "conflict_card_number": batch.conflict_card_number,
                         "conflict_files": batch.conflict_files,
                     }),
+                    now_ms,
                 )?;
             }
             Ok(())
@@ -888,11 +903,12 @@ impl AppServer {
 
         let mut merged_cards = Vec::new();
         self.store.lock().unwrap().write(|db| {
+            let now_ms = self.now_ms();
             if delete_transient_row {
                 delete_batch_row(db, &batch_id)?;
             } else {
                 batch.state = "completed".into();
-                batch.updated_at = now();
+                batch.updated_at = now_ms;
                 db.save(batch)?;
             }
             for item in &active_items {
@@ -901,7 +917,7 @@ impl AppServer {
                 if !matches!(run.state.as_str(), "waiting_delivery" | "waiting_batch") {
                     continue;
                 }
-                let resolved_at = now();
+                let resolved_at = now_ms;
                 card.delivery_mode = Some(DeliveryMode::Local);
                 card.delivery = Some(Delivery {
                     target_branch: target_branch.clone(),
@@ -934,8 +950,11 @@ impl AppServer {
                             Some(batch_id.clone())
                         },
                         json!({"commit":head_sha,"target_branch":target_branch,"batch_id":batch_id,"workflow_run_id":run.id}),
+                        resolved_at,
                     )?;
-                    canban_workflow_engine::runtime::hold_delivery(db, &mut card, &mut run, &reason)?;
+                    canban_workflow_engine::runtime::hold_delivery_at(
+                        db, &mut card, &mut run, &reason, resolved_at,
+                    )?;
                 } else {
                     let synced = remote_name.is_some();
                     let msg = match (&remote_name, push_err_msg.as_deref()) {
@@ -968,14 +987,16 @@ impl AppServer {
                             Some(batch_id.clone())
                         },
                         merged_data,
+                        resolved_at,
                     )?;
-                    canban_workflow_engine::runtime::complete_delivery(
+                    canban_workflow_engine::runtime::complete_delivery_at(
                         db,
                         &config,
                         &mut card,
                         &mut run,
                         delivery_out,
                         enqueue,
+                        resolved_at,
                     )?;
                     merged_cards.push(card.id.clone());
                 }
@@ -999,7 +1020,7 @@ impl AppServer {
     pub(super) fn pump_merge_batches(&self) -> Result<()> {
         let config = self.config();
         let snap = self.snapshot()?;
-        if canban_scheduler::active_count(&snap) >= config.scheduler.max_agents {
+        if canban_scheduler::active_count_at(&snap, self.now_ms()) >= config.scheduler.max_agents {
             return Ok(());
         }
         let next = {
@@ -1067,7 +1088,7 @@ impl AppServer {
             .command()
             .iter()
             .any(|s| s.contains("{session_id}"))
-            .then(crate::runtime::uuid_session_id);
+            .then(|| self.next_uuid());
         let mut argv = canban_profiles::command(
             &profile,
             session_id.as_deref(),
@@ -1146,13 +1167,14 @@ impl AppServer {
         match launch_res.map(|o| o.receipt) {
             Ok(receipt) => {
                 let address = strp(&receipt, "address")?.to_owned();
+                let started_ms = self.now_ms();
                 runtime.terminal = Some(address.clone());
                 runtime.state = "running".into();
                 runtime.connection = "connected".into();
                 batch.state = "running".into();
-                batch.started_at = Some(now());
+                batch.started_at = Some(started_ms);
                 batch.error = None;
-                batch.updated_at = now();
+                batch.updated_at = started_ms;
                 {
                     let mut inv = self.inventory.lock().unwrap();
                     if inv.core == core {
@@ -1176,7 +1198,7 @@ impl AppServer {
                 runtime.connection = "unavailable".into();
                 runtime.error = Some(msg.clone());
                 batch.error = Some(msg);
-                batch.updated_at = now();
+                batch.updated_at = self.now_ms();
             }
         }
         entry
@@ -1236,7 +1258,7 @@ impl AppServer {
             );
             batch.state = "failed".into();
             batch.error = Some(reason.clone());
-            batch.updated_at = now();
+            batch.updated_at = self.now_ms();
             self.fail_batch_runs(&mut batch, "system", "execution.failed", &reason)?;
         }
         self.request_deliveries();
@@ -1252,6 +1274,7 @@ impl AppServer {
         reason: &str,
     ) -> Result<()> {
         self.store.lock().unwrap().write(|db| {
+            let now_ms = self.now_ms();
             db.save(batch)?;
             for item in batch.items.iter().filter(|i| !i.evicted) {
                 let Ok(mut card) = db.get::<Card>(&item.card_id) else {
@@ -1267,7 +1290,7 @@ impl AppServer {
                     run.state = "failed".into();
                     run.error = Some(reason.to_owned());
                     clear_batch_inputs(&mut run);
-                    run.updated_at = now();
+                    run.updated_at = now_ms;
                     card.attention = Some(reason.to_owned());
                     card.human_gate = Some(HumanGate {
                         reason: reason.to_owned(),
@@ -1277,14 +1300,15 @@ impl AppServer {
                     card.revision += 1;
                     db.save(&run)?;
                     db.save(&card)?;
-                    db.save(&canban_notifications::attention(
+                    db.save(&canban_notifications::attention_at(
                         &card.project_id,
                         &card.id,
                         reason,
+                        now_ms,
                     ))?;
                 } else {
-                    canban_workflow_engine::runtime::hold_delivery(
-                        db, &mut card, &mut run, reason,
+                    canban_workflow_engine::runtime::hold_delivery_at(
+                        db, &mut card, &mut run, reason, now_ms,
                     )?;
                 }
                 log(
@@ -1295,6 +1319,7 @@ impl AppServer {
                     reason,
                     Some(batch.id.clone()),
                     json!({"batch_id":batch.id,"workflow_run_id":run.id}),
+                    now_ms,
                 )?;
             }
             Ok(())
@@ -1318,6 +1343,7 @@ impl AppServer {
             .as_str()
             .and_then(|s| (!s.trim().is_empty()).then_some(s.trim().to_owned()));
         let mut retried = 0usize;
+        let now_ms = self.now_ms();
         for item in &batch.items {
             if target_card
                 .as_deref()
@@ -1339,11 +1365,13 @@ impl AppServer {
             }
             if run.state == "waiting_approval" {
                 let config = self.config();
-                canban_workflow_engine::runtime::approve_with_feedback(
-                    db, &config, &mut card, &mut run, false, None, enqueue,
+                canban_workflow_engine::runtime::approve_with_feedback_at(
+                    db, &config, &mut card, &mut run, false, None, enqueue, now_ms,
                 )?;
             } else {
-                canban_workflow_engine::runtime::requeue_delivery(db, &mut card, &mut run)?;
+                canban_workflow_engine::runtime::requeue_delivery_at(
+                    db, &mut card, &mut run, now_ms,
+                )?;
             }
             log(
                 db,
@@ -1353,6 +1381,7 @@ impl AppServer {
                 "Queued in merge queue",
                 Some(entry.id.clone()),
                 json!({"terminal_id":entry.id,"workflow_run_id":run.id,"queued_for_delivery":true}),
+                now_ms,
             )?;
             retried += 1;
         }
@@ -1459,7 +1488,7 @@ impl AppServer {
         self.mutate("batch.bind", &p, |db| {
             let mut batch = self.resolve_batch_for_params(db, &p)?;
             batch.provider_session_id = Some(session.to_owned());
-            batch.updated_at = now();
+            batch.updated_at = self.now_ms();
             db.save(&batch)?;
             Ok(json!({
                 "bound": true,
@@ -1517,7 +1546,7 @@ impl AppServer {
             })
             .unwrap_or_default();
 
-        let report_id = id();
+        let report_id = self.next_id();
         let report_path = if let Some(body) = p["body"].as_str() {
             let path = self
                 .home
@@ -1544,6 +1573,7 @@ impl AppServer {
                 .map(|i| i.card_id.clone())
                 .unwrap_or_default();
             self.store.lock().unwrap().write(|db| {
+                let now_ms = self.now_ms();
                 db.save(&Report {
                     id: report_id,
                     terminal_id: Some(batch.id.clone()),
@@ -1556,7 +1586,7 @@ impl AppServer {
                     path: report_path.clone(),
                     request_key: key.into(),
                     fingerprint,
-                    created_at: now(),
+                    created_at: now_ms,
                 })?;
                 for item in &batch.items {
                     if let Ok(card) = db.get::<Card>(&item.card_id) {
@@ -1568,6 +1598,7 @@ impl AppServer {
                             &format!("working: {message}"),
                             Some(batch.id.clone()),
                             json!({"batch_id":batch.id,"state":"working","path":report_path}),
+                            now_ms,
                         )?;
                     }
                 }
@@ -1621,7 +1652,7 @@ impl AppServer {
                 );
                 ops.cleanup_batch_refs(&project, updated_batch.short_id());
                 updated_batch.state = "completed".into();
-                updated_batch.updated_at = now();
+                updated_batch.updated_at = self.now_ms();
                 let evict_reason = if message.is_empty() {
                     format!("Evicted from merge batch by @{profile_label}")
                 } else {
@@ -1743,7 +1774,7 @@ impl AppServer {
         };
         updated_batch.state = state.into();
         updated_batch.error = Some(reason.clone());
-        updated_batch.updated_at = now();
+        updated_batch.updated_at = self.now_ms();
         self.fail_batch_runs(&mut updated_batch, &actor, "execution.reported", &reason)?;
         self.save_batch_report_record(
             &updated_batch,
@@ -1774,6 +1805,7 @@ impl AppServer {
         save_batch: bool,
     ) -> Result<()> {
         self.store.lock().unwrap().write(|db| {
+            let now_ms = self.now_ms();
             if save_batch {
                 db.save(batch)?;
             }
@@ -1781,8 +1813,8 @@ impl AppServer {
                 let mut card: Card = db.get(&item.card_id)?;
                 let mut run: WorkflowRun = db.get(&item.workflow_run_id)?;
                 if run.state == "waiting_batch" {
-                    canban_workflow_engine::runtime::hold_delivery(
-                        db, &mut card, &mut run, reason,
+                    canban_workflow_engine::runtime::hold_delivery_at(
+                        db, &mut card, &mut run, reason, now_ms,
                     )?;
                     log(
                         db,
@@ -1792,6 +1824,7 @@ impl AppServer {
                         reason,
                         Some(batch.id.clone()),
                         json!({"batch_id":batch.id,"workflow_run_id":run.id}),
+                        now_ms,
                     )?;
                 }
             }
@@ -1829,7 +1862,7 @@ impl AppServer {
                 path,
                 request_key: request_key.to_owned(),
                 fingerprint,
-                created_at: now(),
+                created_at: self.now_ms(),
             })
         })
     }
@@ -1855,9 +1888,10 @@ impl AppServer {
             });
             db.save(item)?;
         }
+        let now_ms = self.now_ms();
         batch.state = "cancelled".into();
         batch.error = Some("Merge batch terminal closed by user".into());
-        batch.updated_at = now();
+        batch.updated_at = now_ms;
         db.save(batch)?;
         if let Ok(project) = db.get::<Project>(&batch.project_id) {
             let ops = self.ops();
@@ -1872,11 +1906,12 @@ impl AppServer {
                 continue;
             };
             if run.state == "waiting_batch" {
-                canban_workflow_engine::runtime::hold_delivery(
+                canban_workflow_engine::runtime::hold_delivery_at(
                     db,
                     &mut card,
                     &mut run,
                     "Merge batch terminal closed by user; resume or retry to queue again",
+                    now_ms,
                 )?;
                 log(
                     db,
@@ -1886,6 +1921,7 @@ impl AppServer {
                     "Merge batch terminal closed by user",
                     Some(batch.id.clone()),
                     json!({"batch_id":batch.id,"workflow_run_id":run.id}),
+                    now_ms,
                 )?;
             }
         }

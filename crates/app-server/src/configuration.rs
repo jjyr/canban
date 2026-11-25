@@ -113,8 +113,9 @@ impl AppServer {
                     format!("Workflows · {}", session.profile_id)
                 };
                 let origin_project_id = (!is_global_project_id(&scope_id)).then_some(scope_id);
-                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(term_name),origin_project_id,origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now()});
-                terminal.created_at=now();
+                let now_ms = self.now_ms();
+                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(term_name),origin_project_id,origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now_ms});
+                terminal.created_at=now_ms;
                 terminal.runtime=None;db.save(&terminal)?;db.save(&session)?;
                 Ok(json!({"terminal_id":key,"reused":false,"state":"queued","terminal":terminal,"session":session}))
             })
@@ -169,8 +170,9 @@ impl AppServer {
                 }
                 continue;
             }
-            if canban_scheduler::active_count(
+            if canban_scheduler::active_count_at(
                 &self.store.lock().unwrap().db().admission_snapshot()?,
+                self.now_ms(),
             ) >= self.config().scheduler.max_agents
             {
                 continue;
@@ -178,7 +180,7 @@ impl AppServer {
             let _gate = self.terminal_gate.lock().unwrap();
             let admitted = self.store.lock().unwrap().write(|db| {
                 let current_snap = db.admission_snapshot()?;
-                if canban_scheduler::active_count(&current_snap)
+                if canban_scheduler::active_count_at(&current_snap, self.now_ms())
                     >= self.config().scheduler.max_agents
                 {
                     return Ok(None);
@@ -201,7 +203,7 @@ impl AppServer {
                 current.state = "starting".into();
                 let fresh = current.provider_session_id.is_none();
                 if fresh && profile.command().iter().any(|s| s.contains("{session_id}")) {
-                    current.provider_session_id = Some(super::runtime::uuid_session_id());
+                    current.provider_session_id = Some(self.next_uuid());
                 }
                 terminal.runtime = Some(TerminalRuntime {
                     core_id: None,

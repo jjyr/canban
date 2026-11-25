@@ -75,6 +75,7 @@ pub(super) fn bind(
     card: &Card,
     p: &Value,
     prepared: &AdoptTerminal,
+    now_ms: u64,
 ) -> Option<TerminalEntry> {
     let attempt = || -> Result<TerminalEntry> {
         let source: TerminalEntry = db.get(&prepared.source.id)?;
@@ -162,7 +163,7 @@ pub(super) fn bind(
                 "Caller directory is outside the Card workspace"
             );
         }
-        let context = sessions::conversation(db, card, &profile)?;
+        let context = sessions::conversation(db, card, &profile, now_ms)?;
         ensure!(
             !db.list::<WorkflowRun>()?
                 .iter()
@@ -181,7 +182,7 @@ pub(super) fn bind(
             "Card/Profile already has another live execution"
         );
         let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
-        let mut run = canban_scheduler::agent_run(
+        let mut run = canban_scheduler::agent_run_at(
             &card.project_id,
             &card.id,
             number,
@@ -190,6 +191,7 @@ pub(super) fn bind(
             profile,
             String::new(),
             None,
+            now_ms,
         );
         run.state = "running".into();
         run.card_number = card.number;
@@ -201,9 +203,9 @@ pub(super) fn bind(
         run.provider_session_id = context.provider_session_id;
         run.observed = Some(canban_herdr::observation(&prepared.observed));
         run.connection_state = "connected".into();
-        run.started_at = Some(now());
-        run.lifecycle.observed_at = Some(now());
-        run.lifecycle.last_interaction_at = Some(now());
+        run.started_at = Some(now_ms);
+        run.lifecycle.observed_at = Some(now_ms);
+        run.lifecycle.last_interaction_at = Some(now_ms);
         entry.agent = Some(run);
         entry.runtime = None;
         entry.name = source.name.clone();

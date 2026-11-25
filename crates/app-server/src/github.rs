@@ -104,7 +104,7 @@ impl AppServer {
                 paused: false,
                 repository: info.full_name,
                 repository_id: info.id,
-                generation: id(),
+                generation: self.next_id(),
                 intake: GitHubIntake::Off,
                 synced_at: None,
                 error: None,
@@ -298,7 +298,7 @@ impl AppServer {
                         paused: p["paused"].as_bool().unwrap_or(false),
                         repository,
                         repository_id,
-                        generation: id(),
+                        generation: self.next_id(),
                         intake,
                         synced_at: None,
                         error: None,
@@ -445,12 +445,14 @@ impl AppServer {
                         "Project source changed; search again"
                     );
                     let instructions = p["instructions"].as_str().unwrap_or("");
-                    let mut card = integration::upsert(
+                    let now_ms = self.now_ms();
+                    let mut card = integration::upsert_at(
                         db,
                         &current,
                         Change { issue, comments },
                         true,
                         instructions,
+                        now_ms,
                     )?;
                     if let Some(note_id) = p["source_note_id"].as_str() {
                         let note: Note = db.get(note_id)?;
@@ -463,7 +465,14 @@ impl AppServer {
                             notes.push(note.id.clone());
                         }
                         db.save(&card)?;
-                        crate::notes::relate_card(db, &note.id, &card, true)?;
+                        crate::notes::relate_card(
+                            db,
+                            &note.id,
+                            &card,
+                            true,
+                            now_ms,
+                            self.id_gen.as_ref(),
+                        )?;
                     }
                     crate::sessions::queue_card_mentions(
                         db,
@@ -472,6 +481,7 @@ impl AppServer {
                         &current,
                         &p,
                         &[instructions],
+                        now_ms,
                     )?;
                     Ok(serde_json::to_value(card)?)
                 })
@@ -656,26 +666,27 @@ impl AppServer {
             }
             let (changes, observations): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
             let mut store = self.store.lock().unwrap();
-            let started = std::time::Instant::now();
+            let now_ms = self.now_ms();
             store.write(|db| {
                 ensure!(
                     self.github.generation() == account_generation,
                     "GitHub account changed; discarded stale sync"
                 );
-                integration::apply_batch(
+                integration::apply_batch_at(
                     db,
                     project,
                     &source.generation,
                     integration::Sync { changes },
                     false,
+                    now_ms,
                 )?;
-                events::github::observe_batch(db, &source.repository, &observations, kind)
+                events::github::observe_batch(db, &source.repository, &observations, kind, now_ms)
             })?;
             if std::env::var_os("CANBAN_BOARD_TRACE").is_some() {
                 eprintln!(
-                    "GITHUB_APPLY_BATCH items={} lock_micros={}",
+                    "GITHUB_APPLY_BATCH items={} lock_ms={}",
                     observations.len(),
-                    started.elapsed().as_micros()
+                    self.now_ms().saturating_sub(now_ms)
                 );
             }
             drop(store);
@@ -802,6 +813,7 @@ impl AppServer {
                         section,
                         &items,
                         current_login.as_deref(),
+                        self.now_ms(),
                     )
                 })?;
             }
@@ -942,6 +954,7 @@ impl AppServer {
         };
 
         self.store.lock().unwrap().write(|db| {
+            let now_ms = self.now_ms();
             events::github::observe_batch_with_context(
                 db,
                 repository,
@@ -949,6 +962,7 @@ impl AppServer {
                 Some("issue"),
                 existing_watermark.as_ref().map(|w| w.baseline_at.as_str()),
                 current_login,
+                now_ms,
             )?;
             events::github::observe_repo_comments_batch(
                 db,
@@ -956,6 +970,7 @@ impl AppServer {
                 &comments,
                 existing_watermark.is_some(),
                 current_login,
+                now_ms,
             )?;
             events::github::save_repo_watermark(db, repository, &next_watermark)?;
             Ok(())

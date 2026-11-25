@@ -438,8 +438,9 @@ impl AppServer {
                 }
             }
             "config.get" => Ok(serde_json::to_value(config)?),
-            "overview.list" => Ok(serde_json::to_value(canban_notifications::overview(
+            "overview.list" => Ok(serde_json::to_value(canban_notifications::overview_at(
                 &self.snapshot()?,
+                self.now_ms(),
             ))?),
             "overview.preview" => self.overview_preview(p),
             "scheduler.status" => {
@@ -456,7 +457,7 @@ impl AppServer {
                         .filter(|r| !r.creates_card && r.state == "queued")
                         .count();
                 Ok(
-                    json!({"active":canban_scheduler::active_count(&snapshot),"max_agents":config.scheduler.max_agents,"queued":queued}),
+                    json!({"active":canban_scheduler::active_count_at(&snapshot, self.now_ms()),"max_agents":config.scheduler.max_agents,"queued":queued}),
                 )
             }
             "scheduler.configure" => {
@@ -506,7 +507,12 @@ impl AppServer {
                 let (c, migration) =
                     Self::read_config_with_runner(&self.home, self.exec_runner.as_ref())?;
                 self.validate_references(&c)?;
-                Self::publish_migration_with_durability(&self.home, migration, self.fs_durability)?;
+                Self::publish_migration_with_durability(
+                    &self.home,
+                    migration,
+                    self.fs_durability,
+                    self.id_gen.as_ref(),
+                )?;
                 *self.config.write().unwrap() = c;
                 self.emit("configuration", None);
                 Ok(json!({"reloaded":true}))
@@ -609,7 +615,13 @@ impl AppServer {
                                 );
                                 let pid = super::resolve_project_id(db, raw_pid)?;
                                 let src_proj: Project = db.get(&pid)?;
-                                authoring::initialize(&self.home, db, &config, &src_proj)?;
+                                authoring::initialize(
+                                    &self.home,
+                                    db,
+                                    &config,
+                                    &src_proj,
+                                    self.now_ms(),
+                                )?;
                                 Some(pid)
                             }
                             (Some("project"), None) => {
@@ -683,6 +695,7 @@ impl AppServer {
                             &[sync_remote.as_str(), workflow.workspace.remote.as_str()],
                         )
                     });
+                let created_at = self.now_ms();
                 let project = Project {
                     github,
                     detected_github,
@@ -690,12 +703,12 @@ impl AppServer {
                     delivery_mode: Default::default(),
                     agent_overrides,
                     tags: Default::default(),
-                    id: id(),
+                    id: self.next_id(),
                     name: name.into(),
                     directory: directory.clone(),
                     workflow,
                     target_branch,
-                    created_at: now(),
+                    created_at,
                 };
                 let result = self.mutate(method, &p, |db| {
                     db.save(&project)?;
@@ -717,6 +730,7 @@ impl AppServer {
                         &project,
                         init_mode,
                         explicit_workspace.as_ref(),
+                        self.now_ms(),
                     )?;
                     let saved: Project = db.get(&project.id)?;
                     Ok(serde_json::to_value(saved)?)
@@ -795,13 +809,16 @@ impl AppServer {
                     .filter(|v| !v.is_null())
                     .map(|v| v.as_str().context("Card id must be a string"))
                     .transpose()?;
-                let mut c = canban_kanban::create_with_id(
+                let now_ms = self.now_ms();
+                let generated_id = explicit_id.is_none().then(|| self.next_id());
+                let mut c = canban_kanban::create_with_id_at(
                     db,
                     &project,
                     strp(&p, "title")?,
                     p["body"].as_str().unwrap_or(""),
                     "user",
-                    explicit_id,
+                    explicit_id.or(generated_id.as_deref()),
+                    now_ms,
                 )?;
                 c.created_by = if self.github_transport.is_some() {
                     self.github.status().login
@@ -821,7 +838,14 @@ impl AppServer {
                     );
                     c.context_notes = Some(vec![note.id.clone()]);
                     db.save(&c)?;
-                    crate::notes::relate_card(db, &note.id, &c, true)?;
+                    crate::notes::relate_card(
+                        db,
+                        &note.id,
+                        &c,
+                        true,
+                        now_ms,
+                        self.id_gen.as_ref(),
+                    )?;
                 } else {
                     db.save(&c)?;
                 }
@@ -834,6 +858,7 @@ impl AppServer {
                     &project,
                     &p,
                     &[&title_text, &body_text],
+                    now_ms,
                 )?;
                 Ok(serde_json::to_value(c)?)
             }),
@@ -896,6 +921,7 @@ impl AppServer {
                         c.delivery_mode = serde_json::from_value(mode.clone())?;
                     }
                     c.revision += 1;
+                    let now_ms = self.now_ms();
                     log(
                         db,
                         &c,
@@ -904,6 +930,7 @@ impl AppServer {
                         "Card updated",
                         active_entry.as_ref().map(|t| t.id.clone()),
                         json!({"title":c.title,"body":c.body,"changed_fields": ([if c.title!=before.title {Some("title")}else{None},if c.body!=before.body {Some("body")}else{None}].into_iter().flatten().collect::<Vec<_>>()),"before_revision":before.revision,"after_revision":c.revision}),
+                        now_ms,
                     )?;
                     db.save(&c)?;
                     if is_agent {
@@ -919,7 +946,7 @@ impl AppServer {
                             wf_run.inputs["body"] = json!(c.body);
                             wf_run.input_digest =
                                 canban_workflow_engine::runtime::card_digest(db, &c);
-                            wf_run.updated_at = now();
+                            wf_run.updated_at = now_ms;
                             db.save(&wf_run)?;
                         }
                     }
@@ -962,8 +989,9 @@ impl AppServer {
                         .as_str()
                         .map(str::trim)
                         .filter(|s| !s.is_empty());
+                    let now_ms = self.now_ms();
                     let bound_entry = caller_terminal.as_ref().and_then(|caller| {
-                        crate::adoption::bind(db, &config, &c, &p, caller)
+                        crate::adoption::bind(db, &config, &c, &p, caller, now_ms)
                     });
                     let mut live_entry = bound_entry.or(db.list::<TerminalEntry>()?.into_iter().rev().find(|t| {
                         t.agent.as_ref().is_some_and(|a| {
@@ -1024,7 +1052,7 @@ impl AppServer {
                                 agent.stage = target.into();
                                 db.save(entry)?;
                                 existing.terminal_id = Some(entry.id.clone());
-                                existing.updated_at = now();
+                                existing.updated_at = now_ms;
                                 db.save(&existing)?;
                             }
                             return Ok(json!({
@@ -1040,7 +1068,7 @@ impl AppServer {
                             .iter()
                             .any(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active())
                         {
-                            workflow::stop_card(db, &config, &c.id, "superseded")?;
+                            workflow::stop_card(db, &config, &c.id, "superseded", now_ms)?;
                         }
                         cancel_other_pending(db)?;
                         let wf_run = workflow::adopt_stage(
@@ -1050,6 +1078,7 @@ impl AppServer {
                             live_entry.as_mut(),
                             target,
                             None,
+                            now_ms,
                         )?;
                         db.save(&c)?;
                         return Ok(json!({
@@ -1063,7 +1092,7 @@ impl AppServer {
 
                     let from = c.stage.clone();
                     cancel_other_pending(db)?;
-                    workflow::stop_card(db, &config, &c.id, "superseded")?;
+                    workflow::stop_card(db, &config, &c.id, "superseded", now_ms)?;
                     c.stage = target.into();
                     c.board_order = None;
                     canban_kanban::order::place(db, &mut c, None)?;
@@ -1079,14 +1108,17 @@ impl AppServer {
                     if let Some(tid) = &live_id {
                         event_data["terminal_id"] = json!(tid);
                     }
-                    let event = db.append(canban_timeline::event(
+                    let mut ev = canban_timeline::event_at(
                         &c.project_id,
                         &c.id,
                         "card.stage_changed",
                         &format!("agent:{profile_label}"),
                         &format!("{from} → {target} (adopted by @{profile_label})"),
                         event_data,
-                    ))?;
+                        now_ms,
+                    );
+                    ev.id = self.next_id();
+                    let event = db.append(ev)?;
                     let wf_run = workflow::adopt_stage(
                         db,
                         &config,
@@ -1094,6 +1126,7 @@ impl AppServer {
                         live_entry.as_mut(),
                         target,
                         Some(event.id),
+                        now_ms,
                     )?;
                     db.save(&c)?;
                     Ok(json!({
@@ -1141,6 +1174,7 @@ impl AppServer {
                             "Card reordered",
                             None,
                             json!({"stage":target,"before_card_id":p["before_card_id"]}),
+                            self.now_ms(),
                         )?;
                         db.save(&c)?;
                     }
@@ -1176,6 +1210,7 @@ impl AppServer {
                 c.attention = None;
                 c.human_gate = None;
                 db.save(&c)?;
+                let now_ms = self.now_ms();
                 log(
                     db,
                     &c,
@@ -1184,8 +1219,9 @@ impl AppServer {
                     &format!("{from} → {target}"),
                     None,
                     json!({"from":from,"to":target,"before_card_id":p["before_card_id"]}),
+                    now_ms,
                 )?;
-                workflow::stop_card(db, &self.config(), &c.id, "superseded")?;
+                workflow::stop_card(db, &self.config(), &c.id, "superseded", now_ms)?;
                 Ok(serde_json::to_value(c)?)
             }),
             "card.continue" => self.continue_card(p),
@@ -1202,6 +1238,7 @@ impl AppServer {
                     let hold = hold_arg.unwrap_or(!c.hold_auto_merge);
                     c.hold_auto_merge = hold;
                     c.revision += 1;
+                    let now_ms = self.now_ms();
                     log(
                         db,
                         &c,
@@ -1218,6 +1255,7 @@ impl AppServer {
                         },
                         None,
                         json!({"hold_auto_merge":hold}),
+                        now_ms,
                     )?;
                     if !hold
                         && let Some(mut run) = db.list::<WorkflowRun>()?.into_iter().find(|r| {
@@ -1228,17 +1266,18 @@ impl AppServer {
                         })
                     {
                         if run.state == "waiting_approval" {
-                            canban_workflow_engine::runtime::approve_with_feedback(
-                                db, &config, &mut c, &mut run, false, None, enqueue,
+                            canban_workflow_engine::runtime::approve_with_feedback_at(
+                                db, &config, &mut c, &mut run, false, None, enqueue, now_ms,
                             )?;
                         } else {
                             run.inputs["queued_at"] = json!(
-                                canban_workflow_engine::runtime::next_merge_queued_at(
+                                canban_workflow_engine::runtime::next_merge_queued_at_ms(
                                     db,
-                                    &c.project_id
+                                    &c.project_id,
+                                    now_ms,
                                 )?
                             );
-                            run.updated_at = now();
+                            run.updated_at = now_ms;
                             db.save(&run)?;
                         }
                     }
@@ -1274,14 +1313,22 @@ impl AppServer {
                         "Context Note belongs to a different Project"
                     );
                 }
+                let now_ms = self.now_ms();
                 let previously = card.context_notes.clone().unwrap_or_default();
                 for id in &previously {
                     if !notes.contains(id) {
-                        crate::notes::relate_card(db, id, &card, false)?;
+                        crate::notes::relate_card(
+                            db,
+                            id,
+                            &card,
+                            false,
+                            now_ms,
+                            self.id_gen.as_ref(),
+                        )?;
                     }
                 }
                 for id in &notes {
-                    crate::notes::relate_card(db, id, &card, true)?;
+                    crate::notes::relate_card(db, id, &card, true, now_ms, self.id_gen.as_ref())?;
                 }
                 card.context_notes = Some(notes.clone());
                 card.revision += 1;
@@ -1294,6 +1341,7 @@ impl AppServer {
                     "Context Note selection updated",
                     None,
                     json!({"note_ids":notes}),
+                    now_ms,
                 )?;
                 Ok(serde_json::to_value(card)?)
             }),
@@ -1308,13 +1356,15 @@ impl AppServer {
                     .filter(|v| !v.is_null())
                     .map(|v| v.as_str().context("Comment id must be a string"))
                     .transpose()?;
-                let mut ev = canban_timeline::event(
+                let now_ms = self.now_ms();
+                let mut ev = canban_timeline::event_at(
                     &c.project_id,
                     &c.id,
                     "comment.created",
                     "user",
                     body,
                     json!({"body":body}),
+                    now_ms,
                 );
                 if let Some(custom_id) = explicit_id {
                     ensure!(
@@ -1328,6 +1378,8 @@ impl AppServer {
                         .is_some();
                     ensure!(!exists, "Event '{custom_id}' already exists");
                     ev.id = custom_id.to_owned();
+                } else {
+                    ev.id = self.next_id();
                 }
                 let event = db.append(ev)?;
                 let project: Project = db.get(&c.project_id)?;
@@ -1352,7 +1404,7 @@ impl AppServer {
                 for agent in mentions {
                     let profile =
                         canban_scheduler::select_in_project(&config, Some(&project), Some(&agent))?;
-                    let context = crate::sessions::conversation(db, &c, &profile)?;
+                    let context = crate::sessions::conversation(db, &c, &profile, now_ms)?;
                     let active = db.get::<TerminalEntry>(&context.id).ok().filter(|t| {
                         t.agent.as_ref().is_some_and(|a| {
                             a.card_id == c.id
@@ -1388,6 +1440,7 @@ impl AppServer {
                             },
                             Some(&profile.id),
                             Some(instruction),
+                            now_ms,
                         )?
                         .context("Question not queued")?
                     };
@@ -1402,7 +1455,7 @@ impl AppServer {
                         state: "pending".into(),
                         error: None,
                         reply_path: None,
-                        created_at: now(),
+                        created_at: now_ms,
                     };
                     db.save(&question)?;
                 }
@@ -1437,7 +1490,7 @@ impl AppServer {
                 if previous_body == body {
                     return Ok(serde_json::to_value(event)?);
                 }
-                let edited_at = now();
+                let edited_at = self.now_ms();
                 let next_revision = previous_revision + 1;
                 event.message = body.into();
                 if !event.data.is_object() {
@@ -1504,7 +1557,7 @@ impl AppServer {
                         if db.get::<Question>(&qid).is_ok() {
                             continue;
                         }
-                        let context = crate::sessions::conversation(db, &c, &profile)?;
+                        let context = crate::sessions::conversation(db, &c, &profile, edited_at)?;
                         let active = db.get::<TerminalEntry>(&context.id).ok().filter(|t| {
                             t.agent.as_ref().is_some_and(|a| {
                                 a.card_id == c.id
@@ -1544,6 +1597,7 @@ impl AppServer {
                                 },
                                 Some(&profile.id),
                                 Some(instruction),
+                                edited_at,
                             )?
                             .context("Question not queued")?
                         };
@@ -1568,7 +1622,7 @@ impl AppServer {
                     c.revision += 1;
                     db.save(&c)?;
                 }
-                db.append(canban_timeline::event(
+                let mut update_ev = canban_timeline::event_at(
                     &c.project_id,
                     &c.id,
                     "comment.updated",
@@ -1581,7 +1635,10 @@ impl AppServer {
                         "body": body,
                         "edited_at": edited_at,
                     }),
-                ))?;
+                    edited_at,
+                );
+                update_ev.id = self.next_id();
+                db.append(update_ev)?;
                 let mut result = serde_json::to_value(event)?;
                 result["card_revision"] = json!(c.revision);
                 Ok(result)
@@ -1598,7 +1655,7 @@ impl AppServer {
                     event.kind == "comment.created" && event.actor == "user",
                     "Only your own comments can be deleted"
                 );
-                let deleted_at = now();
+                let deleted_at = self.now_ms();
                 let previous_body = event.data["body"]
                     .as_str()
                     .unwrap_or(&event.message)
@@ -1670,7 +1727,7 @@ impl AppServer {
                     }
                 }
 
-                db.append(canban_timeline::event(
+                let mut delete_ev = canban_timeline::event_at(
                     &c.project_id,
                     &c.id,
                     "comment.deleted",
@@ -1682,7 +1739,10 @@ impl AppServer {
                         "previous_body": previous_body,
                         "deleted_at": deleted_at,
                     }),
-                ))?;
+                    deleted_at,
+                );
+                delete_ev.id = self.next_id();
+                db.append(delete_ev)?;
                 Ok(json!({
                     "deleted": true,
                     "comment_id": event.id,
@@ -1704,6 +1764,7 @@ impl AppServer {
                     "Attention acknowledged",
                     None,
                     json!({}),
+                    self.now_ms(),
                 )?;
                 for mut n in db
                     .list::<Notice>()?
@@ -1778,6 +1839,7 @@ impl AppServer {
                         }),
                     "End the previous Agent before retrying"
                 );
+                let now_ms = self.now_ms();
                 if let Some(mut wf_run) = deliver_run {
                     if wf_run.state == "waiting_delivery" {
                         c.hold_auto_merge = false;
@@ -1789,11 +1851,16 @@ impl AppServer {
                     }
                     if wf_run.state == "waiting_approval" {
                         let config = self.config();
-                        canban_workflow_engine::runtime::approve_with_feedback(
-                            db, &config, &mut c, &mut wf_run, false, None, enqueue,
+                        canban_workflow_engine::runtime::approve_with_feedback_at(
+                            db, &config, &mut c, &mut wf_run, false, None, enqueue, now_ms,
                         )?;
                     } else {
-                        canban_workflow_engine::runtime::requeue_delivery(db, &mut c, &mut wf_run)?;
+                        canban_workflow_engine::runtime::requeue_delivery_at(
+                            db,
+                            &mut c,
+                            &mut wf_run,
+                            now_ms,
+                        )?;
                     }
                     entry = db.get(&entry.id)?;
                     log(
@@ -1804,10 +1871,11 @@ impl AppServer {
                         "Queued in merge queue",
                         Some(entry.id.clone()),
                         json!({"terminal_id":entry.id,"workflow_run_id":wf_run.id,"queued_for_delivery":true}),
+                        now_ms,
                     )?;
                     return Ok(serde_json::to_value(entry)?);
                 }
-                crate::sessions::retry_agent(db, &c, &mut entry)?;
+                crate::sessions::retry_agent(db, &c, &mut entry, now_ms)?;
                 let run_number = entry.agent.as_ref().map(|a| a.number).unwrap_or(1);
                 c.human_gate = None;
                 c.attention = None;
@@ -1821,6 +1889,7 @@ impl AppServer {
                     "Fresh Agent run queued",
                     Some(entry.id.clone()),
                     json!({"terminal_id":entry.id,"run_number":run_number}),
+                    now_ms,
                 )?;
                 Ok(serde_json::to_value(entry)?)
             }),
@@ -1874,7 +1943,7 @@ impl AppServer {
                 self.mutate(method, &p, |db| {
                     let mut c: Card = db.get(strp(&p, "card_id")?)?;
                     revise(&c, &p)?;
-                    canban_kanban::remove(db, &mut c)?;
+                    canban_kanban::remove_at(db, &mut c, self.now_ms())?;
                     Ok(json!({"removed":true,"card_id":c.id}))
                 })
             }

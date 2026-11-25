@@ -144,7 +144,7 @@ impl AppServer {
                 self.git_changed();
             }
         }
-        let report_id = id();
+        let report_id = self.next_id();
         let path = if let Some(body) = p["body"].as_str() {
             let path = if let Some(entry) = &entry_opt {
                 if let Some(run) = &entry.agent {
@@ -233,6 +233,7 @@ impl AppServer {
                 .and_then(|t| t.agent.as_ref())
                 .map(|r| r.number)
                 .unwrap_or(0);
+            let now_ms = self.now_ms();
             let report = Report {
                 id: report_id,
                 terminal_id: terminal_id.clone(),
@@ -245,7 +246,7 @@ impl AppServer {
                 path,
                 request_key: key.into(),
                 fingerprint,
-                created_at: now(),
+                created_at: now_ms,
             };
             db.save(&report)?;
             let reported_msg = if state == "backlog" {
@@ -296,6 +297,7 @@ impl AppServer {
                     "state": state,
                     "comment_replied": comment_already_replied,
                 }),
+                now_ms,
             )?;
             if matches!(state, "completed" | "backlog") && is_comment {
                 let reply_msg = if state == "backlog" {
@@ -318,6 +320,7 @@ impl AppServer {
                         reply_msg,
                         terminal_id.clone(),
                         json!({"reply_to":q.comment_id,"question_id":q.id,"path":report.path,"report_id":report.id}),
+                        now_ms,
                     )?;
                 }
             }
@@ -359,6 +362,7 @@ impl AppServer {
                         } else {
                             &report.message
                         },
+                        now_ms,
                     )?;
                     if let Some(gate) = &mut card.human_gate
                         && gate.terminal_id.is_none()
@@ -382,11 +386,18 @@ impl AppServer {
                         &mut card,
                         entry_opt.as_ref(),
                         &report,
+                        now_ms,
                     )?;
                 }
                 let mut returned_from = None;
                 if state == "backlog" {
-                    crate::workflow::stop_card(db, &config, &card.id, "returned_to_backlog")?;
+                    crate::workflow::stop_card(
+                        db,
+                        &config,
+                        &card.id,
+                        "returned_to_backlog",
+                        now_ms,
+                    )?;
                     for mut pending in db.list::<TerminalEntry>()? {
                         if let Some(a) = &mut pending.agent
                             && a.card_id == card.id
@@ -440,6 +451,7 @@ impl AppServer {
                             "terminal_id": terminal_id,
                             "workflow_run_id": active_wf_id,
                         }),
+                        now_ms,
                     )?;
                 }
             }

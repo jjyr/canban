@@ -63,14 +63,14 @@ impl AppServer {
         };
         let path_str = path_buf.to_string_lossy().into_owned();
         let wt = ManagedWorktree {
-            id: format!("wt-{}", id()),
+            id: format!("wt-{}", self.next_id()),
             project_id: project.id.clone(),
             branch: branch.to_owned(),
             base_branch: resolved_base,
             base_commit: Some(base_commit),
             path: path_str.clone(),
             directory: project.directory.clone(),
-            created_at: now(),
+            created_at: self.now_ms(),
         };
 
         let saved_wt: ManagedWorktree =
@@ -141,7 +141,17 @@ impl AppServer {
         let card_val = self.mutate("worktree.promote", &p, |db| {
             let wt: ManagedWorktree = db.get(wt_id)?;
             let project: Project = db.get(&wt.project_id)?;
-            let mut card = canban_kanban::create(db, &project, title, body, "user")?;
+            let now_ms = self.now_ms();
+            let card_id = self.next_id();
+            let mut card = canban_kanban::create_with_id_at(
+                db,
+                &project,
+                title,
+                body,
+                "user",
+                Some(&card_id),
+                now_ms,
+            )?;
             card.created_by = if self.github_transport.is_some() {
                 self.github.status().login
             } else {
@@ -175,6 +185,7 @@ impl AppServer {
                 ),
                 None,
                 json!({"branch": wt.branch, "path": wt.path, "base_branch": wt.base_branch}),
+                now_ms,
             )?;
             db.conn
                 .execute("DELETE FROM managed_worktrees WHERE id=?1", params![wt.id])?;
@@ -283,7 +294,7 @@ impl AppServer {
             None
         };
 
-        let now_ms = now();
+        let now_ms = self.now_ms();
         let cutoff = now_ms.saturating_sub(merged_before_ms);
         let mut removed = Vec::<Value>::new();
         let mut dirty = Vec::<Value>::new();

@@ -1806,7 +1806,7 @@ fn recovery_gate_retains_completion_callback_until_human_approval() {
         .unwrap()
         .write(|db| {
             let mut c: Card = db.get(&card.id)?;
-            attention(db, &mut c, "Connection needs inspection")?;
+            attention(db, &mut c, "Connection needs inspection", app.now_ms())?;
             db.save(&c)
         })
         .unwrap();
@@ -4269,6 +4269,8 @@ fn git_related_card_requires_a_unique_canonical_worktree_match() {
 mod memory;
 
 mod representations;
+
+mod clock_and_livelock;
 
 #[test]
 fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback() {

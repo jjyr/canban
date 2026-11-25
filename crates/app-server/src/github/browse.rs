@@ -388,6 +388,7 @@ impl AppServer {
                 "Updated GitHub reference",
                 None,
                 json!({"reference":r}),
+                self.now_ms(),
             )?;
             Ok(serde_json::to_value(c)?)
         })
@@ -436,7 +437,7 @@ impl AppServer {
                     .is_some_and(|s| s.generation == source.generation),
                 "Project source changed; add again"
             );
-            let card = integration::upsert(
+            let card = integration::upsert_at(
                 db,
                 &current,
                 Change {
@@ -445,6 +446,7 @@ impl AppServer {
                 },
                 true,
                 p["instructions"].as_str().unwrap_or(""),
+                self.now_ms(),
             )?;
             Ok(serde_json::to_value(card)?)
         })
@@ -681,7 +683,7 @@ impl AppServer {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(id);
+            .unwrap_or_else(|| self.next_id());
         let review_payload = json!({
             "request_key": request_key,
             "card_id": card.id,
@@ -863,7 +865,13 @@ impl AppServer {
                 };
                 if let Some(kind) = receipt_kind {
                     let _ = self.store.lock().unwrap().write(|db| {
-                        events::github::record_written_receipt(db, &r.repository, kind, item_id)
+                        events::github::record_written_receipt(
+                            db,
+                            &r.repository,
+                            kind,
+                            item_id,
+                            self.now_ms(),
+                        )
                     });
                 }
             }
@@ -966,7 +974,7 @@ impl AppServer {
         };
         object.remove("refresh");
         object.insert("_operation".into(), json!(operation));
-        object.insert("_used_at".into(), json!(now()));
+        object.insert("_used_at".into(), json!(self.now_ms()));
         let mut warm = self.github_queries.lock().unwrap();
         warm.insert(key.into(), query);
         while warm.len() > 12 {

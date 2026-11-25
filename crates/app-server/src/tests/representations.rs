@@ -404,7 +404,7 @@ fn prune_cardless_events_preserves_highwater_pending_deliveries_and_card_events(
         .store
         .lock()
         .unwrap()
-        .write(|db| db.prune_cardless_events(60_000, 100, hw_before))
+        .write(|db| db.prune_cardless_events(60_000, 100, hw_before, app.now_ms()))
         .unwrap();
     assert_eq!(
         pruned, 1,

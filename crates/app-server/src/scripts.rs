@@ -688,6 +688,7 @@ impl AppServer {
                             "Card workspace prepared",
                             None,
                             json!({"workspace": binding}),
+                            self.now_ms(),
                         )?;
                         db.save(&current)?;
                     }
@@ -708,7 +709,7 @@ impl AppServer {
         std::fs::create_dir_all(&scripts_dir)?;
 
         let slug = sanitized_step_slug(step_id);
-        let stem = format!("{slug}-v{}-{}", run.visit, id());
+        let stem = format!("{slug}-v{}-{}", run.visit, self.next_id());
         let script_file = scripts_dir.join(format!("{stem}.sh"));
         let env_file = scripts_dir.join(format!("{stem}.env"));
         let output_file = scripts_dir.join(format!("{stem}.output"));
@@ -929,10 +930,11 @@ impl AppServer {
                 &outputs,
             );
             let cid = card_opt.as_ref().map(|c| c.id.clone());
+            let now_ms = self.now_ms();
 
             if let Some(card) = &mut card_opt {
                 if succeeded || out.continue_on_error {
-                    canban_workflow_engine::runtime::complete_script(
+                    canban_workflow_engine::runtime::complete_script_at(
                         db,
                         &config,
                         card,
@@ -940,6 +942,7 @@ impl AppServer {
                         output_val,
                         &exported_env,
                         enqueue,
+                        now_ms,
                     )?;
                 } else {
                     let code_desc = if out.timed_out {
@@ -960,7 +963,7 @@ impl AppServer {
                             out.step_id
                         )
                     };
-                    canban_workflow_engine::runtime::fail_script(
+                    canban_workflow_engine::runtime::fail_script_at(
                         db,
                         &config,
                         card,
@@ -970,14 +973,16 @@ impl AppServer {
                         &summary,
                         &detail,
                         enqueue,
+                        now_ms,
                     )?;
                 }
             } else if succeeded || out.continue_on_error {
-                canban_workflow_engine::runtime::complete_cardless_script(
+                canban_workflow_engine::runtime::complete_cardless_script_at(
                     db,
                     &mut current_run,
                     output_val,
                     &exported_env,
+                    now_ms,
                 )?;
             } else {
                 let code_desc = if out.timed_out {
@@ -998,13 +1003,14 @@ impl AppServer {
                         out.step_id
                     )
                 };
-                canban_workflow_engine::runtime::fail_cardless_script(
+                canban_workflow_engine::runtime::fail_cardless_script_at(
                     db,
                     &mut current_run,
                     output_val,
                     &exported_env,
                     &summary,
                     &detail,
+                    now_ms,
                 )?;
             }
             Ok(Some(cid))
@@ -1097,7 +1103,7 @@ impl AppServer {
                     }
                 };
 
-                let elapsed_ms = now().saturating_sub(started_at);
+                let elapsed_ms = self.now_ms().saturating_sub(started_at);
                 let is_finished = state_val["state"] == "finished";
                 let timed_out = !is_finished && elapsed_ms >= timeout_secs.saturating_mul(1000);
                 if timed_out {
@@ -1163,6 +1169,7 @@ impl AppServer {
                             && current.step.as_deref() == Some(&step_id)
                             && current.visit == run.visit
                         {
+                            let started_at = self.now_ms();
                             current.inputs["script_terminal"] = json!({
                                 "address": addr,
                                 "core_id": core_id,
@@ -1170,9 +1177,9 @@ impl AppServer {
                                 "output_file": prep.output_file,
                                 "script_file": prep.script_file,
                                 "raw_log_file": prep.raw_log_file,
-                                "started_at": now(),
+                                "started_at": started_at,
                             });
-                            current.updated_at = now();
+                            current.updated_at = started_at;
                             db.save(&current)?;
                         }
                         Ok(())
@@ -1307,9 +1314,10 @@ impl AppServer {
                 &BTreeMap::new(),
             );
             let cid = card_opt.as_ref().map(|c| c.id.clone());
+            let now_ms = self.now_ms();
             if let Some(card) = &mut card_opt {
                 if continue_on_error {
-                    canban_workflow_engine::runtime::complete_script(
+                    canban_workflow_engine::runtime::complete_script_at(
                         db,
                         &config,
                         card,
@@ -1317,9 +1325,10 @@ impl AppServer {
                         output_val,
                         &BTreeMap::new(),
                         enqueue,
+                        now_ms,
                     )?;
                 } else {
-                    canban_workflow_engine::runtime::fail_script(
+                    canban_workflow_engine::runtime::fail_script_at(
                         db,
                         &config,
                         card,
@@ -1329,23 +1338,26 @@ impl AppServer {
                         summary,
                         summary,
                         enqueue,
+                        now_ms,
                     )?;
                 }
             } else if continue_on_error {
-                canban_workflow_engine::runtime::complete_cardless_script(
+                canban_workflow_engine::runtime::complete_cardless_script_at(
                     db,
                     &mut current_run,
                     output_val,
                     &BTreeMap::new(),
+                    now_ms,
                 )?;
             } else {
-                canban_workflow_engine::runtime::fail_cardless_script(
+                canban_workflow_engine::runtime::fail_cardless_script_at(
                     db,
                     &mut current_run,
                     output_val,
                     &BTreeMap::new(),
                     summary,
                     summary,
+                    now_ms,
                 )?;
             }
             Ok(Some(cid))

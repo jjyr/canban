@@ -4,6 +4,7 @@ use canban_transport::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
+#[cfg(test)]
 pub(super) fn uuid_session_id() -> String {
     canban_types::uuid_v4()
 }
@@ -75,6 +76,7 @@ impl AppServer {
                         db,
                         &mut card,
                         "Launch interrupted before its receipt was saved. Inspect Herdr before explicitly retrying.",
+                        self.now_ms(),
                     )?;
                     if let Some(gate) = &mut card.human_gate
                         && gate.terminal_id.is_none()
@@ -92,7 +94,7 @@ impl AppServer {
                 q.state = "delivery_unknown".into();
                 q.error = Some("AppServer restarted during delivery; inspect the Agent terminal before resending".into());
                 let mut card: Card = db.get(&q.card_id)?;
-                attention(db, &mut card, q.error.as_deref().unwrap())?;
+                attention(db, &mut card, q.error.as_deref().unwrap(), self.now_ms())?;
                 card.revision += 1;
                 db.save(&card)?;
                 db.save(&q)?;
@@ -311,8 +313,9 @@ impl AppServer {
             .clone()
             .or_else(|| {
                 listen_cfg.trust_tailscale_self_enabled().then(|| {
-                    Arc::new(network::SystemTailscaleVerifier::new())
-                        as Arc<dyn canban_transport::TailscalePeerVerifier>
+                    Arc::new(network::SystemTailscaleVerifier::new_with_clock(
+                        self.clock.clone(),
+                    )) as Arc<dyn canban_transport::TailscalePeerVerifier>
                 })
             });
         let transport_cfg = Arc::new(canban_transport::ServerTransportConfig {
@@ -700,8 +703,8 @@ async fn github_sync_loop(
     notify: Arc<tokio::sync::Notify>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut next_sync = tokio::time::Instant::now();
-    let mut next_fast_pr = tokio::time::Instant::now() + Duration::from_secs(25);
+    let mut next_sync_ms: u64 = 0;
+    let mut next_fast_pr_ms: Option<u64> = None;
     let mut prev_auth_state = String::new();
     while !*stop_rx.borrow() {
         let Some(server) = weak.upgrade() else {
@@ -738,10 +741,12 @@ async fn github_sync_loop(
                 }
                 prev_auth_state = auth_state;
             }
-            let now_instant = tokio::time::Instant::now();
-            if now_instant >= next_sync || server.github_sync_due.swap(false, Ordering::SeqCst) {
-                next_sync = now_instant + Duration::from_secs(120);
-                next_fast_pr = now_instant + Duration::from_secs(25);
+            let now_ms = server.now_ms();
+            let mut next_fast_pr_ms =
+                next_fast_pr_ms.unwrap_or_else(|| now_ms.saturating_add(25_000));
+            if now_ms >= next_sync_ms || server.github_sync_due.swap(false, Ordering::SeqCst) {
+                next_sync_ms = now_ms.saturating_add(120_000);
+                next_fast_pr_ms = now_ms.saturating_add(25_000);
                 server.reconcile_project_github_bindings();
                 let projects = server
                     .store
@@ -769,8 +774,8 @@ async fn github_sync_loop(
                 }) {
                     let _ = server.github_pr_refresh(json!({"card_id":c.id}));
                 }
-            } else if now_instant >= next_fast_pr {
-                next_fast_pr = now_instant + Duration::from_secs(25);
+            } else if now_ms >= next_fast_pr_ms {
+                next_fast_pr_ms = now_ms.saturating_add(25_000);
                 let cards = server
                     .store
                     .lock()
@@ -821,7 +826,14 @@ async fn github_sync_loop(
                 }
             }
             let authorizing = prev_auth_state == "authorizing";
-            Some((next_sync, next_fast_pr, prev_auth_state, authorizing))
+            let after_ms = server.now_ms();
+            Some((
+                next_sync_ms,
+                next_fast_pr_ms,
+                prev_auth_state,
+                authorizing,
+                after_ms,
+            ))
         };
         let outcome = if inline {
             let res = work();
@@ -830,19 +842,17 @@ async fn github_sync_loop(
         } else {
             tokio::task::spawn_blocking(work).await
         };
-        let Ok(Some((ns, nfp, pas, authorizing))) = outcome else {
+        let Ok(Some((ns, nfp, pas, authorizing, after_ms))) = outcome else {
             break;
         };
-        next_sync = ns;
-        next_fast_pr = nfp;
+        next_sync_ms = ns;
+        next_fast_pr_ms = Some(nfp);
         prev_auth_state = pas;
-        let mut deadline = next_sync.min(next_fast_pr);
+        let mut deadline_ms = next_sync_ms.min(nfp);
         if authorizing {
-            deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(1));
+            deadline_ms = deadline_ms.min(after_ms.saturating_add(1_000));
         }
-        let delay = deadline
-            .saturating_duration_since(tokio::time::Instant::now())
-            .max(Duration::from_millis(1));
+        let delay = Duration::from_millis(deadline_ms.saturating_sub(after_ms).max(1));
         if !AppServer::wait_or_stop(&notify, &mut stop_rx, Some(delay)).await {
             break;
         }
@@ -1028,16 +1038,17 @@ impl AppServer {
             return Ok(());
         }
 
-        let changes_before = self.db_changes();
-        self.store.lock().unwrap().write(|db| {
+        let events_changed = self.store.lock().unwrap().write(|db| {
+            let before = db.conn.total_changes();
             events::pump_at_with_prune_state(
                 db,
                 &self.config(),
                 self.now_ms(),
                 Some(&self.last_cardless_prune_at),
-            )
+            )?;
+            Ok(db.conn.total_changes() != before)
         })?;
-        if self.db_changes() != changes_before || self.delivery_wake.lock().unwrap().is_none() {
+        if events_changed || self.delivery_wake.lock().unwrap().is_none() {
             self.request_deliveries();
             self.request_scripts();
         }
@@ -1112,6 +1123,7 @@ impl AppServer {
                     let run_terminal = run.terminal.clone();
                     let run_number = run.number;
                     self.store.lock().unwrap().write(|db| {
+                        let now_ms = self.now_ms();
                         let mut current_entry: TerminalEntry = db.get(&entry.id)?;
                         let Some(current) = &mut current_entry.agent else {
                             return Ok(());
@@ -1129,6 +1141,7 @@ impl AppServer {
                                 "Reconnected to the original terminal",
                                 Some(entry.id.clone()),
                                 json!({"terminal":run_terminal}),
+                                now_ms,
                             )?;
                         }
                         current.connection_state = "connected".into();
@@ -1149,6 +1162,7 @@ impl AppServer {
                                     closed_msg,
                                     Some(entry.id.clone()),
                                     json!({"run_number":run_number}),
+                                    now_ms,
                                 )?;
                             } else if matches!(
                                 current.state.as_str(),
@@ -1157,7 +1171,7 @@ impl AppServer {
                                 let card = db.get::<Card>(&card_id)?;
                                 if card.resolved() {
                                     current.state = "completed".into();
-                                    current.completed_at = Some(self.now_ms());
+                                    current.completed_at = Some(now_ms);
                                     current.close_state = String::new();
                                 } else {
                                     current.state = "failed".into();
@@ -1171,6 +1185,7 @@ impl AppServer {
                                         current.error.as_deref().unwrap(),
                                         Some(entry.id.clone()),
                                         json!({"run_number":run_number,"exit_code":observed["exit_code"]}),
+                                        now_ms,
                                     )?;
                                 }
                             }
@@ -1288,11 +1303,13 @@ impl AppServer {
                 let close_reason = current.lifecycle.close_reason.clone();
                 let run_num = current.number;
                 let mut card: Card = db.get(&card_id)?;
+                let now_ms = self.now_ms();
                 if close_reason == "idle" {
-                    db.save(&canban_notifications::attention(
+                    db.save(&canban_notifications::attention_at(
                         &card.project_id,
                         &card.id,
                         &err_msg,
+                        now_ms,
                     ))?;
                     log(
                         db,
@@ -1302,9 +1319,10 @@ impl AppServer {
                         &err_msg,
                         Some(entry.id.clone()),
                         json!({"run_number":run_num}),
+                        now_ms,
                     )?;
                 } else {
-                    attention(db, &mut card, &err_msg)?;
+                    attention(db, &mut card, &err_msg, now_ms)?;
                     card.revision += 1;
                     db.save(&card)?;
                 }
@@ -1333,13 +1351,16 @@ impl AppServer {
         if self.observer_running.load(Ordering::SeqCst) && self.runtime_inventory().is_err() {
             return Ok(());
         }
-        let next_entry = canban_scheduler::next(&snapshot, self.config().scheduler.max_agents);
+        let next_entry =
+            canban_scheduler::next_at(&snapshot, self.config().scheduler.max_agents, self.now_ms());
         if let Some(next_entry) = next_entry {
             let admitted = self.store.lock().unwrap().write(|db| {
+                let now_ms = self.now_ms();
                 let mut entry: TerminalEntry = db.get(&next_entry.id)?;
                 let current = db.snapshot()?;
-                if canban_scheduler::active_count(&current) >= self.config().scheduler.max_agents
-                    || !canban_scheduler::eligible(&current, &entry)
+                if canban_scheduler::active_count_at(&current, now_ms)
+                    >= self.config().scheduler.max_agents
+                    || !canban_scheduler::eligible_at(&current, &entry, now_ms)
                 {
                     return Ok(None);
                 }
@@ -1350,8 +1371,8 @@ impl AppServer {
                             .as_deref()
                             == Some(a.applied_env_fingerprint.as_str())
                 });
-                let continue_in_place =
-                    env_matches && canban_scheduler::can_continue_in_place(&current, &entry);
+                let continue_in_place = env_matches
+                    && canban_scheduler::can_continue_in_place_at(&current, &entry, now_ms);
                 let Some(agent) = &mut entry.agent else {
                     return Ok(None);
                 };
@@ -1378,7 +1399,7 @@ impl AppServer {
                 if agent.pending.is_some() {
                     let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
                     let had_session = agent.provider_session_id.is_some();
-                    agent.promote_pending();
+                    agent.promote_pending_at(now_ms);
                     agent.card_number = card.number;
                     agent.number = number;
                     agent.resume_session = had_session && !agent.trigger.is_automatic();
@@ -1407,7 +1428,7 @@ impl AppServer {
                     project.directory.clone()
                 });
                 if agent.started_at.is_none() {
-                    agent.started_at = Some(now());
+                    agent.started_at = Some(now_ms);
                 }
                 agent.state = "starting".into();
                 db.save(&entry)?;
@@ -1473,6 +1494,7 @@ impl AppServer {
                 message,
                 Some(entry.id.clone()),
                 json!({"terminal":terminal,"connection_state":state}),
+                self.now_ms(),
             )
         })?;
         self.emit("runtime", Some(card_id));
@@ -1540,6 +1562,7 @@ impl AppServer {
                         },
                         Some(&q.profile_id),
                         Some(instruction),
+                        self.now_ms(),
                     )?
                     .context("Could not retain question")?;
                     q.terminal_id = Some(follow_up.id);
@@ -1607,7 +1630,7 @@ impl AppServer {
             self.store.lock().unwrap().write(|db|{
                 let mut q:Question=db.get(&question.id)?;
                 if q.state=="replied"{return Ok(());}
-                match &result {Ok(_)=>q.state="delivered".into(),Err(e)=>{q.state="delivery_unknown".into();q.error=Some(format!("{e:#}"));let mut c:Card=db.get(&q.card_id)?;attention(db,&mut c,"Question delivery needs inspection; open the Agent terminal. It was not automatically resent.")?;c.revision+=1;db.save(&c)?;}}
+                match &result {Ok(_)=>q.state="delivered".into(),Err(e)=>{q.state="delivery_unknown".into();q.error=Some(format!("{e:#}"));let mut c:Card=db.get(&q.card_id)?;attention(db,&mut c,"Question delivery needs inspection; open the Agent terminal. It was not automatically resent.",self.now_ms())?;c.revision+=1;db.save(&c)?;}}
                 db.save(&q)
             })?;
             self.emit("question", Some(question.card_id.clone()));
@@ -1727,6 +1750,7 @@ impl AppServer {
                         "Card workspace prepared",
                         Some(entry.id.clone()),
                         json!({"workspace":workspace}),
+                        self.now_ms(),
                     )?;
                     db.save(&current)?;
                 }
@@ -1748,7 +1772,7 @@ impl AppServer {
             &card_events,
         )?;
         let (mut context, fresh) = self.store.lock().unwrap().write(|db| {
-            let mut c = crate::sessions::conversation(db, card, &att.profile)?;
+            let mut c = crate::sessions::conversation(db, card, &att.profile, self.now_ms())?;
             if resuming && att.provider_session_id.is_some() {
                 c.provider_session_id = att.provider_session_id.clone();
             } else if !resuming
@@ -1770,7 +1794,7 @@ impl AppServer {
                     .iter()
                     .any(|a| a.contains("{session_id}"))
             {
-                c.provider_session_id = Some(uuid_session_id());
+                c.provider_session_id = Some(self.next_uuid());
             }
             db.save(&c)?;
             Ok((c, fresh))
@@ -1961,6 +1985,7 @@ impl AppServer {
                 &format!("@{} started", att.profile.id),
                 Some(entry.id.clone()),
                 json!({"run_number":run.number,"terminal":run.terminal,"core_id":run.core_id,"directory":run.directory,"cwd":run.cwd}),
+                self.now_ms(),
             )
         })?;
         self.store.lock().unwrap().write(|db| {
@@ -2010,9 +2035,10 @@ impl AppServer {
                 is_unknown = a.state == "unknown";
                 db.save(&current_entry)?;
             }
+            let now_ms = self.now_ms();
             let mut c: Card = db.get(&card_id)?;
             if is_unknown || error.contains("undelivered work") {
-                attention(db, &mut c, error)?;
+                attention(db, &mut c, error, now_ms)?;
                 if let Some(gate) = &mut c.human_gate
                     && gate.terminal_id.is_none()
                 {
@@ -2029,6 +2055,7 @@ impl AppServer {
                 error,
                 Some(entry.id.clone()),
                 json!({"run_number":run_num}),
+                now_ms,
             )
         })?;
         self.emit("execution", Some(card_id));
@@ -2092,11 +2119,12 @@ impl AppServer {
                             && current.step.as_deref() == Some(&step_id)
                             && current.visit == run.visit
                         {
-                            canban_workflow_engine::runtime::complete_cardless_agent(
+                            canban_workflow_engine::runtime::complete_cardless_agent_at(
                                 db,
                                 &mut current,
                                 output,
                                 report_state,
+                                self.now_ms(),
                             )?;
                         }
                         Ok(())
@@ -2109,10 +2137,9 @@ impl AppServer {
             }
 
             // Respect global `max_agents` capacity before launching a new cardless agent.
-            let has_slot = self
-                .snapshot()
-                .ok()
-                .is_some_and(|s| canban_scheduler::active_count(&s) < config.scheduler.max_agents);
+            let has_slot = self.snapshot().ok().is_some_and(|s| {
+                canban_scheduler::active_count_at(&s, self.now_ms()) < config.scheduler.max_agents
+            });
             if !has_slot {
                 continue;
             }
@@ -2136,11 +2163,12 @@ impl AppServer {
             let Some(profile) = profile else {
                 let _ = self.store.lock().unwrap().write(|db| {
                     let mut current: WorkflowRun = db.get(&run.id)?;
-                    canban_workflow_engine::runtime::complete_cardless_agent(
+                    canban_workflow_engine::runtime::complete_cardless_agent_at(
                         db,
                         &mut current,
                         json!({"error": "No configured agent profile"}),
                         "failed",
+                        self.now_ms(),
                     )
                 });
                 continue;
@@ -2250,13 +2278,14 @@ impl AppServer {
                             && current.step.as_deref() == Some(&step_id)
                             && current.visit == run.visit
                         {
+                            let started_at = self.now_ms();
                             current.inputs["agent_terminal"] = json!({
                                 "address": addr,
                                 "step_id": step_id,
                                 "visit": run.visit,
-                                "started_at": now(),
+                                "started_at": started_at,
                             });
-                            current.updated_at = now();
+                            current.updated_at = started_at;
                             db.save(&current)?;
                         }
                         Ok(())
@@ -2267,11 +2296,12 @@ impl AppServer {
                     let msg = format!("Failed to launch cardless agent `{step_id}`: {e:#}");
                     let _ = self.store.lock().unwrap().write(|db| {
                         let mut current: WorkflowRun = db.get(&run.id)?;
-                        canban_workflow_engine::runtime::complete_cardless_agent(
+                        canban_workflow_engine::runtime::complete_cardless_agent_at(
                             db,
                             &mut current,
                             json!({"error": msg}),
                             "failed",
+                            self.now_ms(),
                         )
                     });
                     self.emit("application", None);

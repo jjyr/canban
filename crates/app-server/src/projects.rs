@@ -130,6 +130,7 @@ impl AppServer {
                         "Project work directory updated for future executions",
                         None,
                         json!({"previous_directory": previous, "directory": directory}),
+                        self.now_ms(),
                     )?;
                 }
             }

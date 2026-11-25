@@ -138,6 +138,7 @@ impl AppServer {
                     &current,
                     target_version.as_deref(),
                     gh_client.as_ref(),
+                    self.id_gen.as_ref(),
                 )?
                 else {
                     return Ok(json!({
@@ -271,30 +272,29 @@ pub(crate) fn update_check_step(
     updates_disabled: bool,
     allow_auto_check: bool,
     prev_payload: Option<Value>,
-    mut next: std::time::Instant,
-) -> Option<(Option<Value>, std::time::Instant, Duration)> {
-    weak.upgrade().filter(|s| !s.stopped())?;
+    mut next_ms: u64,
+) -> Option<(Option<Value>, u64, Duration)> {
+    let server = weak.upgrade().filter(|s| !s.stopped())?;
     let handoff_active = canban_updater::handoff::active(home);
     let mut emitted_auto = false;
     if !handoff_active {
         let _ = canban_updater::handoff::flush_settled(home);
         let recovered = canban_updater::recover_stale_state(home).unwrap_or(false);
         let mut auto_checked = false;
-        if !updates_disabled && allow_auto_check && std::time::Instant::now() >= next {
+        let now_ms = server.now_ms();
+        if !updates_disabled && allow_auto_check && now_ms >= next_ms {
             let result = canban_updater::feed::check_automatically(home, github.client().ok());
             let delay = if result.is_ok() {
                 auto_checked = true;
                 canban_updater::load_state(home)
-                    .automatic_delay(canban_updater::now())
+                    .automatic_delay(server.now_ms() / 1000)
                     .max(1)
             } else {
                 60
             };
-            next = std::time::Instant::now() + Duration::from_secs(delay);
+            next_ms = server.now_ms().saturating_add(delay.saturating_mul(1_000));
         }
-        if (recovered || auto_checked)
-            && let Some(server) = weak.upgrade()
-        {
+        if recovered || auto_checked {
             server.emit_update();
             emitted_auto = true;
         }
@@ -305,25 +305,20 @@ pub(crate) fn update_check_step(
         handoff_active || matches!(phase.as_str(), "checking" | "downloading" | "installing");
     if active_op {
         let mut next_payload = prev_payload;
-        if let Some(server) = weak.upgrade() {
-            let payload = server.update_state_payload();
-            if next_payload.as_ref() != Some(&payload) {
-                next_payload = Some(payload);
-                if !emitted_auto {
-                    server.emit_update();
-                }
+        let payload = server.update_state_payload();
+        if next_payload.as_ref() != Some(&payload) {
+            next_payload = Some(payload);
+            if !emitted_auto {
+                server.emit_update();
             }
         }
-        return Some((next_payload, next, Duration::from_millis(500)));
+        return Some((next_payload, next_ms, Duration::from_millis(500)));
     }
 
-    if prev_payload.is_some()
-        && !emitted_auto
-        && let Some(server) = weak.upgrade()
-    {
+    if prev_payload.is_some() && !emitted_auto {
         server.emit_update();
     }
-    Some((None, next, Duration::from_secs(1)))
+    Some((None, next_ms, Duration::from_secs(1)))
 }
 
 async fn update_checks_loop(
@@ -333,7 +328,7 @@ async fn update_checks_loop(
     github: Arc<canban_github::auth::Service>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut next = std::time::Instant::now();
+    let mut next_ms = weak.upgrade().map_or(0, |s| s.now_ms());
     let mut last_active_payload: Option<Value> = None;
     let allow_auto_check = !cfg!(test) && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none();
     while !*stop_rx.borrow() {
@@ -351,7 +346,7 @@ async fn update_checks_loop(
                 updates_disabled,
                 allow_auto_check,
                 prev_payload,
-                next,
+                next_ms,
             )
         })
         .await;
@@ -359,7 +354,7 @@ async fn update_checks_loop(
             break;
         };
         last_active_payload = next_payload;
-        next = next_at;
+        next_ms = next_at;
         tokio::select! {
             biased;
             res = stop_rx.changed() => {
@@ -533,6 +528,7 @@ fn apply_daemon_update(
     current: &canban_updater::Build,
     target_version: Option<&str>,
     gh_client: Option<&canban_github::Client>,
+    id_gen: &dyn canban_types::IdGen,
 ) -> Result<Option<(String, u32, PathBuf)>> {
     let active_cli = resolve_active_cli_path(home, cli_path);
     // Coexistence guard: if `active_cli` (which resolves `/proc/self/exe` through `~/.local/bin/canban`
@@ -554,7 +550,7 @@ fn apply_daemon_update(
         let target_ver = release.manifest.version.clone();
         let target_api = release.manifest.api;
         let staged_bundle = canban_updater::feed::stage(home, &release, gh_client)?;
-        let token = canban_types::token_id();
+        let token = id_gen.next_token();
         canban_updater::worker::replace_bundle_in_place(&target_bundle, &staged_bundle, &token)?;
         let mut state = canban_updater::load_state(home);
         state.phase = "current".into();
@@ -593,7 +589,7 @@ fn apply_daemon_update(
     let parent = resolved_cli
         .parent()
         .context("Daemon executable parent directory missing")?;
-    let tmp_bin = parent.join(format!(".canban-next-{}", canban_types::id()));
+    let tmp_bin = parent.join(format!(".canban-next-{}", id_gen.next_id()));
     std::fs::copy(&staged_bin, &tmp_bin)
         .with_context(|| format!("Could not write updated binary to {}", parent.display()))?;
     #[cfg(unix)]
@@ -638,6 +634,7 @@ mod tests {
             &canban_updater::Build::current(),
             None,
             None,
+            canban_types::system_id_gen().as_ref(),
         )
         .unwrap_err();
         assert!(
@@ -707,6 +704,7 @@ mod tests {
             },
             None,
             None,
+            canban_types::system_id_gen().as_ref(),
         );
         let _ = live_ui.kill();
         let _ = live_ui.wait();
@@ -831,7 +829,14 @@ mod tests {
         unsafe {
             std::env::set_var("CANBAN_UPDATE_API", format!("http://{addr}"));
         }
-        let outcome = apply_daemon_update(&home, &bin_links.join("canban"), &current, None, None);
+        let outcome = apply_daemon_update(
+            &home,
+            &bin_links.join("canban"),
+            &current,
+            None,
+            None,
+            canban_types::system_id_gen().as_ref(),
+        );
         match prev_api {
             Some(v) => unsafe { std::env::set_var("CANBAN_UPDATE_API", v) },
             None => unsafe { std::env::remove_var("CANBAN_UPDATE_API") },
@@ -1038,7 +1043,14 @@ mod tests {
         unsafe {
             std::env::set_var("CANBAN_UPDATE_API", format!("http://{addr}"));
         }
-        let outcome = apply_daemon_update(&home, &deleted_install_cli, &current, None, None);
+        let outcome = apply_daemon_update(
+            &home,
+            &deleted_install_cli,
+            &current,
+            None,
+            None,
+            canban_types::system_id_gen().as_ref(),
+        );
         match prev_api {
             Some(v) => unsafe { std::env::set_var("CANBAN_UPDATE_API", v) },
             None => unsafe { std::env::remove_var("CANBAN_UPDATE_API") },

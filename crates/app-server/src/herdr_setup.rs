@@ -113,8 +113,12 @@ impl AppServer {
         if let Ok((next_config, migration)) =
             Self::read_config_with_runner(&self.home, self.exec_runner.as_ref())
         {
-            let _ =
-                Self::publish_migration_with_durability(&self.home, migration, self.fs_durability);
+            let _ = Self::publish_migration_with_durability(
+                &self.home,
+                migration,
+                self.fs_durability,
+                self.id_gen.as_ref(),
+            );
             let changed = {
                 let mut active = self.config.write().unwrap();
                 let changed = active.hc != next_config.hc

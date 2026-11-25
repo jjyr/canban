@@ -168,8 +168,9 @@ pub(super) fn publish_collection(
     project: &Project,
     config: &Config,
     inputs: &[Value],
+    now_ms: u64,
 ) -> Result<()> {
-    publish_scope(home, db, &project.id, Some(project), config, inputs)
+    publish_scope(home, db, &project.id, Some(project), config, inputs, now_ms)
 }
 
 pub(super) fn publish_global_collection(
@@ -177,8 +178,9 @@ pub(super) fn publish_global_collection(
     db: Db<'_>,
     config: &Config,
     inputs: &[Value],
+    now_ms: u64,
 ) -> Result<()> {
-    publish_scope(home, db, GLOBAL_PROJECT_ID, None, config, inputs)
+    publish_scope(home, db, GLOBAL_PROJECT_ID, None, config, inputs, now_ms)
 }
 
 fn publish_scope(
@@ -188,6 +190,7 @@ fn publish_scope(
     project_opt: Option<&Project>,
     config: &Config,
     inputs: &[Value],
+    now_ms: u64,
 ) -> Result<()> {
     let compiled = validate(db, config, scope_id, project_opt, inputs)?;
     let old: Vec<_> = db
@@ -214,7 +217,7 @@ fn publish_scope(
                 && r.inputs["stop_after_step"].is_null()
         }) {
             run.inputs["stop_after_step"] = json!(run.step);
-            run.updated_at = now();
+            run.updated_at = now_ms;
             db.save(&run)?;
             if let Some(card_id) = run.card_id.as_deref() {
                 let card: Card = db.get(card_id)?;
@@ -226,15 +229,17 @@ fn publish_scope(
                     "Current step was removed; the run stops after it finishes",
                     run.terminal_id.clone(),
                     json!({"workflow_run_id":run.id,"step":run.step}),
+                    now_ms,
                 )?;
             } else {
-                db.append(canban_timeline::event(
+                db.append(canban_timeline::event_at(
                     &run.project_id,
                     "",
                     "workflow.stop_scheduled",
                     "system",
                     "Current step was removed; the run stops after it finishes",
                     json!({"workflow_run_id":run.id,"step":run.step}),
+                    now_ms,
                 ))?;
             }
         }
@@ -257,7 +262,7 @@ fn publish_scope(
                 workflow_id: definition.id.clone(),
                 revision,
                 definition: definition.clone(),
-                created_at: now(),
+                created_at: now_ms,
             })?;
         }
         let file = WorkflowSource {
@@ -298,7 +303,7 @@ fn publish_scope(
                 cursor: old_sub
                     .as_ref()
                     .map_or(super::events::highwater(db)?, |s| s.cursor),
-                created_at: old_sub.map_or(now(), |s| s.created_at),
+                created_at: old_sub.map_or(now_ms, |s| s.created_at),
             })?;
         }
         db.save(&file)?;
@@ -387,6 +392,7 @@ fn publish_scope(
                         &format!("{from} → {} (column removed)", card.stage),
                         None,
                         json!({"from":from,"to":card.stage,"reason":"column_removed"}),
+                        now_ms,
                     )?;
                 }
             }
@@ -397,9 +403,16 @@ fn publish_scope(
             &updated_project.id,
             Some(&updated_project),
             &active_sources,
+            now_ms,
         )?;
     } else {
-        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &active_sources)?;
+        super::schedules::sync_scope_schedules(
+            db,
+            GLOBAL_PROJECT_ID,
+            None,
+            &active_sources,
+            now_ms,
+        )?;
     }
     Ok(())
 }
@@ -573,6 +586,7 @@ pub(super) fn initialize_new(
     project: &Project,
     mode: NewProjectWorkflow<'_>,
     explicit_workspace: Option<&WorkspaceSettings>,
+    now_ms: u64,
 ) -> Result<()> {
     let profiles: Vec<String> = config.profiles.iter().map(|p| p.id.clone()).collect();
     let inputs: Vec<Value> = match mode {
@@ -643,19 +657,32 @@ pub(super) fn initialize_new(
             vec![json!({"filename":"development.yaml","source":source::encode(&doc)?})]
         }
     };
-    publish_scope(home, db, &project.id, Some(project), config, &inputs)
+    publish_scope(
+        home,
+        db,
+        &project.id,
+        Some(project),
+        config,
+        &inputs,
+        now_ms,
+    )
 }
 
 /// Migrate any active Global (`__global`) workflow sources on older schema versions to `CURRENT`
 /// and synchronize global `ScheduleState` timers.
-pub(super) fn initialize_global(home: &Path, db: Db<'_>, config: &Config) -> Result<()> {
+pub(super) fn initialize_global(
+    home: &Path,
+    db: Db<'_>,
+    config: &Config,
+    now_ms: u64,
+) -> Result<()> {
     let mut existing: Vec<_> = db
         .list::<WorkflowSource>()?
         .into_iter()
         .filter(|f| f.project_id == GLOBAL_PROJECT_ID)
         .collect();
     if existing.is_empty() {
-        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &existing)?;
+        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &existing, now_ms)?;
         return Ok(());
     }
     existing.sort_by(|a, b| a.filename.cmp(&b.filename));
@@ -672,9 +699,9 @@ pub(super) fn initialize_global(home: &Path, db: Db<'_>, config: &Config) -> Res
         }
     }
     if needs_upgrade {
-        publish_scope(home, db, GLOBAL_PROJECT_ID, None, config, &inputs)?;
+        publish_scope(home, db, GLOBAL_PROJECT_ID, None, config, &inputs, now_ms)?;
     } else {
-        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &existing)?;
+        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &existing, now_ms)?;
     }
     Ok(())
 }
@@ -686,6 +713,7 @@ pub(super) fn initialize(
     db: Db<'_>,
     config: &Config,
     project: &Project,
+    now_ms: u64,
 ) -> Result<()> {
     let mut existing: Vec<_> = db
         .list::<WorkflowSource>()?
@@ -693,7 +721,15 @@ pub(super) fn initialize(
         .filter(|f| f.project_id == project.id)
         .collect();
     if existing.is_empty() {
-        return initialize_new(home, db, config, project, NewProjectWorkflow::Builtin, None);
+        return initialize_new(
+            home,
+            db,
+            config,
+            project,
+            NewProjectWorkflow::Builtin,
+            None,
+            now_ms,
+        );
     }
     existing.sort_by(|a, b| a.filename.cmp(&b.filename));
     let mut needs_upgrade = false;
@@ -709,9 +745,17 @@ pub(super) fn initialize(
         }
     }
     if needs_upgrade {
-        publish_scope(home, db, &project.id, Some(project), config, &inputs)?;
+        publish_scope(
+            home,
+            db,
+            &project.id,
+            Some(project),
+            config,
+            &inputs,
+            now_ms,
+        )?;
     } else {
-        super::schedules::sync_scope_schedules(db, &project.id, Some(project), &existing)?;
+        super::schedules::sync_scope_schedules(db, &project.id, Some(project), &existing, now_ms)?;
     }
     Ok(())
 }
@@ -759,7 +803,7 @@ impl AppServer {
                 } else {
                     let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
                     let project: Project = db.get(&pid)?;
-                    initialize(&self.home, db, &config, &project)?;
+                    initialize(&self.home, db, &config, &project, self.now_ms())?;
                     let current = project_template_files(db, &project.id)?;
                     let inputs: Vec<Value> = current
                         .iter()
@@ -781,7 +825,7 @@ impl AppServer {
                     name,
                     source_project_name,
                     sources,
-                    updated_at: now(),
+                    updated_at: self.now_ms(),
                 };
                 db.save(&template)?;
                 Ok(serde_json::to_value(template)?)
@@ -802,12 +846,13 @@ impl AppServer {
         }
         if method == "workflow.sources" {
             let mut store = self.store.lock().unwrap();
+            let now_ms = self.now_ms();
             return store.write(|db| {
                 let (sid, project_opt) = scope_from_params(db, &p)?;
                 if let Some(project) = &project_opt {
-                    initialize(&self.home, db, &self.config(), project)?;
+                    initialize(&self.home, db, &self.config(), project, now_ms)?;
                 } else {
-                    initialize_global(&self.home, db, &self.config())?;
+                    initialize_global(&self.home, db, &self.config(), now_ms)?;
                 }
                 files(&self.home, db, &sid)
             });
@@ -843,6 +888,7 @@ impl AppServer {
                 project_opt.as_ref(),
                 &self.config(),
                 inputs,
+                self.now_ms(),
             )?;
             files(&self.home, db, &sid)
         })

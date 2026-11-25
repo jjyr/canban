@@ -49,7 +49,7 @@ impl AppServer {
             ensure!(revision == expected, "draft_conflict: another window changed this draft; local input is retained");
             let next = revision + 1;
             // Keep tombstones so an old save cannot resurrect a discarded draft.
-            db.conn.execute("INSERT INTO editor_drafts(id,revision,updated_at,data) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at,data=excluded.data", params![id,next,now(),bytes])?;
+            db.conn.execute("INSERT INTO editor_drafts(id,revision,updated_at,data) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at,data=excluded.data", params![id,next,self.now_ms(),bytes])?;
             Ok(json!({"revision":next}))
         })
     }

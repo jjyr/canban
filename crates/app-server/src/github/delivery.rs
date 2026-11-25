@@ -114,7 +114,7 @@ impl AppServer {
             let mut c:Card=db.get(&card.id)?;revise(&c,&p)?;
             if let Some(previous)=c.pull_request.take() && card.pull_request.as_ref().is_some_and(|p|p.merged||p.state=="closed") {c.pull_request_history.push(previous);}
             c.delivery_mode=Some(DeliveryMode::GitHubPr);c.pull_request=Some(pending.clone());c.revision+=1;db.save(&c)?;
-            log(db,&c,"github.pr_publish_started","user","Accepted reviewed changes for PR publication",None,json!({"request_key":key,"head":plan.card_head,"target":plan.target_branch}))?;
+            log(db,&c,"github.pr_publish_started","user","Accepted reviewed changes for PR publication",None,json!({"request_key":key,"head":plan.card_head,"target":plan.target_branch}),self.now_ms())?;
             execute=true;Ok(json!({"state":"unknown","message":"Publication intent saved; refresh PR state before retrying","request_key":key}))
         })?;
         if !execute {
@@ -161,6 +161,7 @@ impl AppServer {
         })();
         let value = self.store.lock().unwrap().write(|db| {
             let mut c: Card = db.get(&card.id)?;
+            let now_ms = self.now_ms();
             let value = match result {
                 Ok(pr) => {
                     let result =
@@ -175,6 +176,7 @@ impl AppServer {
                         "Delivery PR published",
                         None,
                         result.clone(),
+                        now_ms,
                     )?;
                     result
                 }
@@ -183,7 +185,7 @@ impl AppServer {
                     if let Some(pr) = &mut c.pull_request {
                         pr.state = "unknown".into();
                     }
-                    attention(db, &mut c, &message)?;
+                    attention(db, &mut c, &message, now_ms)?;
                     log(
                         db,
                         &c,
@@ -192,6 +194,7 @@ impl AppServer {
                         &message,
                         None,
                         json!({"request_key":key}),
+                        now_ms,
                     )?;
                     json!({"state":"unknown","message":message,"request_key":key})
                 }
@@ -277,6 +280,7 @@ impl AppServer {
                             "No matching delivery PR; explicit publication is available",
                             None,
                             json!({}),
+                            self.now_ms(),
                         )?;
                     }
                     Ok(())
@@ -387,6 +391,7 @@ impl AppServer {
                 pr.merged = true;
                 pr.state = "closed".into();
             }
+            let now_ms = self.now_ms();
             if next.merged
                 && current
                     .delivery
@@ -394,7 +399,7 @@ impl AppServer {
                     .is_none_or(|d| d.request_key != format!("github:{}:{}", next.repository_id, next.number))
             {
                 newly_merged = true;
-                let resolved_at = now();
+                let resolved_at = now_ms;
                 current.delivery = Some(Delivery {
                     target_branch: next.base_branch.clone(),
                     commit: remote["merge_commit_sha"]
@@ -419,7 +424,13 @@ impl AppServer {
                     let att: TerminalEntry = db.get(&id)?;
                     if att.agent.as_ref().is_some_and(|a| a.state == "completed") {
                         current.human_gate = None;
-                        crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
+                        crate::workflow::advance(
+                            db,
+                            &self.config(),
+                            &mut current,
+                            Some(&att),
+                            resolved_at,
+                        )?;
                     }
                 }
                 log(
@@ -430,6 +441,7 @@ impl AppServer {
                     "Delivery PR merged",
                     None,
                     json!({"number": next.number, "commit": current.delivery.as_ref().map(|d| &d.commit)}),
+                    resolved_at,
                 )?;
             } else {
                 ci_event_emitted = record_pr_ci_observation(
@@ -443,6 +455,7 @@ impl AppServer {
                     next.merged,
                     &checks_summary,
                     false,
+                    now_ms,
                 )?;
                 activity_emitted = record_pr_activity_updates(
                     db,
@@ -457,6 +470,7 @@ impl AppServer {
                     &next.head,
                     &activity_payload,
                     current_login.as_deref(),
+                    now_ms,
                 )?;
                 if next.state == "closed" && !next.merged {
                     current.attention = Some("Delivery PR was closed without merging".into());
@@ -586,6 +600,7 @@ impl AppServer {
             );
             let mut current: Card = db.get(&card.id)?;
             let before = current.clone();
+            let now_ms = self.now_ms();
             ci_event_emitted = record_pr_ci_observation(
                 db,
                 &mut current,
@@ -597,6 +612,7 @@ impl AppServer {
                 pr_merged,
                 &checks_summary,
                 baseline_if_unseen,
+                now_ms,
             )?;
             activity_emitted = record_pr_activity_updates(
                 db,
@@ -611,6 +627,7 @@ impl AppServer {
                 &head_sha,
                 &activity_payload,
                 current_login.as_deref(),
+                now_ms,
             )?;
             if current != before {
                 current.revision += 1;
@@ -789,6 +806,7 @@ impl AppServer {
                         "branch": branch,
                         "head": linked.head,
                     }),
+                    self.now_ms(),
                 )?;
                 Ok(true)
             })?;
@@ -911,6 +929,7 @@ impl AppServer {
                     "branch": branch,
                     "head": linked.head,
                 }),
+                self.now_ms(),
             )?;
             Ok(true)
         })?;
@@ -933,14 +952,14 @@ impl AppServer {
 
     fn should_probe_branch_history(&self, card_id: &str, branch: &str) -> bool {
         let mut cache = self.branch_pr_probes.lock().unwrap();
-        let now_instant = std::time::Instant::now();
+        let now_ms = self.now_ms();
         let key = (card_id.to_owned(), branch.to_owned());
-        if let Some(last) = cache.get(&key)
-            && now_instant.duration_since(*last) < Duration::from_secs(300)
+        if let Some(last_ms) = cache.get(&key)
+            && now_ms.saturating_sub(*last_ms) < 300_000
         {
             return false;
         }
-        cache.insert(key, now_instant);
+        cache.insert(key, now_ms);
         true
     }
     pub(crate) fn sync_merged_target(&self, card: &Card, target_branch: Option<&str>) {
@@ -1018,7 +1037,7 @@ impl AppServer {
                     .as_ref()
                     .is_none_or(|d| d.request_key != request_key);
                 if newly_merged {
-                    let resolved_at = now();
+                    let resolved_at = self.now_ms();
                     current.delivery = Some(Delivery {
                         target_branch: base_branch.clone(),
                         commit: commit.clone(),
@@ -1040,7 +1059,13 @@ impl AppServer {
                         let att: TerminalEntry = db.get(&id)?;
                         if att.agent.as_ref().is_some_and(|a| a.state == "completed") {
                             current.human_gate = None;
-                            crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
+                            crate::workflow::advance(
+                                db,
+                                &self.config(),
+                                &mut current,
+                                Some(&att),
+                                resolved_at,
+                            )?;
                         }
                     }
                     log(
@@ -1051,6 +1076,7 @@ impl AppServer {
                         "Delivery PR merged",
                         None,
                         json!({"number":number,"commit":commit}),
+                        resolved_at,
                     )?;
                 }
                 if current != before {
@@ -1089,7 +1115,7 @@ impl AppServer {
         let receipt=self.mutate("github.pr.merge",&p,|db|{
             let c:Card=db.get(strp(&p,"card_id")?)?;revise(&c,&p)?;
             ensure!(c.pull_request.as_ref().is_some_and(|binding|binding.repository_id==pr.repository_id && binding.number==pr.number),"PR binding changed; refresh before merging");saved_pr=Some(pr.clone());execute=true;
-            log(db,&c,"github.pr_merge_started","user","Accepted delivery PR for GitHub merge",None,json!({"head":pr.head,"request_key":key}))?;
+            log(db,&c,"github.pr_merge_started","user","Accepted delivery PR for GitHub merge",None,json!({"head":pr.head,"request_key":key}),self.now_ms())?;
             Ok(json!({"state":"unknown","message":"Merge intent saved; refresh remote PR before retrying","request_key":key}))
         })?;
         if !execute {
@@ -1123,11 +1149,12 @@ impl AppServer {
         };
         self.store.lock().unwrap().write(|db| {
             let mut current: Card = db.get(strp(&p, "card_id")?)?;
+            let now_ms = self.now_ms();
             if value["state"] == "merged" {
                 let commit = value["commit"]
                     .as_str()
                     .context("GitHub returned no merge commit")?;
-                let resolved_at = now();
+                let resolved_at = now_ms;
                 current.delivery = Some(Delivery {
                     target_branch: pr.base_branch.clone(),
                     commit: commit.into(),
@@ -1151,7 +1178,13 @@ impl AppServer {
                     let att: TerminalEntry = db.get(&id)?;
                     if att.agent.as_ref().is_some_and(|a| a.state == "completed") {
                         current.human_gate = None;
-                        crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
+                        crate::workflow::advance(
+                            db,
+                            &self.config(),
+                            &mut current,
+                            Some(&att),
+                            resolved_at,
+                        )?;
                     }
                 }
                 log(
@@ -1162,6 +1195,7 @@ impl AppServer {
                     "Delivery PR merged on GitHub",
                     None,
                     json!({"commit":commit,"request_key":key,"number":pr.number}),
+                    resolved_at,
                 )?;
             } else {
                 let message = value["message"]
@@ -1172,7 +1206,7 @@ impl AppServer {
                 {
                     pr.state = "merge_unknown".into();
                 }
-                attention(db, &mut current, message)?;
+                attention(db, &mut current, message, now_ms)?;
                 log(
                     db,
                     &current,
@@ -1181,6 +1215,7 @@ impl AppServer {
                     message,
                     None,
                     json!({"request_key":key,"number":pr.number}),
+                    now_ms,
                 )?;
             }
             current.revision += 1;
@@ -1275,6 +1310,7 @@ fn record_pr_ci_observation(
     pr_merged: bool,
     summary: &GitHubPrChecks,
     baseline_if_unseen: bool,
+    now_ms: u64,
 ) -> Result<bool> {
     if !pr_open || pr_merged || summary.head_sha.is_empty() {
         return Ok(false);
@@ -1393,6 +1429,7 @@ fn record_pr_ci_observation(
             "summary": summary_text,
             "failed_checks": summary.failed_checks,
         }),
+        now_ms,
     )?;
     Ok(true)
 }
@@ -1544,6 +1581,7 @@ fn record_pr_activity_updates(
     head_sha: &str,
     payload: &PrActivityPayload,
     current_login: Option<&str>,
+    now_ms: u64,
 ) -> Result<bool> {
     let obs_id = format!("pr-activity:{repository_id}:{pr_number}");
     let prev: Option<String> = db
@@ -1657,6 +1695,7 @@ fn record_pr_activity_updates(
                 "stage": card.stage,
                 "self_action": self_action,
             }),
+            now_ms,
         )?;
         emitted = true;
     }
@@ -1684,6 +1723,7 @@ fn record_pr_activity_updates(
                 "stage": card.stage,
                 "self_action": false,
             }),
+            now_ms,
         )?;
         emitted = true;
     } else if pr_open && !pr_merged && prev_draft != pr_draft {
@@ -1712,6 +1752,7 @@ fn record_pr_activity_updates(
                 "stage": card.stage,
                 "self_action": false,
             }),
+            now_ms,
         )?;
         emitted = true;
     }
@@ -1746,6 +1787,7 @@ fn record_pr_activity_updates(
                 "stage": card.stage,
                 "self_action": self_action,
             }),
+            now_ms,
         )?;
         emitted = true;
     }
@@ -1784,6 +1826,7 @@ fn record_pr_activity_updates(
                 "stage": card.stage,
                 "self_action": self_action,
             }),
+            now_ms,
         )?;
         emitted = true;
     }
@@ -1842,6 +1885,7 @@ fn record_pr_activity_updates(
                 "stage": card.stage,
                 "self_action": self_action,
             }),
+            now_ms,
         )?;
         emitted = true;
     }

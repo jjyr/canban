@@ -277,7 +277,7 @@ impl AppServer {
     pub(super) fn finish_agent_work(&self) -> Result<()> {
         let closed = {
             let mut inv = self.inventory.lock().unwrap();
-            inv.close_all_working(now());
+            inv.close_all_working(self.now_ms());
             if inv.closed_work.is_empty() {
                 return Ok(());
             }
@@ -363,7 +363,7 @@ impl AppServer {
         if arr.is_empty() {
             return Ok(json!({"recorded": 0}));
         }
-        let current_now = now();
+        let current_now = self.now_ms();
         let mut rows = Vec::with_capacity(arr.len());
         for seg in arr {
             ensure!(seg.is_object(), "Each segment must be an object");
@@ -468,7 +468,7 @@ impl AppServer {
         if include_agent {
             self.populate_terminal_contexts(&mut snapshot);
             let config = self.config();
-            let current_now = now();
+            let current_now = self.now_ms();
             for mut seg in self.open_agent_work_segments(&snapshot, &config, current_now) {
                 if let Some(pid) = project.as_deref()
                     && seg.project_id.as_deref() != Some(pid)
@@ -553,7 +553,7 @@ impl AppServer {
         if include_agent {
             self.populate_terminal_contexts(&mut snapshot);
             let config = self.config();
-            let current_now = now();
+            let current_now = self.now_ms();
             for seg in self.open_agent_work_segments(&snapshot, &config, current_now) {
                 if let Some(pid) = project.as_deref()
                     && seg.project_id.as_deref() != Some(pid)

@@ -221,7 +221,7 @@ impl AppServer {
             }
         }
 
-        let current_ms = now();
+        let current_ms = self.now_ms();
         let mut live_candidates: BTreeSet<(String, String)> = BTreeSet::new();
         struct PendingProbe {
             idx: usize,
@@ -286,7 +286,7 @@ impl AppServer {
                             raw_status: Some(probe.fingerprint.raw_state.as_str()),
                             screen_text,
                         });
-                        let checked_at = now();
+                        let checked_at = self.now_ms();
                         let next_check_at = decision
                             .is_working()
                             .then(|| checked_at.saturating_add(RECHECK_MS));
@@ -311,7 +311,7 @@ impl AppServer {
                             .get(&key)
                             .map(|c| c.decision)
                             .unwrap_or(RefineDecision::Keep);
-                        let checked_at = now();
+                        let checked_at = self.now_ms();
                         let next_check_at = previous
                             .is_working()
                             .then(|| checked_at.saturating_add(RECHECK_MS));

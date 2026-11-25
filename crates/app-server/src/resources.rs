@@ -63,6 +63,7 @@ impl AppServer {
                 &a.name,
                 None,
                 json!({"artifact_id":a.id}),
+                self.now_ms(),
             )?;
             Ok(serde_json::to_value(a)?)
         })
@@ -77,8 +78,9 @@ impl AppServer {
         self.mutate("card.archive.mark", p, |db| {
             let mut c: Card = db.get(card_id)?;
             revise(&c, p)?;
+            let now_ms = self.now_ms();
             if c.archived_at.is_none() {
-                c.archived_at = Some(now());
+                c.archived_at = Some(now_ms);
                 c.revision += 1;
                 log(
                     db,
@@ -88,10 +90,11 @@ impl AppServer {
                     "Card archived",
                     None,
                     json!({}),
+                    now_ms,
                 )?;
                 db.save(&c)?;
             }
-            crate::workflow::stop_card(db, &self.config(), &c.id, "cancelled")?;
+            crate::workflow::stop_card(db, &self.config(), &c.id, "cancelled", now_ms)?;
             for mut entry in db.list::<TerminalEntry>()? {
                 if let Some(a) = &mut entry.agent
                     && a.card_id == c.id
@@ -256,7 +259,7 @@ impl AppServer {
                 if let Some(message) = notice {
                     self.store.lock().unwrap().write(|db| {
                         let mut c: Card = db.get(card_id)?;
-                        attention(db, &mut c, &message)?;
+                        attention(db, &mut c, &message, self.now_ms())?;
                         db.save(&c)
                     })?;
                 }
@@ -300,9 +303,10 @@ impl AppServer {
             self.store.lock().unwrap().write(|db| {
                 let mut current: TerminalEntry = db.get(&entry.id)?;
                 if let Some(a) = &mut current.agent {
+                    let now_ms = self.now_ms();
                     a.observed = Some(canban_herdr::observation(&actual));
                     a.close_state = "closed".into();
-                    a.close_requested_at = Some(now());
+                    a.close_requested_at = Some(now_ms);
                     a.lifecycle.close_reason = "archive".into();
                     a.connection_state = "connected".into();
                     a.pending = None;
@@ -319,6 +323,7 @@ impl AppServer {
                         "Closed Card Agent after saving its terminal history",
                         Some(entry.id.clone()),
                         json!({"run_number":run_number}),
+                        now_ms,
                     )?;
                 }
                 Ok(())
@@ -404,6 +409,7 @@ impl AppServer {
                 "Card restored; no execution automatically scheduled",
                 None,
                 json!({}),
+                self.now_ms(),
             )?;
             Ok(serde_json::to_value(c)?)
         })
@@ -505,7 +511,7 @@ impl AppServer {
                 canban_context::run_dir(&self.home, entry)
             }
         };
-        let path = dir.join(format!("output-{}.txt", id()));
+        let path = dir.join(format!("output-{}.txt", self.next_id()));
         canban_context::atomic_with_durability(&path, text.as_bytes(), self.fs_durability)?;
         let relative = canban_context::relative(&self.home, &path)?;
         self.store.lock().unwrap().write(|db| {
@@ -618,7 +624,7 @@ impl AppServer {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
-            let resolved_at = now();
+            let resolved_at = self.now_ms();
             let kind = if is_agent { "agent" } else { "manual" };
             c.resolution = Some(CardResolution {
                 resolved_at,
@@ -640,7 +646,7 @@ impl AppServer {
                 db.save(&n)?;
             }
 
-            crate::workflow::stop_card(db, &config, &c.id, "cancelled")?;
+            crate::workflow::stop_card(db, &config, &c.id, "cancelled", resolved_at)?;
             for mut entry in terminals {
                 if let Some(a) = &mut entry.agent
                     && a.card_id == c.id
@@ -688,6 +694,7 @@ impl AppServer {
                     "reason": reason,
                     "resolved_at": resolved_at,
                 }),
+                resolved_at,
             )?;
             Ok(serde_json::to_value(c)?)
         })?;
@@ -727,6 +734,7 @@ impl AppServer {
                 "Card reopened",
                 None,
                 json!({}),
+                self.now_ms(),
             )?;
             Ok(serde_json::to_value(c)?)
         })?;

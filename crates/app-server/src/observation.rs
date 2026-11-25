@@ -1,7 +1,6 @@
 //! Event-driven runtime inventory. No periodic terminal or Git inventory scan.
 use super::*;
 use std::collections::BTreeMap;
-use tokio::time::Instant;
 
 const MIN_AGENT_WORK_MS: u64 = 2_000;
 
@@ -368,6 +367,7 @@ impl AppServer {
                     "Migrated the automatic missing-report gate to a failed execution",
                     Some(t.id.clone()),
                     json!({"run_number":run_num,"migration":true}),
+                    self.now_ms(),
                 )?;
             }
             Ok(())
@@ -409,6 +409,7 @@ impl AppServer {
                 &err_msg,
                 Some(entry.id.clone()),
                 json!({"run_number":run_num}),
+                self.now_ms(),
             )?;
             db.save(&current_entry)
         })?;
@@ -757,15 +758,20 @@ async fn delivery_worker_loop(
             if server.stopped() {
                 return None;
             }
+            #[cfg(test)]
+            server.delivery_worker_passes.fetch_add(1, Ordering::SeqCst);
             let mut wait: Option<Duration> = None;
             if canban_updater::handoff::active(&server.home) {
                 wait = Some(Duration::from_millis(250));
             } else {
-                let changes_before = server.db_changes();
-                if let Err(e) = server.pump_deliveries() {
-                    eprintln!("Canban delivery: {e:#}");
-                }
-                let _ = server.pump_admissions();
+                let delivered_changed = match server.pump_deliveries() {
+                    Ok(changed) => changed,
+                    Err(e) => {
+                        eprintln!("Canban delivery: {e:#}");
+                        false
+                    }
+                };
+                let admitted_changed = server.pump_admissions().unwrap_or(false);
                 let s = server
                     .store
                     .lock()
@@ -773,7 +779,7 @@ async fn delivery_worker_loop(
                     .db()
                     .admission_snapshot()
                     .unwrap_or_default();
-                if server.db_changes() != changes_before
+                if (delivered_changed || admitted_changed)
                     && (s.terminals.iter().any(|t| {
                         t.agent
                             .as_ref()
@@ -887,7 +893,7 @@ async fn runtime_worker_loop(
     notify: Arc<tokio::sync::Notify>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut retry = Instant::now() + Duration::from_secs(1);
+    let mut retry_at_ms: u64 = 0;
     let mut backoff = 1u64;
     let mut queued = Vec::<String>::new();
     while !*stop_rx.borrow() {
@@ -899,6 +905,8 @@ async fn runtime_worker_loop(
             if server.stopped() {
                 return None;
             }
+            #[cfg(test)]
+            server.runtime_worker_ticks.fetch_add(1, Ordering::SeqCst);
             let mut queued = prev_queued;
             if let Err(e) = server.tick() {
                 eprintln!("Canban runtime: {e:#}");
@@ -965,7 +973,9 @@ async fn runtime_worker_loop(
                         .unwrap_or(t.created_at);
                     due(anchor.saturating_add(AppServer::DELIVERY_AGENT_SETTLE_MS + 1));
                 }
-                if let Some(anchor) = canban_notifications::unreported_idle_anchor(&s, &t.id, a) {
+                if let Some(anchor) =
+                    canban_notifications::unreported_idle_anchor_at(&s, &t.id, a, current_ms)
+                {
                     let activity = server.herdr_activity(
                         a.core_id.as_deref().unwrap_or(""),
                         a.terminal.as_deref().unwrap_or(""),
@@ -982,14 +992,11 @@ async fn runtime_worker_loop(
                 due(at);
             }
             // Only queued work awaiting a scheduler slot needs retry admission.
-            let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)
-                .is_some()
-                || canban_scheduler::timers::next_scheduled_run(
-                    &s,
-                    server.config().scheduler.max_agents,
-                )
-                .is_some()
-                || (canban_scheduler::active_count(&s) < server.config().scheduler.max_agents
+            let max_agents = server.config().scheduler.max_agents;
+            let retry_needed = canban_scheduler::next_at(&s, max_agents, current_ms).is_some()
+                || canban_scheduler::timers::next_scheduled_run_at(&s, max_agents, current_ms)
+                    .is_some()
+                || (canban_scheduler::active_count_at(&s, current_ms) < max_agents
                     && (s.merge_batches.iter().any(|b| b.state == "queued")
                         || s.configuration_sessions.iter().any(|c| c.state == "queued")));
             if retry_needed {
@@ -1024,16 +1031,19 @@ async fn runtime_worker_loop(
                 if current != queued {
                     queued = current;
                     backoff = 1;
-                    retry = Instant::now() + Duration::from_secs(1);
-                }
-                if Instant::now() >= retry {
+                    retry_at_ms = current_ms.saturating_add(1_000);
+                } else if retry_at_ms == 0 || current_ms >= retry_at_ms {
                     backoff = (backoff * 2).min(30);
-                    retry = Instant::now() + Duration::from_secs(backoff);
+                    retry_at_ms = current_ms.saturating_add(backoff.saturating_mul(1_000));
                 }
-                let d = retry.saturating_duration_since(Instant::now());
+                let d = Duration::from_millis(retry_at_ms.saturating_sub(current_ms).max(1));
                 wait = Some(wait.map_or(d, |w| w.min(d)));
+            } else {
+                queued.clear();
+                backoff = 1;
+                retry_at_ms = 0;
             }
-            Some((wait, retry, backoff, queued))
+            Some((wait, retry_at_ms, backoff, queued))
         };
         let step = if inline {
             let res = work();
@@ -1042,10 +1052,10 @@ async fn runtime_worker_loop(
         } else {
             tokio::task::spawn_blocking(work).await
         };
-        let Ok(Some((wait, next_retry, next_backoff, next_queued))) = step else {
+        let Ok(Some((wait, next_retry_at_ms, next_backoff, next_queued))) = step else {
             break;
         };
-        retry = next_retry;
+        retry_at_ms = next_retry_at_ms;
         backoff = next_backoff;
         queued = next_queued;
         if !AppServer::wait_or_stop(&notify, &mut stop_rx, wait).await {

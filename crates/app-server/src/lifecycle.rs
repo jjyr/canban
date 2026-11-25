@@ -273,17 +273,19 @@ impl AppServer {
                     if old
                         .is_none_or(|w| w.kind != kind || w.title != title || w.message != message)
                     {
+                        let now_ms = self.now_ms();
                         let w = RuntimeWait {
-                            id: old.map(|w| w.id.clone()).unwrap_or_else(id),
-                            since: old.map(|w| w.since).unwrap_or_else(|| self.now_ms()),
+                            id: old.map(|w| w.id.clone()).unwrap_or_else(|| self.next_id()),
+                            since: old.map(|w| w.since).unwrap_or(now_ms),
                             kind,
                             title,
                             message,
                         };
-                        let mut notice = canban_notifications::attention(
+                        let mut notice = canban_notifications::attention_at(
                             &a.project_id,
                             &a.card_id,
                             &format!("Agent input required: {} — {}", w.title, w.message),
+                            now_ms,
                         );
                         notice.id = w.id.clone();
                         db.save(&notice)?;
@@ -295,6 +297,7 @@ impl AppServer {
                             &notice.message,
                             Some(entry.id.clone()),
                             json!({"wait":w,"run_number":a.number}),
+                            now_ms,
                         )?;
                         a.lifecycle.waiting = Some(w);
                     }
@@ -311,6 +314,7 @@ impl AppServer {
                         "Runtime input wait ended; workflow approval is unchanged",
                         Some(entry.id.clone()),
                         json!({"wait_id":w.id,"run_number":a.number}),
+                        self.now_ms(),
                     )?;
                 }
                 db.save(&current_entry)
@@ -633,7 +637,8 @@ impl AppServer {
                 }
                 a.lifecycle.close_reason = "idle".into();
                 a.close_state = "closing".into();
-                a.close_requested_at = Some(self.now_ms());
+                let close_at = self.now_ms();
+                a.close_requested_at = Some(close_at);
                 let card_id = a.card_id.clone();
                 let run_num = a.number;
                 db.save(&current_entry)?;
@@ -645,6 +650,7 @@ impl AppServer {
                     close_note,
                     Some(entry.id.clone()),
                     json!({"run_number":run_num}),
+                    close_at,
                 )?;
                 Ok(true)
             })?;
@@ -718,8 +724,20 @@ impl AppServer {
                             let proj_id = a.project_id.clone();
                             let run_num = a.number;
                             let card: Card = db.get(&card_id)?;
-                            db.save(&canban_notifications::attention(&proj_id, &card_id, &err_msg))?;
-                            log(db, &card, "execution.idle_close_failed", "system", &err_msg, Some(entry.id.clone()), json!({"run_number":run_num}))?;
+                            let now_ms = self.now_ms();
+                            db.save(&canban_notifications::attention_at(
+                                &proj_id, &card_id, &err_msg, now_ms,
+                            ))?;
+                            log(
+                                db,
+                                &card,
+                                "execution.idle_close_failed",
+                                "system",
+                                &err_msg,
+                                Some(entry.id.clone()),
+                                json!({"run_number":run_num}),
+                                now_ms,
+                            )?;
                         }
                         db.save(&current_entry)
                     })?;

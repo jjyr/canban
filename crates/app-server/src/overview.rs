@@ -2,7 +2,7 @@ use super::*;
 impl AppServer {
     pub(super) fn overview_preview(&self, p: Value) -> Result<Value> {
         let snapshot = self.snapshot()?;
-        let rows = canban_notifications::overview(&snapshot);
+        let rows = canban_notifications::overview_at(&snapshot, self.now_ms());
         let row = rows
             .iter()
             .find(|r| r.id == p["row_id"].as_str().unwrap_or(""))
@@ -43,7 +43,11 @@ impl AppServer {
                 .as_str()
                 .context("No terminal text")?
                 .to_owned();
-            (text, "Herdr terminal screen (read-only)", Some(now()))
+            (
+                text,
+                "Herdr terminal screen (read-only)",
+                Some(self.now_ms()),
+            )
         };
         // Screen preview is read-only and bounded independently of terminal history.
         if text.len() > 32_768 {
@@ -53,7 +57,7 @@ impl AppServer {
             }
             text = text[start..].to_owned();
         }
-        let current = canban_notifications::overview(&self.snapshot()?);
+        let current = canban_notifications::overview_at(&self.snapshot()?, self.now_ms());
         ensure!(
             current
                 .iter()

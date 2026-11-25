@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn conversation(db: Db<'_>, card: &Card, profile: &Profile) -> Result<Conversation> {
+pub(super) fn conversation(
+    db: Db<'_>,
+    card: &Card,
+    profile: &Profile,
+    now_ms: u64,
+) -> Result<Conversation> {
     let key = Conversation::key(&card.id, &profile.id);
     if let Ok(old) = db.get::<Conversation>(&key) {
         return Ok(old);
@@ -12,7 +17,7 @@ pub(super) fn conversation(db: Db<'_>, card: &Card, profile: &Profile) -> Result
         profile_id: profile.id.clone(),
         provider: profile.command_name(),
         provider_session_id: None,
-        created_at: now(),
+        created_at: now_ms,
     };
     db.save(&item)?;
     db.agent_terminal(&item)?;
@@ -25,6 +30,7 @@ pub(super) fn enqueue_interactive(
     card: &mut Card,
     project: &Project,
     profile_id: &str,
+    now_ms: u64,
 ) -> Result<TerminalEntry> {
     let stage = canban_workflow_engine::stage(&project.workflow, &card.stage)?;
     let init_prompt = include_str!(concat!(
@@ -42,6 +48,7 @@ pub(super) fn enqueue_interactive(
         ExecutionTrigger::Interactive,
         Some(profile_id),
         Some(init_prompt),
+        now_ms,
     )?
     .context("Agent was not queued")
 }
@@ -79,6 +86,7 @@ pub(super) fn queue_card_mentions(
     project: &Project,
     p: &Value,
     prose_sources: &[&str],
+    now_ms: u64,
 ) -> Result<()> {
     let mut mentions = strings(p, "mentions");
     // Explicit recipients distinguish addressing an Agent from discussing its name.
@@ -110,14 +118,14 @@ pub(super) fn queue_card_mentions(
     } else {
         format!("{}\n\n{}", card.title, card.body.trim())
     };
-    let created_at = now();
+    let created_at = now_ms;
     for agent in mentions {
         let qid = format!("{anchor_event_id}:{agent}");
         if db.get::<Question>(&qid).is_ok() {
             continue;
         }
         let profile = canban_scheduler::select_in_project(config, Some(project), Some(&agent))?;
-        let context = conversation(db, card, &profile)?;
+        let context = conversation(db, card, &profile, now_ms)?;
         let active = db.get::<TerminalEntry>(&context.id).ok().filter(|t| {
             t.agent.as_ref().is_some_and(|a| {
                 a.card_id == card.id
@@ -150,6 +158,7 @@ pub(super) fn queue_card_mentions(
                 },
                 Some(&profile.id),
                 Some(instruction),
+                now_ms,
             )?
             .context("Card mention was not queued")?
         };
@@ -171,13 +180,18 @@ pub(super) fn queue_card_mentions(
     Ok(())
 }
 
-pub(super) fn retry_agent(db: Db<'_>, card: &Card, entry: &mut TerminalEntry) -> Result<()> {
+pub(super) fn retry_agent(
+    db: Db<'_>,
+    card: &Card,
+    entry: &mut TerminalEntry,
+    now_ms: u64,
+) -> Result<()> {
     let previous = entry
         .agent
         .clone()
         .context("Terminal has no Agent execution to retry")?;
     let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
-    let mut next = canban_scheduler::agent_run(
+    let mut next = canban_scheduler::agent_run_at(
         &previous.project_id,
         &card.id,
         number,
@@ -186,6 +200,7 @@ pub(super) fn retry_agent(db: Db<'_>, card: &Card, entry: &mut TerminalEntry) ->
         previous.profile.clone(),
         previous.instruction.clone(),
         previous.on_completed.clone(),
+        now_ms,
     );
     next.workflow_run_id = previous.workflow_run_id.clone();
     next.workflow_step = previous.workflow_step.clone();
@@ -282,7 +297,7 @@ impl AppServer {
                 };
                 (card, prof, active_entry)
             };
-            let mut context = conversation(db, &card, &profile)?;
+            let mut context = conversation(db, &card, &profile, self.now_ms())?;
             if let Some(old) = &context.provider_session_id {
                 ensure!(
                     old == session,
@@ -334,7 +349,7 @@ impl AppServer {
                 Some(&project),
                 Some(strp(&p, "profile_id")?),
             )?;
-            let mut context = conversation(db, &card, &profile)?;
+            let mut context = conversation(db, &card, &profile, self.now_ms())?;
             if let Some(expected) = p["expected_terminal_id"].as_str() {
                 let entry: TerminalEntry = db
                     .get(&context.id)
@@ -378,7 +393,8 @@ impl AppServer {
                 context.provider = profile.command_name();
                 db.save(&context)?;
             }
-            let entry = enqueue_interactive(db, &config, &mut card, &project, &profile.id)?;
+            let entry =
+                enqueue_interactive(db, &config, &mut card, &project, &profile.id, self.now_ms())?;
             Ok(json!({"terminal_id":entry.id,"reused":false,"terminal":entry}))
         })
     }
@@ -425,13 +441,14 @@ impl AppServer {
                 .unwrap()
                 .write(|db| db.counter(&format!("card-attempt:{}", card.id)))?,
         )?;
+        let now_ms = self.now_ms();
         let mut promoted_entry = entry.clone();
         {
             let run = promoted_entry.agent.as_mut().unwrap();
-            run.promote_pending();
+            run.promote_pending_at(now_ms);
             run.card_number = card.number;
             run.number = next_number;
-            run.started_at = Some(now());
+            run.started_at = Some(now_ms);
             run.state = "running".into();
             run.output_path = None;
             run.response_path = None;
@@ -442,7 +459,7 @@ impl AppServer {
             run.turn_ended_at = None;
             run.close_requested_at = None;
             run.observed = Some(json!({"state":"live","status":{"state":"working"}}));
-            run.lifecycle.observed_at = Some(now());
+            run.lifecycle.observed_at = Some(now_ms);
             run.lifecycle.waiting = None;
             run.lifecycle.idle_since = None;
             run.lifecycle.close_reason.clear();
@@ -479,6 +496,7 @@ impl AppServer {
                 "Started a new assignment in the retained Agent terminal",
                 Some(entry.id.clone()),
                 json!({"previous_run":prev_number,"run_number":next_number}),
+                self.now_ms(),
             )
         })?;
         let prompt = std::fs::read_to_string(self.home.join(&input))?;
@@ -528,7 +546,7 @@ impl AppServer {
             let card: Card = db.get(&card_id)?;
             log(db, &card, "execution.control_requested", "user",
                 "User requested terminal control", Some(entry.id.clone()),
-                json!({"run_number":run_number,"action":method}))?;
+                json!({"run_number":run_number,"action":method}), self.now_ms())?;
             execute = true;
             Ok(json!({"state":"unknown","message":"Control requested; inspect the terminal before repeating an uncertain action"}))
         })?;
@@ -568,6 +586,7 @@ impl AppServer {
                 "Terminal control delivery observed",
                 Some(entry.id.clone()),
                 json!({"run_number":run_number,"result":result}),
+                self.now_ms(),
             )?;
             Ok(())
         })?;
@@ -643,6 +662,7 @@ impl AppServer {
                 body,
                 q.terminal_id.clone(),
                 json!({"reply_to":q.comment_id,"question_id":q.id,"path":q.reply_path}),
+                self.now_ms(),
             )?;
             Ok(json!({"accepted":true,"question_id":q.id}))
         })

@@ -5,50 +5,49 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Component,
-    time::Instant,
 };
 
-const STATUS_DEBOUNCE: Duration = Duration::from_millis(300);
-const STATUS_MIN_INTERVAL: Duration = Duration::from_secs(2);
+const STATUS_DEBOUNCE_MS: u64 = 300;
+const STATUS_MIN_INTERVAL_MS: u64 = 2_000;
 
 /// Pure trailing-edge coalescer for Git status invalidations.
 ///
-/// Debounces rapid bursts by [`STATUS_DEBOUNCE`] without starving continuous writes
-/// or dropping trailing updates inside the [`STATUS_MIN_INTERVAL`] cooldown window.
+/// Debounces rapid bursts by [`STATUS_DEBOUNCE_MS`] without starving continuous writes
+/// or dropping trailing updates inside the [`STATUS_MIN_INTERVAL_MS`] cooldown window.
 #[derive(Clone, Debug, Default)]
 struct StatusInvalidationCoalescer {
-    last_flush: Option<Instant>,
-    pending_since: Option<Instant>,
-    due_at: Option<Instant>,
+    last_flush: Option<u64>,
+    pending_since: Option<u64>,
+    due_at: Option<u64>,
 }
 
 impl StatusInvalidationCoalescer {
-    fn record(&mut self, now: Instant) -> Instant {
-        let first = *self.pending_since.get_or_insert(now);
-        let quiet_due = now + STATUS_DEBOUNCE;
-        let max_due = first + STATUS_MIN_INTERVAL;
+    fn record(&mut self, now_ms: u64) -> u64 {
+        let first = *self.pending_since.get_or_insert(now_ms);
+        let quiet_due = now_ms.saturating_add(STATUS_DEBOUNCE_MS);
+        let max_due = first.saturating_add(STATUS_MIN_INTERVAL_MS);
         let rate_due = self
             .last_flush
-            .map(|last| last + STATUS_MIN_INTERVAL)
-            .unwrap_or(now);
+            .map(|last| last.saturating_add(STATUS_MIN_INTERVAL_MS))
+            .unwrap_or(now_ms);
         let due = quiet_due.min(max_due).max(rate_due);
         self.due_at = Some(due);
         due
     }
 
-    fn record_immediate_flush(&mut self, now: Instant) {
-        self.last_flush = Some(now);
+    fn record_immediate_flush(&mut self, now_ms: u64) {
+        self.last_flush = Some(now_ms);
         self.pending_since = None;
         self.due_at = None;
     }
 
-    fn next_deadline(&self) -> Option<Instant> {
+    fn next_deadline(&self) -> Option<u64> {
         self.due_at
     }
 
-    fn poll_flush(&mut self, now: Instant) -> bool {
-        if self.due_at.is_some_and(|due| now >= due) {
-            self.last_flush = Some(now);
+    fn poll_flush(&mut self, now_ms: u64) -> bool {
+        if self.due_at.is_some_and(|due| now_ms >= due) {
+            self.last_flush = Some(now_ms);
             self.pending_since = None;
             self.due_at = None;
             true
@@ -187,7 +186,7 @@ type Key = String;
 struct Cached {
     context: TerminalContext,
     signature: String,
-    at: Instant,
+    at: u64,
 }
 #[derive(Default)]
 pub(super) struct ContextQueue {
@@ -470,24 +469,24 @@ impl AppServer {
                     {
                         let mut q = server.contexts.lock().unwrap();
                         q.pending_watches.extend(cls.new_watches);
-                        let now = Instant::now();
+                        let now_ms = server.now_ms();
                         match cls.kind {
                             Some(InvalidationKind::Structural) => {
                                 q.cache = Default::default();
                                 q.results.clear();
                                 q.generation += 1;
-                                q.coalescer.record_immediate_flush(now);
+                                q.coalescer.record_immediate_flush(now_ms);
                                 wake_runtime_now = true;
                             }
                             Some(InvalidationKind::Immediate) => {
                                 q.cache.lock().unwrap().invalidate_branches();
                                 q.results.clear();
                                 q.generation += 1;
-                                q.coalescer.record_immediate_flush(now);
+                                q.coalescer.record_immediate_flush(now_ms);
                                 wake_runtime_now = true;
                             }
                             Some(InvalidationKind::Coalesced) => {
-                                q.coalescer.record(now);
+                                q.coalescer.record(now_ms);
                                 wake_worker = true;
                             }
                             None => {}
@@ -517,7 +516,7 @@ impl AppServer {
         q.generation += 1;
         q.results.clear();
         q.cache.lock().unwrap().invalidate_branches();
-        q.coalescer.record_immediate_flush(Instant::now());
+        q.coalescer.record_immediate_flush(self.now_ms());
         drop(q);
         self.wake_runtime();
     }
@@ -526,7 +525,7 @@ impl AppServer {
         q.generation += 1;
         q.results.clear();
         q.cache = Default::default();
-        q.coalescer.record_immediate_flush(Instant::now());
+        q.coalescer.record_immediate_flush(self.now_ms());
         drop(q);
         self.wake_runtime();
     }
@@ -540,11 +539,12 @@ impl AppServer {
     ) -> Result<TerminalContext> {
         let cwd = canban_herdr::cwd(value).context("Current directory unavailable")?;
         let key: Key = cwd.into();
-        let ttl = Duration::from_secs(15);
+        let ttl_ms = 15_000u64;
+        let now_ms = self.now_ms();
         let mut q = self.contexts.lock().unwrap();
         if let Some(r) = q.results.get(&key)
             && r.signature == signature(s)
-            && r.at.elapsed() < ttl
+            && now_ms.saturating_sub(r.at) < ttl_ms
         {
             let mut context = r.context.clone();
             context.terminal_id = id.into();
@@ -602,7 +602,8 @@ async fn context_worker_loop(
                 for target in pending_watches {
                     register_watch_target(&mut q, target);
                 }
-                if q.coalescer.poll_flush(Instant::now()) {
+                let now_ms = server.now_ms();
+                if q.coalescer.poll_flush(now_ms) {
                     q.cache.lock().unwrap().invalidate_branches();
                     q.results.clear();
                     q.generation += 1;
@@ -619,7 +620,7 @@ async fn context_worker_loop(
                     let wait = q
                         .coalescer
                         .next_deadline()
-                        .map(|due| due.saturating_duration_since(Instant::now()));
+                        .map(|due| Duration::from_millis(due.saturating_sub(now_ms)));
                     Err(wait)
                 }
             };
@@ -672,7 +673,7 @@ async fn context_worker_loop(
                     Cached {
                         context: context.clone(),
                         signature: job.signature.clone(),
-                        at: Instant::now(),
+                        at: server.now_ms(),
                     },
                 );
                 let targets = q
@@ -700,10 +701,11 @@ async fn context_worker_loop(
                 }
             }
             let more = !q.pending.is_empty();
+            let now_ms = server.now_ms();
             let wait = q
                 .coalescer
                 .next_deadline()
-                .map(|due| due.saturating_duration_since(Instant::now()));
+                .map(|due| Duration::from_millis(due.saturating_sub(now_ms)));
             drop(q);
             if wake_runtime {
                 server.wake_runtime();
@@ -739,6 +741,7 @@ async fn context_worker_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     #[test]
     fn check_serializes_concurrent_checks() {
         let dir = tempfile::tempdir().unwrap();
@@ -770,58 +773,55 @@ mod tests {
 
     #[test]
     fn coalescer_debounces_bursts_preserves_trailing_event_and_prevents_starvation() {
-        let t0 = Instant::now();
+        let t0: u64 = 1_000_000;
         let mut c = StatusInvalidationCoalescer::default();
 
-        // Single event flushes after STATUS_DEBOUNCE (300ms).
-        assert_eq!(c.record(t0), t0 + STATUS_DEBOUNCE);
-        assert!(!c.poll_flush(t0 + STATUS_DEBOUNCE - Duration::from_millis(1)));
-        assert!(c.poll_flush(t0 + STATUS_DEBOUNCE));
+        // Single event flushes after STATUS_DEBOUNCE_MS (300ms).
+        assert_eq!(c.record(t0), t0 + STATUS_DEBOUNCE_MS);
+        assert!(!c.poll_flush(t0 + STATUS_DEBOUNCE_MS - 1));
+        assert!(c.poll_flush(t0 + STATUS_DEBOUNCE_MS));
         assert_eq!(c.next_deadline(), None);
 
         // Cooldown follow-up (`git push` right after `git commit` flush) is scheduled, not dropped.
-        let t1 = t0 + STATUS_DEBOUNCE;
-        let follow = t1 + Duration::from_millis(400);
-        assert_eq!(c.record(follow), t1 + STATUS_MIN_INTERVAL);
-        assert!(!c.poll_flush(t1 + STATUS_MIN_INTERVAL - Duration::from_millis(1)));
-        assert!(c.poll_flush(t1 + STATUS_MIN_INTERVAL));
+        let t1 = t0 + STATUS_DEBOUNCE_MS;
+        let follow = t1 + 400;
+        assert_eq!(c.record(follow), t1 + STATUS_MIN_INTERVAL_MS);
+        assert!(!c.poll_flush(t1 + STATUS_MIN_INTERVAL_MS - 1));
+        assert!(c.poll_flush(t1 + STATUS_MIN_INTERVAL_MS));
         assert_eq!(c.next_deadline(), None);
 
         // Burst debounce shifts deadline cleanly until quiet.
-        let b0 = t1 + STATUS_MIN_INTERVAL + Duration::from_secs(5);
-        assert_eq!(c.record(b0), b0 + STATUS_DEBOUNCE);
-        let b1 = b0 + Duration::from_millis(150);
-        assert_eq!(c.record(b1), b1 + STATUS_DEBOUNCE);
-        assert!(!c.poll_flush(b1 + STATUS_DEBOUNCE - Duration::from_millis(1)));
-        assert!(c.poll_flush(b1 + STATUS_DEBOUNCE));
+        let b0 = t1 + STATUS_MIN_INTERVAL_MS + 5_000;
+        assert_eq!(c.record(b0), b0 + STATUS_DEBOUNCE_MS);
+        let b1 = b0 + 150;
+        assert_eq!(c.record(b1), b1 + STATUS_DEBOUNCE_MS);
+        assert!(!c.poll_flush(b1 + STATUS_DEBOUNCE_MS - 1));
+        assert!(c.poll_flush(b1 + STATUS_DEBOUNCE_MS));
 
         // Continuous writes every 100ms for 5s never starve and still flush a trailing event.
-        let churn_start = b1 + STATUS_MIN_INTERVAL + Duration::from_secs(5);
+        let churn_start = b1 + STATUS_MIN_INTERVAL_MS + 5_000;
         let mut flushes = Vec::new();
         for step in 0..=50u64 {
-            let now = churn_start + Duration::from_millis(step * 100);
-            if c.poll_flush(now) {
-                flushes.push(now);
+            let now_ms = churn_start + step * 100;
+            if c.poll_flush(now_ms) {
+                flushes.push(now_ms);
             }
-            c.record(now);
+            c.record(now_ms);
         }
         assert!(
             flushes.len() >= 2,
             "expected periodic flushes during churn: {flushes:?}"
         );
-        let settle = churn_start + Duration::from_millis(5000) + STATUS_MIN_INTERVAL;
+        let settle = churn_start + 5_000 + STATUS_MIN_INTERVAL_MS;
         assert!(c.poll_flush(settle));
         assert_eq!(c.next_deadline(), None);
 
         // Immediate flush cancels any pending coalesced deadline and resets cooldown baseline.
-        let t_imm = settle + Duration::from_secs(1);
+        let t_imm = settle + 1_000;
         c.record(t_imm);
-        c.record_immediate_flush(t_imm + Duration::from_millis(50));
+        c.record_immediate_flush(t_imm + 50);
         assert_eq!(c.next_deadline(), None);
-        assert_eq!(
-            c.record(t_imm + Duration::from_millis(100)),
-            t_imm + Duration::from_millis(50) + STATUS_MIN_INTERVAL
-        );
+        assert_eq!(c.record(t_imm + 100), t_imm + 50 + STATUS_MIN_INTERVAL_MS);
     }
 
     #[test]

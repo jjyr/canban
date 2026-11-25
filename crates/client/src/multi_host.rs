@@ -152,7 +152,7 @@ struct RemoteHostSlot {
     reconnect_count: u32,
     last_synced_at: Option<u64>,
     last_marker: Value,
-    next_retry_at: Instant,
+    next_retry_at: u64,
     conn_gen: u64,
     supervisor_epoch: u64,
     supervisor_notify: Arc<Notify>,
@@ -209,7 +209,7 @@ impl RemoteHostSlot {
             reconnect_count: 0,
             last_synced_at: cached_at,
             last_marker: Value::Null,
-            next_retry_at: Instant::now(),
+            next_retry_at: 0,
             conn_gen: 0,
             supervisor_epoch: 0,
             supervisor_notify: Arc::new(Notify::new()),
@@ -859,17 +859,18 @@ impl MultiHostClient {
     /// Returns `true` when `host_id` is currently waiting for a scheduled retry deadline
     /// (for example, the 30-second backoff after an `ApiMismatch` probe).
     pub fn is_retry_backed_off(&self, host_id: &str) -> bool {
+        let now_ms = self.now_ms();
         self.hosts
             .read()
             .unwrap()
             .get(host_id)
-            .is_some_and(|s| s.next_retry_at > Instant::now())
+            .is_some_and(|s| s.next_retry_at > now_ms)
     }
 
     /// Clears any scheduled retry backoff for `host_id` so the next probe runs immediately.
     pub fn clear_retry_backoff(&self, host_id: &str) {
         if let Some(slot) = self.hosts.write().unwrap().get_mut(host_id) {
-            slot.next_retry_at = Instant::now();
+            slot.next_retry_at = 0;
         }
     }
 
@@ -1012,7 +1013,7 @@ impl MultiHostClient {
                 if !slot.saved.enabled || slot.updating {
                     continue;
                 }
-                slot.next_retry_at = Instant::now();
+                slot.next_retry_at = 0;
                 if slot.client.is_none() {
                     slot.connection = HostConnectionState::Connecting;
                 }
@@ -1038,7 +1039,7 @@ impl MultiHostClient {
                 if !slot.saved.enabled || slot.updating {
                     continue;
                 }
-                slot.next_retry_at = Instant::now();
+                slot.next_retry_at = 0;
                 if slot.client.is_some() {
                     slot.clear_connection(HostConnectionState::Connecting);
                     changed.push(id.clone());
@@ -1101,6 +1102,7 @@ impl MultiHostClient {
         let Some(this) = self.upgrade_self() else {
             return;
         };
+        let now_ms = self.now_ms();
         let host_ids: Vec<String> = {
             let guard = self.hosts.read().unwrap();
             guard
@@ -1108,7 +1110,7 @@ impl MultiHostClient {
                 .filter(|s| {
                     s.saved.enabled
                         && !s.updating
-                        && (s.client.is_some() || Instant::now() >= s.next_retry_at)
+                        && (s.client.is_some() || now_ms >= s.next_retry_at)
                 })
                 .map(|s| s.saved.id.clone())
                 .collect()
@@ -1281,7 +1283,9 @@ impl MultiHostClient {
                         app_api: mismatch.app_api,
                         version: mismatch.version.clone(),
                     };
-                    slot.next_retry_at = Instant::now() + API_MISMATCH_RETRY_DELAY;
+                    slot.next_retry_at = self
+                        .now_ms()
+                        .saturating_add(API_MISMATCH_RETRY_DELAY.as_millis() as u64);
                     let summary = slot.summary();
                     {
                         let mut guard = self.hosts.write().unwrap();
@@ -1699,7 +1703,7 @@ impl MultiHostClient {
             slot.saved.enabled = enabled;
             let (spawn, n) = if enabled {
                 if !slot.updating {
-                    slot.next_retry_at = Instant::now();
+                    slot.next_retry_at = 0;
                     if !was_enabled && slot.client.is_none() {
                         slot.connection = HostConnectionState::Connecting;
                     }
@@ -3376,7 +3380,7 @@ impl MultiHostClient {
                     let mut guard = self.client.hosts.write().unwrap();
                     if let Some(slot) = guard.get_mut(&self.host_id) {
                         slot.updating = false;
-                        slot.next_retry_at = Instant::now();
+                        slot.next_retry_at = 0;
                         if slot.connection.is_updating() {
                             slot.connection = if slot.saved.enabled {
                                 HostConnectionState::Connecting
@@ -3526,7 +3530,7 @@ impl MultiHostClient {
                                 break;
                             };
                             slot.updating = false;
-                            slot.next_retry_at = Instant::now();
+                            slot.next_retry_at = 0;
                             slot.clear_connection(HostConnectionState::Connecting);
                             let mut persist_needed = false;
                             if let HostTransport::Tcp { token: cur, .. } = &mut slot.saved.transport
@@ -3614,7 +3618,7 @@ impl MultiHostClient {
             let mut guard = self.hosts.write().unwrap();
             if let Some(slot) = guard.get_mut(host_id) {
                 slot.updating = false;
-                slot.next_retry_at = Instant::now();
+                slot.next_retry_at = 0;
                 slot.clear_connection(if slot.saved.enabled {
                     HostConnectionState::Connecting
                 } else {
@@ -3694,7 +3698,9 @@ impl MultiHostClient {
                             {
                                 slot.saved.server_id = Some(sid.clone());
                             }
-                            slot.next_retry_at = Instant::now() + API_MISMATCH_RETRY_DELAY;
+                            slot.next_retry_at = self
+                                .now_ms()
+                                .saturating_add(API_MISMATCH_RETRY_DELAY.as_millis() as u64);
                             if slot.client.is_some() {
                                 slot.clear_connection(next_state.clone());
                             } else {
@@ -3788,7 +3794,7 @@ impl MultiHostClient {
                 bail!("Host '{host_id}' state changed during connect");
             }
             slot.clear_connection(HostConnectionState::Connecting);
-            slot.next_retry_at = Instant::now();
+            slot.next_retry_at = 0;
             let mut persist_needed = false;
             if let HostTransport::Tcp { token: cur, .. } = &mut slot.saved.transport
                 && let Some(new_tok) = upgraded
@@ -4227,10 +4233,10 @@ impl MultiHostClient {
                     json!({"card_id": card_id, "tail": true, "limit": 200, "view": "full"});
                 match client.call_async("timeline.list", &params).await {
                     Ok(val) => {
-                        let ts = weak
-                            .upgrade()
-                            .map(|this| this.now_ms())
-                            .unwrap_or_else(canban_types::now);
+                        let Some(this) = weak.upgrade() else {
+                            break;
+                        };
+                        let ts = this.now_ms();
                         let _ = reads_arc.lock().unwrap().put(
                             "timeline.list",
                             &params,
@@ -4248,6 +4254,7 @@ impl MultiHostClient {
     }
 
     async fn sync_one_host_once(&self, host_id: &str) -> Result<()> {
+        let now_ms = self.now_ms();
         let existing = {
             let guard = self.hosts.read().unwrap();
             let Some(slot) = guard.get(host_id) else {
@@ -4256,7 +4263,7 @@ impl MultiHostClient {
             if !slot.saved.enabled || slot.updating {
                 return Ok(());
             }
-            if slot.client.is_none() && Instant::now() < slot.next_retry_at {
+            if slot.client.is_none() && now_ms < slot.next_retry_at {
                 return Ok(());
             }
             slot.client.clone().map(|c| (c, slot.conn_gen))
@@ -4457,10 +4464,11 @@ async fn host_supervisor_task(
         if *shutdown_rx.borrow() || weak_client.strong_count() == 0 {
             return;
         }
-        let (enabled, epoch_matches, updating, next_retry_at, token, existing) = {
+        let (enabled, epoch_matches, updating, next_retry_at, now_ms, token, existing) = {
             let Some(rc) = weak_client.upgrade() else {
                 return;
             };
+            let now_ms = rc.now_ms();
             let guard = rc.hosts.read().unwrap();
             let Some(slot) = guard.get(&host_id) else {
                 return;
@@ -4470,6 +4478,7 @@ async fn host_supervisor_task(
                 slot.supervisor_epoch == epoch,
                 slot.updating,
                 slot.next_retry_at,
+                now_ms,
                 slot.tcp_token(),
                 slot.client
                     .clone()
@@ -4491,9 +4500,8 @@ async fn host_supervisor_task(
         let (transport, conn_gen, last_marker) = if let Some(pair) = existing {
             pair
         } else {
-            let now_i = Instant::now();
-            if next_retry_at > now_i {
-                let wait = next_retry_at.saturating_duration_since(now_i);
+            if next_retry_at > now_ms {
+                let wait = Duration::from_millis(next_retry_at.saturating_sub(now_ms));
                 tokio::select! {
                     biased;
                     _ = shutdown_rx.changed() => { return; }

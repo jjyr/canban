@@ -588,7 +588,7 @@ fn migration_only_clears_the_automatic_exit_gate_and_keeps_explicit_task_gates()
     }
     app.store.lock().unwrap().write(|db|{
         db.save(&entry)?;
-        let mut c:Card=db.get(&card.id)?;attention(db,&mut c,"Agent exited without an explicit outcome. Inspect the retained output before resuming.")?;
+        let mut c:Card=db.get(&card.id)?;attention(db,&mut c,"Agent exited without an explicit outcome. Inspect the retained output before resuming.",app.now_ms())?;
         c.human_gate.as_mut().unwrap().terminal_id=Some(entry.id.clone());db.save(&c)
     }).unwrap();
     app.migrate_exit_failures().unwrap();
@@ -605,7 +605,7 @@ fn migration_only_clears_the_automatic_exit_gate_and_keeps_explicit_task_gates()
         .write(|db| {
             db.save(&entry)?;
             let mut c: Card = db.get(&card.id)?;
-            attention(db, &mut c, "Need a product decision")?;
+            attention(db, &mut c, "Need a product decision", app.now_ms())?;
             c.human_gate.as_mut().unwrap().terminal_id = Some(entry.id.clone());
             db.save(&c)
         })

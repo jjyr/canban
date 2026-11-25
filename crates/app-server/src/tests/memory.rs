@@ -543,7 +543,7 @@ fn interrupted_update_check_recovers_while_live_operation_keeps_pushing_progress
         false,
         true,
         None,
-        std::time::Instant::now(),
+        app.now_ms(),
     )
     .expect("step must return active state");
     assert_eq!(next_payload, None);
@@ -582,7 +582,7 @@ fn interrupted_update_check_recovers_while_live_operation_keeps_pushing_progress
         false,
         true,
         None,
-        std::time::Instant::now(),
+        app.now_ms(),
     )
     .expect("step must continue while downloading");
     assert!(next_payload.is_some());
@@ -692,7 +692,7 @@ fn stale_downloading_update_recovers_on_open_update_state_and_step() {
         true,
         false,
         None,
-        std::time::Instant::now(),
+        app.now_ms(),
     )
     .expect("step must recover stale downloading state");
     assert_eq!(next_payload, None);

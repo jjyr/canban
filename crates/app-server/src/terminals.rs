@@ -128,8 +128,9 @@ impl AppServer {
                         .clone()
                         .context("Terminal is still starting; wait before closing")?;
                     target = Some((core, terminal));
+                    let now_ms = self.now_ms();
                     run.close_state = "closing".into();
-                    run.close_requested_at = Some(now());
+                    run.close_requested_at = Some(now_ms);
                     let card_id = run.card_id.clone();
                     let run_num = run.number;
                     db.save(&item)?;
@@ -142,6 +143,7 @@ impl AppServer {
                         "Terminal closed by user",
                         Some(item.id.clone()),
                         json!({"run_number":run_num}),
+                        now_ms,
                     )?;
                     closing_agent = true;
                 } else if !run.finished() {
@@ -151,17 +153,18 @@ impl AppServer {
                     );
                     let card_id = run.card_id.clone();
                     let run_num = run.number;
+                    let now_ms = self.now_ms();
                     if let Some((core, terminal)) = orphan_target.clone() {
                         run.core_id = Some(core.clone());
                         run.terminal = Some(terminal.clone());
                         target = Some((core, terminal));
                         run.close_state = "closing".into();
-                        run.close_requested_at = Some(now());
+                        run.close_requested_at = Some(now_ms);
                         closing_agent = true;
                     } else {
                         run.state = "cancelled".into();
                         run.close_state = "closed".into();
-                        run.close_requested_at = Some(now());
+                        run.close_requested_at = Some(now_ms);
                     }
                     db.save(&item)?;
                     if let Ok(card) = db.get::<Card>(&card_id) {
@@ -173,6 +176,7 @@ impl AppServer {
                             "Terminal closed by user",
                             Some(item.id.clone()),
                             json!({"run_number":run_num}),
+                            now_ms,
                         )?;
                     }
                 }
@@ -645,6 +649,7 @@ impl AppServer {
                         "Card workspace prepared",
                         terminal_id,
                         json!({"workspace":workspace}),
+                        self.now_ms(),
                     )?;
                     db.save(&current)?;
                 }
@@ -900,14 +905,14 @@ impl AppServer {
             };
             let prefix = if want_agent { "agent" } else { "shell" };
             let item = TerminalEntry {
-                id: format!("{prefix}-{}", id()),
+                id: format!("{prefix}-{}", self.next_id()),
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
                 name: resolved_name,
                 origin_project_id,
                 origin_card_id,
                 agent_engine,
-                created_at: now(),
+                created_at: self.now_ms(),
                 runtime: Some(TerminalRuntime {
                     core_id: None,
                     terminal: None,
@@ -1048,7 +1053,7 @@ impl AppServer {
                     .command()
                     .iter()
                     .any(|s| s.contains("{session_id}"))
-                    .then(super::runtime::uuid_session_id);
+                    .then(|| self.next_uuid());
                 if let Some(sid) = &session_id {
                     env.insert("CANBAN_SESSION_ID".into(), sid.clone());
                 }
@@ -1457,8 +1462,12 @@ impl AppServer {
                                         w.kind != kind || w.title != title || w.message != message
                                     }) {
                                         runtime.waiting = Some(RuntimeWait {
-                                            id: old.map(|w| w.id.clone()).unwrap_or_else(id),
-                                            since: old.map(|w| w.since).unwrap_or_else(now),
+                                            id: old
+                                                .map(|w| w.id.clone())
+                                                .unwrap_or_else(|| self.next_id()),
+                                            since: old
+                                                .map(|w| w.since)
+                                                .unwrap_or_else(|| self.now_ms()),
                                             kind,
                                             title,
                                             message,
@@ -1493,7 +1502,7 @@ impl AppServer {
                     _ if runtime.state != "finished" => {
                         // Guard against async subscription lag immediately after launch.
                         let fresh_launch = runtime.connection == "connected"
-                            && now().saturating_sub(item.created_at) < 3_000;
+                            && self.now_ms().saturating_sub(item.created_at) < 3_000;
                         if !fresh_launch {
                             runtime.connection = "unavailable".into();
                             runtime.observed_agent = None;
@@ -1527,7 +1536,7 @@ impl AppServer {
                     .runtime
                     .as_ref()
                     .is_some_and(|r| r.connection == "connected")
-                    && now().saturating_sub(item.created_at) < 3_000;
+                    && self.now_ms().saturating_sub(item.created_at) < 3_000;
                 if let Some((core, terminal)) = &binding
                     && !observed
                         .as_ref()

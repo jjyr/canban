@@ -104,7 +104,7 @@ impl AppServer {
         }
         let config = self.config();
         let build = canban_updater::Build::current();
-        let uptime_ms = now().saturating_sub(self.started_at);
+        let uptime_ms = self.now_ms().saturating_sub(self.started_at);
         let listen_cfg = network::load_listen_config(&self.home);
         let bound_tcp = self.bound_tcp.lock().unwrap().clone();
         let has_token = network::read_server_token(&self.home).is_some();
@@ -207,7 +207,7 @@ impl AppServer {
         let gh = self.github.status();
 
         Ok(json!({
-            "checked_at": now(),
+            "checked_at": self.now_ms(),
             "server": {
                 "server_id": self.identity,
                 "hostname": network::hostname_with(self.exec_runner.as_ref()),

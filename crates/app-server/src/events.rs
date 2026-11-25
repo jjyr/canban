@@ -37,7 +37,7 @@ fn page(db: Db<'_>, after: u64, limit: usize) -> Result<Vec<JournalEvent>> {
     })
     .collect()
 }
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
     pump_at_with_prune_state(db, config, now(), None)
 }
@@ -47,7 +47,7 @@ pub(super) fn pump_at_with_prune_state(
     now_ms: u64,
     last_prune_at: Option<&AtomicU64>,
 ) -> Result<()> {
-    super::workflow::reconcile(db)?;
+    super::workflow::reconcile(db, now_ms)?;
     let top = highwater(db)?;
     let mut min_enabled_cursor: Option<u64> = None;
     for mut sub in db.list::<EventSubscription>()? {
@@ -193,6 +193,7 @@ pub(super) fn pump_at_with_prune_state(
                     w,
                     &entry.clone(),
                     &d.event_id,
+                    now_ms,
                 )?;
                 if event.kind == "github.pr.ci_failed"
                     && card
@@ -213,13 +214,14 @@ pub(super) fn pump_at_with_prune_state(
                 }
                 Ok(run.id)
             } else {
-                let run = canban_workflow_engine::runtime::start_cardless(
+                let run = canban_workflow_engine::runtime::start_cardless_at(
                     db,
                     &w.project_id,
                     w.definition,
                     w.revision,
                     entry,
                     Some(d.event_id.clone()),
+                    now_ms,
                 )?;
                 Ok(run.id)
             }
@@ -258,9 +260,13 @@ pub(super) fn pump_at_with_prune_state(
                 .is_ok()
         {
             let safe_offset = min_enabled_cursor.unwrap_or(top);
-            let _ =
-                db.prune_cardless_events(CARDLESS_RETENTION_MS, CARDLESS_KEEP_RECENT, safe_offset)?;
-            let _ = db.prune_activity_segments(ACTIVITY_RETENTION_MS)?;
+            let _ = db.prune_cardless_events(
+                CARDLESS_RETENTION_MS,
+                CARDLESS_KEEP_RECENT,
+                safe_offset,
+                now_ms,
+            )?;
+            let _ = db.prune_activity_segments(ACTIVITY_RETENTION_MS, now_ms)?;
         }
     }
     Ok(())
@@ -337,7 +343,7 @@ impl AppServer {
                     let id = p["subscription_id"]
                         .as_str()
                         .map(str::to_owned)
-                        .unwrap_or_else(canban_types::id);
+                        .unwrap_or_else(|| self.next_id());
                     let old = db.get::<EventSubscription>(&id).ok();
                     let rev = old.as_ref().map_or(0, |s| s.revision);
                     ensure!(
