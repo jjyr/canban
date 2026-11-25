@@ -15,6 +15,7 @@ anyhow.workspace = true
 base64.workspace = true
 canban-context.workspace = true
 canban-notifications.workspace = true
+canban-scheduler.workspace = true
 canban-sync.workspace = true
 canban-terminal = { workspace = true, default-features = false }
 canban-transport.workspace = true

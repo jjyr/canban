@@ -18,7 +18,10 @@ use canban_context::FsDurability;
 use canban_sync::{
     Outbox, QueueDecision, ReadCache,
     outbox::{Mutation, MutationKind, MutationState, UpdateBase},
-    replay::{DrainReport, FinishOutcome, StepAction, finish_step, prepare_next_step},
+    replay::{
+        DrainReport, FinishOutcome, MAX_REVISION_REBUILDS_PER_DRAIN, StepAction, finish_step,
+        prepare_next_step,
+    },
 };
 use canban_terminal::{RemotePtyTransport, session::PtyTransport};
 use canban_transport::ClientTransport;
@@ -26,8 +29,8 @@ use canban_types::{
     AppEvent, Clock, Config, DiscoveredCanbanHost, EnvEntryMeta, GlobalEnvSyncHostFailure,
     GlobalEnvSyncStatus, GlobalEnvSyncSummary, HostConnectionState, HostSummary, HostTransport,
     IdGen, RuntimeState, SavedHost, SchedulerSettings, Snapshot, SyncAction, SyncItemState,
-    SyncItemView, TerminalEntry, is_device_token, is_pairing_code, normalize_daemon_addr,
-    system_clock, system_id_gen,
+    SyncItemView, is_device_token, is_pairing_code, normalize_daemon_addr, system_clock,
+    system_id_gen,
 };
 use serde_json::{Value, json};
 use std::{
@@ -65,19 +68,8 @@ fn is_unsupported_subscribe_error(err: &anyhow::Error) -> bool {
     msg.contains("Unknown operation") && msg.contains("app.subscribe")
 }
 
-fn count_active_agents_in(terminals: &[TerminalEntry]) -> usize {
-    terminals
-        .iter()
-        .filter(|t| {
-            t.agent
-                .as_ref()
-                .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running" | "working"))
-        })
-        .count()
-}
-
-fn count_active_agents(s: &Snapshot) -> usize {
-    count_active_agents_in(&s.terminals)
+fn count_active_agents(s: &Snapshot, now_ms: u64) -> usize {
+    canban_scheduler::active_count_at(s, now_ms)
 }
 
 fn is_runtime_topic(topic: &str) -> bool {
@@ -225,9 +217,9 @@ impl RemoteHostSlot {
         }
     }
 
-    fn summary(&self) -> HostSummary {
+    fn summary(&self, now_ms: u64) -> HostSummary {
         let outbox = self.outbox.lock().unwrap();
-        let active_agents = count_active_agents(&self.cached.snapshot);
+        let active_agents = count_active_agents(&self.cached.snapshot, now_ms);
         HostSummary {
             id: self.saved.id.clone(),
             name: self.saved.name.clone(),
@@ -1257,13 +1249,14 @@ impl MultiHostClient {
             addr: addr.clone(),
             token: invite.secret.clone(),
         };
-        let session_res = SingleHostSession::connect_checked_async(
+        let session_res = SingleHostSession::connect_checked_async_with_clock(
             self.connector.as_ref(),
             preferred_id.as_deref().unwrap_or("pairing"),
             &tcp_transport,
             &self.config.device_name,
             Value::Null,
             self.min_api_version,
+            self.clock.as_ref(),
         )
         .await;
         let session = match session_res {
@@ -1308,10 +1301,10 @@ impl MultiHostClient {
                         app_api: mismatch.app_api,
                         version: mismatch.version.clone(),
                     };
-                    slot.next_retry_at = self
-                        .now_ms()
-                        .saturating_add(API_MISMATCH_RETRY_DELAY.as_millis() as u64);
-                    let summary = slot.summary();
+                    let now_ms = self.now_ms();
+                    slot.next_retry_at =
+                        now_ms.saturating_add(API_MISMATCH_RETRY_DELAY.as_millis() as u64);
+                    let summary = slot.summary(now_ms);
                     {
                         let mut guard = self.hosts.write().unwrap();
                         guard.insert(hid.clone(), slot);
@@ -1406,6 +1399,7 @@ impl MultiHostClient {
                 )));
                 slot.lease = lease;
                 slot.client = Some(Arc::clone(&transport));
+                let now_ms = self.now_ms();
                 apply_state_to_slot(
                     slot,
                     &self.config.data_dir,
@@ -1413,11 +1407,11 @@ impl MultiHostClient {
                     Some(rtt_ms),
                     Some(&ping_val),
                     None,
-                    self.now_ms(),
+                    now_ms,
                     self.fs_durability,
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
-                let summary = slot.summary();
+                let summary = slot.summary(now_ms);
                 let notify = was_enabled.then(|| Arc::clone(&slot.supervisor_notify));
                 self.persist_locked(&guard)?;
                 (hid, summary, !was_enabled, notify, entities)
@@ -1446,6 +1440,7 @@ impl MultiHostClient {
                 )));
                 slot.lease = lease;
                 slot.client = Some(Arc::clone(&transport));
+                let now_ms = self.now_ms();
                 apply_state_to_slot(
                     &mut slot,
                     &self.config.data_dir,
@@ -1453,11 +1448,11 @@ impl MultiHostClient {
                     Some(rtt_ms),
                     Some(&ping_val),
                     None,
-                    self.now_ms(),
+                    now_ms,
                     self.fs_durability,
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
-                let summary = slot.summary();
+                let summary = slot.summary(now_ms);
                 guard.insert(hid.clone(), slot);
                 self.persist_locked(&guard)?;
                 (hid, summary, true, None, entities)
@@ -1562,13 +1557,14 @@ impl MultiHostClient {
         }
 
         if host.enabled {
-            let session = SingleHostSession::connect_checked_async(
+            let session = SingleHostSession::connect_checked_async_with_clock(
                 self.connector.as_ref(),
                 &host.id,
                 &host.transport,
                 &self.config.device_name,
                 Value::Null,
                 self.min_api_version,
+                self.clock.as_ref(),
             )
             .await?;
             let (transport, lease, hs) = session.into_parts();
@@ -1600,6 +1596,7 @@ impl MultiHostClient {
                 )));
                 slot.lease = lease;
                 slot.client = Some(Arc::clone(&transport));
+                let now_ms = self.now_ms();
                 apply_state_to_slot(
                     &mut slot,
                     &self.config.data_dir,
@@ -1607,11 +1604,11 @@ impl MultiHostClient {
                     Some(hs.rtt_ms),
                     Some(&hs.ping),
                     None,
-                    self.now_ms(),
+                    now_ms,
                     self.fs_durability,
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
-                let sum = slot.summary();
+                let sum = slot.summary(now_ms);
                 guard.insert(hid.clone(), slot);
                 self.persist_locked(&guard)?;
                 (sum, entities)
@@ -1639,7 +1636,7 @@ impl MultiHostClient {
                 self.config.read_cache_budget_bytes,
                 self.fs_durability,
             );
-            let sum = slot.summary();
+            let sum = slot.summary(self.now_ms());
             guard.insert(hid.clone(), slot);
             self.persist_locked(&guard)?;
             sum
@@ -1771,8 +1768,9 @@ impl MultiHostClient {
         if let Some(local) = &self.local_host {
             out.push(self.local_summary(local.as_ref()));
         }
+        let now_ms = self.now_ms();
         let guard = self.hosts.read().unwrap();
-        out.extend(guard.values().map(RemoteHostSlot::summary));
+        out.extend(guard.values().map(|s| s.summary(now_ms)));
         out
     }
 
@@ -1842,13 +1840,13 @@ impl MultiHostClient {
     /// Merges the built-in `"local"` host (when present) and all enabled (plus mobile offline-cached)
     /// remote hosts with optimistic `canban-sync` projections, refreshing the O(1) routing table.
     pub fn merged_snapshot(&self) -> Result<Snapshot> {
+        let now_ms = self.now_ms();
         let mut merged = if let Some(local) = &self.local_host {
             let mut combined = local.snapshot()?;
-            let local_active = count_active_agents(&combined);
+            let local_active = count_active_agents(&combined, now_ms);
             let local_projects = combined.projects.len();
-            let synced_at = self.now_ms();
             *self.local_summary_counts.lock().unwrap() =
-                Some((local_active, local_projects, synced_at));
+                Some((local_active, local_projects, now_ms));
             combined.register_host_entities("local");
             combined
                 .host_summaries
@@ -1879,7 +1877,7 @@ impl MultiHostClient {
                         if !ops.is_empty() {
                             canban_sync::apply(&mut s, &slot.saved.id, &ops);
                         }
-                        canban_notifications::reconcile_runtime_reminders_at(&mut s, self.now_ms());
+                        canban_notifications::reconcile_runtime_reminders_at(&mut s, now_ms);
                         s.register_host_entities(&slot.saved.id);
                         Some(s)
                     } else if !ops.is_empty() {
@@ -1890,7 +1888,7 @@ impl MultiHostClient {
                     } else {
                         None
                     };
-                    (snap, slot.summary())
+                    (snap, slot.summary(now_ms))
                 })
                 .collect()
         };
@@ -1919,6 +1917,7 @@ impl MultiHostClient {
     pub fn merged_runtime_state(&self) -> Result<RuntimeState> {
         use std::collections::HashSet;
 
+        let now_ms = self.now_ms();
         if let Some(local) = &self.local_host {
             let mut combined = local.runtime_state()?;
             let local_active = combined
@@ -1929,7 +1928,7 @@ impl MultiHostClient {
             {
                 let mut counts = self.local_summary_counts.lock().unwrap();
                 let prev_projects = counts.map(|(_, p, _)| p).unwrap_or(0);
-                *counts = Some((local_active, prev_projects, self.now_ms()));
+                *counts = Some((local_active, prev_projects, now_ms));
             }
             combined.register_host("local");
 
@@ -1956,7 +1955,7 @@ impl MultiHostClient {
                         } else {
                             None
                         }?;
-                        let active_agents = count_active_agents(&snap);
+                        let active_agents = count_active_agents(&snap, now_ms);
                         let rt = RuntimeState {
                             terminals: snap.terminals,
                             terminal_contexts: snap.terminal_contexts,
@@ -2024,7 +2023,7 @@ impl MultiHostClient {
                         .or_insert_with(|| slot.saved.id.clone());
                 }
             }
-            let active_agents = count_active_agents(&host_snap);
+            let active_agents = count_active_agents(&host_snap, now_ms);
             let has_durable = !host_snap.projects.is_empty() || !host_snap.cards.is_empty();
             let rt = RuntimeState {
                 terminals: host_snap.terminals,
@@ -3546,13 +3545,14 @@ impl MultiHostClient {
                 if !still_enabled {
                     break;
                 }
-                if let Ok(session) = SingleHostSession::connect_checked_async(
+                if let Ok(session) = SingleHostSession::connect_checked_async_with_clock(
                     self.connector.as_ref(),
                     host_id,
                     &saved.transport,
                     &self.config.device_name,
                     Value::Null,
                     self.min_api_version,
+                    self.clock.as_ref(),
                 )
                 .await
                 {
@@ -3719,13 +3719,14 @@ impl MultiHostClient {
         } else {
             last_marker["revision"].clone()
         };
-        let session = match SingleHostSession::connect_checked_async(
+        let session = match SingleHostSession::connect_checked_async_with_clock(
             self.connector.as_ref(),
             host_id,
             &transport_spec,
             &self.config.device_name,
             after,
             self.min_api_version,
+            self.clock.as_ref(),
         )
         .await
         {
@@ -3913,11 +3914,12 @@ impl MultiHostClient {
         } else {
             after["revision"].clone()
         };
-        let start = Instant::now();
+        let started_ms = self.now_ms();
         let state_val = client
             .call_async("app.state", &json!({"after": req_after}))
             .await?;
-        let rtt_ms = start.elapsed().as_millis() as u64;
+        let finished_ms = self.now_ms();
+        let rtt_ms = finished_ms.saturating_sub(started_ms);
 
         let (emitted_topic, updated_entities, stale_inflight) = {
             let mut guard = self.hosts.write().unwrap();
@@ -3937,7 +3939,7 @@ impl MultiHostClient {
                     Some(rtt_ms),
                     None,
                     preferred_topic,
-                    self.now_ms(),
+                    finished_ms,
                     self.fs_durability,
                 );
                 let entities = topic
@@ -3966,7 +3968,7 @@ impl MultiHostClient {
         card_id: Option<String>,
         latest_marker: &Value,
     ) -> Result<()> {
-        let start = Instant::now();
+        let started_ms = self.now_ms();
         let mut val = match client.call_async("runtime.state", &json!({})).await {
             Ok(v) => v,
             Err(err) if !is_connection_error(&err) => {
@@ -3976,7 +3978,8 @@ impl MultiHostClient {
             }
             Err(err) => return Err(err),
         };
-        let rtt_ms = start.elapsed().as_millis() as u64;
+        let now_ms = self.now_ms();
+        let rtt_ms = now_ms.saturating_sub(started_ms);
         let Ok(mut rt) = serde_json::from_value::<RuntimeState>(val["runtime"].take()) else {
             return self
                 .refresh_host_now_async(host_id, client, Some(topic), card_id)
@@ -3985,9 +3988,6 @@ impl MultiHostClient {
         rt.terminal_hosts.clear();
         rt.host_active_agents.clear();
         rt.register_host(host_id);
-        let active_agents = count_active_agents_in(&rt.terminals);
-        rt.host_active_agents
-            .insert(host_id.to_owned(), active_agents);
 
         {
             let mut guard = self.hosts.write().unwrap();
@@ -3995,12 +3995,13 @@ impl MultiHostClient {
                 return Ok(());
             };
             slot.cached.snapshot.apply_runtime_state(rt);
-            canban_notifications::reconcile_runtime_reminders_at(
-                &mut slot.cached.snapshot,
-                self.now_ms(),
-            );
+            let active_agents = count_active_agents(&slot.cached.snapshot, now_ms);
+            if let Some(summary) = slot.cached.snapshot.host_summaries.get_mut(host_id) {
+                summary.active_agents = active_agents;
+            }
+            canban_notifications::reconcile_runtime_reminders_at(&mut slot.cached.snapshot, now_ms);
             slot.cached.snapshot.register_host_entities(host_id);
-            slot.last_synced_at = Some(self.now_ms());
+            slot.last_synced_at = Some(now_ms);
             if let HostConnectionState::Connected {
                 rtt_ms: ref mut prev_rtt,
                 ..
@@ -4033,7 +4034,8 @@ impl MultiHostClient {
 
         let mut report = DrainReport::default();
         let mut blocked = BTreeSet::new();
-        let mut rebuilt_ids = BTreeSet::new();
+        let mut rebuild_counts: BTreeMap<String, u32> = BTreeMap::new();
+        let mut deferred_retry = false;
         let mut active_client: Option<Arc<ClientTransport>> = None;
 
         loop {
@@ -4093,7 +4095,8 @@ impl MultiHostClient {
                 break;
             };
 
-            let allow_rebuild = !rebuilt_ids.contains(&mutation_id);
+            let allow_rebuild = rebuild_counts.get(&mutation_id).copied().unwrap_or(0)
+                < MAX_REVISION_REBUILDS_PER_DRAIN;
             let is_global_env_sync = method == "env.global.sync";
             let (payload, sync_fingerprint) = if is_global_env_sync {
                 if let Some(provider) = &self.global_env_provider {
@@ -4131,17 +4134,21 @@ impl MultiHostClient {
             let (is_conn_err, refreshed) = match &result {
                 Ok(_) => (false, None),
                 Err(err) => {
-                    let conn = is_connection_error(err);
+                    let mut conn = is_connection_error(err);
                     let msg = format!("{err:#}");
                     let need_refresh = !conn
-                        && ((msg.contains("revision_conflict") && allow_rebuild)
+                        && (msg.contains("revision_conflict")
                             || msg.contains("request_key_conflict"));
                     let snap = if need_refresh {
-                        client
-                            .call_async("app.state", &json!({}))
-                            .await
-                            .ok()
-                            .and_then(|v| parse_refreshed_snapshot(&v, host_id))
+                        match client.call_async("app.state", &json!({})).await {
+                            Ok(v) => parse_refreshed_snapshot(&v, host_id),
+                            Err(refresh_err) => {
+                                if is_connection_error(&refresh_err) {
+                                    conn = true;
+                                }
+                                None
+                            }
+                        }
                     } else {
                         None
                     };
@@ -4196,7 +4203,10 @@ impl MultiHostClient {
             match outcome {
                 FinishOutcome::Continue => {}
                 FinishOutcome::RetryImmediate => {
-                    rebuilt_ids.insert(mutation_id);
+                    *rebuild_counts.entry(mutation_id).or_insert(0) += 1;
+                }
+                FinishOutcome::Deferred => {
+                    deferred_retry = true;
                 }
                 FinishOutcome::StopConnection => {
                     self.mark_slot_disconnected(
@@ -4211,7 +4221,9 @@ impl MultiHostClient {
         }
 
         if report.applied > 0 || report.conflicts > 0 || report.failed > 0 {
-            if let Some(client) = active_client {
+            if !report.aborted_by_connection
+                && let Some(client) = active_client
+            {
                 let _ = self
                     .refresh_host_now_async(host_id, &client, Some("application"), None)
                     .await;
@@ -4223,6 +4235,22 @@ impl MultiHostClient {
                     card_id: None,
                 },
             );
+        }
+        if deferred_retry
+            && !report.aborted_by_connection
+            && let Some(this) = self.upgrade_self()
+        {
+            let hid = host_id.to_owned();
+            let mut shutdown_rx = self.shutdown_tx.subscribe();
+            self.runtime_handle.spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = shutdown_rx.changed() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        this.wake_host(&hid);
+                    }
+                }
+            });
         }
         self.spawn_prefetch_timelines(host_id);
         Ok(report)
@@ -4898,7 +4926,7 @@ mod tests {
     use super::*;
     use crate::{pairing::format_pairing_uri, parse_pairing_invite, store::MemoryCredentialStore};
     use canban_app_server::AppServer;
-    use canban_types::{Card, Project, ServerListenConfig, SyncMark, now};
+    use canban_types::{Card, Project, ServerListenConfig, SyncMark, TerminalEntry, now};
 
     async fn start_tcp_server_with_verifier(
         home: PathBuf,
@@ -6838,5 +6866,710 @@ mod tests {
         assert_eq!(snap.cards[0].title, "After Durable Commit");
 
         let _ = stop_tx.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_outbox_revision_conflict_refresh_disconnect_stays_queued_and_recovers() {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
+        };
+        use canban_types::Workflow;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("mock-server-home");
+        let client_dir = dir.path().join("client-data");
+        std::fs::create_dir_all(&server_home).unwrap();
+        let store = Arc::new(DeviceTokenStore::open(&server_home));
+        let (_dev, token) = store.issue_device("rc-drop-test").unwrap();
+
+        let make_snap = |title: &str, body: &str, rev: u64| -> Snapshot {
+            let mut snap = Snapshot::default();
+            snap.projects.push(
+                serde_json::from_value(json!({
+                    "id": "p-rc",
+                    "name": "RC Project",
+                    "directory": "/srv/rc",
+                    "workflow": Workflow::default(),
+                    "created_at": 1000,
+                }))
+                .unwrap(),
+            );
+            snap.cards.push(
+                serde_json::from_value(json!({
+                    "id": "c-rc",
+                    "project_id": "p-rc",
+                    "number": 1,
+                    "title": title,
+                    "body": body,
+                    "stage": "backlog",
+                    "revision": rev,
+                    "created_at": 1000,
+                }))
+                .unwrap(),
+            );
+            snap
+        };
+
+        let server_snap = Arc::new(Mutex::new(make_snap("Initial", "Old body", 4)));
+        let update_calls = Arc::new(AtomicUsize::new(0));
+        let drop_next_refresh = Arc::new(AtomicBool::new(false));
+        let server_rev = Arc::new(AtomicUsize::new(1));
+        let subscribed_notify = Arc::new(Notify::new());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home.clone(),
+            server_id: "srv-rc-drop".into(),
+            api_version: 90,
+            device_store: store,
+            pairing_codes: Arc::new(PairingCodeStore::open(&server_home)),
+            revocations: RevocationBus::new(),
+            active_tcp_connections: Arc::new(AtomicUsize::new(0)),
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let snap_ref = server_snap.clone();
+        let upd_ref = update_calls.clone();
+        let drop_ref = drop_next_refresh.clone();
+        let rev_ref = server_rev.clone();
+        let sub_notify = subscribed_notify.clone();
+        spawn_tcp_listener(
+            &handle,
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let snap_ref = snap_ref.clone();
+                let upd_ref = upd_ref.clone();
+                let drop_ref = drop_ref.clone();
+                let rev_ref = rev_ref.clone();
+                let sub_notify = sub_notify.clone();
+                async move {
+                    let (read_half, mut writer) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(read_half);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("app.ping") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-rc-drop",
+                                            "api_version": 90,
+                                            "version": "test",
+                                            "platform": "macos",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                if drop_ref.swap(false, Ordering::SeqCst) {
+                                    // Simulate transient transport drop on the refresh call!
+                                    break;
+                                }
+                                let snap = snap_ref.lock().unwrap().clone();
+                                let r = rev_ref.load(Ordering::SeqCst);
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "changed": true,
+                                            "revision": ["srv-rc-drop", "i1", r, r, 0],
+                                            "github_revision": 0,
+                                            "server_id": "srv-rc-drop",
+                                            "snapshot": snap,
+                                            "config": Config::default(),
+                                            "home": "/tmp/srv",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("card.update") => {
+                                let _n = upd_ref.fetch_add(1, Ordering::SeqCst) + 1;
+                                let sent_rev = req["params"]["revision"].as_u64().unwrap_or(0);
+                                let resp = {
+                                    let mut snap = snap_ref.lock().unwrap();
+                                    if sent_rev != snap.cards[0].revision {
+                                        let cur = snap.cards[0].revision;
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "error": {
+                                                "code": -32000,
+                                                "message": format!("revision_conflict: expected revision {sent_rev}, current revision {cur}; refresh and retry")
+                                            }
+                                        })
+                                    } else {
+                                        if let Some(t) = req["params"]["title"].as_str() {
+                                            snap.cards[0].title = t.to_owned();
+                                        }
+                                        if let Some(b) = req["params"]["body"].as_str() {
+                                            snap.cards[0].body = b.to_owned();
+                                        }
+                                        snap.cards[0].revision += 1;
+                                        rev_ref.fetch_add(1, Ordering::SeqCst);
+                                        let card = snap.cards[0].clone();
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "result": card,
+                                        })
+                                    }
+                                };
+                                let _ = write_json_line_async(&mut writer, &resp).await;
+                            }
+                            Some("app.subscribe") => {
+                                let r = rev_ref.load(Ordering::SeqCst);
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "subscribed": true,
+                                            "server_id": "srv-rc-drop",
+                                            "api_version": 90,
+                                            "revision": ["srv-rc-drop", "i1", r, r, 0],
+                                            "changed": false,
+                                            "github_revision": 0,
+                                            "heartbeat_ms": 5000,
+                                        }
+                                    }),
+                                )
+                                .await;
+                                sub_notify.notify_waiters();
+                                let mut buf = String::new();
+                                while matches!(reader.read_line(&mut buf).await, Ok(n) if n > 0) {
+                                    buf.clear();
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        client
+            .add_host_async(SavedHost {
+                id: "host-rc".into(),
+                name: "RC Host".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-rc-drop".into()),
+                enabled: true,
+                added_at: 1000,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), subscribed_notify.notified())
+            .await
+            .expect("supervisor subscribed before outbox test");
+
+        // Advance server concurrently (disjoint title edit, rev 4 -> 5) and instruct server to drop
+        // the follow-up `app.state` refresh right after returning `revision_conflict`.
+        *server_snap.lock().unwrap() = make_snap("Server Title", "Old body", 5);
+        server_rev.store(2, Ordering::SeqCst);
+        drop_next_refresh.store(true, Ordering::SeqCst);
+
+        // Enqueue an offline-style edit on `body` against cached rev 4 directly into the outbox.
+        {
+            let guard = client.hosts.read().unwrap();
+            let slot = guard.get("host-rc").unwrap();
+            let mut ob = slot.outbox.lock().unwrap();
+            ob.enqueue(Mutation {
+                id: "m-rc-drop".into(),
+                host_id: "host-rc".into(),
+                card_id: "c-rc".into(),
+                kind: MutationKind::UpdateCard,
+                params: json!({"card_id": "c-rc", "title": "Initial", "body": "My New Body"}),
+                base: UpdateBase {
+                    title: Some("Initial".into()),
+                    body: Some("Old body".into()),
+                },
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 1001,
+                attempts: 0,
+            })
+            .unwrap();
+        }
+
+        // First drain hits `revision_conflict`, then transport drop on `app.state` refresh.
+        // It MUST abort with `aborted_by_connection == true` and leave the mutation `Queued`!
+        let rep = client.drain_outbox_async("host-rc").await.unwrap();
+        assert!(
+            rep.aborted_by_connection,
+            "refresh transport drop must return StopConnection, got {rep:?}"
+        );
+        assert_eq!(rep.failed, 0, "edit must NOT be marked Failed");
+        let items = client.sync_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].state, SyncItemState::Queued);
+
+        // Reconnect and drain again: fresh snapshot (rev 5) merges cleanly and applies body edit!
+        client.poll_remotes_once_async().await;
+        let items_after = client.sync_items();
+        assert!(
+            items_after.is_empty(),
+            "queued edit must drain cleanly after reconnect; remaining={items_after:?}"
+        );
+        let final_server = server_snap.lock().unwrap().clone();
+        assert_eq!(final_server.cards[0].title, "Server Title");
+        assert_eq!(final_server.cards[0].body, "My New Body");
+        assert_eq!(final_server.cards[0].revision, 6);
+
+        let _ = stop_tx.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_outbox_concurrent_double_revision_conflict_merges_and_surfaces_conflict_never_failed()
+     {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
+        };
+        use canban_types::Workflow;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("mock-server-home");
+        let client_dir = dir.path().join("client-data");
+        std::fs::create_dir_all(&server_home).unwrap();
+        let store = Arc::new(DeviceTokenStore::open(&server_home));
+        let (_dev, token) = store.issue_device("dbl-rc-test").unwrap();
+
+        let make_snap =
+            |c1_title: &str, c1_body: &str, c1_rev: u64, c2_title: &str, c2_rev: u64| {
+                let mut snap = Snapshot::default();
+                snap.projects.push(
+                    serde_json::from_value(json!({
+                        "id": "p-dbl",
+                        "name": "Double RC",
+                        "directory": "/srv/dbl",
+                        "workflow": Workflow::default(),
+                        "created_at": 1000,
+                    }))
+                    .unwrap(),
+                );
+                snap.cards.push(
+                    serde_json::from_value(json!({
+                        "id": "c-merge",
+                        "project_id": "p-dbl",
+                        "number": 1,
+                        "title": c1_title,
+                        "body": c1_body,
+                        "stage": "backlog",
+                        "revision": c1_rev,
+                        "created_at": 1000,
+                    }))
+                    .unwrap(),
+                );
+                snap.cards.push(
+                    serde_json::from_value(json!({
+                        "id": "c-conflict",
+                        "project_id": "p-dbl",
+                        "number": 2,
+                        "title": c2_title,
+                        "body": "Body 2",
+                        "stage": "backlog",
+                        "revision": c2_rev,
+                        "created_at": 1000,
+                    }))
+                    .unwrap(),
+                );
+                snap
+            };
+
+        let server_snap = Arc::new(Mutex::new(make_snap("T1", "B1", 1, "T2", 1)));
+        let c1_attempts = Arc::new(AtomicUsize::new(0));
+        let c2_attempts = Arc::new(AtomicUsize::new(0));
+        let subscribed_notify = Arc::new(Notify::new());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home.clone(),
+            server_id: "srv-dbl".into(),
+            api_version: 90,
+            device_store: store,
+            pairing_codes: Arc::new(PairingCodeStore::open(&server_home)),
+            revocations: RevocationBus::new(),
+            active_tcp_connections: Arc::new(AtomicUsize::new(0)),
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let snap_ref = server_snap.clone();
+        let c1_ref = c1_attempts.clone();
+        let c2_ref = c2_attempts.clone();
+        let sub_notify = subscribed_notify.clone();
+        spawn_tcp_listener(
+            &handle,
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let snap_ref = snap_ref.clone();
+                let c1_ref = c1_ref.clone();
+                let c2_ref = c2_ref.clone();
+                let sub_notify = sub_notify.clone();
+                async move {
+                    let (read_half, mut writer) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(read_half);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("app.ping") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-dbl",
+                                            "api_version": 90,
+                                            "version": "test",
+                                            "platform": "macos",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                let snap = snap_ref.lock().unwrap().clone();
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "changed": true,
+                                            "revision": ["srv-dbl", "i1", 1, 1, 0],
+                                            "github_revision": 0,
+                                            "server_id": "srv-dbl",
+                                            "snapshot": snap,
+                                            "config": Config::default(),
+                                            "home": "/tmp/srv",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("card.update") => {
+                                let cid = req["params"]["card_id"].as_str().unwrap_or("");
+                                let resp = {
+                                    let mut snap = snap_ref.lock().unwrap();
+                                    if cid == "c-merge" {
+                                        let n = c1_ref.fetch_add(1, Ordering::SeqCst) + 1;
+                                        if n <= 2 {
+                                            // Concurrent disjoint title bump on attempts 1 and 2.
+                                            snap.cards[0].revision += 1;
+                                            snap.cards[0].title = format!("Server T1 v{n}");
+                                            let cur = snap.cards[0].revision;
+                                            Some(json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "error": {
+                                                    "code": -32000,
+                                                    "message": format!("revision_conflict: current revision {cur}")
+                                                }
+                                            }))
+                                        } else {
+                                            if let Some(b) = req["params"]["body"].as_str() {
+                                                snap.cards[0].body = b.to_owned();
+                                            }
+                                            snap.cards[0].revision += 1;
+                                            let card = snap.cards[0].clone();
+                                            Some(json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "result": card,
+                                            }))
+                                        }
+                                    } else if cid == "c-conflict" {
+                                        let n = c2_ref.fetch_add(1, Ordering::SeqCst) + 1;
+                                        snap.cards[1].revision += 1;
+                                        if n == 2 {
+                                            // Second concurrent bump edits the same `title` field.
+                                            snap.cards[1].title = "Server Competing Title".into();
+                                        }
+                                        let cur = snap.cards[1].revision;
+                                        Some(json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "error": {
+                                                "code": -32000,
+                                                "message": format!("revision_conflict: current revision {cur}")
+                                            }
+                                        }))
+                                    } else {
+                                        None
+                                    }
+                                };
+                                if let Some(resp) = resp {
+                                    let _ = write_json_line_async(&mut writer, &resp).await;
+                                }
+                            }
+                            Some("app.subscribe") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "subscribed": true,
+                                            "server_id": "srv-dbl",
+                                            "api_version": 90,
+                                            "revision": ["srv-dbl", "i1", 1, 1, 0],
+                                            "changed": false,
+                                            "github_revision": 0,
+                                            "heartbeat_ms": 5000,
+                                        }
+                                    }),
+                                )
+                                .await;
+                                sub_notify.notify_waiters();
+                                let mut buf = String::new();
+                                while matches!(reader.read_line(&mut buf).await, Ok(n) if n > 0) {
+                                    buf.clear();
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        client
+            .add_host_async(SavedHost {
+                id: "host-dbl".into(),
+                name: "Double RC Host".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-dbl".into()),
+                enabled: true,
+                added_at: 1000,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), subscribed_notify.notified())
+            .await
+            .expect("supervisor subscribed before outbox test");
+
+        {
+            let guard = client.hosts.read().unwrap();
+            let slot = guard.get("host-dbl").unwrap();
+            let mut ob = slot.outbox.lock().unwrap();
+            ob.enqueue(Mutation {
+                id: "m-dbl-merge".into(),
+                host_id: "host-dbl".into(),
+                card_id: "c-merge".into(),
+                kind: MutationKind::UpdateCard,
+                params: json!({"card_id": "c-merge", "title": "T1", "body": "Merged Body"}),
+                base: UpdateBase {
+                    title: Some("T1".into()),
+                    body: Some("B1".into()),
+                },
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 1001,
+                attempts: 0,
+            })
+            .unwrap();
+            ob.enqueue(Mutation {
+                id: "m-dbl-conflict".into(),
+                host_id: "host-dbl".into(),
+                card_id: "c-conflict".into(),
+                kind: MutationKind::UpdateCard,
+                params: json!({"card_id": "c-conflict", "title": "My Competing Title", "body": "Body 2"}),
+                base: UpdateBase {
+                    title: Some("T2".into()),
+                    body: Some("Body 2".into()),
+                },
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 1002,
+                attempts: 0,
+            })
+            .unwrap();
+        }
+
+        let rep = client.drain_outbox_async("host-dbl").await.unwrap();
+        assert_eq!(
+            rep.applied, 1,
+            "c-merge should merge and apply after 2 concurrent bumps"
+        );
+        assert_eq!(
+            rep.conflicts, 1,
+            "c-conflict should surface Conflict after 2nd bump"
+        );
+        assert_eq!(rep.failed, 0, "neither edit should be marked Failed");
+
+        let final_server = server_snap.lock().unwrap().clone();
+        assert_eq!(final_server.cards[0].title, "Server T1 v2");
+        assert_eq!(final_server.cards[0].body, "Merged Body");
+        let items = client.sync_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].mutation_id, "m-dbl-conflict");
+        assert_eq!(items[0].state, SyncItemState::Conflict);
+        assert_eq!(items[0].conflict_fields, vec!["title".to_owned()]);
+
+        let _ = stop_tx.send(true);
+    }
+
+    #[test]
+    fn remote_count_active_agents_matches_scheduler_semantics() {
+        let now_ms = 1_750_000_050_000_u64;
+        let make_term =
+            |id: &str, state: &str, conn: &str, obs_state: Option<&str>, obs_at: Option<u64>| {
+                let observed =
+                    obs_state.map(|s| json!({ "state": "live", "status": { "state": s } }));
+                serde_json::from_value::<TerminalEntry>(json!({
+                    "id": id,
+                    "conversation_id": null,
+                    "number": 1,
+                    "name": id,
+                    "origin_project_id": "p1",
+                    "origin_card_id": "c1",
+                    "agent_engine": null,
+                    "runtime": null,
+                    "agent": {
+                        "project_id": "p1",
+                        "card_id": "c1",
+                        "number": 1,
+                        "provider": "claude",
+                        "state": state,
+                        "connection_state": conn,
+                        "observed": observed,
+                        "lifecycle": { "observed_at": obs_at },
+                        "instruction": "Work",
+                        "cwd": "/srv/p1",
+                        "terminal": id,
+                        "started_at": now_ms - 5_000,
+                    },
+                    "created_at": now_ms - 5_000,
+                }))
+                .unwrap()
+            };
+
+        let mut snap = Snapshot::default();
+        // 1. Running terminal whose live observed status is `idle` -> NOT active (releases slot).
+        snap.terminals.push(make_term(
+            "t-idle",
+            "running",
+            "connected",
+            Some("idle"),
+            Some(now_ms - 1_000),
+        ));
+        // 2. Running terminal whose live observed status is `done` -> NOT active.
+        snap.terminals.push(make_term(
+            "t-done",
+            "running",
+            "connected",
+            Some("done"),
+            Some(now_ms - 1_000),
+        ));
+        // 3. Running terminal whose live observed status is `blocked` -> NOT active.
+        snap.terminals.push(make_term(
+            "t-blocked",
+            "running",
+            "connected",
+            Some("blocked"),
+            Some(now_ms - 1_000),
+        ));
+        assert_eq!(count_active_agents(&snap, now_ms), 0);
+        assert_eq!(
+            count_active_agents(&snap, now_ms),
+            canban_scheduler::active_count_at(&snap, now_ms)
+        );
+
+        // 4. Actively working terminal -> active (+1).
+        snap.terminals.push(make_term(
+            "t-work",
+            "working",
+            "connected",
+            Some("working"),
+            Some(now_ms - 1_000),
+        ));
+        // 5. Running terminal with stale observation (>30s) -> conservative active (+1).
+        snap.terminals.push(make_term(
+            "t-stale",
+            "running",
+            "connected",
+            Some("idle"),
+            Some(now_ms - 31_000),
+        ));
+        // 6. Disconnected terminal -> conservative active (+1).
+        snap.terminals
+            .push(make_term("t-unavail", "running", "unavailable", None, None));
+        assert_eq!(count_active_agents(&snap, now_ms), 3);
+        assert_eq!(
+            count_active_agents(&snap, now_ms),
+            canban_scheduler::active_count_at(&snap, now_ms)
+        );
     }
 }

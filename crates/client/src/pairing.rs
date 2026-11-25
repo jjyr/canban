@@ -3,10 +3,8 @@
 use canban_types::{
     HostTransport, TAILSCALE_AUTH_SENTINEL, extract_daemon_host, normalize_daemon_addr,
 };
-use std::{
-    net::IpAddr,
-    time::{Duration, Instant},
-};
+use std::{net::IpAddr, time::Duration};
+use tokio::time::Instant;
 
 /// Transport confidentiality classification displayed during pairing and host inspection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

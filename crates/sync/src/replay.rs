@@ -6,7 +6,11 @@ use crate::{
 use anyhow::Result;
 use canban_types::{Card, Snapshot};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Maximum immediate `revision_conflict` refresh-and-rebuild retries for a single mutation
+/// within one drain pass before deferring the remaining `Queued` op to a subsequent drain.
+pub const MAX_REVISION_REBUILDS_PER_DRAIN: u32 = 3;
 
 /// Host RPC + snapshot transport used by [`drain`].
 pub trait Transport {
@@ -257,6 +261,7 @@ pub enum StepAction {
 pub enum FinishOutcome {
     Continue,
     RetryImmediate,
+    Deferred,
     StopConnection,
 }
 
@@ -363,24 +368,64 @@ pub fn finish_step(
             FinishOutcome::Continue
         }
         Err(err) => {
+            let msg = format!("{err:#}");
             if is_conn_err {
                 outbox.ops[pos].state = MutationState::Queued;
-                outbox.ops[pos].retry_same_params = true;
+                // A `revision_conflict` proves the server rejected our stale revision without
+                // committing `request_key`, so when the follow-up `app.state` refresh fails with
+                // a transport error we must NOT preserve the stale `sent_params` across reconnect;
+                // let the next drain re-classify against the fresh post-reconnect snapshot.
+                outbox.ops[pos].retry_same_params = !msg.contains("revision_conflict");
                 let _ = outbox.save();
                 report.aborted_by_connection = true;
                 return FinishOutcome::StopConnection;
             }
-            let msg = format!("{err:#}");
             if let Some(fresh) = refreshed_snapshot {
                 *snapshot = fresh;
-                if msg.contains("revision_conflict") && allow_revision_rebuild {
+                if msg.contains("revision_conflict") {
                     // A `revision_conflict` proves the server never committed `request_key`
                     // (even when `was_retry_same_params` was true after a transport drop), so
                     // refreshing and re-classifying via three-way merge is safe and required.
                     let _ = was_retry_same_params;
-                    outbox.ops[pos].state = MutationState::Queued;
-                    let _ = outbox.save();
-                    return FinishOutcome::RetryImmediate;
+                    outbox.ops[pos].retry_same_params = false;
+                    if allow_revision_rebuild {
+                        outbox.ops[pos].state = MutationState::Queued;
+                        let _ = outbox.save();
+                        return FinishOutcome::RetryImmediate;
+                    }
+                    // Immediate rebuild budget for this drain pass is exhausted; re-evaluate
+                    // against the freshly fetched snapshot so genuine conflicts, no-ops, or
+                    // archived/deleted cards resolve immediately instead of becoming a spurious
+                    // `Failed("revision_conflict")`, while still-valid edits stay `Queued` and
+                    // defer to the next drain pass.
+                    match prepare_params(&outbox.ops[pos], snapshot) {
+                        PrepareResult::AlreadySatisfied => {
+                            outbox.ops.remove(pos);
+                            let _ = outbox.save();
+                            report.applied += 1;
+                            return FinishOutcome::Continue;
+                        }
+                        PrepareResult::Conflict(fields) => {
+                            outbox.ops[pos].state = MutationState::Conflict { fields };
+                            let _ = outbox.save();
+                            blocked.insert(block_key);
+                            report.conflicts += 1;
+                            return FinishOutcome::Continue;
+                        }
+                        PrepareResult::Failed(message) => {
+                            outbox.ops[pos].state = MutationState::Failed { message };
+                            let _ = outbox.save();
+                            blocked.insert(block_key);
+                            report.failed += 1;
+                            return FinishOutcome::Continue;
+                        }
+                        PrepareResult::Send(_) => {
+                            outbox.ops[pos].state = MutationState::Queued;
+                            let _ = outbox.save();
+                            blocked.insert(block_key);
+                            return FinishOutcome::Deferred;
+                        }
+                    }
                 }
                 if msg.contains("request_key_conflict")
                     && card_already_matches_after_key_conflict(&outbox.ops[pos], snapshot)
@@ -408,7 +453,7 @@ pub fn drain(
 ) -> DrainReport {
     let mut report = DrainReport::default();
     let mut blocked = BTreeSet::new();
-    let mut rebuilt_ids = BTreeSet::new();
+    let mut rebuild_counts: BTreeMap<String, u32> = BTreeMap::new();
 
     while let StepAction::Send {
         mutation_id,
@@ -417,18 +462,26 @@ pub fn drain(
         was_retry_same_params,
     } = prepare_next_step(outbox, snapshot, &mut blocked, &mut report)
     {
-        let allow_rebuild = !rebuilt_ids.contains(&mutation_id);
+        let allow_rebuild = rebuild_counts.get(&mutation_id).copied().unwrap_or(0)
+            < MAX_REVISION_REBUILDS_PER_DRAIN;
         let result = transport.call(method, sent_params);
         let (is_conn_err, refreshed) = match &result {
             Ok(_) => (false, None),
             Err(err) => {
-                let conn = transport.is_connection_error(err);
+                let mut conn = transport.is_connection_error(err);
                 let msg = format!("{err:#}");
                 let need_refresh = !conn
-                    && ((msg.contains("revision_conflict") && allow_rebuild)
-                        || msg.contains("request_key_conflict"));
+                    && (msg.contains("revision_conflict") || msg.contains("request_key_conflict"));
                 let snap = if need_refresh {
-                    transport.refresh_snapshot().ok()
+                    match transport.refresh_snapshot() {
+                        Ok(s) => Some(s),
+                        Err(refresh_err) => {
+                            if transport.is_connection_error(&refresh_err) {
+                                conn = true;
+                            }
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
@@ -448,9 +501,9 @@ pub fn drain(
             &mut report,
         );
         match outcome {
-            FinishOutcome::Continue => {}
+            FinishOutcome::Continue | FinishOutcome::Deferred => {}
             FinishOutcome::RetryImmediate => {
-                rebuilt_ids.insert(mutation_id);
+                *rebuild_counts.entry(mutation_id).or_insert(0) += 1;
             }
             FinishOutcome::StopConnection => break,
         }
@@ -785,5 +838,349 @@ mod tests {
         assert_eq!(rep.applied, 1);
         assert_eq!(outbox.len(), 1);
         assert_eq!(outbox.ops[0].kind, MutationKind::SyncGlobalEnv);
+    }
+
+    #[test]
+    fn revision_conflict_with_refresh_connection_error_stops_connection_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut outbox = Outbox::load(dir.path().join("o.json"));
+        // Simulate an in-flight retry after a prior transport drop (`retry_same_params = true`).
+        outbox
+            .enqueue(Mutation {
+                id: "m-upd".into(),
+                host_id: "h1".into(),
+                card_id: "c1".into(),
+                kind: MutationKind::UpdateCard,
+                params: json!({"card_id": "c1", "title": "Initial", "body": "Edited body"}),
+                base: UpdateBase {
+                    title: Some("Initial".into()),
+                    body: Some("Body".into()),
+                },
+                sent_params: json!({"card_id": "c1", "revision": 4, "title": "Initial", "body": "Edited body", "request_key": "m-upd"}),
+                retry_same_params: true,
+                state: MutationState::Queued,
+                created_at: 1,
+                attempts: 1,
+            })
+            .unwrap();
+
+        let mut snap = snap_with_cards(vec![make_card("c1", "Initial", "backlog", 4)]);
+        let transport_drop_refresh = MockTransport {
+            calls: RefCell::new(vec![]),
+            handler: Box::new(|_, _| {
+                Err(anyhow!(
+                    "revision_conflict: expected revision 4, current revision 5; refresh and retry"
+                ))
+            }),
+            refresh: Box::new(|| {
+                Err(
+                    std::io::Error::new(std::io::ErrorKind::ConnectionReset, "refresh dropped")
+                        .into(),
+                )
+            }),
+        };
+
+        let rep = drain(&mut outbox, &mut snap, &transport_drop_refresh);
+        assert!(
+            rep.aborted_by_connection,
+            "refresh transport error must stop replay with StopConnection"
+        );
+        assert_eq!(rep.failed, 0);
+        assert_eq!(rep.applied, 0);
+        assert_eq!(outbox.ops.len(), 1);
+        assert_eq!(outbox.ops[0].state, MutationState::Queued);
+        assert!(
+            !outbox.ops[0].retry_same_params,
+            "revision_conflict proved stale revision was uncommitted, so retry must rebuild against fresh snapshot"
+        );
+
+        // After reconnect, fresh snapshot has revision 5 (disjoint title change on server).
+        let mut fresh_card = make_card("c1", "Server title", "backlog", 5);
+        fresh_card.body = "Body".into();
+        let mut snap_reconnected = snap_with_cards(vec![fresh_card]);
+        let transport_ok = MockTransport {
+            calls: RefCell::new(vec![]),
+            handler: Box::new(|method, p| {
+                assert_eq!(method, "card.update");
+                assert_eq!(p["revision"], 5);
+                assert_eq!(p["request_key"], "m-upd");
+                assert!(p.get("title").is_none());
+                assert_eq!(p["body"], "Edited body");
+                let mut updated = make_card("c1", "Server title", "backlog", 6);
+                updated.body = "Edited body".into();
+                Ok(serde_json::to_value(updated).unwrap())
+            }),
+            refresh: Box::new(|| unreachable!("no refresh needed after reconnecting fresh state")),
+        };
+
+        let rep2 = drain(&mut outbox, &mut snap_reconnected, &transport_ok);
+        assert!(!rep2.aborted_by_connection);
+        assert_eq!(rep2.applied, 1);
+        assert_eq!(rep2.failed, 0);
+        assert!(outbox.is_empty());
+        assert_eq!(snap_reconnected.cards[0].title, "Server title");
+        assert_eq!(snap_reconnected.cards[0].body, "Edited body");
+        assert_eq!(snap_reconnected.cards[0].revision, 6);
+    }
+
+    #[test]
+    fn request_key_conflict_with_refresh_connection_error_stops_connection_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut outbox = Outbox::load(dir.path().join("o.json"));
+        outbox
+            .enqueue(Mutation {
+                id: "m-rk".into(),
+                host_id: "h1".into(),
+                card_id: "c1".into(),
+                kind: MutationKind::MoveCard,
+                params: json!({"card_id": "c1", "stage": "develop"}),
+                base: UpdateBase::default(),
+                sent_params: json!({"card_id": "c1", "revision": 1, "stage": "develop", "request_key": "m-rk"}),
+                retry_same_params: true,
+                state: MutationState::Queued,
+                created_at: 1,
+                attempts: 1,
+            })
+            .unwrap();
+
+        let mut snap = snap_with_cards(vec![make_card("c1", "T", "backlog", 1)]);
+        let transport_drop = MockTransport {
+            calls: RefCell::new(vec![]),
+            handler: Box::new(|_, _| Err(anyhow!("request_key_conflict: same key"))),
+            refresh: Box::new(|| {
+                Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "refresh eof").into())
+            }),
+        };
+        let rep = drain(&mut outbox, &mut snap, &transport_drop);
+        assert!(rep.aborted_by_connection);
+        assert_eq!(rep.failed, 0);
+        assert_eq!(outbox.ops[0].state, MutationState::Queued);
+        assert!(outbox.ops[0].retry_same_params);
+
+        let transport_ok = MockTransport {
+            calls: RefCell::new(vec![]),
+            handler: Box::new(|_, _| Err(anyhow!("request_key_conflict: same key"))),
+            refresh: Box::new(|| Ok(snap_with_cards(vec![make_card("c1", "T", "develop", 2)]))),
+        };
+        let rep2 = drain(&mut outbox, &mut snap, &transport_ok);
+        assert_eq!(rep2.applied, 1);
+        assert_eq!(rep2.failed, 0);
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn concurrent_double_revision_conflict_resolves_via_merge_conflict_or_defer_never_failed() {
+        // Case A: Two consecutive disjoint revision bumps -> merges and applies on 3rd attempt.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let mut outbox = Outbox::load(dir.path().join("o.json"));
+            outbox
+                .enqueue(Mutation {
+                    id: "m-double-merge".into(),
+                    host_id: "h1".into(),
+                    card_id: "c1".into(),
+                    kind: MutationKind::UpdateCard,
+                    params: json!({"card_id": "c1", "title": "Old", "body": "My body"}),
+                    base: UpdateBase {
+                        title: Some("Old".into()),
+                        body: Some("Body".into()),
+                    },
+                    sent_params: Value::Null,
+                    retry_same_params: false,
+                    state: MutationState::Queued,
+                    created_at: 1,
+                    attempts: 0,
+                })
+                .unwrap();
+
+            let mut snap = snap_with_cards(vec![make_card("c1", "Old", "backlog", 1)]);
+            let attempts = RefCell::new(0_u32);
+            let refreshes = RefCell::new(0_u32);
+            let transport = MockTransport {
+                calls: RefCell::new(vec![]),
+                handler: Box::new(move |_, p| {
+                    let mut n = attempts.borrow_mut();
+                    *n += 1;
+                    match *n {
+                        1 => Err(anyhow!("revision_conflict: expected 1, current 2")),
+                        2 => {
+                            assert_eq!(p["revision"], 2);
+                            Err(anyhow!("revision_conflict: expected 2, current 3"))
+                        }
+                        3 => {
+                            assert_eq!(p["revision"], 3);
+                            assert_eq!(p["body"], "My body");
+                            assert!(p.get("title").is_none());
+                            let mut c = make_card("c1", "Title v3", "develop", 4);
+                            c.body = "My body".into();
+                            Ok(serde_json::to_value(c).unwrap())
+                        }
+                        other => panic!("unexpected attempt {other}"),
+                    }
+                }),
+                refresh: Box::new(move || {
+                    let mut r = refreshes.borrow_mut();
+                    *r += 1;
+                    match *r {
+                        1 => Ok(snap_with_cards(vec![make_card(
+                            "c1", "Title v2", "backlog", 2,
+                        )])),
+                        2 => Ok(snap_with_cards(vec![make_card(
+                            "c1", "Title v3", "develop", 3,
+                        )])),
+                        other => panic!("unexpected refresh {other}"),
+                    }
+                }),
+            };
+
+            let rep = drain(&mut outbox, &mut snap, &transport);
+            assert_eq!(rep.applied, 1);
+            assert_eq!(rep.conflicts, 0);
+            assert_eq!(rep.failed, 0);
+            assert!(outbox.is_empty());
+            assert_eq!(snap.cards[0].revision, 4);
+            assert_eq!(snap.cards[0].body, "My body");
+        }
+
+        // Case B: Second concurrent revision bump edits the same field -> surfaces Conflict (not Failed).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let mut outbox = Outbox::load(dir.path().join("o.json"));
+            outbox
+                .enqueue(Mutation {
+                    id: "m-double-conflict".into(),
+                    host_id: "h1".into(),
+                    card_id: "c1".into(),
+                    kind: MutationKind::UpdateCard,
+                    params: json!({"card_id": "c1", "title": "My title", "body": "Body"}),
+                    base: UpdateBase {
+                        title: Some("Old".into()),
+                        body: Some("Body".into()),
+                    },
+                    sent_params: Value::Null,
+                    retry_same_params: false,
+                    state: MutationState::Queued,
+                    created_at: 1,
+                    attempts: 0,
+                })
+                .unwrap();
+
+            let mut snap = snap_with_cards(vec![make_card("c1", "Old", "backlog", 1)]);
+            let attempts = RefCell::new(0_u32);
+            let refreshes = RefCell::new(0_u32);
+            let transport = MockTransport {
+                calls: RefCell::new(vec![]),
+                handler: Box::new(move |_, _| {
+                    let mut n = attempts.borrow_mut();
+                    *n += 1;
+                    Err(anyhow!("revision_conflict: attempt {}", *n))
+                }),
+                refresh: Box::new(move || {
+                    let mut r = refreshes.borrow_mut();
+                    *r += 1;
+                    match *r {
+                        // First concurrent bump only changed stage (no field conflict yet).
+                        1 => Ok(snap_with_cards(vec![make_card("c1", "Old", "develop", 2)])),
+                        // Second concurrent bump edited title -> true field conflict.
+                        2 => Ok(snap_with_cards(vec![make_card(
+                            "c1",
+                            "Server title",
+                            "develop",
+                            3,
+                        )])),
+                        other => panic!("unexpected refresh {other}"),
+                    }
+                }),
+            };
+
+            let rep = drain(&mut outbox, &mut snap, &transport);
+            assert_eq!(rep.applied, 0);
+            assert_eq!(rep.conflicts, 1);
+            assert_eq!(rep.failed, 0);
+            assert_eq!(
+                outbox.ops[0].state,
+                MutationState::Conflict {
+                    fields: vec!["title".into()]
+                }
+            );
+        }
+
+        // Case C: Exhausting MAX_REVISION_REBUILDS_PER_DRAIN on rapid non-conflicting bumps
+        // defers the card as Queued (NOT Failed) without stalling other cards.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let mut outbox = Outbox::load(dir.path().join("o.json"));
+            outbox
+                .enqueue(Mutation {
+                    id: "m-hot".into(),
+                    host_id: "h1".into(),
+                    card_id: "c1".into(),
+                    kind: MutationKind::UpdateCard,
+                    params: json!({"card_id": "c1", "title": "Old", "body": "My body"}),
+                    base: UpdateBase {
+                        title: Some("Old".into()),
+                        body: Some("Body".into()),
+                    },
+                    sent_params: Value::Null,
+                    retry_same_params: false,
+                    state: MutationState::Queued,
+                    created_at: 1,
+                    attempts: 0,
+                })
+                .unwrap();
+            outbox
+                .enqueue(Mutation {
+                    id: "m-other".into(),
+                    host_id: "h1".into(),
+                    card_id: "c2".into(),
+                    kind: MutationKind::MoveCard,
+                    params: json!({"card_id": "c2", "stage": "develop"}),
+                    base: UpdateBase::default(),
+                    sent_params: Value::Null,
+                    retry_same_params: false,
+                    state: MutationState::Queued,
+                    created_at: 2,
+                    attempts: 0,
+                })
+                .unwrap();
+
+            let mut snap = snap_with_cards(vec![
+                make_card("c1", "Old", "backlog", 1),
+                make_card("c2", "Other", "backlog", 1),
+            ]);
+            let rev = RefCell::new(1_u64);
+            let transport = MockTransport {
+                calls: RefCell::new(vec![]),
+                handler: Box::new(|method, p| match method {
+                    "card.update" => Err(anyhow!("revision_conflict: hot card")),
+                    "card.move" => {
+                        assert_eq!(p["card_id"], "c2");
+                        Ok(serde_json::to_value(make_card("c2", "Other", "develop", 2)).unwrap())
+                    }
+                    other => panic!("unexpected call {other}"),
+                }),
+                refresh: Box::new(move || {
+                    let mut r = rev.borrow_mut();
+                    *r += 1;
+                    Ok(snap_with_cards(vec![
+                        make_card("c1", &format!("Title v{}", *r), "backlog", *r),
+                        make_card("c2", "Other", "backlog", 1),
+                    ]))
+                }),
+            };
+
+            let rep = drain(&mut outbox, &mut snap, &transport);
+            assert_eq!(
+                rep.applied, 1,
+                "c2 must not be stalled by c1 CAS contention"
+            );
+            assert_eq!(rep.failed, 0, "c1 must NOT be marked Failed");
+            assert_eq!(rep.conflicts, 0);
+            assert_eq!(outbox.ops.len(), 1);
+            assert_eq!(outbox.ops[0].id, "m-hot");
+            assert_eq!(outbox.ops[0].state, MutationState::Queued);
+            assert!(!outbox.ops[0].retry_same_params);
+            assert_eq!(outbox.ops[0].attempts, MAX_REVISION_REBUILDS_PER_DRAIN + 1);
+        }
     }
 }

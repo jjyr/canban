@@ -512,43 +512,79 @@ impl InvariantOracle {
         Ok(())
     }
 
-    /// #7: Active agent counts in `merged_runtime_state()` match live active agent terminals
-    /// across the UNION of computed & reported host keys on ALL live clients, cross-checked against
-    /// `canban_scheduler::active_count_at`, `scheduler.max_agents`, Herdr terminal binding
+    /// #7: Active agent counts in `merged_runtime_state()` match `canban_scheduler::active_count_at`
+    /// identically for both local and remote hosts across the UNION of computed & reported host keys
+    /// on ALL live clients, cross-checked against `scheduler.max_agents`, Herdr terminal binding
     /// exclusivity, and `protected_terminals` safety!
     fn check_herdr_runtime_parity(&self, world: &SimWorld) -> Result<()> {
         let local_now_ms = world
             .server("local-server")
             .map(|s| s.now_ms())
             .unwrap_or_else(|| world.now_ms());
+        let client_now_ms = world.now_ms();
         for client_name in world.client_names() {
             let rt = world.client_merged_runtime_on(&client_name)?;
-            let mut computed: BTreeMap<String, usize> = BTreeMap::new();
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+            let mut per_host: BTreeMap<String, Snapshot> = BTreeMap::new();
             for t in &rt.terminals {
                 let host = rt
                     .terminal_hosts
                     .get(&t.id)
                     .cloned()
                     .unwrap_or_else(|| "local".into());
-                let active = if host == "local" {
-                    t.agent.as_ref().is_some_and(|a| {
-                        (a.terminal.is_some()
-                            && !a.finished()
-                            && (a.close_state == "closing"
-                                || !matches!(
-                                    a.runtime_status_at(local_now_ms),
-                                    "closed" | "blocked" | "idle" | "done" | "error"
-                                )))
-                            || (a.terminal.is_none()
-                                && matches!(a.state.as_str(), "starting" | "unknown"))
-                    })
+                per_host.entry(host).or_default().terminals.push(t.clone());
+            }
+            for cs in &merged.configuration_sessions {
+                let host = merged
+                    .entity_hosts
+                    .get(&cs.id)
+                    .cloned()
+                    .unwrap_or_else(|| "local".into());
+                per_host
+                    .entry(host)
+                    .or_default()
+                    .configuration_sessions
+                    .push(cs.clone());
+            }
+            for mb in &merged.merge_batches {
+                let host = merged
+                    .entity_hosts
+                    .get(&mb.id)
+                    .cloned()
+                    .unwrap_or_else(|| "local".into());
+                per_host
+                    .entry(host)
+                    .or_default()
+                    .merge_batches
+                    .push(mb.clone());
+            }
+            for sr in &merged.scheduled_runs {
+                let host = if !sr.host_id.is_empty() {
+                    sr.host_id.clone()
                 } else {
-                    t.agent.as_ref().is_some_and(|a| {
-                        matches!(a.state.as_str(), "starting" | "running" | "working")
-                    })
+                    merged
+                        .entity_hosts
+                        .get(&sr.id)
+                        .cloned()
+                        .unwrap_or_else(|| "local".into())
                 };
-                if active {
-                    *computed.entry(host).or_default() += 1;
+                per_host
+                    .entry(host)
+                    .or_default()
+                    .scheduled_runs
+                    .push(sr.clone());
+            }
+
+            let mut computed: BTreeMap<String, usize> = BTreeMap::new();
+            for (host, host_snap) in &per_host {
+                let host_now = if host == "local" {
+                    local_now_ms
+                } else {
+                    client_now_ms
+                };
+                let count = canban_scheduler::active_count_at(host_snap, host_now);
+                if count > 0 {
+                    computed.insert(host.clone(), count);
                 }
             }
 

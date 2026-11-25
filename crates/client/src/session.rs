@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use canban_transport::{ClientEndpoint, ClientTransport};
-use canban_types::{HostTransport, normalize_daemon_addr, parse_pairing_uri};
+use canban_types::{Clock, HostTransport, normalize_daemon_addr, parse_pairing_uri};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use tokio::time::Instant;
@@ -136,6 +136,29 @@ impl SingleHostSession {
         Self::handshake_checked_async(connected, after, started, min_api_version).await
     }
 
+    /// Clock-injected variant of [`Self::connect_checked_async`] that measures handshake RTT
+    /// through `clock` instead of ambient clocks.
+    pub async fn connect_checked_async_with_clock(
+        connector: &dyn HostConnector,
+        host_id: &str,
+        transport: &HostTransport,
+        device_name: &str,
+        after: Value,
+        min_api_version: Option<u32>,
+        clock: &dyn Clock,
+    ) -> Result<Self> {
+        let started_ms = clock.now_ms();
+        let connected = connector.connect(host_id, transport, device_name).await?;
+        Self::handshake_checked_async_with_clock(
+            connected,
+            after,
+            started_ms,
+            min_api_version,
+            clock,
+        )
+        .await
+    }
+
     /// Runs the canonical `app.ping` + `app.state` handshake over an already-connected transport.
     pub async fn handshake_async(
         connected: ConnectedTransport,
@@ -153,6 +176,41 @@ impl SingleHostSession {
         started: Instant,
         min_api_version: Option<u32>,
     ) -> Result<Self> {
+        let (transport, lease, ping, state) =
+            Self::handshake_exchange_async(connected, after, min_api_version).await?;
+        let rtt_ms = started.elapsed().as_millis() as u64;
+        let handshake = extract_handshake_info(ping, state, rtt_ms);
+        Ok(Self {
+            transport,
+            lease,
+            handshake,
+        })
+    }
+
+    /// Clock-injected variant of [`Self::handshake_checked_async`].
+    pub async fn handshake_checked_async_with_clock(
+        connected: ConnectedTransport,
+        after: Value,
+        started_ms: u64,
+        min_api_version: Option<u32>,
+        clock: &dyn Clock,
+    ) -> Result<Self> {
+        let (transport, lease, ping, state) =
+            Self::handshake_exchange_async(connected, after, min_api_version).await?;
+        let rtt_ms = clock.now_ms().saturating_sub(started_ms);
+        let handshake = extract_handshake_info(ping, state, rtt_ms);
+        Ok(Self {
+            transport,
+            lease,
+            handshake,
+        })
+    }
+
+    async fn handshake_exchange_async(
+        connected: ConnectedTransport,
+        after: Value,
+        min_api_version: Option<u32>,
+    ) -> Result<(Arc<ClientTransport>, ConnectionLease, Value, Value)> {
         let transport = connected.transport;
         let ping = match transport.call_async("app.ping", &json!({})).await {
             Ok(p) => p,
@@ -194,13 +252,7 @@ impl SingleHostSession {
                 return Err(e);
             }
         };
-        let rtt_ms = started.elapsed().as_millis() as u64;
-        let handshake = extract_handshake_info(ping, state, rtt_ms);
-        Ok(Self {
-            transport,
-            lease: connected.lease,
-            handshake,
-        })
+        Ok((transport, connected.lease, ping, state))
     }
 
     /// Synchronous handshake helper for blocking desktop/CLI callers.
