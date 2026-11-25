@@ -82,10 +82,12 @@ run = "cargo nextest run --workspace --locked"
 
 [tasks.sim]
 description = "Run one complete deterministic simulation round (all 8 scenarios + chaos; pass -- --seed <N> [--scenario <name>] to replay)"
+env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }
 run = "cargo run --locked -p canban-sim --bin canban-sim -- run"
 
 [tasks.random-sim]
 description = "Continuously run random-seed DST until Ctrl-C, printing failing seeds (pass -- --fail-fast to stop immediately on error)"
+env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }
 run = "cargo run --release --locked -p canban-sim --bin canban-sim -- random"
 
 [tasks.run]
