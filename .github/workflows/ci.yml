@@ -53,7 +53,9 @@ jobs:
         run: mise run test
       - name: Run Deterministic Simulation Testing (DST)
         if: ${{ !cancelled() }}
-        run: mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario all --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
+        run: |
+          mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- run --seeds 1 --assert-coverage --seed-timeout 60
+          mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario chaos --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
       - name: Run script and packaging tests
         if: ${{ !cancelled() }}
         run: |
@@ -142,7 +144,9 @@ jobs:
         run: python3 scripts/run-acceptance.py -- scripts/test-install.py --bundle .local/canban
       - name: Run Deterministic Simulation Testing (DST)
         if: ${{ !cancelled() }}
-        run: mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario all --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
+        run: |
+          mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- run --seeds 1 --assert-coverage --seed-timeout 60
+          mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario chaos --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
       - name: Upload CI failure logs
         if: failure()
         uses: actions/upload-artifact@v7

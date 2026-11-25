@@ -374,7 +374,11 @@ fn verify_coverage(
     if !assert_coverage && extra_required.is_empty() {
         return Ok(());
     }
-    println!("\nProperty coverage summary:\n{}", tracker.summary());
+    println!(
+        "\nProperty coverage summary ({} distinct properties):\n{}",
+        tracker.counts().len(),
+        tracker.summary()
+    );
     let mut required: Vec<&str> = Vec::new();
     if assert_coverage {
         required.extend_from_slice(&[
@@ -389,7 +393,14 @@ fn verify_coverage(
     for prop in extra_required {
         required.push(prop.as_str());
     }
-    tracker.assert_required(&required)
+    tracker.assert_required(&required)?;
+    println!(
+        "Coverage gate PASSED: {}/{} required properties verified ({} total distinct properties hit).",
+        required.len(),
+        required.len(),
+        tracker.counts().len(),
+    );
+    Ok(())
 }
 
 fn print_shrink_report(report: &scenarios::chaos::ShrinkReport) {
@@ -537,6 +548,7 @@ fn run_suite(
         &[
             "oracle.post_bounce_recovery_checked",
             "oracle.outbox_file_scanned",
+            "oracle.committed_durability_checked",
             "world.quiesce_natural",
             "notifications.non_empty_both_hosts",
             "workflow.rework",
@@ -764,17 +776,31 @@ fn run_random(
         bail!("{failed} random-sim seed(s) failed");
     }
     let cov = total_coverage.lock().unwrap();
-    let random_req: &[&str] = if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
-        &[
+    let mut random_req: Vec<&str> = Vec::new();
+    if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
+        random_req.extend_from_slice(&[
+            "oracle.committed_durability_checked",
             "chaos.net_partition",
             "chaos.server_crash_bounce",
             "chaos.client_bounce",
             "chaos.env_save",
-        ]
-    } else {
-        &[]
-    };
-    verify_coverage(&cov, assert_coverage, &require_coverage, random_req)?;
+        ]);
+    } else if scenario_arg.trim().eq_ignore_ascii_case("all") && passed >= 12 {
+        random_req.extend_from_slice(&[
+            "oracle.post_bounce_recovery_checked",
+            "oracle.outbox_file_scanned",
+            "oracle.committed_durability_checked",
+        ]);
+        if cov.count("sim.scenario.chaos") >= 6 {
+            random_req.extend_from_slice(&[
+                "chaos.net_partition",
+                "chaos.server_crash_bounce",
+                "chaos.client_bounce",
+                "chaos.env_save",
+            ]);
+        }
+    }
+    verify_coverage(&cov, assert_coverage, &require_coverage, &random_req)?;
     Ok(())
 }
 

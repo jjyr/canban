@@ -137,10 +137,40 @@ impl SimWorldConfig {
     }
 }
 
+async fn connect_local_transport(local_tok: String) -> Result<Arc<ClientTransport>> {
+    let addr = format!("local-server:{SIM_PORT}");
+    let stream = turmoil::net::TcpStream::connect(addr.as_str())
+        .await
+        .map_err(|e| anyhow!("connect local-server: {e}"))?;
+    let transport =
+        ClientTransport::connect_stream_async(stream, addr, local_tok, "Sim Desktop".into())
+            .await
+            .map_err(|e| anyhow!("local mux: {e:#}"))?;
+    Ok(Arc::new(transport))
+}
+
 struct SimLocalHostDriver {
     home: PathBuf,
     server_slot: Arc<Mutex<Option<Arc<AppServer>>>>,
-    transport: Arc<ClientTransport>,
+    server_boot_gen: Arc<AtomicU64>,
+    token_slot: Arc<Mutex<Option<String>>>,
+    transport_state: Arc<Mutex<(u64, Arc<ClientTransport>)>>,
+    reconnecting: Arc<AtomicBool>,
+}
+
+impl SimLocalHostDriver {
+    async fn refresh_transport(&self) -> Result<()> {
+        let target_gen = self.server_boot_gen.load(Ordering::SeqCst);
+        let tok = self
+            .token_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .context("Simulated local-server token unavailable")?;
+        let fresh = connect_local_transport(tok).await?;
+        *self.transport_state.lock().unwrap() = (target_gen, fresh);
+        Ok(())
+    }
 }
 
 impl LocalHostDriver for SimLocalHostDriver {
@@ -178,7 +208,58 @@ impl LocalHostDriver for SimLocalHostDriver {
     }
 
     fn transport(&self) -> Arc<ClientTransport> {
-        Arc::clone(&self.transport)
+        let (connected_gen, current) = {
+            let guard = self.transport_state.lock().unwrap();
+            (guard.0, Arc::clone(&guard.1))
+        };
+        let cur_gen = self.server_boot_gen.load(Ordering::SeqCst);
+        if connected_gen != cur_gen
+            && self.server_slot.lock().unwrap().is_some()
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+            && !self.reconnecting.swap(true, Ordering::SeqCst)
+        {
+            let server_boot_gen = Arc::clone(&self.server_boot_gen);
+            let token_slot = Arc::clone(&self.token_slot);
+            let transport_state = Arc::clone(&self.transport_state);
+            let reconnecting = Arc::clone(&self.reconnecting);
+            rt.spawn(async move {
+                struct ResetFlag(Arc<AtomicBool>);
+                impl Drop for ResetFlag {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::SeqCst);
+                    }
+                }
+                let _reset = ResetFlag(reconnecting);
+                let target_gen = server_boot_gen.load(Ordering::SeqCst);
+                let Some(tok) = token_slot.lock().unwrap().clone() else {
+                    return;
+                };
+                if let Ok(fresh) = connect_local_transport(tok).await {
+                    *transport_state.lock().unwrap() = (target_gen, fresh);
+                }
+            });
+        }
+        current
+    }
+
+    fn connect_push_transport<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Arc<ClientTransport>>> + Send + 'a>> {
+        Box::pin(async move {
+            let (connected_gen, current) = {
+                let guard = self.transport_state.lock().unwrap();
+                (guard.0, Arc::clone(&guard.1))
+            };
+            let cur_gen = self.server_boot_gen.load(Ordering::SeqCst);
+            if connected_gen != cur_gen {
+                if self.server_slot.lock().unwrap().is_none() {
+                    bail!("Simulated local AppServer is crashed");
+                }
+                self.refresh_transport().await?;
+                return Ok(Arc::clone(&self.transport_state.lock().unwrap().1));
+            }
+            Ok(current)
+        })
     }
 
     fn call(&self, method: &str, params: Value) -> Result<Value> {
@@ -285,9 +366,11 @@ pub struct SimClientHandle {
     pub client_slot: Arc<Mutex<Option<Arc<MultiHostClient>>>>,
     pub rt_handle: Arc<Mutex<Option<tokio::runtime::Handle>>>,
     cmd_tx: Arc<Mutex<Option<mpsc::UnboundedSender<ClientCommand>>>>,
+    local_driver: Arc<Mutex<Option<Arc<SimLocalHostDriver>>>>,
     events: Arc<Mutex<VecDeque<ClientEvent>>>,
     total_events: Arc<AtomicU64>,
     pub crashed: Arc<AtomicBool>,
+    pub boot_generation: Arc<AtomicU64>,
 }
 
 impl SimClientHandle {
@@ -331,6 +414,8 @@ pub struct SimWorld {
     link_fail_pairs: BTreeSet<(String, String)>,
     faulted_hosts: BTreeSet<String>,
     global_net_faulted: bool,
+    suppress_herdr_heartbeats: bool,
+    last_herdr_heartbeat_ms: u64,
     step_count: u64,
     fault_count: u64,
 }
@@ -550,6 +635,8 @@ impl SimWorld {
             link_fail_pairs: BTreeSet::new(),
             faulted_hosts: BTreeSet::new(),
             global_net_faulted: false,
+            suppress_herdr_heartbeats: false,
+            last_herdr_heartbeat_ms: 0,
             step_count: 0,
             fault_count: 0,
         };
@@ -580,18 +667,24 @@ impl SimWorld {
         let rt_handle: Arc<Mutex<Option<tokio::runtime::Handle>>> = Arc::new(Mutex::new(None));
         let cmd_tx_slot: Arc<Mutex<Option<mpsc::UnboundedSender<ClientCommand>>>> =
             Arc::new(Mutex::new(None));
+        let local_driver_slot: Arc<Mutex<Option<Arc<SimLocalHostDriver>>>> =
+            Arc::new(Mutex::new(None));
         let client_events: Arc<Mutex<VecDeque<ClientEvent>>> =
             Arc::new(Mutex::new(VecDeque::new()));
         let total_events = Arc::new(AtomicU64::new(0));
         let crashed = Arc::new(AtomicBool::new(false));
+        let boot_generation = Arc::new(AtomicU64::new(0));
 
         let ui_data_dir = data_dir.clone();
         let ui_clock = Arc::new(TurmoilClock::new(Arc::clone(&self.shared_elapsed_ms)));
         let ui_client_slot = Arc::clone(&client_slot);
         let ui_rt_handle = Arc::clone(&rt_handle);
         let ui_cmd_tx = Arc::clone(&cmd_tx_slot);
+        let ui_local_driver = Arc::clone(&local_driver_slot);
         let ui_events = Arc::clone(&client_events);
         let ui_total_events = Arc::clone(&total_events);
+        let ui_boot_gen = Arc::clone(&boot_generation);
+        let ui_seed = self.config.seed;
         let ui_durability = self.config.fs_durability;
         let ui_policy = self.stream_fault_policy.clone();
         let ui_name = client_name.to_owned();
@@ -601,7 +694,8 @@ impl SimWorld {
                 (
                     s.home.clone(),
                     Arc::clone(&s.server_slot),
-                    s.token().expect("local token"),
+                    Arc::clone(&s.boot_generation),
+                    Arc::clone(&s.token),
                 )
             })
         } else {
@@ -625,8 +719,12 @@ impl SimWorld {
             let client_slot = Arc::clone(&ui_client_slot);
             let rt_slot = Arc::clone(&ui_rt_handle);
             let cmd_tx_holder = Arc::clone(&ui_cmd_tx);
+            let local_driver_holder = Arc::clone(&ui_local_driver);
             let events_sink = Arc::clone(&ui_events);
             let total_events_ctr = Arc::clone(&ui_total_events);
+            let boot_gen = ui_boot_gen.fetch_add(1, Ordering::SeqCst);
+            let client_id_gen =
+                canban_types::deterministic_id_gen(derive_host_seed(ui_seed, &ui_name, boot_gen));
             let local_info = local_info.clone();
             let remotes = initial_remotes.clone();
             let policy = ui_policy.clone();
@@ -639,26 +737,23 @@ impl SimWorld {
                     Option<Arc<dyn canban_client::GlobalEnvSyncProvider>>,
                     ClientCapabilities,
                 ) = if desktop_local {
-                    let (local_home, srv_slot, local_tok) = local_info.expect("local server info");
-                    let addr = format!("local-server:{SIM_PORT}");
-                    let stream = turmoil::net::TcpStream::connect(addr.as_str())
+                    let (local_home, srv_slot, srv_boot_gen, tok_slot) =
+                        local_info.expect("local server info");
+                    let connected_gen = srv_boot_gen.load(Ordering::SeqCst);
+                    let local_tok = tok_slot.lock().unwrap().clone().expect("local token");
+                    let transport = connect_local_transport(local_tok)
                         .await
-                        .map_err(|e| format!("connect local-server: {e}"))?;
-                    let transport = Arc::new(
-                        ClientTransport::connect_stream_async(
-                            stream,
-                            addr,
-                            local_tok,
-                            "Sim Desktop".into(),
-                        )
-                        .await
-                        .map_err(|e| format!("local mux: {e:#}"))?,
-                    );
-                    let driver: Arc<dyn LocalHostDriver> = Arc::new(SimLocalHostDriver {
+                        .map_err(|e| format!("{e:#}"))?;
+                    let concrete_driver = Arc::new(SimLocalHostDriver {
                         home: local_home.clone(),
                         server_slot: srv_slot,
-                        transport,
+                        server_boot_gen: srv_boot_gen,
+                        token_slot: tok_slot,
+                        transport_state: Arc::new(Mutex::new((connected_gen, transport))),
+                        reconnecting: Arc::new(AtomicBool::new(false)),
                     });
+                    *local_driver_holder.lock().unwrap() = Some(Arc::clone(&concrete_driver));
+                    let driver: Arc<dyn LocalHostDriver> = concrete_driver;
                     let env_provider: Arc<dyn canban_client::GlobalEnvSyncProvider> =
                         Arc::new(DesktopGlobalEnvProvider::new(local_home));
                     (
@@ -677,7 +772,7 @@ impl SimWorld {
                     ui_durability,
                 ));
                 let rt_cur = tokio::runtime::Handle::current();
-                let client = MultiHostClient::from_options_with_runtime(
+                let client = MultiHostClient::from_options_with_runtime_and_id_gen(
                     MultiHostClientOptions {
                         config: rc_cfg,
                         host_store,
@@ -690,6 +785,7 @@ impl SimWorld {
                         fs_durability: ui_durability,
                     },
                     rt_cur.clone(),
+                    client_id_gen,
                 )
                 .map_err(|e| format!("MultiHostClient init: {e:#}"))?;
 
@@ -748,6 +844,7 @@ impl SimWorld {
                 }
                 *client_slot.lock().unwrap() = None;
                 *cmd_tx_holder.lock().unwrap() = None;
+                *local_driver_holder.lock().unwrap() = None;
                 *rt_slot.lock().unwrap() = None;
                 Ok(())
             }
@@ -761,9 +858,11 @@ impl SimWorld {
                 client_slot,
                 rt_handle,
                 cmd_tx: cmd_tx_slot,
+                local_driver: local_driver_slot,
                 events: client_events,
                 total_events,
                 crashed,
+                boot_generation,
             },
         );
 
@@ -838,13 +937,29 @@ impl SimWorld {
         Ok(dir.to_string_lossy().into_owned())
     }
 
+    /// Controls whether `SimWorld` automatically emits virtual-time Herdr control-plane heartbeats
+    /// every 15s (default `false` = heartbeats enabled). Set `true` in heartbeat-timeout tests.
+    pub fn set_suppress_herdr_heartbeats(&mut self, suppress: bool) {
+        self.suppress_herdr_heartbeats = suppress;
+    }
+
     pub fn step_once(&mut self) -> Result<()> {
         self.sim
             .step()
             .map_err(|e| anyhow!("turmoil step error: {e}"))?;
         self.step_count += 1;
-        self.shared_elapsed_ms
-            .store(self.sim.elapsed().as_millis() as u64, Ordering::SeqCst);
+        let elapsed_ms = self.sim.elapsed().as_millis() as u64;
+        self.shared_elapsed_ms.store(elapsed_ms, Ordering::SeqCst);
+        if !self.suppress_herdr_heartbeats
+            && elapsed_ms.saturating_sub(self.last_herdr_heartbeat_ms) >= 15_000
+        {
+            self.last_herdr_heartbeat_ms = elapsed_ms;
+            for h in self.servers.values() {
+                if !h.crashed.load(Ordering::SeqCst) && h.server().is_some() {
+                    let _ = h.herdr.maybe_emit_heartbeat(14_000);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -922,6 +1037,15 @@ impl SimWorld {
 
     pub fn client_named(&self, client_id: &str) -> Option<Arc<MultiHostClient>> {
         self.clients.get(client_id).and_then(|c| c.client())
+    }
+
+    /// Returns the names of all live (non-crashed, initialized) simulated clients in deterministic order.
+    pub fn client_names(&self) -> Vec<String> {
+        self.clients
+            .iter()
+            .filter(|(_, h)| !h.crashed.load(Ordering::SeqCst) && h.client().is_some())
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     pub fn client_data_dir_named(&self, client_id: &str) -> Option<&Path> {
@@ -1233,7 +1357,7 @@ impl SimWorld {
             self.elapsed_ms(),
             client_id,
             "sync.action",
-            format!("{hid}:{mid} {action:?}"),
+            format!("{hid} {action:?}"),
         );
         self.hit("client.sync_action");
         self.client_exec_on(client_id, 30_000, move |c| async move {
@@ -1244,7 +1368,7 @@ impl SimWorld {
     }
 
     /// Triggers `MultiHostClient::sync_global_env_now` inside `"ui-client"`'s Turmoil runtime.
-    pub fn client_sync_global_env_now(&mut self) {
+    pub fn client_sync_global_env_now(&mut self) -> Result<()> {
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),
@@ -1253,10 +1377,11 @@ impl SimWorld {
             "trigger global env sync",
         );
         self.hit("env.sync_triggered");
-        let _ = self.client_exec(30_000, |c| async move {
+        self.client_exec(30_000, |c| async move {
             c.sync_global_env_now();
             Ok(Value::Null)
-        });
+        })?;
+        Ok(())
     }
 
     /// Triggers `MultiHostClient::reconnect` inside `"ui-client"`'s Turmoil runtime.
@@ -1536,6 +1661,26 @@ impl SimWorld {
         for _ in 0..400 {
             self.step_once()?;
             if self.servers[name].server().is_some() {
+                if name == "local-server" {
+                    let local_drivers: Vec<(String, Arc<SimLocalHostDriver>)> = self
+                        .clients
+                        .iter()
+                        .filter(|(_, h)| !h.crashed.load(Ordering::SeqCst) && h.client().is_some())
+                        .filter_map(|(cname, h)| {
+                            h.local_driver
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .map(|d| (cname.clone(), d))
+                        })
+                        .collect();
+                    for (cname, driver) in local_drivers {
+                        let _ = self.client_exec_on(&cname, 10_000, move |_| async move {
+                            driver.refresh_transport().await?;
+                            Ok(Value::Null)
+                        });
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1553,6 +1698,7 @@ impl SimWorld {
             bail!("Unknown client host '{client_name}'");
         };
         handle.cmd_tx.lock().unwrap().take();
+        handle.local_driver.lock().unwrap().take();
         handle.rt_handle.lock().unwrap().take();
         if let Some(c) = handle.client_slot.lock().unwrap().take() {
             drop(c);
@@ -1583,6 +1729,7 @@ impl SimWorld {
             bail!("Unknown client host '{client_name}'");
         };
         handle.cmd_tx.lock().unwrap().take();
+        handle.local_driver.lock().unwrap().take();
         handle.rt_handle.lock().unwrap().take();
         if let Some(c) = handle.client_slot.lock().unwrap().take() {
             drop(c);
@@ -1622,9 +1769,25 @@ impl SimWorld {
                 return false;
             }
             let items = self.client_sync_items_on(client_name);
-            let pending_active = items
+            fn raw_card(id: &str) -> &str {
+                canban_types::split_qualified_host_id(id)
+                    .map(|(_, raw)| raw)
+                    .unwrap_or(id)
+            }
+            // Per-card FIFO outbox items queued behind a `Conflict` or `Failed` item on the same
+            // `(host_id, card_id)` cannot drain until the head item is resolved/discarded.
+            let blocked_cards: BTreeSet<(&str, &str)> = items
                 .iter()
-                .any(|it| matches!(it.state, SyncItemState::Queued | SyncItemState::InFlight));
+                .filter(|it| matches!(it.state, SyncItemState::Conflict | SyncItemState::Failed))
+                .map(|it| (it.host_id.as_str(), raw_card(&it.card_id)))
+                .collect();
+            let pending_active = items.iter().any(|it| match it.state {
+                SyncItemState::InFlight => true,
+                SyncItemState::Queued => {
+                    !blocked_cards.contains(&(it.host_id.as_str(), raw_card(&it.card_id)))
+                }
+                SyncItemState::Conflict | SyncItemState::Failed => false,
+            });
             if pending_active {
                 return false;
             }
@@ -1634,6 +1797,14 @@ impl SimWorld {
             }
         }
         true
+    }
+
+    fn all_servers_herdr_observed(&self) -> bool {
+        self.servers.values().all(|h| {
+            !h.crashed.load(Ordering::SeqCst)
+                && h.server().is_some()
+                && h.herdr.subscriber_count() > 0
+        })
     }
 
     /// Waits for natural unassisted reconnect, outbox drain, and global env sync WITHOUT
@@ -1765,10 +1936,14 @@ impl SimWorld {
         }
 
         // A supervisor parked on a half-open Turmoil stream may wait up to one heartbeat interval
-        // (~30s virtual time) before observing teardown and redialing; ensure sufficient virtual
-        // budget when recovering faulted links while still failing loudly if convergence stalls.
+        // (~30s virtual time) before observing teardown and redialing; similarly a Herdr observer
+        // waking from reconnect backoff may need up to ~30s virtual time. Ensure sufficient
+        // virtual budget while still failing loudly if convergence stalls.
+        let needs_herdr_reconnect = !self.all_servers_herdr_observed();
         let budget_ms = if had_reconnect {
             max_virtual_ms.max(120_000)
+        } else if needs_herdr_reconnect {
+            max_virtual_ms.max(35_000)
         } else {
             max_virtual_ms.max(1)
         };
@@ -1785,7 +1960,7 @@ impl SimWorld {
             if !iter.is_multiple_of(5) {
                 continue;
             }
-            if self.all_clients_quiesced() {
+            if self.all_clients_quiesced() && self.all_servers_herdr_observed() {
                 stable_checks += 1;
                 if stable_checks >= 5 {
                     converged = true;
@@ -1807,14 +1982,16 @@ impl SimWorld {
             );
         }
 
-        // Final explicit poll pass so client cached snapshots reflect all latest server mutations.
+        // Let any just-emitted Herdr/server events settle before the final synchronous client poll,
+        // and do NOT advance virtual time afterward so no background timer mutates server state
+        // between the final poll and subsequent quiescent oracle assertions.
+        self.advance(Duration::from_millis(200))?;
         for cname in &client_names {
             self.client_exec_on(cname, 15_000, |c| async move {
                 c.poll_remotes_once_async().await;
                 Ok(json!({}))
             })?;
         }
-        self.advance(Duration::from_millis(200))?;
         self.hit("world.heal_and_quiesce");
         Ok(())
     }
@@ -1834,13 +2011,14 @@ impl SimWorld {
             if let Some(srv) = h.server() {
                 match srv.snapshot() {
                     Ok(snap) => out.push_str(&format!(
-                        "  server[{name}]: UP projects={} cards={} wf_runs={} terminals={} notices={} reminders={} exec_cmds={}\n",
+                        "  server[{name}]: UP projects={} cards={} wf_runs={} terminals={} notices={} reminders={} herdr_subs={} exec_cmds={}\n",
                         snap.projects.len(),
                         snap.cards.len(),
                         snap.workflow_runs.len(),
                         snap.terminals.len(),
                         snap.notices.len(),
                         snap.reminders.len(),
+                        h.herdr.subscriber_count(),
                         h.exec.command_count(),
                     )),
                     Err(e) => out.push_str(&format!("  server[{name}]: UP (snapshot err: {e})\n")),
@@ -2190,5 +2368,75 @@ mod tests {
             "cold-start SimWorld + terminal launch took {:?} (>= 2s implies a real shell probe leaked!)",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn local_server_bounce_refreshes_local_driver_transport() {
+        let mut cfg = SimWorldConfig::desktop_default(888_010, "unit_local_bounce_transport");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+
+        let driver = world.clients[PRIMARY_CLIENT]
+            .local_driver
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("desktop client must have SimLocalHostDriver");
+        let pre_transport = driver.transport();
+        let pre_t = Arc::clone(&pre_transport);
+        let pre_ping = world
+            .client_exec(10_000, move |_| async move {
+                pre_t.call_async("app.ping", &json!({})).await
+            })
+            .expect("pre-bounce local transport app.ping");
+        let pre_srv_id = pre_ping["server_id"].as_str().unwrap().to_owned();
+
+        // Bounce `local-server`: `SimLocalHostDriver::transport()` must swap to a fresh
+        // `ClientTransport` connected to the new `local-server` Turmoil listener!
+        world
+            .bounce_server("local-server")
+            .expect("bounce local-server");
+        let post_transport = driver.transport();
+        assert!(
+            !Arc::ptr_eq(&pre_transport, &post_transport),
+            "SimLocalHostDriver::transport() must refresh after bounce_server(\"local-server\")"
+        );
+        let post_t = Arc::clone(&post_transport);
+        let post_ping = world
+            .client_exec(10_000, move |_| async move {
+                post_t.call_async("app.ping", &json!({})).await
+            })
+            .expect("post-bounce local transport app.ping must succeed on new listener");
+        assert_eq!(
+            post_ping["server_id"].as_str(),
+            Some(pre_srv_id.as_str()),
+            "bounced local-server must retain its persistent server_id"
+        );
+
+        // Mutations on `local` AND push events from the bounced `local-server` work seamlessly.
+        let dir = world.project_dir("post-bounce-local").expect("dir");
+        let proj = world
+            .client_call(
+                "project.create",
+                json!({ "host_id": "local", "name": "Post Bounce Local", "directory": dir }),
+                None,
+            )
+            .expect("local project.create after bounce");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let _ = world.drain_client_events();
+        let _ = world
+            .server_call(
+                "local-server",
+                "card.create",
+                json!({ "project_id": pid, "title": "Server Push After Local Bounce" }),
+            )
+            .expect("direct local-server card.create");
+        world
+            .wait_until(10_000, |w| Ok(!w.drain_client_events().is_empty()))
+            .expect("local_push_supervisor must receive push events after local-server bounce");
+        world.heal_and_quiesce(10_000).expect("heal_and_quiesce");
+        crate::oracle::InvariantOracle::default()
+            .check_quiescent_invariants(&world)
+            .expect("quiescent invariants after local-server bounce");
     }
 }

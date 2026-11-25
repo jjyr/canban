@@ -441,4 +441,108 @@ mod tests {
             .check_quiescent_invariants(&world)
             .expect("quiescent invariants after abrupt crash + bounce");
     }
+
+    #[test]
+    fn secondary_client_oracle_catches_stuck_outbox_and_divergence() {
+        let mut cfg = SimWorldConfig::mobile_default(888_006, "unit_secondary_oracle");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        cfg.extra_clients = vec!["ui-client-2".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+        let mut oracle = InvariantOracle::default();
+
+        let dir = world.project_dir("sec-oracle").expect("dir");
+        let proj = world
+            .client_call(
+                "project.create",
+                json!({ "host_id": "remote-a", "name": "Sec Oracle Proj", "directory": dir }),
+                None,
+            )
+            .expect("project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        world.heal_and_quiesce(15_000).expect("initial quiesce");
+        oracle
+            .check_quiescent_invariants(&world)
+            .expect("initial quiescent invariants");
+
+        // Partition ONLY `ui-client-2` while primary `ui-client` remains completely healthy,
+        // and queue an offline card on `ui-client-2`.
+        world.partition("ui-client-2", "remote-a");
+        world.advance(Duration::from_millis(120)).expect("advance");
+        let _ = world
+            .client_call_on(
+                "ui-client-2",
+                "card.create",
+                json!({ "project_id": pid, "title": "Stuck On Client 2", "body": "offline" }),
+                Some(&pid),
+            )
+            .expect("offline card.create on ui-client-2");
+
+        // Primary client has zero outbox items, yet the oracle MUST fail because `ui-client-2`
+        // has a queued outbox item and diverged view!
+        assert!(world.client_sync_items().is_empty());
+        let err = oracle
+            .check_quiescent_invariants(&world)
+            .expect_err("oracle must catch stuck outbox item on secondary client ui-client-2");
+        assert!(
+            err.to_string().contains("[ui-client-2]"),
+            "expected error mentioning [ui-client-2], got: {err:#}"
+        );
+
+        // Once healed and quiesced, both clients converge and the oracle passes cleanly.
+        world.heal_and_quiesce(20_000).expect("heal and quiesce");
+        oracle
+            .check_quiescent_invariants(&world)
+            .expect("quiescent invariants after secondary client heals");
+    }
+
+    #[test]
+    fn sim_world_emits_herdr_heartbeats_unless_suppressed() {
+        let mut cfg = SimWorldConfig::mobile_default(888_007, "unit_herdr_heartbeats");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+
+        let herdr = world.herdr("remote-a").expect("remote-a herdr");
+        world
+            .wait_until(5_000, |w| {
+                Ok(w.herdr("remote-a").unwrap().subscriber_count() > 0)
+            })
+            .expect("initial herdr observer subscribed");
+
+        let subs_before = herdr.subscribe_count();
+        let hb_before = herdr.heartbeat_count();
+
+        // 1. Default mode: advancing 60s virtual time emits periodic heartbeats every 15s and
+        //    keeps the Herdr observer connected without hitting the 45s heartbeat timeout!
+        world
+            .advance(Duration::from_secs(60))
+            .expect("advance 60s with heartbeats");
+        assert!(
+            herdr.heartbeat_count() >= hb_before + 3,
+            "expected >=3 virtual-time Herdr heartbeats over 60s, got {}",
+            herdr.heartbeat_count() - hb_before
+        );
+        assert_eq!(
+            herdr.subscribe_count(),
+            subs_before,
+            "Herdr observer unexpectedly reconnected despite periodic heartbeats"
+        );
+
+        // 2. Suppressed mode: disabling automatic heartbeats causes the 45s timeout to trigger
+        //    and the Herdr observer to disconnect & resubscribe cleanly.
+        world.set_suppress_herdr_heartbeats(true);
+        let hb_suppressed_start = herdr.heartbeat_count();
+        let subs_suppressed_start = herdr.subscribe_count();
+        world
+            .advance(Duration::from_secs(60))
+            .expect("advance 60s with heartbeats suppressed");
+        assert_eq!(
+            herdr.heartbeat_count(),
+            hb_suppressed_start,
+            "no heartbeats should be emitted while suppressed"
+        );
+        assert!(
+            herdr.subscribe_count() > subs_suppressed_start,
+            "expected Herdr observer to hit 45s heartbeat timeout and resubscribe when heartbeats are suppressed"
+        );
+    }
 }

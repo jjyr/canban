@@ -78,6 +78,10 @@ struct State {
     reorder_buffer: Vec<Value>,
     /// Count of subscribers dropped due to bounded-channel overflow.
     overflow_drops: u64,
+    /// Total control-plane heartbeats emitted via `emit_heartbeat` / `maybe_emit_heartbeat`.
+    heartbeat_count: u64,
+    /// Total successful `subscribe` calls accepted by this core.
+    subscribe_count: u64,
     /// Last virtual timestamp at which `maybe_emit_heartbeat` emitted a heartbeat.
     last_heartbeat_ms: u64,
     /// When true, `subscribe` / `call` fail to simulate Herdr Core outage.
@@ -121,6 +125,8 @@ impl SimHerdr {
                 reorder_remaining: 0,
                 reorder_buffer: Vec::new(),
                 overflow_drops: 0,
+                heartbeat_count: 0,
+                subscribe_count: 0,
                 last_heartbeat_ms: initial_ms,
                 offline: false,
             }),
@@ -137,6 +143,18 @@ impl SimHerdr {
 
     pub fn overflow_drop_count(&self) -> u64 {
         self.state.lock().unwrap().overflow_drops
+    }
+
+    pub fn subscriber_count(&self) -> usize {
+        self.state.lock().unwrap().subscribers.len()
+    }
+
+    pub fn heartbeat_count(&self) -> u64 {
+        self.state.lock().unwrap().heartbeat_count
+    }
+
+    pub fn subscribe_count(&self) -> u64 {
+        self.state.lock().unwrap().subscribe_count
     }
 
     pub fn set_offline(&self, offline: bool) {
@@ -554,6 +572,7 @@ impl SimHerdr {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock().unwrap();
         st.last_heartbeat_ms = now_ms;
+        st.heartbeat_count += 1;
         let seq = st.seq;
         Self::broadcast_locked(
             &mut st,
@@ -573,6 +592,7 @@ impl SimHerdr {
             return false;
         }
         st.last_heartbeat_ms = now_ms;
+        st.heartbeat_count += 1;
         let seq = st.seq;
         Self::broadcast_locked(
             &mut st,
@@ -1148,6 +1168,7 @@ impl HerdrBackend for SimHerdr {
             "terminals": st.terminals.values().cloned().collect::<Vec<_>>(),
         });
         let core = st.core_id.clone();
+        st.subscribe_count += 1;
         st.subscribers.push(SubEntry { tx, wake });
         Ok(BackendSubscription {
             core,

@@ -393,175 +393,179 @@ impl InvariantOracle {
     }
 
     /// #4 & #6: Merged UI snapshot, `entity_hosts` integrity, reminders, and `sound_event_ids`
-    /// invariants at the `canban-client` boundary.
+    /// invariants at the `canban-client` boundary across ALL live simulated clients.
     fn check_client_merged_view_invariants(&self, world: &SimWorld) -> Result<()> {
-        let merged = world.client_merged_snapshot()?;
-
         let mut known_hosts: BTreeSet<&str> = BTreeSet::new();
         known_hosts.insert("local");
         for h in &world.config.remote_hosts {
             known_hosts.insert(h.as_str());
         }
 
-        // Every project and card in merged snapshot must have unique IDs (multi-host qualification).
-        let mut seen_projects = BTreeSet::new();
-        for p in &merged.projects {
-            ensure!(
-                seen_projects.insert(p.id.clone()),
-                "duplicate Project ID {} in merged_snapshot",
-                p.id
-            );
-            if let Some(owner) = merged.entity_hosts.get(&p.id) {
+        for client_name in world.client_names() {
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+
+            // Every project and card in merged snapshot must have unique IDs (multi-host qualification).
+            let mut seen_projects = BTreeSet::new();
+            for p in &merged.projects {
                 ensure!(
-                    known_hosts.contains(owner.as_str()),
-                    "Project {} has unknown entity_hosts owner {owner:?}",
+                    seen_projects.insert(p.id.clone()),
+                    "[{client_name}] duplicate Project ID {} in merged_snapshot",
                     p.id
                 );
-            }
-        }
-        let mut seen_cards = BTreeSet::new();
-        let mut active_cards = BTreeSet::new();
-        for c in &merged.cards {
-            ensure!(
-                seen_cards.insert(c.id.clone()),
-                "duplicate Card ID {} in merged_snapshot",
-                c.id
-            );
-            if c.active() {
-                active_cards.insert(c.id.clone());
-            }
-            ensure!(
-                !c.id.trim().is_empty()
-                    && !c.project_id.trim().is_empty()
-                    && !c.title.trim().is_empty()
-                    && !c.stage.trim().is_empty(),
-                "Incomplete Card in merged_snapshot: id={:?} project_id={:?} title={:?} stage={:?}",
-                c.id,
-                c.project_id,
-                c.title,
-                c.stage
-            );
-            ensure!(
-                seen_projects.contains(&c.project_id),
-                "Card {} references missing project_id {} in merged_snapshot",
-                c.id,
-                c.project_id
-            );
-            if let Some(owner) = merged.entity_hosts.get(&c.id) {
-                ensure!(
-                    known_hosts.contains(owner.as_str()),
-                    "Card {} has unknown entity_hosts owner {owner:?}",
-                    c.id
-                );
-                if let Some(proj_owner) = merged.entity_hosts.get(&c.project_id) {
+                if let Some(owner) = merged.entity_hosts.get(&p.id) {
                     ensure!(
-                        owner == proj_owner,
-                        "Card {} owner ({owner}) disagrees with its Project {} owner ({proj_owner})",
-                        c.id,
-                        c.project_id
+                        known_hosts.contains(owner.as_str()),
+                        "[{client_name}] Project {} has unknown entity_hosts owner {owner:?}",
+                        p.id
                     );
                 }
             }
-        }
-
-        for t in &merged.terminals {
-            if let Some(owner) = merged.entity_hosts.get(&t.id) {
+            let mut seen_cards = BTreeSet::new();
+            let mut active_cards = BTreeSet::new();
+            for c in &merged.cards {
                 ensure!(
-                    known_hosts.contains(owner.as_str()),
-                    "Terminal {} has unknown entity_hosts owner {owner:?}",
-                    t.id
+                    seen_cards.insert(c.id.clone()),
+                    "[{client_name}] duplicate Card ID {} in merged_snapshot",
+                    c.id
                 );
-            }
-        }
-        for r in &merged.workflow_runs {
-            if let Some(owner) = merged.entity_hosts.get(&r.id) {
+                if c.active() {
+                    active_cards.insert(c.id.clone());
+                }
                 ensure!(
-                    known_hosts.contains(owner.as_str()),
-                    "WorkflowRun {} has unknown entity_hosts owner {owner:?}",
+                    !c.id.trim().is_empty()
+                        && !c.project_id.trim().is_empty()
+                        && !c.title.trim().is_empty()
+                        && !c.stage.trim().is_empty(),
+                    "[{client_name}] Incomplete Card in merged_snapshot: id={:?} project_id={:?} title={:?} stage={:?}",
+                    c.id,
+                    c.project_id,
+                    c.title,
+                    c.stage
+                );
+                ensure!(
+                    seen_projects.contains(&c.project_id),
+                    "[{client_name}] Card {} references missing project_id {} in merged_snapshot",
+                    c.id,
+                    c.project_id
+                );
+                if let Some(owner) = merged.entity_hosts.get(&c.id) {
+                    ensure!(
+                        known_hosts.contains(owner.as_str()),
+                        "[{client_name}] Card {} has unknown entity_hosts owner {owner:?}",
+                        c.id
+                    );
+                    if let Some(proj_owner) = merged.entity_hosts.get(&c.project_id) {
+                        ensure!(
+                            owner == proj_owner,
+                            "[{client_name}] Card {} owner ({owner}) disagrees with its Project {} owner ({proj_owner})",
+                            c.id,
+                            c.project_id
+                        );
+                    }
+                }
+            }
+
+            for t in &merged.terminals {
+                if let Some(owner) = merged.entity_hosts.get(&t.id) {
+                    ensure!(
+                        known_hosts.contains(owner.as_str()),
+                        "[{client_name}] Terminal {} has unknown entity_hosts owner {owner:?}",
+                        t.id
+                    );
+                }
+            }
+            for r in &merged.workflow_runs {
+                if let Some(owner) = merged.entity_hosts.get(&r.id) {
+                    ensure!(
+                        known_hosts.contains(owner.as_str()),
+                        "[{client_name}] WorkflowRun {} has unknown entity_hosts owner {owner:?}",
+                        r.id
+                    );
+                }
+            }
+
+            // Reminders at the merged client boundary must have unique IDs and never reference archived/removed cards.
+            let reminders = canban_notifications::reminders(&merged);
+            let mut seen_rem = BTreeSet::new();
+            for r in &reminders {
+                ensure!(
+                    seen_rem.insert(r.id.clone()),
+                    "[{client_name}] duplicate Reminder ID {} in merged UI notification center",
                     r.id
                 );
+                ensure!(
+                    active_cards.contains(&r.card_id),
+                    "[{client_name}] merged UI notification center returned reminder {} for non-active card {}",
+                    r.id,
+                    r.card_id
+                );
             }
-        }
 
-        // Reminders at the merged client boundary must have unique IDs and never reference archived/removed cards.
-        let reminders = canban_notifications::reminders(&merged);
-        let mut seen_rem = BTreeSet::new();
-        for r in &reminders {
-            ensure!(
-                seen_rem.insert(r.id.clone()),
-                "duplicate Reminder ID {} in merged UI notification center",
-                r.id
-            );
-            ensure!(
-                active_cards.contains(&r.card_id),
-                "merged UI notification center returned reminder {} for non-active card {}",
-                r.id,
-                r.card_id
-            );
-        }
-
-        let mut seen_sounds = BTreeSet::new();
-        for sid in &merged.sound_event_ids {
-            ensure!(
-                seen_sounds.insert(sid.clone()),
-                "duplicate sound_event_id {sid} in merged_snapshot"
-            );
+            let mut seen_sounds = BTreeSet::new();
+            for sid in &merged.sound_event_ids {
+                ensure!(
+                    seen_sounds.insert(sid.clone()),
+                    "[{client_name}] duplicate sound_event_id {sid} in merged_snapshot"
+                );
+            }
         }
         Ok(())
     }
 
     /// #7: Active agent counts in `merged_runtime_state()` match live active agent terminals
-    /// across the UNION of computed & reported host keys, cross-checked against
+    /// across the UNION of computed & reported host keys on ALL live clients, cross-checked against
     /// `canban_scheduler::active_count_at`, `scheduler.max_agents`, Herdr terminal binding
     /// exclusivity, and `protected_terminals` safety!
     fn check_herdr_runtime_parity(&self, world: &SimWorld) -> Result<()> {
-        let rt = world.client_merged_runtime()?;
         let local_now_ms = world
             .server("local-server")
             .map(|s| s.now_ms())
             .unwrap_or_else(|| world.now_ms());
-        let mut computed: BTreeMap<String, usize> = BTreeMap::new();
-        for t in &rt.terminals {
-            let host = rt
-                .terminal_hosts
-                .get(&t.id)
-                .cloned()
-                .unwrap_or_else(|| "local".into());
-            let active = if host == "local" {
-                t.agent.as_ref().is_some_and(|a| {
-                    (a.terminal.is_some()
-                        && !a.finished()
-                        && (a.close_state == "closing"
-                            || !matches!(
-                                a.runtime_status_at(local_now_ms),
-                                "closed" | "blocked" | "idle" | "done" | "error"
-                            )))
-                        || (a.terminal.is_none()
-                            && matches!(a.state.as_str(), "starting" | "unknown"))
-                })
-            } else {
-                t.agent
-                    .as_ref()
-                    .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running" | "working"))
-            };
-            if active {
-                *computed.entry(host).or_default() += 1;
+        for client_name in world.client_names() {
+            let rt = world.client_merged_runtime_on(&client_name)?;
+            let mut computed: BTreeMap<String, usize> = BTreeMap::new();
+            for t in &rt.terminals {
+                let host = rt
+                    .terminal_hosts
+                    .get(&t.id)
+                    .cloned()
+                    .unwrap_or_else(|| "local".into());
+                let active = if host == "local" {
+                    t.agent.as_ref().is_some_and(|a| {
+                        (a.terminal.is_some()
+                            && !a.finished()
+                            && (a.close_state == "closing"
+                                || !matches!(
+                                    a.runtime_status_at(local_now_ms),
+                                    "closed" | "blocked" | "idle" | "done" | "error"
+                                )))
+                            || (a.terminal.is_none()
+                                && matches!(a.state.as_str(), "starting" | "unknown"))
+                    })
+                } else {
+                    t.agent.as_ref().is_some_and(|a| {
+                        matches!(a.state.as_str(), "starting" | "running" | "working")
+                    })
+                };
+                if active {
+                    *computed.entry(host).or_default() += 1;
+                }
             }
-        }
 
-        // Check UNION of computed and reported host keys (so stale non-zero reported counts are caught!).
-        let all_hosts: BTreeSet<String> = computed
-            .keys()
-            .chain(rt.host_active_agents.keys())
-            .cloned()
-            .collect();
-        for host in all_hosts {
-            let expected = computed.get(&host).copied().unwrap_or(0);
-            let reported = rt.host_active_agents.get(&host).copied().unwrap_or(0);
-            ensure!(
-                reported == expected,
-                "[{host}] merged_runtime_state active_agents mismatch: reported={reported}, computed={expected}"
-            );
+            // Check UNION of computed and reported host keys (so stale non-zero reported counts are caught!).
+            let all_hosts: BTreeSet<String> = computed
+                .keys()
+                .chain(rt.host_active_agents.keys())
+                .cloned()
+                .collect();
+            for host in all_hosts {
+                let expected = computed.get(&host).copied().unwrap_or(0);
+                let reported = rt.host_active_agents.get(&host).copied().unwrap_or(0);
+                ensure!(
+                    reported == expected,
+                    "[{client_name}][{host}] merged_runtime_state active_agents mismatch: reported={reported}, computed={expected}"
+                );
+            }
         }
 
         // Cross-check scheduler `active_count_at`, `max_agents`, and Herdr binding exclusivity per server.
@@ -803,6 +807,7 @@ impl InvariantOracle {
         {
             return Ok(());
         }
+        world.hit("oracle.committed_durability_checked");
         for (host_name, handle) in &world.servers {
             let Some(server) = handle.server() else {
                 continue;
@@ -968,31 +973,34 @@ impl InvariantOracle {
         Ok(())
     }
 
-    /// #2 (P0 #2): At quiescence, no outbox items remain `Queued`, `InFlight`, OR unexpected `Failed`.
+    /// #2 (P0 #2): At quiescence, no outbox items remain `Queued`, `InFlight`, OR unexpected `Failed`
+    /// on ANY live simulated client.
     fn check_outbox_drained(&self, world: &SimWorld) -> Result<()> {
-        let items = world.client_sync_items();
-        for it in &items {
-            match it.state {
-                SyncItemState::Queued | SyncItemState::InFlight => {
-                    bail!(
-                        "Outbox item {} ({}) for host {} still {:?} at quiescence; host_summaries={:?}",
-                        it.mutation_id,
-                        it.card_title,
-                        it.host_id,
-                        it.state,
-                        world.client_host_summaries()
-                    );
+        for client_name in world.client_names() {
+            let items = world.client_sync_items_on(&client_name);
+            for it in &items {
+                match it.state {
+                    SyncItemState::Queued | SyncItemState::InFlight => {
+                        bail!(
+                            "[{client_name}] Outbox item {} ({}) for host {} still {:?} at quiescence; host_summaries={:?}",
+                            it.mutation_id,
+                            it.card_title,
+                            it.host_id,
+                            it.state,
+                            world.client_host_summaries_on(&client_name)
+                        );
+                    }
+                    SyncItemState::Failed if !self.allow_failed_ids.contains(&it.mutation_id) => {
+                        bail!(
+                            "[{client_name}] Unexpected SyncItemState::Failed outbox item {} ({}) for host {} at quiescence: msg={:?}",
+                            it.mutation_id,
+                            it.card_title,
+                            it.host_id,
+                            it.message
+                        );
+                    }
+                    SyncItemState::Conflict | SyncItemState::Failed => {}
                 }
-                SyncItemState::Failed if !self.allow_failed_ids.contains(&it.mutation_id) => {
-                    bail!(
-                        "Unexpected SyncItemState::Failed outbox item {} ({}) for host {} at quiescence: msg={:?}",
-                        it.mutation_id,
-                        it.card_title,
-                        it.host_id,
-                        it.message
-                    );
-                }
-                SyncItemState::Conflict | SyncItemState::Failed => {}
             }
         }
         Ok(())
@@ -1179,88 +1187,98 @@ impl InvariantOracle {
         Ok(Some(chosen_id.to_owned()))
     }
 
-    /// #2 & #4 (P0 #2 + P1 full convergence): At quiescence, `client.merged_snapshot()` matches
-    /// every enabled live server across normalized Cards, Projects, WorkflowRuns, Terminals,
-    /// CardReads, Reminders, GlobalEnv, and empty `pending_sync` — exempting ONLY the exact
-    /// `(host_id, raw_card_id)` pairs with an active `SyncItemState::Conflict`, and FAILING
-    /// if any live enabled host is still disconnected!
+    /// #2 & #4 (P0 #2 + P1 full convergence): At quiescence, `client.merged_snapshot()` on EVERY
+    /// live simulated client matches every enabled live server across normalized Cards, Projects,
+    /// WorkflowRuns, Terminals, CardReads, Reminders, GlobalEnv, and empty `pending_sync` —
+    /// exempting ONLY the exact `(host_id, raw_card_id)` pairs with an active
+    /// `SyncItemState::Conflict`, and FAILING if any live enabled host is still disconnected!
     fn check_client_server_convergence(&self, world: &SimWorld) -> Result<()> {
-        let merged = world.client_merged_snapshot()?;
-        let summaries = world.client_host_summaries();
-        let sync_items = world.client_sync_items();
-
-        let mut conflict_cards: BTreeSet<(String, String)> = BTreeSet::new();
-        for item in &sync_items {
-            match item.state {
-                SyncItemState::Conflict => {
-                    let raw_cid = strip_host_prefix(&item.card_id);
-                    conflict_cards.insert((item.host_id.clone(), raw_cid));
-                }
-                SyncItemState::Failed => {
-                    if !self.allow_failed_ids.contains(&item.mutation_id) {
-                        bail!(
-                            "Unexpected Failed sync item {} on host {} during convergence check: {:?}",
-                            item.mutation_id,
-                            item.host_id,
-                            item.message
-                        );
-                    }
-                    let raw_cid = strip_host_prefix(&item.card_id);
-                    conflict_cards.insert((item.host_id.clone(), raw_cid));
-                }
-                SyncItemState::Queued | SyncItemState::InFlight => {}
-            }
-        }
-
         let local_global_env = world
             .server("local-server")
             .and_then(|s| s.snapshot().ok())
             .map(|s| s.global_env);
-        let env_status = world.client_global_env_status();
 
-        for (host_name, handle) in &world.servers {
-            let Some(server) = handle.server() else {
-                continue;
-            };
-            let client_host_id = if host_name == "local-server" {
-                "local"
-            } else {
-                host_name.as_str()
-            };
-            if let Some(summary) = summaries.iter().find(|s| s.id == client_host_id) {
-                let is_disabled = matches!(
-                    &summary.connection,
-                    HostConnectionState::Offline { error, .. }
-                        if error.eq_ignore_ascii_case("disabled")
-                );
-                if is_disabled {
-                    continue;
+        for client_name in world.client_names() {
+            let has_local = world
+                .client_named(&client_name)
+                .is_some_and(|c| c.capabilities().local_host);
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+            let summaries = world.client_host_summaries_on(&client_name);
+            let sync_items = world.client_sync_items_on(&client_name);
+
+            let mut conflict_cards: BTreeSet<(String, String)> = BTreeSet::new();
+            for item in &sync_items {
+                match item.state {
+                    SyncItemState::Conflict => {
+                        let raw_cid = strip_host_prefix(&item.card_id);
+                        conflict_cards.insert((item.host_id.clone(), raw_cid));
+                    }
+                    SyncItemState::Failed => {
+                        if !self.allow_failed_ids.contains(&item.mutation_id) {
+                            bail!(
+                                "[{client_name}] Unexpected Failed sync item {} on host {} during convergence check: {:?}",
+                                item.mutation_id,
+                                item.host_id,
+                                item.message
+                            );
+                        }
+                        let raw_cid = strip_host_prefix(&item.card_id);
+                        conflict_cards.insert((item.host_id.clone(), raw_cid));
+                    }
+                    SyncItemState::Queued | SyncItemState::InFlight => {}
                 }
-                ensure!(
-                    matches!(summary.connection, HostConnectionState::Connected { .. }),
-                    "[{client_host_id}] enabled server is NOT Connected at quiescence (state={:?})",
-                    summary.connection
-                );
-            } else if client_host_id != "local" {
-                bail!(
-                    "[{client_host_id}] live remote host missing from client host_summaries at quiescence"
-                );
             }
 
-            let srv_snap = server.snapshot()?;
-            assert_host_converged(client_host_id, &srv_snap, &merged, &conflict_cards)?;
+            let env_status = world.client_global_env_status_on(&client_name);
 
-            if world.config.desktop_local
-                && client_host_id != "local"
-                && env_status.synced_hosts.iter().any(|h| h == client_host_id)
-                && let Some(local_env) = &local_global_env
-            {
-                ensure!(
-                    &srv_snap.global_env == local_env,
-                    "[{client_host_id}] global_env diverged from local-server despite synced_hosts membership: server={:?} local={:?}",
-                    srv_snap.global_env,
-                    local_env
-                );
+            for (host_name, handle) in &world.servers {
+                let Some(server) = handle.server() else {
+                    continue;
+                };
+                let client_host_id = if host_name == "local-server" {
+                    "local"
+                } else {
+                    host_name.as_str()
+                };
+                if client_host_id == "local" && !has_local {
+                    continue;
+                }
+                if let Some(summary) = summaries.iter().find(|s| s.id == client_host_id) {
+                    let is_disabled = matches!(
+                        &summary.connection,
+                        HostConnectionState::Offline { error, .. }
+                            if error.eq_ignore_ascii_case("disabled")
+                    );
+                    if is_disabled {
+                        continue;
+                    }
+                    ensure!(
+                        matches!(summary.connection, HostConnectionState::Connected { .. }),
+                        "[{client_name}][{client_host_id}] enabled server is NOT Connected at quiescence (state={:?})",
+                        summary.connection
+                    );
+                } else if client_host_id != "local" {
+                    bail!(
+                        "[{client_name}][{client_host_id}] live remote host missing from client host_summaries at quiescence"
+                    );
+                }
+
+                let srv_snap = server.snapshot()?;
+                assert_host_converged(client_host_id, &srv_snap, &merged, &conflict_cards)
+                    .with_context(|| format!("client '{client_name}' convergence check failed"))?;
+
+                if has_local
+                    && client_host_id != "local"
+                    && env_status.synced_hosts.iter().any(|h| h == client_host_id)
+                    && let Some(local_env) = &local_global_env
+                {
+                    ensure!(
+                        &srv_snap.global_env == local_env,
+                        "[{client_name}][{client_host_id}] global_env diverged from local-server despite synced_hosts membership: server={:?} local={:?}",
+                        srv_snap.global_env,
+                        local_env
+                    );
+                }
             }
         }
         Ok(())
@@ -1711,17 +1729,20 @@ pub fn canonical_state_digest(world: &SimWorld) -> u64 {
         }
 
         type ReminderDigestRow = (CardKey, String, bool, bool, String);
-        let mut rem_rows: Vec<ReminderDigestRow> = canban_notifications::reminders(&snap)
-            .into_iter()
-            .map(|r| {
-                let ckey = card_key_map
-                    .get(r.card_id.as_str())
-                    .copied()
-                    .unwrap_or((usize::MAX, 0));
-                let prefix = r.id.split(':').next().unwrap_or("other").to_owned();
-                (ckey, prefix, r.unread, r.pending, r.message)
-            })
-            .collect();
+        let mut events = server.events().unwrap_or_default();
+        events.retain(|e| card_key_map.contains_key(e.card_id.as_str()));
+        let mut rem_rows: Vec<ReminderDigestRow> =
+            canban_notifications::reminders_from_events_at(&snap, &events, server.now_ms())
+                .into_iter()
+                .map(|r| {
+                    let ckey = card_key_map
+                        .get(r.card_id.as_str())
+                        .copied()
+                        .unwrap_or((usize::MAX, 0));
+                    let prefix = r.id.split(':').next().unwrap_or("other").to_owned();
+                    (ckey, prefix, r.unread, r.pending, r.message)
+                })
+                .collect();
         rem_rows.sort();
         mix_u64(&mut h, rem_rows.len() as u64);
         for ((pidx, num), prefix, unread, pending, msg) in rem_rows {

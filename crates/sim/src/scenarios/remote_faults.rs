@@ -112,6 +112,19 @@ pub fn run(seed: u64) -> Result<u64> {
         for (idx, body) in comments.iter().enumerate() {
             ensure!(*body == format!("comment-{}", idx + 1));
         }
+        oracle.record_committed_card(
+            "remote-a",
+            &srv_snap.cards[0].id,
+            &srv_snap.cards[0].project_id,
+            srv_snap.cards[0].revision,
+        );
+        for idx in 1..=expected_steps {
+            oracle.record_committed_comment(
+                "remote-a",
+                &srv_snap.cards[0].id,
+                format!("comment-{idx}"),
+            );
+        }
 
         // 2. True mid-flight fault injection via `client_spawn` + TCP RST / one-way drop +
         //    server crash/bounce rounds -> zero duplicate cards!
@@ -165,6 +178,9 @@ pub fn run(seed: u64) -> Result<u64> {
             1 + rounds,
             srv_snap.cards.len()
         );
+        for c in &srv_snap.cards {
+            oracle.record_committed_card("remote-a", &c.id, &c.project_id, c.revision);
+        }
 
         // 3. 3-way disjoint-field auto-merge:
         //    Partition client; client edits ONLY `body` while server edits ONLY `title` ->
@@ -384,6 +400,13 @@ pub fn run(seed: u64) -> Result<u64> {
             .find(|c| c.title == "Survives Client Crash")
             .expect("Offline card in .outbox.json was lost across bounce_client()!");
         ensure!(recovered.body == "persisted-in-outbox-json");
+        oracle.record_committed_card(
+            "remote-a",
+            &recovered.id,
+            &recovered.project_id,
+            recovered.revision,
+        );
+        oracle.record_committed_comment("remote-a", &recovered.id, "outbox-comment-before-crash");
         world.hit("remote_faults.client_bounce_outbox_recovery");
 
         // 6. Reconnect Window Injection:
@@ -439,6 +462,12 @@ pub fn run(seed: u64) -> Result<u64> {
             }),
         )?;
         let fresh_raw_id = fresh_srv["id"].as_str().unwrap().to_owned();
+        oracle.record_committed_card(
+            "remote-a",
+            &fresh_raw_id,
+            &raw_pid,
+            fresh_srv["revision"].as_u64().unwrap_or(1),
+        );
         let fresh_cid = canban_types::qualify_host_id("remote-a", &fresh_raw_id);
         world.wait_until(10_000, |w| {
             let merged = w.client_merged_snapshot()?;

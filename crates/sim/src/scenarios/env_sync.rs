@@ -38,7 +38,7 @@ pub fn run(seed: u64) -> Result<u64> {
             }),
             None,
         )?;
-        world.client_sync_global_env_now();
+        world.client_sync_global_env_now()?;
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;
 
@@ -57,6 +57,11 @@ pub fn run(seed: u64) -> Result<u64> {
                 ),
                 "Host {host} missing masked API_TOKEN secret: {:?}",
                 snap.global_env
+            );
+            oracle.record_committed_env(
+                host,
+                "SHARED_PLAIN",
+                EnvEntryMeta::Plain { value: "v1".into() },
             );
         }
 
@@ -82,6 +87,16 @@ pub fn run(seed: u64) -> Result<u64> {
                 }
             }),
         )?;
+        oracle.record_committed_env(
+            "remote-b",
+            "SHARED_LWW",
+            EnvEntryMeta::Plain {
+                value: "remote-b-newer".into(),
+            },
+        );
+        for host in ["local-server", "remote-a", "remote-b"] {
+            oracle.remove_committed_env(host, "SHARED_PLAIN");
+        }
         let _ = world.client_call(
             "env.save",
             json!({
@@ -95,7 +110,14 @@ pub fn run(seed: u64) -> Result<u64> {
             }),
             None,
         )?;
-        world.client_sync_global_env_now();
+        oracle.record_committed_env(
+            "local-server",
+            "SHARED_PLAIN",
+            EnvEntryMeta::Plain {
+                value: "v2-rotated".into(),
+            },
+        );
+        world.client_sync_global_env_now()?;
         oracle.check_step_invariants(world)?;
 
         // Heal link and let global env sync push `local`'s older write to `remote-b`.
@@ -118,11 +140,21 @@ pub fn run(seed: u64) -> Result<u64> {
             "LWW violation: stale local push overwrote newer remote-b write! got {:?}",
             b_snap.global_env.get("SHARED_LWW")
         );
+        for host in ["remote-a", "remote-b"] {
+            oracle.record_committed_env(
+                host,
+                "SHARED_PLAIN",
+                EnvEntryMeta::Plain {
+                    value: "v2-rotated".into(),
+                },
+            );
+        }
         world.hit("env_sync.lww_stale_rejected");
 
         // Now advance virtual clock past `remote-b`'s +20s skew so `local` issues a strictly newer
         // timestamp and ALL hosts converge identically!
         world.advance(Duration::from_secs(30))?;
+        oracle.remove_committed_env("remote-b", "SHARED_LWW");
         let _ = world.client_call(
             "env.save",
             json!({
@@ -136,7 +168,7 @@ pub fn run(seed: u64) -> Result<u64> {
             }),
             None,
         )?;
-        world.client_sync_global_env_now();
+        world.client_sync_global_env_now()?;
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;
         for host in ["local-server", "remote-a", "remote-b"] {
@@ -148,6 +180,13 @@ pub fn run(seed: u64) -> Result<u64> {
                     }),
                 "Host {host} failed to converge to local-newest: {:?}",
                 snap.global_env.get("SHARED_LWW")
+            );
+            oracle.record_committed_env(
+                host,
+                "SHARED_LWW",
+                EnvEntryMeta::Plain {
+                    value: "local-newest".into(),
+                },
             );
         }
         world.hit("env_sync.lww_converged");
@@ -202,6 +241,10 @@ pub fn run(seed: u64) -> Result<u64> {
         world.hit("env_sync.project_unset_override");
 
         // 4. Tombstone deletion across partition + `remote-b` crash/bounce.
+        for host in ["local-server", "remote-a", "remote-b"] {
+            oracle.remove_committed_env(host, "SHARED_PLAIN");
+            oracle.remove_committed_env(host, "SHARED_LWW");
+        }
         world.partition("ui-client", "remote-b");
         world.advance(Duration::from_millis(120))?;
         let _ = world.client_call(
@@ -215,7 +258,14 @@ pub fn run(seed: u64) -> Result<u64> {
             }),
             None,
         )?;
-        world.client_sync_global_env_now();
+        oracle.record_committed_env(
+            "local-server",
+            "SHARED_PLAIN",
+            EnvEntryMeta::Plain {
+                value: "v3-final".into(),
+            },
+        );
+        world.client_sync_global_env_now()?;
         world.crash_server("remote-b")?;
         world.advance(Duration::from_millis(200))?;
         world.bounce_server("remote-b")?;
@@ -239,7 +289,15 @@ pub fn run(seed: u64) -> Result<u64> {
                     }),
                 "Host {host} did not converge to SHARED_PLAIN=v3-final"
             );
+            oracle.record_committed_env(
+                host,
+                "SHARED_PLAIN",
+                EnvEntryMeta::Plain {
+                    value: "v3-final".into(),
+                },
+            );
         }
+        oracle.check_committed_durability(world)?;
         world.hit("env_sync.tombstone_bounce_converged");
 
         Ok(finalize_digest(world))

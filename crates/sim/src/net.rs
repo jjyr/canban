@@ -12,7 +12,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context as TaskContext, Poll},
     time::Duration,
@@ -56,6 +56,7 @@ pub struct StreamFaultPolicy {
 struct PolicyInner {
     default_cfg: Mutex<StreamFaultConfig>,
     host_cfgs: Mutex<BTreeMap<String, StreamFaultConfig>>,
+    generation: AtomicU64,
     wake: Arc<Notify>,
 }
 
@@ -65,13 +66,20 @@ impl StreamFaultPolicy {
             inner: Arc::new(PolicyInner {
                 default_cfg: Mutex::new(default_cfg),
                 host_cfgs: Mutex::new(BTreeMap::new()),
+                generation: AtomicU64::new(0),
                 wake: Arc::new(Notify::new()),
             }),
         }
     }
 
+    /// Monotonic counter incremented whenever the fault policy is updated or cleared.
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::SeqCst)
+    }
+
     pub fn set_default(&self, cfg: StreamFaultConfig) {
         *self.inner.default_cfg.lock().unwrap() = cfg;
+        self.inner.generation.fetch_add(1, Ordering::SeqCst);
         self.inner.wake.notify_waiters();
     }
 
@@ -81,17 +89,20 @@ impl StreamFaultPolicy {
             .lock()
             .unwrap()
             .insert(host_id.into(), cfg);
+        self.inner.generation.fetch_add(1, Ordering::SeqCst);
         self.inner.wake.notify_waiters();
     }
 
     pub fn clear_for_host(&self, host_id: &str) {
         self.inner.host_cfgs.lock().unwrap().remove(host_id);
+        self.inner.generation.fetch_add(1, Ordering::SeqCst);
         self.inner.wake.notify_waiters();
     }
 
     pub fn clear_all(&self) {
         *self.inner.default_cfg.lock().unwrap() = StreamFaultConfig::default();
         self.inner.host_cfgs.lock().unwrap().clear();
+        self.inner.generation.fetch_add(1, Ordering::SeqCst);
         self.inner.wake.notify_waiters();
     }
 
@@ -115,6 +126,7 @@ pub struct FaultyStream<S> {
     inner: S,
     host_id: Option<String>,
     policy: StreamFaultPolicy,
+    policy_gen: u64,
     bytes_read: u64,
     bytes_written: u64,
     read_sleep: Option<Pin<Box<Sleep>>>,
@@ -125,10 +137,12 @@ pub struct FaultyStream<S> {
 
 impl<S> FaultyStream<S> {
     pub fn new(inner: S, policy: StreamFaultPolicy, host_id: Option<String>) -> Self {
+        let policy_gen = policy.generation();
         Self {
             inner,
             host_id,
             policy,
+            policy_gen,
             bytes_read: 0,
             bytes_written: 0,
             read_sleep: None,
@@ -153,6 +167,18 @@ impl<S> FaultyStream<S> {
     fn current_cfg(&self) -> StreamFaultConfig {
         self.policy.effective_config(self.host_id.as_deref())
     }
+
+    /// Resets per-arm read/write byte budgets whenever [`StreamFaultPolicy`] changes generation,
+    /// so injecting e.g. `rst_after_write_bytes: Some(32)` mid-session fires after 32 new bytes
+    /// rather than immediately at byte 0 on an already-warm multiplexed connection.
+    fn sync_policy_gen(&mut self) {
+        let current_gen = self.policy.generation();
+        if current_gen != self.policy_gen {
+            self.policy_gen = current_gen;
+            self.bytes_read = 0;
+            self.bytes_written = 0;
+        }
+    }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for FaultyStream<S> {
@@ -162,6 +188,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for FaultyStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        this.sync_policy_gen();
         let cfg = this.current_cfg();
 
         // 1. Half-open blackhole stall.
@@ -187,6 +214,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for FaultyStream<S> {
             this.read_stall = None;
         }
 
+        this.sync_policy_gen();
         let cfg = this.current_cfg();
 
         // 2. Deterministic virtual latency spike.
@@ -273,6 +301,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FaultyStream<S> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.sync_policy_gen();
         let cfg = this.current_cfg();
 
         // 1. Half-open write stall.
@@ -298,6 +327,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FaultyStream<S> {
             this.write_stall = None;
         }
 
+        this.sync_policy_gen();
         let cfg = this.current_cfg();
 
         // 2. Deterministic virtual latency spike.
@@ -620,5 +650,38 @@ mod tests {
             assert_eq!(counter.load(Ordering::SeqCst), 2);
         }
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn faulty_stream_policy_update_resets_byte_budgets() {
+        let policy = StreamFaultPolicy::new(StreamFaultConfig::default());
+        let (w, mut r) = tokio::io::duplex(256);
+        let mut faulty = FaultyStream::new(w, policy.clone(), Some("remote-a".into()));
+
+        // Warm the stream with 64 bytes under a clean policy (simulating prior session traffic).
+        let warmup = vec![b'A'; 64];
+        faulty.write_all(&warmup).await.unwrap();
+        assert_eq!(faulty.bytes_written(), 64);
+        let mut drain = vec![0u8; 64];
+        r.read_exact(&mut drain).await.unwrap();
+
+        // Arm a 16-byte write RST mid-session: the generation bump must reset the write budget so
+        // 16 new bytes are written mid-flight before ConnectionReset triggers (NOT byte 0!).
+        policy.set_for_host(
+            "remote-a",
+            StreamFaultConfig {
+                rst_after_write_bytes: Some(16),
+                ..StreamFaultConfig::default()
+            },
+        );
+        let payload = vec![b'B'; 32];
+        let wn = faulty.write(&payload).await.unwrap();
+        assert_eq!(
+            wn, 16,
+            "mid-session policy update must allow 16 fresh bytes before RST"
+        );
+        assert_eq!(faulty.bytes_written(), 16);
+        let werr = faulty.write(&payload[wn..]).await.unwrap_err();
+        assert_eq!(werr.kind(), io::ErrorKind::ConnectionReset);
     }
 }

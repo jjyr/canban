@@ -13,7 +13,7 @@ use crate::{
     world::{SimWorld, SimWorldConfig, run_with_world},
 };
 use anyhow::{Result, bail, ensure};
-use canban_types::{SyncAction, SyncItemState};
+use canban_types::{EnvEntryMeta, SyncAction, SyncItemState};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -408,6 +408,9 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "conflict",
                 "archived",
                 "removed",
+                "restore the card before editing",
+                "restore the card before commenting",
+                "terminal has no core binding",
                 "not found",
                 "unknown card",
                 "unknown terminal",
@@ -601,6 +604,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 Some(pid),
             )?;
             let cid = c["id"].as_str().unwrap().to_owned();
+            oracle.record_committed_card(
+                server_key(host),
+                &cid,
+                pid,
+                c["revision"].as_u64().unwrap_or(1),
+            );
             cards.push((host.clone(), pid.clone(), cid));
         }
 
@@ -635,6 +644,23 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         ),
                     )? && let Some(cid) = res["id"].as_str()
                     {
+                        let srv_name = server_key(host);
+                        let raw_cid = canban_types::split_qualified_host_id(cid)
+                            .map(|(_, r)| r)
+                            .unwrap_or(cid);
+                        // Only record durability when confirmed on server (not offline-queued).
+                        if let Some(srv_card) = world
+                            .server(srv_name)
+                            .and_then(|s| s.snapshot().ok())
+                            .and_then(|snap| snap.cards.into_iter().find(|c| c.id == raw_cid))
+                        {
+                            oracle.record_committed_card(
+                                srv_name,
+                                &srv_card.id,
+                                &srv_card.project_id,
+                                srv_card.revision,
+                            );
+                        }
                         cards.push((host.clone(), pid.clone(), cid.to_owned()));
                     }
                 }
@@ -684,11 +710,15 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         .filter(|(_, _, cid)| !archived_cards.contains(cid))
                         .count();
                     if active_count > host_projects.len()
-                        && let Some((_host, pid, cid)) =
+                        && let Some((host, pid, cid)) =
                             pick_active_card(&cards, &archived_cards, *card_pick)
                     {
                         let rev = lookup_card_rev(world, &cid);
-                        if check_expected_chaos_err(
+                        let srv_name = server_key(&host);
+                        let raw_cid = canban_types::split_qualified_host_id(&cid)
+                            .map(|(_, r)| r.to_owned())
+                            .unwrap_or_else(|| cid.clone());
+                        let archived_ok = check_expected_chaos_err(
                             "card.archive",
                             world.client_call(
                                 "card.archive",
@@ -696,8 +726,15 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 Some(&pid),
                             ),
                         )?
-                        .is_some()
-                        {
+                        .is_some();
+                        // Under link loss, `card.archive` can commit on the server and drop the
+                        // reply packet; inspect server state so chaos doesn't treat the card as active.
+                        let server_archived = world
+                            .server(srv_name)
+                            .and_then(|s| s.snapshot().ok())
+                            .and_then(|snap| snap.cards.into_iter().find(|c| c.id == raw_cid))
+                            .is_some_and(|c| !c.active());
+                        if archived_ok || server_archived {
                             archived_cards.insert(cid);
                         }
                     }
@@ -825,7 +862,10 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 oracle.mark_secret_queued_offline();
                             }
                         }
-                        let _ = check_expected_chaos_err(
+                        let expected_plain = EnvEntryMeta::Plain {
+                            value: format!("val-{tag}"),
+                        };
+                        if check_expected_chaos_err(
                             "env.save",
                             world.client_call(
                                 "env.save",
@@ -836,8 +876,25 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 }),
                                 None,
                             ),
+                        )?
+                        .is_some()
+                            && world
+                                .server("local-server")
+                                .and_then(|s| s.snapshot().ok())
+                                .is_some_and(|snap| {
+                                    snap.global_env.get("CHAOS_PLAIN") == Some(&expected_plain)
+                                })
+                        {
+                            oracle.record_committed_env(
+                                "local-server",
+                                "CHAOS_PLAIN",
+                                expected_plain,
+                            );
+                        }
+                        let _ = check_expected_chaos_err(
+                            "env.sync",
+                            world.client_sync_global_env_now().map(|()| Value::Null),
                         )?;
-                        world.client_sync_global_env_now();
                         world.hit("chaos.env_save");
                     }
                 }
@@ -1187,16 +1244,47 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
         world.heal_and_quiesce(25_000)?;
 
         // Resolve ONLY genuine `SyncItemState::Conflict` items (cycling through ALL SyncAction
-        // variants: Retry, UseMine, UseEdited, Discard!). NEVER discard `SyncItemState::Failed`!
+        // variants: Retry, UseMine, UseEdited, Discard!) plus the specific expected offline-edit
+        // vs server-archive race where the server genuinely archived the card while an offline
+        // mutation was queued. NEVER discard any other `SyncItemState::Failed`!
         let mut retry_used = false;
-        for round in 0..4usize {
-            let conflicts: Vec<_> = world
-                .client_sync_items()
-                .into_iter()
+        for round in 0..8usize {
+            let sync_items = world.client_sync_items();
+            let conflicts: Vec<_> = sync_items
+                .iter()
                 .filter(|i| matches!(i.state, SyncItemState::Conflict))
+                .cloned()
                 .collect();
-            if conflicts.is_empty() {
+            let expected_archived_fails: Vec<_> = sync_items
+                .iter()
+                .filter(|i| {
+                    if !matches!(i.state, SyncItemState::Failed) {
+                        return false;
+                    }
+                    let msg = i.message.to_ascii_lowercase();
+                    let is_archived_err = msg.contains("archived or removed")
+                        || msg.contains("restore the card before");
+                    if !is_archived_err {
+                        return false;
+                    }
+                    let srv_name = server_key(&i.host_id);
+                    let raw_cid = canban_types::split_qualified_host_id(&i.card_id)
+                        .map(|(_, r)| r)
+                        .unwrap_or(i.card_id.as_str());
+                    world
+                        .server(srv_name)
+                        .and_then(|s| s.snapshot().ok())
+                        .and_then(|snap| snap.cards.into_iter().find(|c| c.id == raw_cid))
+                        .is_some_and(|c| !c.active())
+                })
+                .cloned()
+                .collect();
+            if conflicts.is_empty() && expected_archived_fails.is_empty() {
                 break;
+            }
+            for item in expected_archived_fails {
+                world.client_sync_action(&item.host_id, &item.mutation_id, SyncAction::Discard)?;
+                world.hit("chaos.archived_edit_race_discarded");
             }
             for (idx, item) in conflicts.into_iter().enumerate() {
                 let action = if !retry_used && round == 0 {
