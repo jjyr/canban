@@ -365,6 +365,61 @@ fn load_replay_file(path: &Path, default_ops: usize) -> Result<Vec<ReplayEntry>>
     Ok(entries)
 }
 
+const BASE_REQUIRED_COVERAGE: &[&str] = &[
+    "sim.scenario.started",
+    "sim.scenario.passed",
+    "sim.canonical_digest_mixed",
+    "world.heal_and_quiesce",
+    "oracle.sqlite_integrity_checked",
+];
+
+const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
+    "oracle.post_bounce_recovery_checked",
+    "oracle.outbox_file_scanned",
+    "oracle.committed_durability_checked",
+    "world.quiesce_natural",
+    "notifications.non_empty_both_hosts",
+    "workflow.rework",
+    "workflow.stop",
+    "remote_faults.three_way_auto_merge",
+    "remote_faults.client_bounce_outbox_recovery",
+    "github.collaborator_trust_gating",
+    "github.pagination_multi_page",
+    "env_sync.lww_converged",
+    "reclaim.stuck_exit_kill_fallback",
+    "schedules_budget.herdr_offline_queued_no_livelock",
+    "workflow_faults.condition_external_pr_gated",
+    "multi_client.two_client_three_way_auto_merge",
+    "auth.invite_single_use",
+    "auth.client_pair_persisted",
+    "auth.duplicate_server_rejected",
+    "auth.revoke_kicks_live_stream",
+    "auth.client_revoked_auth_failed",
+    "auth.tailscale_ephemeral_enc",
+    "auth.client_tailscale_autoseal",
+    "auth.api_mismatch",
+    "workspaces.worktree_created",
+    "workflow.script_executed",
+    "workflow.script_herdr_pty",
+    "workflow.script_herdr_crash_recovery",
+    "workflow.admit_checked",
+    "delivery.merge_batch_passed",
+    "delivery.test_failure_rework",
+    "delivery.hold_auto_merge",
+    "delivery.multi_card_batch",
+    "delivery.conflict_evict",
+    "delivery.squash_or_merge",
+    "delivery.sync_upstream_pushed",
+    "bundle.exported",
+    "bundle.managed_files_roundtrip",
+    "bundle.github_linked_import",
+    "bundle.schedules_multi_host",
+    "bundle.imported_multi_host",
+    "bundle.cross_host_ops_isolated",
+    "bundle.project_archive_restore",
+    "bundle.fault_recovery",
+];
+
 fn verify_coverage(
     tracker: &CoverageTracker,
     assert_coverage: bool,
@@ -381,13 +436,7 @@ fn verify_coverage(
     );
     let mut required: Vec<&str> = Vec::new();
     if assert_coverage {
-        required.extend_from_slice(&[
-            "sim.scenario.started",
-            "sim.scenario.passed",
-            "sim.canonical_digest_mixed",
-            "world.heal_and_quiesce",
-            "oracle.sqlite_integrity_checked",
-        ]);
+        required.extend_from_slice(BASE_REQUIRED_COVERAGE);
         required.extend_from_slice(suite_required);
     }
     for prop in extra_required {
@@ -545,38 +594,7 @@ fn run_suite(
         started.elapsed().as_secs_f64()
     );
     let suite_req: &[&str] = if is_full_suite {
-        &[
-            "oracle.post_bounce_recovery_checked",
-            "oracle.outbox_file_scanned",
-            "oracle.committed_durability_checked",
-            "world.quiesce_natural",
-            "notifications.non_empty_both_hosts",
-            "workflow.rework",
-            "workflow.stop",
-            "remote_faults.three_way_auto_merge",
-            "remote_faults.client_bounce_outbox_recovery",
-            "github.collaborator_trust_gating",
-            "github.pagination_multi_page",
-            "env_sync.lww_converged",
-            "reclaim.stuck_exit_kill_fallback",
-            "schedules_budget.herdr_offline_queued_no_livelock",
-            "workflow_faults.condition_external_pr_gated",
-            "multi_client.two_client_three_way_auto_merge",
-            "auth.invite_single_use",
-            "auth.revoke_kicks_live_stream",
-            "auth.tailscale_ephemeral_enc",
-            "auth.api_mismatch",
-            "workspaces.worktree_created",
-            "workflow.script_executed",
-            "workflow.admit_checked",
-            "delivery.merge_batch_passed",
-            "delivery.test_failure_rework",
-            "delivery.hold_auto_merge",
-            "bundle.exported",
-            "bundle.imported_multi_host",
-            "bundle.cross_host_ops_isolated",
-            "bundle.fault_recovery",
-        ]
+        FULL_SUITE_REQUIRED_COVERAGE
     } else {
         &[]
     };
@@ -607,7 +625,7 @@ impl RandomTarget {
         match self {
             Self::Single(sc) => *sc,
             Self::AllMixed => {
-                // 50% full-spectrum chaos, 50% one of the 8 focused scenarios.
+                // 50% full-spectrum chaos, 50% one of the 14 focused scenarios.
                 if rng.random_bool(0.5) {
                     Scenario::Chaos
                 } else {
@@ -941,5 +959,39 @@ mod tests {
         assert_eq!(format_panic_payload(s.as_ref()), "boom");
         let owned: Box<dyn Any + Send> = Box::new(String::from("owned boom"));
         assert_eq!(format_panic_payload(owned.as_ref()), "owned boom");
+    }
+
+    #[test]
+    fn full_suite_coverage_gate_requires_49_unique_properties() {
+        use std::collections::BTreeSet;
+
+        let all: Vec<&str> = BASE_REQUIRED_COVERAGE
+            .iter()
+            .chain(FULL_SUITE_REQUIRED_COVERAGE.iter())
+            .copied()
+            .collect();
+        let unique: BTreeSet<&str> = all.iter().copied().collect();
+        assert_eq!(
+            all.len(),
+            49,
+            "full suite coverage gate must require 49 properties"
+        );
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "full suite coverage gate must not contain duplicate property keys"
+        );
+
+        let mut tracker = CoverageTracker::new();
+        for key in &all {
+            tracker.hit(key);
+        }
+        verify_coverage(&tracker, true, &[], FULL_SUITE_REQUIRED_COVERAGE).unwrap();
+
+        let mut incomplete = CoverageTracker::new();
+        for key in all.iter().skip(1) {
+            incomplete.hit(key);
+        }
+        assert!(verify_coverage(&incomplete, true, &[], FULL_SUITE_REQUIRED_COVERAGE).is_err());
     }
 }
