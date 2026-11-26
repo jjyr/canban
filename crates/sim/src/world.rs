@@ -2319,6 +2319,8 @@ impl SimWorld {
 
     pub fn partition(&mut self, a: &str, b: &str) {
         self.sim.partition(a, b);
+        self.held_pairs.remove(&(a.to_owned(), b.to_owned()));
+        self.held_pairs.remove(&(b.to_owned(), a.to_owned()));
         self.partitioned_pairs.insert((a.to_owned(), b.to_owned()));
         self.faulted_hosts.insert(a.to_owned());
         self.faulted_hosts.insert(b.to_owned());
@@ -2365,6 +2367,8 @@ impl SimWorld {
 
     pub fn hold(&mut self, a: &str, b: &str) {
         self.sim.hold(a, b);
+        self.partitioned_pairs.remove(&(a.to_owned(), b.to_owned()));
+        self.partitioned_pairs.remove(&(b.to_owned(), a.to_owned()));
         self.held_pairs.insert((a.to_owned(), b.to_owned()));
         self.faulted_hosts.insert(a.to_owned());
         self.faulted_hosts.insert(b.to_owned());
@@ -2383,6 +2387,8 @@ impl SimWorld {
         self.sim.release(a, b);
         self.held_pairs.remove(&(a.to_owned(), b.to_owned()));
         self.held_pairs.remove(&(b.to_owned(), a.to_owned()));
+        self.partitioned_pairs.remove(&(a.to_owned(), b.to_owned()));
+        self.partitioned_pairs.remove(&(b.to_owned(), a.to_owned()));
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),

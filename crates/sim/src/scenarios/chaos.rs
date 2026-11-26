@@ -2637,6 +2637,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hold(client_name, target);
                                 world.advance(Duration::from_millis(60))?;
                                 world.release(client_name, target);
+                                if client_name == PRIMARY_CLIENT {
+                                    // Turmoil's `hold` + `release` resets both link directions to
+                                    // `State::Healthy`, clearing any prior partition.
+                                    partitioned_remotes.remove(target);
+                                }
                             }
                             _ => {
                                 world.set_link_fail_rate(client_name, target, 0.05);

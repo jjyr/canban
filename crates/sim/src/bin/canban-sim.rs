@@ -1623,8 +1623,8 @@ mod tests {
         let corpus_path = resolve_corpus_path(Path::new(DEFAULT_CORPUS_FILE));
         let entries = load_replay_file(&corpus_path, 40).expect("load corpus/regressions.txt");
         assert!(
-            entries.len() >= 5,
-            "expected at least 5 corpus regression entries, got {}",
+            entries.len() >= 12,
+            "expected at least 12 corpus regression entries, got {}",
             entries.len()
         );
         for (seed, ops) in [
@@ -1637,6 +1637,9 @@ mod tests {
             (10_281_633_911_761_585_129, 60),
             (267_765_175_692_156_043, 60),
             (15_097_008_142_518_856_235, 60),
+            (7_914_532_405_096_322_517, 60),
+            (5_215_407_837_432_958_784, 60),
+            (17_295_058_876_053_817_750, 60),
         ] {
             assert!(
                 entries

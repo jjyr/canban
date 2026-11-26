@@ -12,3 +12,6 @@ chaos 7015526293144434493 60  # Slot-released running agent flipping to unknown 
 chaos 10281633911761585129 60 # Slot-released running agent flipping to unknown on subscriber drop vs max_agents
 chaos 267765175692156043 60   # card.adopt interactive PTY vs max_agents budget
 chaos 15097008142518856235 60 # card.adopt on resolved card validation error
+chaos 7914532405096322517 60  # Bug #17: Out-of-order app.state overwriting newer merged_snapshot rev 3 -> 2
+chaos 5215407837432958784 60  # Bug #17: Concurrent refresh regressing merged_snapshot rev 3 -> 2
+chaos 17295058876053817750 60 # Bug #18 + Archive/Restore RYW race (push refresh retry + archive epoch)
