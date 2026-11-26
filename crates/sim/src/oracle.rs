@@ -3,7 +3,8 @@
 use crate::world::SimWorld;
 use anyhow::{Context, Result, bail, ensure};
 use canban_types::{
-    Card, EnvEntryMeta, HostConnectionState, HumanGate, Snapshot, SyncItemState, WorkflowRun,
+    Card, EnvEntryMeta, ExecutionTrigger, HostConnectionState, HumanGate, Snapshot, SyncItemState,
+    WorkflowRun,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -107,6 +108,18 @@ pub struct InvariantOracle {
     /// re-admission on the same `TerminalEntry` (`promote_pending` / `continue_assignment`) is
     /// still strictly checked against `max_agents`.
     pub slot_released_terminals: BTreeSet<(String, String, u32)>,
+    /// Observed `(norm_host, raw_card_id) -> raw_project_id` index so `clear_committed_project`
+    /// and mid-step archive-epoch transitions can identify every card belonging to an archived
+    /// project even if it was only observed via client snapshots.
+    pub card_projects: BTreeMap<(String, String), String>,
+    /// Projects currently archived on `(norm_host, raw_project_id)` (tracked across temporary
+    /// server bounces so stale pre-archive client snapshots never re-seed `min_snapshot_rev`).
+    pub archived_projects: BTreeSet<(String, String)>,
+    /// Monotonic archive count per `(norm_host, raw_project_id)` incremented on each
+    /// `clear_committed_project` call.
+    pub archive_epoch: BTreeMap<(String, String), u64>,
+    /// Latest archive epoch already observed (as an absent project) by `(client_id, norm_host, raw_project_id)`.
+    pub client_seen_archive_epoch: BTreeMap<(String, String, String), u64>,
 }
 
 impl InvariantOracle {
@@ -170,6 +183,13 @@ impl InvariantOracle {
     ) {
         let raw_card = strip_host_prefix(card_id);
         let raw_proj = strip_host_prefix(project_id);
+        let norm_host = normalize_client_host_id(host_name);
+        if !raw_proj.is_empty() {
+            self.card_projects
+                .insert((norm_host.clone(), raw_card.clone()), raw_proj.clone());
+            self.archived_projects
+                .remove(&(norm_host, raw_proj.clone()));
+        }
         let key = (host_name.to_owned(), raw_card);
         self.committed_cards
             .entry(key)
@@ -297,12 +317,18 @@ impl InvariantOracle {
     /// Clears committed durability expectations belonging to a project intentionally archived via `project.archive`.
     pub fn clear_committed_project(&mut self, host_name: &str, project_id: &str) {
         let raw_proj = strip_host_prefix(project_id);
-        let removed_cards: BTreeSet<String> = self
+        let norm_host = normalize_client_host_id(host_name);
+        let mut removed_cards: BTreeSet<String> = self
             .committed_cards
             .iter()
             .filter(|((h, _), exp)| h == host_name && exp.project_id == raw_proj)
             .map(|((_, cid), _)| cid.clone())
             .collect();
+        for ((h, cid), pid) in &self.card_projects {
+            if h == &norm_host && pid == &raw_proj {
+                removed_cards.insert(cid.clone());
+            }
+        }
         self.committed_cards
             .retain(|(h, _), exp| !(h == host_name && exp.project_id == raw_proj));
         self.committed_comments
@@ -315,11 +341,21 @@ impl InvariantOracle {
             .retain(|(h, _), (pid, _)| !(h == host_name && *pid == raw_proj));
         self.committed_notes
             .retain(|(h, _), exp| !(h == host_name && exp.project_id == raw_proj));
-        let norm_host = normalize_client_host_id(host_name);
         self.min_seen_rev
             .retain(|(_, h, cid), _| !(h == &norm_host && removed_cards.contains(cid)));
         self.min_snapshot_rev
             .retain(|(_, h, cid), _| !(h == &norm_host && removed_cards.contains(cid)));
+        let proj_key = (norm_host, raw_proj);
+        self.archived_projects.insert(proj_key.clone());
+        let epoch = self.archive_epoch.entry(proj_key).or_insert(0);
+        *epoch = epoch.saturating_add(1);
+    }
+
+    /// Marks an archived project as restored via `project.restore`.
+    pub fn mark_project_restored(&mut self, host_name: &str, project_id: &str) {
+        let norm_host = normalize_client_host_id(host_name);
+        let raw_proj = strip_host_prefix(project_id);
+        self.archived_projects.remove(&(norm_host, raw_proj));
     }
 
     /// Records an observed `Card.revision` for `(client, host, card_id)` and immediately fails
@@ -403,6 +439,26 @@ impl InvariantOracle {
     ) -> Result<()> {
         world.hit("oracle.read_your_writes_checked");
 
+        // Snapshot every live authoritative server once so client scans and server checks observe
+        // a consistent ground truth (including whether a card's project is currently archived).
+        let mut live_servers: BTreeMap<String, (String, Snapshot)> = BTreeMap::new();
+        for (host_name, handle) in &world.servers {
+            let Some(server) = handle.server() else {
+                continue;
+            };
+            let norm_host = normalize_client_host_id(host_name);
+            let snap = server.snapshot()?;
+            for card in &snap.cards {
+                if !card.project_id.is_empty() {
+                    self.card_projects.insert(
+                        (norm_host.clone(), card.id.clone()),
+                        card.project_id.clone(),
+                    );
+                }
+            }
+            live_servers.insert(norm_host, (host_name.clone(), snap));
+        }
+
         // 1. Scan every live client's merged_snapshot for monotonic Card revisions and RYW visibility.
         for client_name in world.client_names() {
             let merged = world.client_merged_snapshot_on(&client_name)?;
@@ -420,6 +476,19 @@ impl InvariantOracle {
                 })
                 .collect();
 
+            let mut client_projects: BTreeSet<(String, String)> = BTreeSet::new();
+            for proj in &merged.projects {
+                let host_id = merged
+                    .entity_hosts
+                    .get(&proj.id)
+                    .map(String::as_str)
+                    .or_else(|| canban_types::split_qualified_host_id(&proj.id).map(|(h, _)| h))
+                    .unwrap_or("local");
+                let norm_host = normalize_client_host_id(host_id);
+                let raw_pid = strip_host_prefix(&proj.id);
+                client_projects.insert((norm_host, raw_pid));
+            }
+
             let mut client_cards: BTreeMap<(String, String), i64> = BTreeMap::new();
             for card in &merged.cards {
                 let host_id = merged
@@ -430,28 +499,92 @@ impl InvariantOracle {
                     .unwrap_or("local");
                 let norm_host = normalize_client_host_id(host_id);
                 let raw_cid = strip_host_prefix(&card.id);
+                let raw_pid = strip_host_prefix(&card.project_id);
                 let rev = card.revision as i64;
-                let key = (client_name.clone(), norm_host.clone(), raw_cid.clone());
-                if let Some(&prev_snap) = self.min_snapshot_rev.get(&key) {
-                    ensure!(
-                        rev >= prev_snap,
-                        "[{client_name}][{norm_host}] MONOTONIC READ VIOLATION: Card {raw_cid} merged_snapshot revision regressed from {prev_snap} to {rev}"
-                    );
-                    if rev > prev_snap {
-                        self.min_snapshot_rev.insert(key.clone(), rev);
+                if !raw_pid.is_empty() {
+                    client_projects.insert((norm_host.clone(), raw_pid.clone()));
+                    self.card_projects
+                        .insert((norm_host.clone(), raw_cid.clone()), raw_pid.clone());
+                }
+                let project_archived_or_missing = if raw_pid.is_empty() {
+                    false
+                } else if let Some((_, srv_snap)) = live_servers.get(&norm_host) {
+                    if srv_snap.projects.iter().any(|p| p.id == raw_pid) {
+                        self.archived_projects
+                            .remove(&(norm_host.clone(), raw_pid.clone()));
+                        false
+                    } else {
+                        true
                     }
                 } else {
-                    self.min_snapshot_rev.insert(key.clone(), rev);
-                }
-                if enforce_receipt_catchup {
-                    self.observe_card_revision(&client_name, &norm_host, &raw_cid, rev)?;
+                    self.archived_projects
+                        .contains(&(norm_host.clone(), raw_pid.clone()))
+                };
+
+                let key = (client_name.clone(), norm_host.clone(), raw_cid.clone());
+                if project_archived_or_missing {
+                    // Do not seed/re-insert cards belonging to a project that is currently archived
+                    // (or missing/deleted) on the authoritative server from a client's still-cached
+                    // pre-archive `merged_snapshot`. Still catch any revision rollback if tracked.
+                    if let Some(&prev_snap) = self.min_snapshot_rev.get(&key) {
+                        ensure!(
+                            rev >= prev_snap,
+                            "[{client_name}][{norm_host}] MONOTONIC READ VIOLATION: Card {raw_cid} merged_snapshot revision regressed from {prev_snap} to {rev}"
+                        );
+                    }
                 } else {
-                    self.min_seen_rev
-                        .entry(key)
-                        .and_modify(|prev| *prev = (*prev).max(rev))
-                        .or_insert(rev);
+                    if let Some(&prev_snap) = self.min_snapshot_rev.get(&key) {
+                        ensure!(
+                            rev >= prev_snap,
+                            "[{client_name}][{norm_host}] MONOTONIC READ VIOLATION: Card {raw_cid} merged_snapshot revision regressed from {prev_snap} to {rev}"
+                        );
+                        if rev > prev_snap {
+                            self.min_snapshot_rev.insert(key.clone(), rev);
+                        }
+                    } else {
+                        self.min_snapshot_rev.insert(key.clone(), rev);
+                    }
+                    if enforce_receipt_catchup {
+                        self.observe_card_revision(&client_name, &norm_host, &raw_cid, rev)?;
+                    } else {
+                        self.min_seen_rev
+                            .entry(key)
+                            .and_modify(|prev| *prev = (*prev).max(rev))
+                            .or_insert(rev);
+                    }
                 }
                 client_cards.insert((norm_host, raw_cid), rev);
+            }
+
+            // Mid-step only: if a project underwent `project.archive` (epoch > client's seen epoch)
+            // and this client's snapshot no longer contains that project (either during the archive
+            // window or when a delayed in-flight archive snapshot lands right after `project.restore`),
+            // advance the client's seen archive epoch and clear stale pre-archive `min_snapshot_rev`
+            // entries for that project so we only require post-restore visibility once the client
+            // observes the restored card or at quiescence.
+            if !enforce_receipt_catchup {
+                for ((arch_host, arch_pid), &epoch) in &self.archive_epoch {
+                    if client_projects.contains(&(arch_host.clone(), arch_pid.clone())) {
+                        continue;
+                    }
+                    let ckey = (client_name.clone(), arch_host.clone(), arch_pid.clone());
+                    let seen_epoch = self
+                        .client_seen_archive_epoch
+                        .get(&ckey)
+                        .copied()
+                        .unwrap_or(0);
+                    if seen_epoch < epoch {
+                        self.client_seen_archive_epoch.insert(ckey, epoch);
+                        let card_projects = &self.card_projects;
+                        self.min_snapshot_rev.retain(|(c, h, cid), _| {
+                            !(c == &client_name
+                                && h == arch_host
+                                && card_projects
+                                    .get(&(h.clone(), cid.clone()))
+                                    .is_some_and(|pid| pid == arch_pid))
+                        });
+                    }
+                }
             }
 
             // Ensure every card previously observed/written by this client on a connected live host
@@ -490,9 +623,8 @@ impl InvariantOracle {
                 if !host_connected {
                     continue;
                 }
-                let server_key = normalize_server_host_name(&norm_host);
-                if let Some(srv) = world.server(&server_key)
-                    && srv.snapshot()?.cards.iter().any(|c| c.id == raw_cid)
+                if let Some((_, srv_snap)) = live_servers.get(&norm_host)
+                    && srv_snap.cards.iter().any(|c| c.id == raw_cid)
                 {
                     bail!(
                         "[{client_name}][{norm_host}] RYW VIOLATION: Card {raw_cid} (min_rev={min_rev}) exists on live connected server but vanished from client merged_snapshot"
@@ -503,25 +635,31 @@ impl InvariantOracle {
 
         // 2. Scan every live server snapshot to verify authoritative revisions never drop below
         //    any revision previously observed or acknowledged to any client.
-        for (host_name, handle) in &world.servers {
-            let Some(server) = handle.server() else {
-                continue;
-            };
-            let norm_host = normalize_client_host_id(host_name);
-            let snap = server.snapshot()?;
+        for (norm_host, (host_name, snap)) in &live_servers {
             let srv_revs: BTreeMap<&str, i64> = snap
                 .cards
                 .iter()
                 .map(|c| (c.id.as_str(), c.revision as i64))
                 .collect();
             for ((client_name, tracked_host, raw_cid), &min_rev) in &self.min_seen_rev {
-                if tracked_host != &norm_host {
+                if tracked_host != norm_host {
                     continue;
                 }
                 if let Some(&srv_rev) = srv_revs.get(raw_cid.as_str()) {
                     ensure!(
                         srv_rev >= min_rev,
                         "[{host_name}] SERVER RYW VIOLATION: Card {raw_cid} server rev {srv_rev} < floor {min_rev} seen by client '{client_name}'"
+                    );
+                }
+            }
+        }
+
+        if enforce_receipt_catchup {
+            for client_name in world.client_names() {
+                for ((arch_host, arch_pid), &epoch) in &self.archive_epoch {
+                    self.client_seen_archive_epoch.insert(
+                        (client_name.clone(), arch_host.clone(), arch_pid.clone()),
+                        epoch,
                     );
                 }
             }
@@ -886,7 +1024,10 @@ impl InvariantOracle {
         self.check_workflow_invariants(world)?;
         self.check_snapshot_boundedness(world)?;
         self.check_committed_durability(world)?;
-        if !self.min_seen_rev.is_empty() || !self.min_snapshot_rev.is_empty() {
+        if !self.min_seen_rev.is_empty()
+            || !self.min_snapshot_rev.is_empty()
+            || !self.archive_epoch.is_empty()
+        {
             self.check_read_your_writes_step(world)?;
         }
         if !self.auth_failed_baselines.is_empty()
@@ -1401,14 +1542,21 @@ impl InvariantOracle {
             let srv_active = canban_scheduler::active_count_at(&srv_snap, srv_now);
             let max_agents = server.config().scheduler.max_agents;
             // Per `crates/scheduler/src/lib.rs:123`: `max_agents` is an automatic admission
-            // budget, not a hard cap on retained/previously-idle terminals. When a bound Agent
-            // PTY (whether `running`, `completed`, or `backlog`) releases its admission slot via a
-            // verified `"idle" | "done" | "blocked" | "error"` status, the scheduler may
-            // legitimately admit up to `max_agents` new runs. If that previously slot-released PTY
-            // later flips to `"unknown"` (e.g. Herdr offline / stale observation) or resumes
-            // `"working"`/`"closing"`, `active_count_at` conservatively recounts it to pause
-            // *further* admissions without implying the scheduler over-admitted.
+            // budget, not a hard cap on retained/previously-idle or user-adopted interactive PTYs:
+            // 1. When a bound Agent PTY releases its admission slot via a verified
+            //    `"idle" | "done" | "blocked" | "error"` status, the scheduler may legitimately
+            //    admit up to `max_agents` new runs. If that previously slot-released PTY later
+            //    flips to `"unknown"` (Herdr offline / stale observation) or resumes
+            //    `"working"`/`"closing"`, `active_count_at` conservatively recounts it to pause
+            //    *further* admissions without implying the scheduler over-admitted.
+            // 2. `card.adopt` (`crates/app-server/src/adoption.rs`) intentionally binds an
+            //    already-running standalone interactive PTY (`ExecutionTrigger::Interactive`,
+            //    empty `input_path`/`instruction`, or attached to an adopted `WorkflowRun`)
+            //    without checking `max_agents`, while `active_count_at` counts it to pause
+            //    *further* automatic admissions. Automatic Workflow / StageEntry / Cron / Merge /
+            //    `agent.open` admissions remain strictly bounded by `max_agents`.
             let mut slot_released_recounted = 0usize;
+            let mut adopted_interactive_active = 0usize;
             for t in &srv_snap.terminals {
                 let Some(a) = t.agent.as_ref() else {
                     continue;
@@ -1438,17 +1586,33 @@ impl InvariantOracle {
                         runtime_status,
                         "closed" | "blocked" | "idle" | "done" | "error"
                     );
-                if counts_as_bound_active
-                    && (matches!(a.state.as_str(), "completed" | "backlog")
-                        || self.slot_released_terminals.contains(&key))
+                if !counts_as_bound_active {
+                    continue;
+                }
+                let is_adopted_interactive = a.trigger == ExecutionTrigger::Interactive
+                    && ((a.input_path.is_empty() && a.instruction.is_empty())
+                        || a.workflow_run_id.as_deref().is_some_and(|wf_id| {
+                            srv_snap.workflow_runs.iter().any(|r| {
+                                r.id == wf_id
+                                    && r.inputs.get("adopted").and_then(serde_json::Value::as_bool)
+                                        == Some(true)
+                                    && r.terminal_id.as_deref() == Some(t.id.as_str())
+                            })
+                        }));
+                if is_adopted_interactive {
+                    adopted_interactive_active += 1;
+                } else if matches!(a.state.as_str(), "completed" | "backlog")
+                    || self.slot_released_terminals.contains(&key)
                 {
                     slot_released_recounted += 1;
                 }
             }
-            let admitted_active = srv_active.saturating_sub(slot_released_recounted);
+            let admitted_active = srv_active
+                .saturating_sub(slot_released_recounted)
+                .saturating_sub(adopted_interactive_active);
             ensure!(
                 admitted_active <= max_agents,
-                "[{host_name}] scheduler admitted active count ({admitted_active}, total active_count_at={srv_active}, slot_released_recounted={slot_released_recounted}) exceeded max_agents ({max_agents})"
+                "[{host_name}] scheduler admitted active count ({admitted_active}, total active_count_at={srv_active}, slot_released_recounted={slot_released_recounted}, adopted_interactive_active={adopted_interactive_active}) exceeded max_agents ({max_agents})"
             );
 
             // Terminal binding exclusivity: at most 1 live non-finished AgentRun per (core_id, herdr_addr).
@@ -3427,6 +3591,313 @@ mod tests {
             .expect_err("2 freshly working agents with max_agents=1 must strictly fail");
         assert!(
             format!("{err:#}").contains("exceeded max_agents (1)"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn adopted_interactive_pty_exempt_from_max_agents_while_automatic_overadmission_fails() {
+        let mut cfg = SimWorldConfig::desktop_default(889_006, "unit_oracle_adopted_pty");
+        let mut world = SimWorld::new(cfg.clone()).expect("world init");
+        let dir = world.project_dir("adopt-cap-repo").expect("dir");
+        world
+            .exec_runner("local-server")
+            .unwrap()
+            .register_git_repo(&dir, crate::exec::SimGitRepo::default());
+        let proj = world
+            .server_call(
+                "local-server",
+                "project.create",
+                json!({ "name": "AdoptCap", "directory": dir }),
+            )
+            .expect("project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+
+        let mut card_ids = Vec::new();
+        for i in 1..=2 {
+            let c = world
+                .server_call(
+                    "local-server",
+                    "card.create",
+                    json!({ "project_id": pid, "title": format!("Adopt Card {i}") }),
+                )
+                .expect("card.create");
+            card_ids.push(c["id"].as_str().unwrap().to_owned());
+        }
+
+        // Fill the single scheduler slot (`max_agents = 1`) with an active admitted agent.
+        let _ = world
+            .server_call(
+                "local-server",
+                "scheduler.configure",
+                json!({ "max_agents": 1 }),
+            )
+            .expect("scheduler.configure max_agents=1");
+        let _ = world
+            .server_call(
+                "local-server",
+                "agent.open",
+                json!({ "card_id": card_ids[0], "profile_id": "codex" }),
+            )
+            .expect("agent.open 1");
+        world
+            .wait_until(10_000, |w| {
+                let srv = w.server("local-server").unwrap();
+                let snap = srv.snapshot()?;
+                Ok(canban_scheduler::active_count_at(&snap, srv.now_ms()) == 1)
+            })
+            .expect("slot 1 occupied");
+
+        // Launch a standalone interactive agent PTY inside card 2's workspace and adopt it via
+        // `card.adopt` (intentionally bypasses `max_agents` while incrementing `active_count_at` to 2).
+        let term = world
+            .server_call(
+                "local-server",
+                "terminal.create",
+                json!({
+                    "project_id": pid,
+                    "card_id": card_ids[1],
+                    "agent": true,
+                    "profile_id": "codex",
+                    "name": "Standalone Adopt PTY",
+                }),
+            )
+            .expect("terminal.create");
+        let raw_tid = term["id"].as_str().unwrap().to_owned();
+        world.advance(Duration::from_millis(250)).expect("advance");
+        let runtime_addr = world
+            .server("local-server")
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .terminals
+            .into_iter()
+            .find(|t| t.id == raw_tid)
+            .and_then(|t| t.runtime)
+            .and_then(|r| r.terminal)
+            .expect("standalone runtime addr");
+        let _ = world
+            .server_call(
+                "local-server",
+                "card.adopt",
+                json!({
+                    "view": "full",
+                    "card_id": card_ids[1],
+                    "stage": "develop",
+                    "profile_id": "codex",
+                    "runtime_terminal": runtime_addr,
+                    "runtime_session": "default",
+                }),
+            )
+            .expect("card.adopt");
+        world.advance(Duration::from_millis(250)).expect("advance");
+
+        let srv = world.server("local-server").unwrap();
+        let snap = srv.snapshot().unwrap();
+        assert_eq!(
+            canban_scheduler::active_count_at(&snap, srv.now_ms()),
+            2,
+            "1 admitted + 1 adopted interactive PTY should report active_count_at == 2"
+        );
+        let mut oracle = InvariantOracle::default();
+        oracle
+            .check_herdr_runtime_parity(&world)
+            .expect("adopted interactive PTY must not false-positive against max_agents=1");
+
+        // Now prove genuine automatic over-admission STILL fails immediately:
+        // start 2 automatic Workflow agents with max_agents=2, then lower max_agents=1.
+        cfg.seed = 889_007;
+        let mut world2 = SimWorld::new(cfg).expect("world2 init");
+        let dir2 = world2.project_dir("auto-over-repo").expect("dir2");
+        world2
+            .exec_runner("local-server")
+            .unwrap()
+            .register_git_repo(&dir2, crate::exec::SimGitRepo::default());
+        let proj2 = world2
+            .server_call(
+                "local-server",
+                "project.create",
+                json!({ "name": "AutoOver", "directory": dir2 }),
+            )
+            .expect("project.create 2");
+        let pid2 = proj2["id"].as_str().unwrap().to_owned();
+        let _ = world2
+            .server_call(
+                "local-server",
+                "scheduler.configure",
+                json!({ "max_agents": 2 }),
+            )
+            .expect("max_agents=2");
+        for i in 1..=2 {
+            let c = world2
+                .server_call(
+                    "local-server",
+                    "card.create",
+                    json!({ "project_id": pid2, "title": format!("Auto Card {i}") }),
+                )
+                .expect("card.create");
+            let cid = c["id"].as_str().unwrap().to_owned();
+            let rev = c["revision"].as_u64().unwrap();
+            let _ = world2
+                .server_call(
+                    "local-server",
+                    "card.move",
+                    json!({ "card_id": cid, "stage": "develop", "revision": rev }),
+                )
+                .expect("card.move develop");
+        }
+        world2
+            .wait_until(10_000, |w| {
+                let srv = w.server("local-server").unwrap();
+                let snap = srv.snapshot()?;
+                let active_auto = snap
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.agent.as_ref())
+                    .filter(|a| a.trigger.is_automatic() && a.terminal.is_some() && !a.finished())
+                    .count();
+                Ok(active_auto == 2 && canban_scheduler::active_count_at(&snap, srv.now_ms()) == 2)
+            })
+            .expect("2 automatic agents active");
+        let _ = world2
+            .server_call(
+                "local-server",
+                "scheduler.configure",
+                json!({ "max_agents": 1 }),
+            )
+            .expect("lower max_agents to 1");
+        let mut strict_oracle = InvariantOracle::default();
+        let err = strict_oracle
+            .check_herdr_runtime_parity(&world2)
+            .expect_err("2 active automatic agents with max_agents=1 must strictly fail");
+        assert!(
+            format!("{err:#}").contains("exceeded max_agents (1)"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn archive_restore_ryw_skips_stale_pre_archive_reseed_and_catches_genuine_disappearance() {
+        let mut cfg = SimWorldConfig::desktop_default(889_008, "unit_oracle_archive_ryw");
+        cfg.remote_hosts = vec!["remote-a".into()];
+        cfg.extra_clients = vec!["ui-client-2".into()];
+        let mut world = SimWorld::new(cfg).expect("world init");
+        let dir = world.project_dir("arch-ryw-repo").expect("dir");
+        let proj = world
+            .client_call(
+                "project.create",
+                json!({ "host_id": "remote-a", "name": "ArchRYW", "directory": dir }),
+                None,
+            )
+            .expect("project.create");
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let raw_pid = strip_host_prefix(&pid);
+        let card = world
+            .client_call(
+                "card.create",
+                json!({ "project_id": pid, "title": "Archive RYW Card" }),
+                Some(&pid),
+            )
+            .expect("card.create");
+        let raw_cid = strip_host_prefix(card["id"].as_str().unwrap());
+
+        world.heal_and_quiesce(10_000).expect("initial quiesce");
+        let mut oracle = InvariantOracle::default();
+        oracle.record_committed_card("remote-a", &raw_cid, &raw_pid, 1);
+        oracle
+            .check_read_your_writes_step(&world)
+            .expect("both clients observe card pre-archive");
+        assert!(oracle.min_snapshot_rev.contains_key(&(
+            "ui-client-2".into(),
+            "remote-a".into(),
+            raw_cid.clone()
+        )));
+
+        // Pause remote-a push delivery to ui-client-2 by partitioning? Instead call server directly
+        // and inspect before ui-client-2 refreshes:
+        let _ = world
+            .server_call(
+                "remote-a",
+                "project.archive",
+                json!({ "project_id": raw_pid }),
+            )
+            .expect("project.archive");
+        oracle.clear_committed_project("remote-a", &raw_pid);
+
+        // Immediately check step RYW while clients still cache the pre-archive snapshot:
+        // must NOT re-insert the archived card into `min_snapshot_rev`!
+        oracle
+            .check_read_your_writes_step(&world)
+            .expect("stale pre-archive snapshot must not fail or re-seed");
+        assert!(
+            !oracle.min_snapshot_rev.contains_key(&(
+                "ui-client-2".into(),
+                "remote-a".into(),
+                raw_cid.clone()
+            )),
+            "archived card must not be re-inserted into min_snapshot_rev"
+        );
+
+        // Let clients process the archive (dropping the card), then restore on server and
+        // immediately check step RYW BEFORE clients refresh the restored card.
+        world.heal_and_quiesce(10_000).expect("clients see archive");
+        oracle
+            .check_read_your_writes_step(&world)
+            .expect("step check after clients drop archived card");
+        let _ = world
+            .server_call(
+                "remote-a",
+                "project.restore",
+                json!({ "project_id": raw_pid }),
+            )
+            .expect("project.restore");
+        oracle.mark_project_restored("remote-a", &raw_pid);
+        oracle.record_committed_card("remote-a", &raw_cid, &raw_pid, 1);
+        oracle
+            .check_read_your_writes_step(&world)
+            .expect("clients not yet refreshed post-restore must not false-positive");
+
+        // After quiescence, clients see the restored card and strict RYW passes.
+        world.heal_and_quiesce(10_000).expect("clients see restore");
+        oracle
+            .check_read_your_writes(&world)
+            .expect("quiescent RYW passes post-restore");
+
+        // Genuine revision regression below `min_snapshot_rev` must STILL fail immediately!
+        oracle.min_snapshot_rev.insert(
+            ("ui-client-2".into(), "remote-a".into(), raw_cid.clone()),
+            99,
+        );
+        let err = oracle
+            .check_read_your_writes_step(&world)
+            .expect_err("revision regression below min_snapshot_rev must still fail immediately");
+        assert!(
+            format!("{err:#}").contains("MONOTONIC READ VIOLATION"),
+            "unexpected error: {err:#}"
+        );
+        oracle.min_snapshot_rev.insert(
+            ("ui-client-2".into(), "remote-a".into(), raw_cid.clone()),
+            1,
+        );
+
+        // Genuine disappearance (live card on server already tracked in `min_snapshot_rev` after
+        // archive epoch settled, absent from client `merged_snapshot`) must STILL fail immediately!
+        let card2 = world
+            .server_call(
+                "remote-a",
+                "card.create",
+                json!({ "project_id": raw_pid, "title": "Vanished Card Check" }),
+            )
+            .expect("server card.create");
+        let raw_cid2 = strip_host_prefix(card2["id"].as_str().unwrap());
+        oracle
+            .min_snapshot_rev
+            .insert(("ui-client-2".into(), "remote-a".into(), raw_cid2), 1);
+        let err = oracle
+            .check_read_your_writes_step(&world)
+            .expect_err("card missing from client after archive epoch settled must fail");
+        assert!(
+            format!("{err:#}").contains("vanished from client merged_snapshot"),
             "unexpected error: {err:#}"
         );
     }

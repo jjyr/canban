@@ -563,6 +563,45 @@ const CHAOS_SWARM_PROFILE_REQUIRED_COVERAGE: &[&str] = &[
     "chaos.profile.full_mix",
 ];
 
+const RANDOM_SUMMARY_HIGHLIGHT_PROPERTIES: &[&str] = &[
+    "chaos.delivery_batch_entered",
+    "exec.shell_executed",
+    "oracle.read_your_writes_checked",
+    "oracle.at_most_once_checked",
+    "oracle.committed_durability_checked",
+    "chaos.natural_quiesce_recovered",
+];
+
+fn format_random_coverage_overview(tracker: &CoverageTracker) -> String {
+    let mut out = format!(
+        "\nCoverage overview ({} distinct properties hit):\n",
+        tracker.counts().len()
+    );
+    for prop in RANDOM_SUMMARY_HIGHLIGHT_PROPERTIES {
+        out.push_str(&format!("  {:<42} {}\n", prop, tracker.count(prop)));
+    }
+    match tracker.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
+        Ok(()) => {
+            let watched: Vec<String> = NEVER_COVERAGE_PROPERTIES
+                .iter()
+                .map(|p| format!("{p}=0"))
+                .collect();
+            out.push_str(&format!(
+                "Never-property gate: PASS ({})\n",
+                watched.join(", ")
+            ));
+        }
+        Err(violations) => {
+            let details: Vec<String> = violations.iter().map(|(p, c)| format!("{p}={c}")).collect();
+            out.push_str(&format!(
+                "Never-property gate: FAIL ({})\n",
+                details.join(", ")
+            ));
+        }
+    }
+    out
+}
+
 fn print_fault_telemetry_table(tracker: &CoverageTracker) {
     let rows = tracker.armed_vs_fired_report();
     if rows.is_empty() {
@@ -1277,6 +1316,7 @@ fn run_random(
     );
     print_fault_telemetry_table(&cov);
     print_cold_properties_table(&cov, COLD_PROPERTIES_TOP_N);
+    print!("{}", format_random_coverage_overview(&cov));
     if (!assert_coverage || !recorded.is_empty())
         && let Err(violations) = cov.assert_never_zero(NEVER_COVERAGE_PROPERTIES)
     {
@@ -1595,6 +1635,8 @@ mod tests {
             (13_893_003_159_721_802_437, 50),
             (7_015_526_293_144_434_493, 60),
             (10_281_633_911_761_585_129, 60),
+            (267_765_175_692_156_043, 60),
+            (15_097_008_142_518_856_235, 60),
         ] {
             assert!(
                 entries
@@ -1629,6 +1671,30 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("git.after_push_before_batch_finalize")
+        );
+    }
+
+    #[test]
+    fn random_coverage_overview_reports_distinct_count_highlights_and_never_gate() {
+        let mut tracker = CoverageTracker::new();
+        tracker.hit("chaos.delivery_batch_entered");
+        tracker.hit("chaos.delivery_batch_entered");
+        tracker.hit("exec.shell_executed");
+        let clean = format_random_coverage_overview(&tracker);
+        assert!(clean.contains("2 distinct properties hit"), "{clean}");
+        assert!(clean.contains("chaos.delivery_batch_entered"), "{clean}");
+        assert!(clean.contains("exec.shell_executed"), "{clean}");
+        assert!(
+            clean.contains("Never-property gate: PASS (exec.blocked_command=0)"),
+            "{clean}"
+        );
+
+        tracker.hit("exec.blocked_command");
+        let violated = format_random_coverage_overview(&tracker);
+        assert!(violated.contains("3 distinct properties hit"), "{violated}");
+        assert!(
+            violated.contains("Never-property gate: FAIL (exec.blocked_command=1)"),
+            "{violated}"
         );
     }
 }

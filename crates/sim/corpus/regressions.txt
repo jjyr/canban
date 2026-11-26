@@ -10,3 +10,5 @@ chaos 10298014112690665752 50 # Bug #14: Transient SQLITE_BUSY during outbox dra
 chaos 13893003159721802437 50 # Retained PTY resuming working after blocked slot release vs max_agents budget
 chaos 7015526293144434493 60  # Slot-released running agent flipping to unknown on Herdr offline vs max_agents
 chaos 10281633911761585129 60 # Slot-released running agent flipping to unknown on subscriber drop vs max_agents
+chaos 267765175692156043 60   # card.adopt interactive PTY vs max_agents budget
+chaos 15097008142518856235 60 # card.adopt on resolved card validation error

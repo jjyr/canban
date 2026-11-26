@@ -1261,6 +1261,7 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "human review must be approved",
                 "resolve the existing pr delivery",
                 "resolved cards do not",
+                "resolved cards cannot",
                 "review is stale",
                 "merge unavailable",
                 "no commits",
@@ -3767,6 +3768,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 });
                             if rest_ok || back_on_srv {
                                 archive_proj_archived = false;
+                                oracle.mark_project_restored(srv_name, arch_raw_pid);
                                 if let Some(snap) =
                                     world.server(srv_name).and_then(|s| s.snapshot().ok())
                                 {
@@ -5839,6 +5841,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 "project.restore",
                 json!({ "project_id": arch_raw_pid }),
             )?;
+            oracle.mark_project_restored(srv_name, arch_raw_pid);
             let snap = world.server(srv_name).unwrap().snapshot()?;
             ensure!(
                 snap.cards.iter().any(|c| c.id == *arch_raw_cid),
