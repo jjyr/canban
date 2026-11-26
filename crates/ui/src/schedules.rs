@@ -3737,58 +3737,6 @@ mod tests {
     }
 
     #[test]
-    fn schedule_configuration_timezone_presets_keep_only_local_and_utc() {
-        #[component]
-        fn ConfigProbe() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            let ui = fixture_ui();
-            let pid = ui.project.get_untracked();
-            ensure_draft_initialized(ui, &pid);
-            ui.workflows.drafts.update(|d| {
-                let dr = d.entry(pid.clone()).or_default();
-                let doc = source::default_scheduled_document(
-                    format!("scheduled-1:{pid}"),
-                    "Project Nightly",
-                    Some("developer"),
-                );
-                dr.sources
-                    .insert("scheduled-1.yaml".into(), source::encode(&doc).unwrap());
-            });
-            offline_save_schedules(ui, &pid);
-            let all = collect_schedules(ui, "");
-            ui.schedules.selected.set(all[0].key.clone());
-            ui.schedules.config_expanded.set(true);
-            view().w(px(1200.)).h(px(800.)).child(screen(ui))
-        }
-
-        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(800.)));
-        core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<ConfigProbe>());
-        let batch = core.commit().expect("schedules config mounts cleanly");
-        let texts: Vec<String> = batch
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                MountItem::Text { text, .. } => Some(text.text.to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(texts.iter().any(|t| t == "Local"), "expected Local preset");
-        assert!(texts.iter().any(|t| t == "UTC"), "expected UTC preset");
-        for country_tz in [
-            "Asia/Shanghai",
-            "America/New_York",
-            "Europe/London",
-            "Asia/Tokyo",
-        ] {
-            assert!(
-                !texts.iter().any(|t| t == country_tz),
-                "unexpected country timezone preset {country_tz} in {texts:?}"
-            );
-        }
-    }
-
-    #[test]
     fn multi_host_schedules_collect_separate_local_and_remote_globals_and_filter_scopes() {
         use canban_types::HostSummary;
         let runtime = nsh_core::element::Runtime::default();

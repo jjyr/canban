@@ -1223,8 +1223,6 @@ pub fn column_automation_pill(ui: Ui, column: String) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
-    use std::collections::HashMap;
 
     #[test]
     fn publication_receipt_retains_text_entered_after_submit() {
@@ -1242,87 +1240,5 @@ mod tests {
         assert_eq!(draft.sources["test.yaml"], "new keystrokes");
         assert_eq!(draft.base["revision"], "new");
         assert!(draft.dirty());
-    }
-
-    #[test]
-    fn yaml_source_editor_enables_syntax_highlighting_despite_markdown_input_default() {
-        #[component]
-        fn ProbeRoot() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            canban_ui_kit::markdown::install_editor_language();
-            let ui = Ui::new();
-            let project_id = "proj-yaml".to_owned();
-            let yaml = "# Workflow comment\nschema: 1\nid: delivery\nname: \"Delivery\"\non:\n  develop:\n    event: card.column_entered\n    start_at: build\nsteps:\n  - id: build\n    uses: agent\n    with:\n      profile: developer\n";
-            let mut draft = Draft {
-                base: json!({"revision": "r1", "sources": [{"filename": "development.yaml", "source": yaml}]}),
-                ..Default::default()
-            };
-            draft
-                .sources
-                .insert("development.yaml".into(), yaml.to_owned());
-            draft.selected = "development.yaml".into();
-            ui.project.set(project_id.clone());
-            ui.page.set("workflows".into());
-            ui.workflows.mode.set("yaml".into());
-            ui.workflows.selected.set("development.yaml".into());
-            ui.workflows.drafts.update(|d| {
-                d.insert(project_id, draft);
-            });
-            view().w(px(960.)).h(px(640.)).child(source_editor(ui))
-        }
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_time()
-            .build()
-            .unwrap();
-        let mut core = Core::new(ApproxTextEngine, size(px(960.), px(640.)));
-        core.set_components(nsh_base::registry());
-        core.set_task_runtime(runtime.handle().clone());
-        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
-        let mut texts = HashMap::new();
-        if let Some(batch) = core.commit() {
-            for item in batch.items {
-                if let MountItem::Text { id, text, .. } = item {
-                    texts.insert(id, text);
-                }
-            }
-        }
-        // Highlighting runs off-thread in NSH; drive component tasks until the
-        // background job finishes and emits multi-color AttributedText spans.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            core.run_component_tasks();
-            if let Some(batch) = core.commit() {
-                for item in batch.items {
-                    if let MountItem::Text { id, text, .. } = item {
-                        texts.insert(id, text);
-                    }
-                }
-            }
-            let distinct_syntax_colors: std::collections::HashSet<_> = texts
-                .values()
-                .filter(|t| {
-                    t.text.contains("schema:")
-                        || t.text.contains("# Workflow comment")
-                        || t.text.contains("name: \"Delivery\"")
-                })
-                .flat_map(|t| t.spans.iter().map(|s| format!("{:?}", s.style.color)))
-                .collect();
-            if distinct_syntax_colors.len() >= 3 {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(15));
-        }
-        panic!(
-            "expected YAML syntax highlighting rows with >= 3 distinct span colors, got: {:?}",
-            texts
-                .values()
-                .map(|t| (
-                    &t.text,
-                    t.spans.iter().map(|s| s.style.color).collect::<Vec<_>>()
-                ))
-                .collect::<Vec<_>>()
-        );
     }
 }

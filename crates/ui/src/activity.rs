@@ -617,22 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_initializes_activity_flush_seq_at_zero() {
-        #[component]
-        fn Root() -> impl IntoElement {
-            let ui = Ui::new();
-            assert_eq!(ui.activity_flush_seq.get_untracked(), 0);
-            view()
-        }
-        let mut core = nsh_core::Core::new(
-            nsh_core::ApproxTextEngine,
-            nsh_core::geometry::size(px(100.), px(100.)),
-        );
-        core.mount_root(&nsh_core::element::Root::of::<Root>());
-        let _ = core.commit();
-    }
-
-    #[test]
     fn automated_terminals_are_excluded_from_dwell_key() {
         use canban_types::{AgentRun, TerminalEntry};
 

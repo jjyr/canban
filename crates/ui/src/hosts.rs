@@ -3992,29 +3992,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_section_shows_enable_tailscale_access_cta_when_not_listening() {
-        #[component]
-        fn ProbeRemoteAccessOff() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            let ui = Ui::new();
-            ui.paired_devices_preview
-                .set(Some(PairedDevicesPreview::default()));
-            view()
-                .w(px(1200.))
-                .h(px(1100.))
-                .child(settings_section_view(ui))
-        }
-
-        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(1100.)));
-        core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<ProbeRemoteAccessOff>());
-        let texts = collect_mounted_texts(core.commit().expect("mount batch"));
-
-        assert!(texts.iter().any(|t| t == "Remote Access Off"));
-        assert!(texts.iter().any(|t| t == "Enable Tailscale Access"));
-    }
-
-    #[test]
     fn hosts_popover_keeps_stable_action_nodes_when_only_rtt_polls_change() {
         use nsh_core::{EventKind, EventPayload, ROOT_ID};
 

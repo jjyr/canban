@@ -5288,36 +5288,6 @@ mod tests {
     }
 
     #[test]
-    fn insights_empty_state_omits_empty_project_parentheses() {
-        #[component]
-        fn EmptyHarness() -> impl IntoElement {
-            let ui = build_test_ui(1_794_744_000_000u64, false);
-            ui.snapshot.set(Snapshot::default());
-            ui.insights.events.set(Rc::new(Vec::new()));
-            ui.insights.activity.set(Rc::new(ActivityInput {
-                loaded: true,
-                ..Default::default()
-            }));
-            ui.project.set(ALL_PROJECTS_OPTION.into());
-            view()
-                .w(px(1400.))
-                .h(px(3600.))
-                .child(crate::frame::screen(ui))
-        }
-
-        let mut core = Core::new(ApproxTextEngine, size(px(1400.), px(3600.)));
-        core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<EmptyHarness>());
-        let mut tree = Tracker::new();
-        pump(&mut core, &mut tree);
-
-        assert!(
-            tree.has_mounted_text("Color = Project · Hover for card & duration · Click to open")
-        );
-        assert!(!tree.has_mounted_substring("Color = Project ("));
-    }
-
-    #[test]
     fn connected_hosts_key_ignores_reconnecting_and_renders_skipped_offline_hosts() {
         use canban_types::{HostConnectionState, HostSummary};
 

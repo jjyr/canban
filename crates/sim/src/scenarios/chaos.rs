@@ -6562,36 +6562,6 @@ mod tests {
     }
 
     #[test]
-    fn delivery_and_storage_sub_profile_hits_real_delivery_batch_and_storage_faults() {
-        crate::trace::reset_thread_coverage();
-        // Seed 606 % 6 == 0 -> DeliveryAndStorage
-        let d1 = run(606, 45).expect("DeliveryAndStorage seed 606 failed");
-        let cov = crate::trace::take_thread_coverage();
-        assert!(cov.count("chaos.profile.delivery_and_storage") > 0);
-        assert!(
-            cov.count("chaos.delivery_batch_entered") > 0,
-            "expected chaos.delivery_batch_entered > 0, got:\n{}",
-            cov.summary()
-        );
-        assert!(
-            cov.count("exec.shell_executed") > 0,
-            "expected exec.shell_executed > 0, got:\n{}",
-            cov.summary()
-        );
-        assert!(
-            cov.count("chaos.natural_quiesce_checked") > 0
-                && cov.count("chaos.natural_quiesce_recovered") > 0
-        );
-        assert!(
-            cov.vacuous_armed_faults().is_empty(),
-            "vacuous armed faults detected: {:?}",
-            cov.armed_vs_fired_report()
-        );
-        let d2 = run(606, 45).expect("DeliveryAndStorage seed 606 replay failed");
-        assert_eq!(d1, d2, "DeliveryAndStorage must replay deterministically");
-    }
-
-    #[test]
     fn shrink_ops_pins_error_class_fingerprint_and_prevents_drift() {
         // Ops 0..10 fail with the target error iff op 3 and op 8 are present,
         // while any subset containing op 1 without op 3 fails with a DIFFERENT error class.

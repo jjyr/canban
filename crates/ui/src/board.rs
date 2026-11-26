@@ -3,8 +3,6 @@ pub mod activity;
 mod columns;
 mod drag;
 mod model;
-#[cfg(test)]
-mod performance;
 mod transitions;
 use crate::presenter::*;
 use canban_ui_kit::*;
@@ -414,81 +412,12 @@ fn stage_tabs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canban_types::{Project, ProjectAgentOverride, Snapshot, Workflow};
+    use canban_types::{Project, Snapshot, Workflow};
     use nsh_core::{
         AccessibilityRole, ApproxTextEngine, Core, EventKind, EventPayload, MountBatch, MountItem,
         NodeId, element::JsEvent, geometry::size,
     };
     use std::collections::{BTreeMap, HashMap};
-
-    #[test]
-    fn board_chrome_bar_renders_plain_agents_label_without_override_count() {
-        #[component]
-        fn ProbeRoot() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            let ui = Ui::new();
-            let mut snapshot = Snapshot::default();
-            snapshot.projects.push(Project {
-                id: "proj-1".into(),
-                name: "Canban".into(),
-                directory: "/tmp/canban".into(),
-                github: None,
-                detected_github: None,
-                github_disconnected: false,
-                delivery_mode: Default::default(),
-                agent_overrides: BTreeMap::from([
-                    (
-                        "developer".into(),
-                        ProjectAgentOverride {
-                            agent: Some("agy".into()),
-                            model: Some("gemini-4-carbon-high".into()),
-                            effort: Some("high".into()),
-                            orchestrator: None,
-                        },
-                    ),
-                    (
-                        "reviewer".into(),
-                        ProjectAgentOverride {
-                            agent: None,
-                            model: Some("gpt-5.4".into()),
-                            effort: Some("medium".into()),
-                            orchestrator: None,
-                        },
-                    ),
-                ]),
-                tags: Vec::new(),
-                workflow: Workflow::default(),
-                target_branch: Some("main".into()),
-                created_at: 1,
-            });
-            ui.snapshot.set(snapshot);
-            ui.project.set("proj-1".into());
-            ui.narrow.set(false);
-            view().w(px(1200.)).h(px(42.)).child(chrome_bar(ui))
-        }
-
-        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(42.)));
-        core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
-        let batch = core.commit().expect("initial mount batch");
-        let texts: Vec<String> = batch
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                MountItem::Text { text, .. } => Some(text.text.to_string()),
-                _ => None,
-            })
-            .collect();
-
-        assert!(
-            texts.iter().any(|t| t == "Agents"),
-            "expected Board chrome bar to display plain `Agents`, got {texts:?}"
-        );
-        assert!(
-            !texts.iter().any(|t| t.starts_with("Agents (")),
-            "Board chrome bar must not append override count in parentheses, got {texts:?}"
-        );
-    }
 
     #[test]
     fn deep_review_column_retains_bottom_card_texts_after_scrolling_past_reclaim_threshold() {

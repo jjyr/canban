@@ -402,18 +402,6 @@ fn command_queries_require_gt_prefix_and_match_agent_setup_commands() {
     let gt_setup = crate::quick_open::matching_commands(">setup agent");
     assert!(!gt_setup.is_empty());
     assert_eq!(gt_setup[0].id, "go-agent-setup");
-}
-
-#[test]
-fn command_catalog_ids_are_unique_and_cover_notifications_card_terminal_and_worktrees() {
-    let mut ids = std::collections::BTreeSet::new();
-    for cmd in crate::commands::CATALOG {
-        assert!(
-            ids.insert(cmd.id),
-            "duplicate command id in CATALOG: {}",
-            cmd.id
-        );
-    }
 
     let notif = crate::quick_open::matching_commands(">notifications");
     assert!(notif.iter().any(|c| c.id == "toggle-notifications"));

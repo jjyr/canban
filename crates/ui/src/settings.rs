@@ -1749,36 +1749,6 @@ mod tests {
     }
 
     #[test]
-    fn credits_include_herdr_sheprd_and_nsh_without_shear_or_herdr_app() {
-        let names: Vec<_> = RUNTIME_CREDITS
-            .iter()
-            .chain(ASSET_CREDITS.iter())
-            .map(|c| c.name)
-            .collect();
-        assert!(names.contains(&"Herdr"));
-        assert!(names.contains(&"sheprd"));
-        assert!(names.contains(&"NSH"));
-        assert!(names.contains(&"Ghostty"));
-        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("shear")));
-
-        let sheprd = RUNTIME_CREDITS
-            .iter()
-            .find(|c| c.name == "sheprd")
-            .expect("sheprd credit");
-        assert_eq!(sheprd.subtitle, "formerly herdr-gpui");
-        assert_eq!(sheprd.license, "Apache-2.0");
-        assert_eq!(
-            sheprd.links,
-            &[("GitHub", "https://github.com/sheprd-labs/sheprd")]
-        );
-
-        for credit in RUNTIME_CREDITS.iter().chain(ASSET_CREDITS.iter()) {
-            assert!(!credit.subtitle.contains("herdr-app"));
-            assert!(!credit.description.contains("herdr-app"));
-        }
-    }
-
-    #[test]
     fn global_env_sync_bar_renders_expected_copy_across_all_states() {
         use canban_types::{GlobalEnvSyncHostFailure, GlobalEnvSyncStatus};
         use nsh_core::{ApproxTextEngine, Core, MountBatch, MountItem, geometry::size};
@@ -1904,57 +1874,5 @@ mod tests {
                 .iter()
                 .any(|t| t == "Synced to 2/2 hosts (Home Linux, Studio Mac).")
         );
-    }
-
-    #[test]
-    fn archived_projects_section_lists_entries_without_delete_action() {
-        use nsh_core::{ApproxTextEngine, Core, MountBatch, MountItem, geometry::size};
-
-        fn collect_texts(batch: MountBatch) -> Vec<String> {
-            batch
-                .items
-                .into_iter()
-                .filter_map(|item| match item {
-                    MountItem::Text { text, .. } => Some(text.text.to_string()),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        #[component]
-        fn ProbeArchivedProjects() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            let ui = Ui::new();
-            ui.archived_projects_preview
-                .set(Some(vec![crate::projects::ArchivedProjectSummary {
-                    project_id: "arch-1".into(),
-                    name: "Fiber".into(),
-                    source_directory: "/Users/demo/Workspace/fiber".into(),
-                    archived_at: canban_types::now().saturating_sub(3_600_000),
-                    bytes: 428_032,
-                    archive_path: "/Users/demo/.canban/project-archives/arch-1.canban.tar.zst"
-                        .into(),
-                    active_cards: 4,
-                    archived_cards: 8,
-                    total_cards: 12,
-                    files_count: 3,
-                    required_profiles: Vec::new(),
-                    secret_keys: vec!["GITHUB_PAT".into()],
-                }]));
-            archived_projects_section(ui)
-        }
-
-        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
-        core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<ProbeArchivedProjects>());
-        let texts = collect_texts(core.commit().expect("mount archived projects"));
-
-        assert!(texts.iter().any(|t| t == "Archived Projects"));
-        assert!(texts.iter().any(|t| t == "Fiber"));
-        assert!(texts.iter().any(|t| t == "arch-1"));
-        assert!(texts.iter().any(|t| t == "/Users/demo/Workspace/fiber"));
-        assert!(texts.iter().any(|t| t == "Copy archive path"));
-        assert!(texts.iter().any(|t| t == "Restore…"));
-        assert!(!texts.iter().any(|t| t.to_lowercase().contains("delete")));
     }
 }

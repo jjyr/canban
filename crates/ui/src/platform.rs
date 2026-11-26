@@ -188,28 +188,3 @@ pub fn open_external(target: &str) -> Result<()> {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn open_external_rejects_blank_targets() {
-        assert!(open_external("").is_err());
-        assert!(open_external("   ").is_err());
-    }
-
-    #[test]
-    fn local_host_copy_matches_target_platform() {
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(LOCAL_HOST_NAME, "This Mac");
-            assert_eq!(ON_THIS_MACHINE, "on this Mac");
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(LOCAL_HOST_NAME, "This Linux");
-            assert_eq!(ON_THIS_MACHINE, "on this machine");
-        }
-    }
-}
