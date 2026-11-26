@@ -1,20 +1,28 @@
 # Project guide
 
-- Read [docs/README.md](docs/README.md) for current product and architecture directions.
-- Keep project documentation, prompts, role/session instructions, prompt templates (`prompts/`), and built-in skills (`skills/`) in English, and obtain explicit user approval before modifying any prompt.
-- Follow [development conventions](docs/development-conventions.md).
-- Cargo package names use canban-xxx; crate directories use crates/xxx and source/module filenames omit the canban- prefix.
-- Canban is Apache-2.0 (original copyright: JJy <jjyruby@gmail.com>, 2026); workspace packages inherit `license.workspace = true` and must preserve third-party licenses/notices separately.
-- Keep the main components in separate crates: AppServer, Kanban, Workflow Engine, Scheduler, UI, and the supporting boundaries documented in docs.
-- Follow [UI architecture](docs/ui-architecture.md): separate canban-ui-kit from product UI, reuse suitable NSH behavior, maintain component contracts and a native gallery using production components, and fix shared defects in their owning layer with appropriate regression scenarios.
-- Read [implementation and acceptance](docs/implementation.md) for implemented behavior versus remaining proposals; historical research/specification entries are not runtime acceptance evidence.
-- Use `mise run check` for fast Rust formatting/compilation checks (`pre-commit` runs it, filtered via `hk.pkl`), `mise run lint` for workspace Clippy checks (`pre-push` and CI run it), and `mise run build`/`test`/`acceptance` for implementation checks (keep `--workspace` when filtering nextest, e.g. `mise run test -- -E 'package(...)'`). Use `mise run gallery` (the standalone `examples/gallery` app) to check UI component changes, adding scenes/regression states there. Validate application-flow changes with the running dev app (`mise run dev`); compilation alone does not establish interaction acceptance. Herdr tests and ad-hoc `hc` scripts must strip inherited `HC_*` and set `HC_SESSION`, `HC_SOCKET`, `XDG_STATE_HOME`, and `XDG_CONFIG_HOME` (use `isolated_herdr_env` in `scripts/acceptance_lib.py`; `HERDR_HOME` is ignored); never run `hc server stop`/`restart` against the user's live core.
-- Route all local CLI probing and child process launches through `crates/exec` (`canban_exec::command`, `command_with_env`, `find_executable`, or `raw_command` for bundled/system binaries) so GUI-launched processes inherit the user's shell `PATH`; direct `std::process::Command::new` is disallowed by `clippy.toml`.
-- Keep time-based state machines (timeouts, coalesce/debounce windows, grace periods, backoff, cooldowns) pure with explicit `now` inputs and zero-sleep boundary unit tests, avoid racing short wall-clock windows or global mutable mock clocks in tests, and wait for full observable post-conditions (not wall-clock proxies); see [time-dependent logic and deterministic testing](docs/development-conventions.md#time-dependent-logic-and-deterministic-testing).
-- Keep `Snapshot` (`app.state`) to bounded projections only (never unbounded histories like raw event logs); serve timelines/history via paginated or on-demand RPCs, and canonicalize external poll payloads before diffing so idle polls skip duplicate events and redundant SQLite writes.
-- Keep user-facing mutation RPCs non-blocking: return a hydratable write receipt (with updated Card `revision`) without waiting on full workspace refreshes, and hydrate the full receipt on the UI side alongside optimistic projections.
-- Use `mise run dev` / `mise run dev-stop` (alias: `mise run run`) for branch-scoped isolated development; dev commands refuse `~/.canban` and unrecorded services, and acceptance must use an isolated Herdr Core. See [development instances](docs/development-startup.md) and [remaining isolation gaps](docs/instance-isolation.md).
-- Use `mise run install-app` to build an optimized release bundle and atomically install `/Applications/Canban.app`. Use `mise run release` to manually trigger a new GitHub Release via `workflow_dispatch` (passes flags such as `-- --ref <branch>` or `-- --watch` to `scripts/release.py dispatch`).
-- Increment `DESKTOP_API` in `crates/updater/src/lib.rs` whenever UI ↔ `AppServer` compatibility changes (new/changed RPC methods or parameters, `Snapshot`/event schemas, or compiled Workflow YAML step/schema capabilities such as new `uses:` types), so newly installed local builds detect older `~/.canban` daemons and automatically activate the bundled backend.
-- Workflow YAML schema/default evolution must use sequential migrations in `crates/workflow-engine/src/migrations.rs` (advancing `Document.schema` / `CURRENT`) rather than scattering legacy compatibility branches across authoring, compiler, or Studio code. Keep runtime/UI logic targeting `CURRENT` only; see [development conventions](docs/development-conventions.md#database-workflow-migrations-and-release-updates).
-- Canonical machine inventory is ~/Workspace/Machines. Keep machine-specific connection, environment, and deployment knowledge there.
+## DST-first & determinism
+
+- **DST-first, no new unit tests**: Do not write new unit tests (`#[test]`). Validate all backend, sync, client, scheduler, workflow, and protocol behavior through Deterministic Simulation Testing ([docs/dst.md](docs/dst.md), `crates/sim`). Keep existing tests passing unless intentionally replaced by DST coverage.
+- **Wire new features into DST**: Every new business capability, RPC, state transition, or I/O boundary must be deterministic and simulation-ready (injected `Clock`, `IdGen`, `canban-exec` runner, per-instance `Failpoints` / fault seams, zero process-global mutable statics, zero stray wall-clock calls) and covered in `crates/sim` (scenarios, `chaos` ops, oracles, and coverage gates).
+- **Turn bug fixes into DST regressions**: When fixing a bug, reproduce it in DST via a scenario, injectable fault (`Failpoints`, storage/network/fake faults), or oracle invariant, and record any failing chaos seed in `crates/sim/corpus/regressions.txt`.
+- **Keep time logic pure**: Express timeouts, backoff, debounce, cooldowns, and grace periods with explicit `now` / `Clock` inputs; never rely on wall-clock sleeps or stray `SystemTime::now()` / `Utc::now()` in core runtime/sync crates ([time-dependent logic](docs/development-conventions.md#time-dependent-logic-and-deterministic-testing)).
+
+## Architecture & compatibility
+
+- Read [docs/README.md](docs/README.md), [development conventions](docs/development-conventions.md), [UI architecture](docs/ui-architecture.md), and [implementation status](docs/implementation.md) (historical specs are not acceptance evidence).
+- Keep project docs, prompts, role/session instructions, `prompts/`, and `skills/` in English; get explicit user approval before modifying any prompt.
+- **Crate boundaries & license**: Use `canban-xxx` in `crates/xxx` (omitting `canban-` in module/file names), separating AppServer, Kanban, Workflow Engine, Scheduler, UI (`canban-ui-kit` vs product UI), and supporting crates. Apache-2.0 (`JJy <jjyruby@gmail.com>, 2026`, `license.workspace = true`; preserve third-party notices).
+- **Runtime contracts**:
+  - Route all local CLI probing and child process launches through `crates/exec` (`std::process::Command::new` is disallowed by `clippy.toml`).
+  - Keep `Snapshot` (`app.state`) bounded (serve timelines/histories via paginated or on-demand RPCs) and canonicalize external polls before diffing.
+  - Keep mutation RPCs non-blocking: return a hydratable write receipt (with Card `revision`) and hydrate alongside optimistic UI projections.
+- **Compatibility & migrations**:
+  - Bump `DESKTOP_API` in `crates/updater/src/lib.rs` whenever UI ↔ `AppServer` compatibility changes (RPCs, `Snapshot`/events, or compiled Workflow YAML capabilities).
+  - Evolve Workflow YAML schemas strictly via sequential migrations in `crates/workflow-engine/src/migrations.rs` (`Document.schema` / `CURRENT`); keep runtime/UI targeting `CURRENT` only.
+
+## Verification, dev & release
+
+- **Checks & DST**: Run `mise run check` (fmt + compile), `mise run lint` (Clippy `-D warnings`), and `canban-sim` (`corpus`, `run --seeds 1 --assert-coverage`, `random --scenario chaos --seeds 12 --jobs 4 --master-seed 2026 --assert-coverage`). Use `mise run test` only to ensure existing tests do not regress (`mise run test -- -E 'package(...)'`).
+- **UI & app validation**: Verify UI components in `mise run gallery` (`examples/gallery`) and end-to-end app flows in an isolated `mise run dev` / `mise run dev-stop` instance (compilation alone is not acceptance).
+- **Strict isolation**: Never touch `~/.canban` or the user's live Herdr core (`hc server stop`/`restart`). Strip inherited `HC_*` and set isolated `HC_SESSION`, `HC_SOCKET`, `XDG_STATE_HOME`, and `XDG_CONFIG_HOME` for any Herdr/DST run ([development startup](docs/development-startup.md), [isolation gaps](docs/instance-isolation.md)).
+- **Install, release & machines**: Use `mise run install-app` for `/Applications/Canban.app`, `mise run release` to dispatch a GitHub Release, and keep machine-specific connection/deployment knowledge in `~/Workspace/Machines`.
