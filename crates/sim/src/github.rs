@@ -106,12 +106,17 @@ struct RepoState {
     default_branch: String,
     collaborators: Vec<String>,
     issues: BTreeMap<u64, SimIssue>,
+    issue_created_at: BTreeMap<u64, String>,
     pr_meta: BTreeMap<u64, SimPrMeta>,
+    pr_files: BTreeMap<u64, Vec<Value>>,
     issue_comments: BTreeMap<u64, Vec<SimComment>>,
     pr_reviews: BTreeMap<u64, Vec<SimReview>>,
     pr_review_comments: BTreeMap<u64, Vec<SimComment>>,
     check_runs: BTreeMap<String, Vec<SimCheckRun>>,
     commit_statuses: BTreeMap<String, Value>,
+    files: BTreeMap<(String, String), Value>,
+    blobs: BTreeMap<String, Value>,
+    compares: BTreeMap<String, Value>,
     branch_heads: BTreeMap<String, String>,
     next_comment_id: u64,
     next_review_id: u64,
@@ -285,12 +290,17 @@ impl SimGitHub {
                 default_branch: default_branch.into(),
                 collaborators: vec!["alice".into(), "bot".into()],
                 issues: BTreeMap::new(),
+                issue_created_at: BTreeMap::new(),
                 pr_meta: BTreeMap::new(),
+                pr_files: BTreeMap::new(),
                 issue_comments: BTreeMap::new(),
                 pr_reviews: BTreeMap::new(),
                 pr_review_comments: BTreeMap::new(),
                 check_runs: BTreeMap::new(),
                 commit_statuses: BTreeMap::new(),
+                files: BTreeMap::new(),
+                blobs: BTreeMap::new(),
+                compares: BTreeMap::new(),
                 branch_heads: BTreeMap::new(),
                 next_comment_id: 1_000,
                 next_review_id: 5_000,
@@ -347,6 +357,72 @@ impl SimGitHub {
             let pr_key = format!("pr:{number}");
             let issue_key = format!("issue:{number}");
             r.bump_resource(&["pulls", &pr_key, "issues", &issue_key]);
+        }
+    }
+
+    pub fn set_issue_created_at(&self, repo: &str, number: u64, created_at: impl Into<String>) {
+        let mut st = self.state.lock().unwrap();
+        if let Some(r) = st.repos.get_mut(repo) {
+            r.issue_created_at.insert(number, created_at.into());
+            let issue_key = format!("issue:{number}");
+            let pr_key = format!("pr:{number}");
+            r.bump_resource(&["issues", &issue_key, "pulls", &pr_key]);
+        }
+    }
+
+    pub fn set_notifications(&self, notifications: Vec<Value>) {
+        self.state.lock().unwrap().notifications = notifications;
+    }
+
+    pub fn set_pr_files(&self, repo: &str, number: u64, files: Vec<Value>) {
+        let mut st = self.state.lock().unwrap();
+        if let Some(r) = st.repos.get_mut(repo) {
+            r.pr_files.insert(number, files);
+            let key = format!("pr_files:{number}");
+            r.bump_resource(&[&key]);
+        }
+    }
+
+    pub fn set_file_contents(
+        &self,
+        repo: &str,
+        ref_sha: impl Into<String>,
+        path: impl Into<String>,
+        value: Value,
+    ) {
+        let path = path.into();
+        let mut st = self.state.lock().unwrap();
+        if let Some(r) = st.repos.get_mut(repo) {
+            let key = format!("contents:{path}");
+            r.files.insert((ref_sha.into(), path), value);
+            r.bump_resource(&[&key]);
+        }
+    }
+
+    pub fn set_git_blob(&self, repo: &str, blob_sha: impl Into<String>, value: Value) {
+        let blob_sha = blob_sha.into();
+        let mut st = self.state.lock().unwrap();
+        if let Some(r) = st.repos.get_mut(repo) {
+            let key = format!("blob:{blob_sha}");
+            r.blobs.insert(blob_sha, value);
+            r.bump_resource(&[&key]);
+        }
+    }
+
+    pub fn set_compare(&self, repo: &str, base_sha: &str, head_sha: &str, commits: Value) {
+        let mut st = self.state.lock().unwrap();
+        if let Some(r) = st.repos.get_mut(repo) {
+            let spec = format!("{base_sha}...{head_sha}");
+            let key = format!("compare:{spec}");
+            let url = format!("https://github.com/{}/compare/{spec}", r.full_name);
+            r.compares.insert(
+                spec,
+                json!({
+                    "html_url": url,
+                    "commits": commits,
+                }),
+            );
+            r.bump_resource(&[&key]);
         }
     }
 
@@ -616,6 +692,11 @@ impl SimGitHub {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let created_at = repo
+            .issue_created_at
+            .get(&i.number)
+            .map(String::as_str)
+            .unwrap_or("2026-01-01T00:00:00Z");
         let mut v = json!({
             "id": 10_000 + i.number,
             "node_id": format!("I_sim_{}", i.number),
@@ -634,7 +715,7 @@ impl SimGitHub {
             "labels": i.labels.iter().map(|l| json!({ "name": l })).collect::<Vec<_>>(),
             "assignees": assignees,
             "comments": comment_count,
-            "created_at": "2026-01-01T00:00:00Z",
+            "created_at": created_at,
             "updated_at": i.updated_at,
         });
         if i.is_pr {
@@ -729,13 +810,15 @@ impl SimGitHub {
         })
     }
 
-    fn issue_comment_json(repo_name: &str, c: &SimComment) -> Value {
+    fn issue_comment_json(repo: &RepoState, c: &SimComment) -> Value {
+        let is_pr = repo.issues.get(&c.issue_number).is_some_and(|i| i.is_pr);
+        let segment = if is_pr { "pull" } else { "issues" };
         json!({
             "id": c.id,
             "body": c.body,
             "user": Self::user_json(&c.author),
-            "html_url": format!("https://github.com/{repo_name}/issues/{}#issuecomment-{}", c.issue_number, c.id),
-            "issue_url": format!("https://api.github.com/repos/{repo_name}/issues/{}", c.issue_number),
+            "html_url": format!("https://github.com/{}/{segment}/{}#issuecomment-{}", repo.full_name, c.issue_number, c.id),
+            "issue_url": format!("https://api.github.com/repos/{}/issues/{}", repo.full_name, c.issue_number),
             "created_at": c.updated_at,
             "updated_at": c.updated_at,
         })
@@ -1072,21 +1155,83 @@ impl SimGitHub {
         }
         if req.method == "GET" && base_path == "/search/issues" {
             let q = query.get("q").map(String::as_str).unwrap_or("");
-            let mut items = Vec::new();
+            let tokens: Vec<&str> = q.split_whitespace().collect();
+            let repo_filter = tokens.iter().find_map(|t| t.strip_prefix("repo:"));
+            let author_filter = tokens.iter().find_map(|t| t.strip_prefix("author:"));
+            let assignee_filter = tokens.iter().find_map(|t| t.strip_prefix("assignee:"));
+            let text_terms: Vec<&str> = tokens
+                .iter()
+                .copied()
+                .filter(|t| !t.contains(':'))
+                .collect();
+            let mut matched: Vec<(&RepoState, &SimIssue)> = Vec::new();
             for repo in st.repos.values() {
-                if q.contains("repo:") && !q.contains(&format!("repo:{}", repo.full_name)) {
+                if let Some(rf) = repo_filter
+                    && !repo.full_name.eq_ignore_ascii_case(rf)
+                {
                     continue;
                 }
                 for issue in repo.issues.values() {
-                    if q.contains("is:issue") && issue.is_pr {
+                    if tokens.contains(&"is:issue") && issue.is_pr {
                         continue;
                     }
-                    if q.contains("is:pr") && !issue.is_pr {
+                    if tokens.contains(&"is:pr") && !issue.is_pr {
                         continue;
                     }
-                    items.push(Self::issue_json(repo, issue));
+                    if tokens.contains(&"is:open") && !issue.state.eq_ignore_ascii_case("open") {
+                        continue;
+                    }
+                    if tokens.contains(&"is:closed") && !issue.state.eq_ignore_ascii_case("closed")
+                    {
+                        continue;
+                    }
+                    if tokens.contains(&"is:merged") && !issue.merged {
+                        continue;
+                    }
+                    if let Some(af) = author_filter
+                        && !issue.author.eq_ignore_ascii_case(af)
+                    {
+                        continue;
+                    }
+                    if let Some(asg) = assignee_filter {
+                        let has_assignee = repo.pr_meta.get(&issue.number).is_some_and(|m| {
+                            m.assignees.iter().any(|a| a.eq_ignore_ascii_case(asg))
+                        });
+                        if !has_assignee {
+                            continue;
+                        }
+                    }
+                    if !text_terms.is_empty() {
+                        let hay = format!("{} {}", issue.title, issue.body).to_ascii_lowercase();
+                        if !text_terms
+                            .iter()
+                            .all(|term| hay.contains(&term.to_ascii_lowercase()))
+                        {
+                            continue;
+                        }
+                    }
+                    matched.push((repo, issue));
                 }
             }
+            let sort_updated = query.get("sort").map(String::as_str) == Some("updated");
+            let desc = query
+                .get("order")
+                .map(|o| o.eq_ignore_ascii_case("desc"))
+                .unwrap_or(true);
+            matched.sort_by(|(_, a), (_, b)| {
+                let ord = if sort_updated {
+                    a.updated_at
+                        .cmp(&b.updated_at)
+                        .then(a.number.cmp(&b.number))
+                } else {
+                    a.number.cmp(&b.number)
+                };
+                if desc { ord.reverse() } else { ord }
+            });
+            let items: Vec<Value> = matched
+                .into_iter()
+                .map(|(repo, issue)| Self::issue_json(repo, issue))
+                .collect();
             let total_count = items.len();
             let (page_items, link) = Self::paginate(items, &base_path, &query);
             st.stats.responses_200 += 1;
@@ -1206,16 +1351,22 @@ impl SimGitHub {
             }
             ["issues", "comments"] => {
                 let since = query.get("since").map(String::as_str);
+                let desc = query
+                    .get("direction")
+                    .is_some_and(|d| d.eq_ignore_ascii_case("desc"));
                 let mut comments: Vec<&SimComment> = repo
                     .issue_comments
                     .values()
                     .flatten()
                     .filter(|c| since.is_none_or(|s| c.updated_at.as_str() >= s))
                     .collect();
-                comments.sort_by(|a, b| a.updated_at.cmp(&b.updated_at).then(a.id.cmp(&b.id)));
+                comments.sort_by(|a, b| {
+                    let ord = a.updated_at.cmp(&b.updated_at).then(a.id.cmp(&b.id));
+                    if desc { ord.reverse() } else { ord }
+                });
                 let list: Vec<Value> = comments
                     .into_iter()
-                    .map(|c| Self::issue_comment_json(&repo.full_name, c))
+                    .map(|c| Self::issue_comment_json(&repo, c))
                     .collect();
                 Self::paginate(list, &base_path, &query)
             }
@@ -1237,7 +1388,7 @@ impl SimGitHub {
                     .get(&num)
                     .into_iter()
                     .flatten()
-                    .map(|c| Self::issue_comment_json(&repo.full_name, c))
+                    .map(|c| Self::issue_comment_json(&repo, c))
                     .collect();
                 Self::paginate(list, &base_path, &query)
             }
@@ -1308,6 +1459,42 @@ impl SimGitHub {
                     .collect();
                 Self::paginate(list, &base_path, &query)
             }
+            ["pulls", num_str, "files"] => {
+                let num: u64 = num_str.parse().unwrap_or(0);
+                if !repo.issues.get(&num).is_some_and(|i| i.is_pr) {
+                    return Ok(Self::not_found(&mut st.stats));
+                }
+                let list = repo.pr_files.get(&num).cloned().unwrap_or_default();
+                Self::paginate(list, &base_path, &query)
+            }
+            ["contents", rest @ ..] if !rest.is_empty() => {
+                let file_path = rest
+                    .iter()
+                    .map(|seg| Self::percent_decode(seg))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let ref_sha = query.get("ref").cloned().unwrap_or_default();
+                if let Some(val) = repo.files.get(&(ref_sha, file_path)).cloned() {
+                    (val, None)
+                } else {
+                    return Ok(Self::not_found(&mut st.stats));
+                }
+            }
+            ["git", "blobs", blob_sha] => {
+                if let Some(val) = repo.blobs.get(*blob_sha).cloned() {
+                    (val, None)
+                } else {
+                    return Ok(Self::not_found(&mut st.stats));
+                }
+            }
+            ["compare", spec] => {
+                let decoded = Self::percent_decode(spec);
+                if let Some(val) = repo.compares.get(&decoded).cloned() {
+                    (val, None)
+                } else {
+                    return Ok(Self::not_found(&mut st.stats));
+                }
+            }
             ["commits", sha, "check-runs"] => {
                 let runs: Vec<Value> = if let Some(explicit) = repo.check_runs.get(*sha) {
                     explicit
@@ -1318,6 +1505,7 @@ impl SimGitHub {
                                 "name": r.name,
                                 "status": r.status,
                                 "conclusion": r.conclusion,
+                                "html_url": format!("https://github.com/{}/actions/runs/{}", repo.full_name, r.id),
                             })
                         })
                         .collect()
@@ -1333,6 +1521,7 @@ impl SimGitHub {
                             "name": "ci",
                             "status": if c == "pending" { "in_progress" } else { "completed" },
                             "conclusion": if c == "pending" { Value::Null } else { json!(c) },
+                            "html_url": format!("https://github.com/{}/actions/runs/1", repo.full_name),
                         })],
                         None => Vec::new(),
                     }
@@ -1382,6 +1571,10 @@ impl SimGitHub {
             ["pulls", n] => format!("pr:{n}"),
             ["pulls", n, "reviews"] => format!("pr_reviews:{n}"),
             ["pulls", n, "comments"] => format!("pr_comments:{n}"),
+            ["pulls", n, "files"] => format!("pr_files:{n}"),
+            ["contents", rest @ ..] if !rest.is_empty() => format!("contents:{}", rest.join("/")),
+            ["git", "blobs", sha] => format!("blob:{sha}"),
+            ["compare", spec] => format!("compare:{spec}"),
             ["commits", sha, "check-runs"] => format!("checks:{sha}"),
             ["commits", sha, "status"] => format!("status:{sha}"),
             _ => "other".into(),
@@ -1597,7 +1790,7 @@ impl SimGitHub {
                     side: None,
                     in_reply_to_id: None,
                 };
-                let payload = Self::issue_comment_json(&repo.full_name, &comment);
+                let payload = Self::issue_comment_json(repo, &comment);
                 repo.issue_comments.entry(num).or_default().push(comment);
                 let key = format!("issue_comments:{num}");
                 let issue_key = format!("issue:{num}");
@@ -1630,17 +1823,18 @@ impl SimGitHub {
                         c.body = new_body.clone();
                         c.updated_at = format!("2026-06-01T01:{:02}:00Z", next_ver % 60);
                         issue_num = *num;
-                        updated = Some(Self::issue_comment_json(&repo.full_name, c));
+                        updated = Some(c.clone());
                         break;
                     }
                 }
+                let updated_val = Self::issue_comment_json(repo, &updated.unwrap());
                 let key = format!("issue_comments:{issue_num}");
                 repo.bump_resource(&["comments", &key]);
                 st.stats.responses_200 += 1;
                 Ok(HttpResponse {
                     status: 200,
                     headers: Vec::new(),
-                    body: serde_json::to_vec(&updated.unwrap())?,
+                    body: serde_json::to_vec(&updated_val)?,
                 })
             }
             ("DELETE", ["issues", "comments", id_str]) => {

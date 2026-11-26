@@ -8,14 +8,16 @@
 //! `plan_backend_events` / `is_runtime_only_event_batch`, and draft error watch).
 use crate::{
     exec::SimGitRepo,
+    github::SimIssue,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
     world::{PRIMARY_CLIENT, SimWorldConfig, run_with_world},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use canban_types::{
-    AppEvent, Delivery, DeliveryMode, EnvWriteEntry, Event, HumanGate, Report, RuntimeState,
-    Snapshot, TerminalContext,
+    ActivityBucket, ActivityDetail, ActivityKind, ActivitySegment, AgentBucketStat, AppEvent,
+    Delivery, DeliveryMode, DwellBucketTotals, DwellLane, EnvWriteEntry, Event, EventDelivery,
+    HumanGate, ProjectActivityTotals, Report, RuntimeState, Snapshot, TerminalContext,
 };
 use canban_ui::{
     BackendRefreshAction,
@@ -2025,6 +2027,847 @@ pub fn run(seed: u64) -> Result<u64> {
             "drafts::persistence error watch must wake consumer immediately on bump"
         );
         world.hit("client_pages.ui_event_batch_checked");
+
+        // =========================================================================
+        // 10. Comment Views/Projection, `activity.record`, `insights.activity`,
+        //     `insights.activity_buckets` Parity & Persistence across Restart,
+        //     `insights.events` Filtering, and Cardless Event Pruning.
+        // =========================================================================
+        {
+            // Close prior standalone shells from section 8 so agent-work tracking starts clean.
+            for sh_id in [&id_plain, &id_claude, &id_agy] {
+                let _ = world.client_call(
+                    "terminal.close",
+                    json!({ "terminal_id": sh_id }),
+                    Some(&pid_local),
+                )?;
+            }
+            world.advance(Duration::from_millis(200))?;
+
+            // 10a. Comment receipt projection vs `view: "full"`, `kinds`/`fields` paging, and
+            //      preserving raw stored event fields (`e.message == e.data["body"]`).
+            let c_views = world.client_call(
+                "card.create",
+                json!({
+                    "view": "full",
+                    "project_id": pid_local,
+                    "title": "Comment Views Card",
+                    "body": "projection check",
+                }),
+                Some(&pid_local),
+            )?;
+            let cid_views = c_views["id"].as_str().unwrap().to_owned();
+            let views_card_rev = c_views["revision"].as_u64().unwrap();
+            for n in 0..5u64 {
+                let p = json!({
+                    "card_id": cid_views,
+                    "body": format!("unique comment {n}"),
+                    "mentions": [],
+                    "request_key": format!("views-cmt-{seed}-{n}"),
+                });
+                let receipt = world.client_call("comment.add", p.clone(), Some(&pid_local))?;
+                ensure!(
+                    receipt.get("body").is_none()
+                        && receipt.get("message").is_none()
+                        && receipt["card_revision"] == views_card_rev,
+                    "Default comment.add receipt leaked body/message or wrong card_revision: {receipt}"
+                );
+                let mut full_req = p;
+                full_req["view"] = json!("full");
+                let full_resp = world.client_call("comment.add", full_req, Some(&pid_local))?;
+                let expected_body = format!("unique comment {n}");
+                ensure!(
+                    full_resp["id"] == receipt["id"]
+                        && full_resp["body"] == expected_body
+                        && full_resp.get("message").is_none()
+                        && full_resp["data"].get("body").is_none(),
+                    "Replayed view=full comment.add projection mismatch: {full_resp}"
+                );
+                ensure!(
+                    serde_json::to_string(&full_resp)?
+                        .matches(&expected_body)
+                        .count()
+                        == 1,
+                    "view=full comment must not duplicate body text"
+                );
+                let typed: Event = serde_json::from_value(full_resp)?;
+                ensure!(typed.message == expected_body);
+            }
+            let mut after_seq = 0u64;
+            let mut paged_cmts = Vec::new();
+            loop {
+                let page = world.client_call(
+                    "timeline.list",
+                    json!({
+                        "card_id": cid_views,
+                        "kinds": ["comment.created"],
+                        "after_sequence": after_seq,
+                        "limit": 2,
+                    }),
+                    Some(&pid_local),
+                )?;
+                for ev in page["events"].as_array().unwrap() {
+                    ensure!(
+                        ev["kind"] == "comment.created" && ev.get("message").is_none(),
+                        "kinds-filtered timeline event mismatch: {ev}"
+                    );
+                    paged_cmts.push(ev["id"].clone());
+                }
+                after_seq = page["last_sequence"].as_u64().unwrap();
+                if page["next_cursor"].is_null() {
+                    break;
+                }
+                ensure!(page["next_cursor"] == after_seq);
+            }
+            ensure!(paged_cmts.len() == 5);
+            let empty_kinds = world.client_call(
+                "timeline.list",
+                json!({ "card_id": cid_views, "kinds": ["never.matches"] }),
+                Some(&pid_local),
+            )?;
+            ensure!(
+                empty_kinds["events"] == json!([]) && empty_kinds["last_sequence"] == after_seq
+            );
+            let selected_fields = world.client_call(
+                "timeline.list",
+                json!({ "card_id": cid_views, "fields": ["id"], "limit": 1 }),
+                Some(&pid_local),
+            )?;
+            ensure!(
+                selected_fields["last_sequence"].as_u64().is_some()
+                    && selected_fields["events"][0].as_object().unwrap().len() == 1
+            );
+            {
+                let stored_cmts: Vec<_> = world
+                    .server("local-server")
+                    .unwrap()
+                    .events()?
+                    .into_iter()
+                    .filter(|e| e.card_id == cid_views && e.kind == "comment.created")
+                    .collect();
+                ensure!(
+                    stored_cmts.len() == 5
+                        && stored_cmts
+                            .iter()
+                            .all(|e| e.message == e.data["body"].as_str().unwrap_or("")),
+                    "Stored comment.created events must retain message == data.body"
+                );
+            }
+
+            // 10b. `activity.record`, real virtual-time open & closed agent work,
+            //      `insights.activity`, `insights.activity_buckets` exact parity & restart persistence.
+            let dir_local2 = world.project_dir("local-insights-2")?;
+            let p_local2 = world.client_call(
+                "project.create",
+                json!({ "host_id": "local", "name": "Local Insights 2", "directory": dir_local2 }),
+                None,
+            )?;
+            let pid_local2 = p_local2["id"].as_str().unwrap().to_owned();
+
+            // Apply a simple manual agent workflow on `pid_local` to launch a real AgentRun.
+            let ins_sources = world.client_call(
+                "workflow.sources",
+                json!({ "project_id": pid_local }),
+                Some(&pid_local),
+            )?;
+            let ins_wf = r#"schema: 12
+id: insights-agent-flow
+name: Insights Agent Flow
+workspace:
+  create_worktree: false
+  sync_base: false
+on:
+  start:
+    event: manual
+    start_at: work
+steps:
+  - id: work
+    uses: agent
+    with:
+      profile: developer
+      instruction: Work for insights activity verification
+    next: done
+  - id: done
+    uses: complete
+"#;
+            let _ = world.client_call(
+                "workflow.apply",
+                json!({
+                    "project_id": pid_local,
+                    "revision": ins_sources["revision"],
+                    "sources": [{ "filename": "insights-agent.yaml", "source": ins_wf }],
+                }),
+                Some(&pid_local),
+            )?;
+
+            // Start a standalone manual `codex` shell on `pid_local2` and record a 10s closed burst.
+            let sh_codex = world.client_call(
+                "terminal.create",
+                json!({ "project_id": pid_local2, "name": "Manual Codex", "cwd": dir_local2 }),
+                Some(&pid_local2),
+            )?;
+            let id_codex = sh_codex["id"].as_str().unwrap().to_owned();
+            let addr_codex = sh_codex["runtime"]["terminal"].as_str().unwrap().to_owned();
+            let local_herdr = world.herdr("local-server").unwrap();
+            local_herdr.set_foreground(
+                &addr_codex,
+                Some(json!({ "pid": 401, "name": "codex", "argv": ["codex"], "cwd": dir_local2 })),
+            );
+            local_herdr.set_status_detailed(
+                &addr_codex,
+                json!({ "state": "working", "app": "codex" }),
+                Some(1),
+            );
+            world.advance(Duration::from_secs(10))?;
+            local_herdr.set_status_detailed(
+                &addr_codex,
+                json!({ "state": "idle", "app": "codex" }),
+                Some(1),
+            );
+            world.advance(Duration::from_millis(500))?;
+
+            // Launch a workflow `developer` agent on `cid_views` (`pid_local`) and keep it OPEN working!
+            let _ = world.client_call(
+                "workflow.start",
+                json!({
+                    "workflow_id": "insights-agent-flow",
+                    "card_id": cid_views,
+                    "entry": "start",
+                    "request_key": format!("ins-wf-start-{seed}"),
+                }),
+                Some(&pid_local),
+            )?;
+            world.wait_until(10_000, |w| {
+                let snap = w.server("local-server").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == cid_views && a.terminal.is_some())
+                }))
+            })?;
+            let (open_tid, open_addr) = {
+                let snap = world.server("local-server").unwrap().snapshot()?;
+                let t = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == cid_views))
+                    .unwrap();
+                (
+                    t.id.clone(),
+                    t.agent.as_ref().unwrap().terminal.clone().unwrap(),
+                )
+            };
+            local_herdr.set_status(&open_addr, "working", Some(1));
+            world.advance(Duration::from_secs(12))?;
+
+            let now_ts = world.server("local-server").unwrap().now_ms();
+            let day_end = now_ts - 2_000;
+            let day_start = day_end - 8 * 3_600_000;
+
+            // Validation rejections for `activity.record`.
+            let too_many: Vec<Value> = (0..201u64)
+                .map(|i| {
+                    json!({
+                        "start_ms": day_start + i,
+                        "end_ms": day_start + i + 100,
+                        "lane": "other",
+                        "page": "board",
+                    })
+                })
+                .collect();
+            ensure!(
+                world
+                    .client_call(
+                        "activity.record",
+                        json!({ "segments": too_many }),
+                        Some(&pid_local)
+                    )
+                    .is_err()
+            );
+            ensure!(
+                world
+                    .client_call(
+                        "activity.record",
+                        json!({ "segments": [{ "start_ms": day_start + 500, "end_ms": day_start + 500, "lane": "card", "page": "card" }] }),
+                        Some(&pid_local),
+                    )
+                    .is_err()
+            );
+            ensure!(
+                world
+                    .client_call(
+                        "activity.record",
+                        json!({ "segments": [{ "start_ms": day_start, "end_ms": day_start + 12 * 3_600_000 + 1, "lane": "card", "page": "card" }] }),
+                        Some(&pid_local),
+                    )
+                    .is_err()
+            );
+            ensure!(
+                world
+                    .client_call(
+                        "activity.record",
+                        json!({ "segments": [{ "start_ms": now_ts, "end_ms": now_ts + 120_000, "lane": "card", "page": "card" }] }),
+                        Some(&pid_local),
+                    )
+                    .is_err()
+            );
+            ensure!(
+                world
+                    .client_call(
+                        "activity.record",
+                        json!({ "segments": [{ "start_ms": day_start, "end_ms": day_start + 10_000, "lane": "bogus", "page": "card" }] }),
+                        Some(&pid_local),
+                    )
+                    .is_err()
+            );
+
+            // Record valid dwell segments: straddling day_start, fully inside pid_local2,
+            // straddling day_end, and fully outside after day_end.
+            let rec_res = world.client_call(
+                "activity.record",
+                json!({
+                    "segments": [
+                        {
+                            "start_ms": day_start - 30_000,
+                            "end_ms": day_start + 90_000,
+                            "lane": "card",
+                            "page": "card",
+                            "project_id": pid_local,
+                            "card_id": cid_local,
+                        },
+                        {
+                            "start_ms": day_start + 300_000,
+                            "end_ms": day_start + 480_000,
+                            "lane": "terminal",
+                            "page": "terminals",
+                            "project_id": pid_local2,
+                            "terminal_id": id_codex,
+                        },
+                        {
+                            "start_ms": day_end - 45_000,
+                            "end_ms": day_end + 30_000,
+                            "lane": "other",
+                            "page": "board",
+                        },
+                        {
+                            "start_ms": day_end + 10_000,
+                            "end_ms": day_end + 40_000,
+                            "lane": "card",
+                            "page": "card",
+                            "project_id": pid_local,
+                            "card_id": cid_local,
+                        },
+                    ]
+                }),
+                Some(&pid_local),
+            )?;
+            ensure!(rec_res["recorded"] == 4);
+
+            // Validation rejections for `insights.activity` and `insights.activity_buckets`.
+            ensure!(
+                world
+                    .client_call(
+                        "insights.activity",
+                        json!({ "from_ms": day_start, "to_ms": day_start + 9 * 24 * 3_600_000 }),
+                        Some(&pid_local),
+                    )
+                    .is_err()
+            );
+            ensure!(
+                world
+                    .client_call(
+                        "insights.activity_buckets",
+                        json!({ "boundaries": [day_start] }),
+                        Some(&pid_local),
+                    )
+                    .is_err()
+            );
+            ensure!(
+                world
+                    .client_call(
+                        "insights.activity_buckets",
+                        json!({ "boundaries": [day_start + 100, day_start + 100] }),
+                        Some(&pid_local),
+                    )
+                    .is_err()
+            );
+
+            let aggregate_window = |segments: &[ActivitySegment],
+                                    win_from: u64,
+                                    win_to: u64|
+             -> ActivityBucket {
+                let mut dwell = DwellBucketTotals::default();
+                let mut agent_ms = 0u64;
+                let mut by_project: BTreeMap<String, ProjectActivityTotals> = BTreeMap::new();
+                let mut by_agent_map: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+                for seg in segments {
+                    let dur = seg
+                        .end_ms
+                        .min(win_to)
+                        .saturating_sub(seg.start_ms.max(win_from));
+                    if dur == 0 {
+                        continue;
+                    }
+                    let pid_key = seg.project_id.as_deref().filter(|s| !s.is_empty());
+                    match (&seg.kind, &seg.data) {
+                        (ActivityKind::Dwell, ActivityDetail::Dwell(d)) => {
+                            match d.lane {
+                                DwellLane::Card => dwell.card += dur,
+                                DwellLane::Terminal => dwell.terminal += dur,
+                                DwellLane::Other => dwell.other += dur,
+                            }
+                            if let Some(p) = pid_key {
+                                by_project.entry(p.to_owned()).or_default().dwell_ms += dur;
+                            }
+                        }
+                        (ActivityKind::Agent, ActivityDetail::Agent(a)) => {
+                            agent_ms += dur;
+                            if let Some(p) = pid_key {
+                                by_project.entry(p.to_owned()).or_default().agent_ms += dur;
+                            }
+                            *by_agent_map
+                                .entry((a.profile_id.clone(), a.provider.clone(), a.model.clone()))
+                                .or_default() += dur;
+                        }
+                        _ => {}
+                    }
+                }
+                let mut by_agent: Vec<AgentBucketStat> = by_agent_map
+                    .into_iter()
+                    .map(|((profile_id, provider, model), ms)| AgentBucketStat {
+                        profile_id,
+                        provider,
+                        model,
+                        ms,
+                    })
+                    .collect();
+                by_agent.sort_by(|a, b| {
+                    b.ms.cmp(&a.ms)
+                        .then_with(|| a.profile_id.cmp(&b.profile_id))
+                        .then_with(|| a.provider.cmp(&b.provider))
+                        .then_with(|| a.model.cmp(&b.model))
+                });
+                ActivityBucket {
+                    start_ms: win_from,
+                    end_ms: win_to,
+                    dwell,
+                    agent_ms,
+                    by_project,
+                    by_agent,
+                }
+            };
+
+            // Unscoped parity check: open workflow agent + closed manual codex + clipped dwell!
+            let act_unscoped = world.client_call(
+                "insights.activity",
+                json!({ "from_ms": day_start, "to_ms": day_end }),
+                Some(&pid_local),
+            )?;
+            let segs_unscoped: Vec<ActivitySegment> =
+                serde_json::from_value(act_unscoped["segments"].clone())?;
+            let open_agent = segs_unscoped
+                .iter()
+                .find(|s| s.open && s.terminal_id.as_deref() == Some(open_tid.as_str()))
+                .context("Expected open working workflow agent in insights.activity")?;
+            let open_info = open_agent.agent_data().unwrap();
+            ensure!(
+                open_info.profile_id == "developer" && !open_info.manual,
+                "Open agent metadata mismatch: {open_info:?}"
+            );
+            let closed_manual = segs_unscoped
+                .iter()
+                .find(|s| {
+                    s.kind == ActivityKind::Agent
+                        && !s.open
+                        && s.terminal_id.as_deref() == Some(id_codex.as_str())
+                })
+                .context("Expected closed manual codex agent segment in insights.activity")?;
+            let manual_info = closed_manual.agent_data().unwrap();
+            ensure!(
+                manual_info.profile_id == "manual"
+                    && manual_info.provider == "codex"
+                    && manual_info.manual
+                    && closed_manual.duration_ms() >= 9_000,
+                "Closed manual agent metadata/duration mismatch: {closed_manual:?}"
+            );
+
+            let buckets_unscoped_res = world.client_call(
+                "insights.activity_buckets",
+                json!({ "boundaries": [day_start, day_end] }),
+                Some(&pid_local),
+            )?;
+            let buckets_unscoped: Vec<ActivityBucket> =
+                serde_json::from_value(buckets_unscoped_res["buckets"].clone())?;
+            ensure!(buckets_unscoped.len() == 1);
+            let expected_unscoped = aggregate_window(&segs_unscoped, day_start, day_end);
+            ensure!(
+                expected_unscoped.dwell == buckets_unscoped[0].dwell
+                    && expected_unscoped.agent_ms == buckets_unscoped[0].agent_ms
+                    && expected_unscoped.by_project == buckets_unscoped[0].by_project
+                    && expected_unscoped.by_agent == buckets_unscoped[0].by_agent,
+                "Unscoped insights.activity vs insights.activity_buckets parity mismatch: expected={expected_unscoped:?} actual={:?}",
+                buckets_unscoped[0]
+            );
+            ensure!(
+                buckets_unscoped[0].dwell.card == 90_000
+                    && buckets_unscoped[0].dwell.terminal == 180_000
+                    && buckets_unscoped[0].dwell.other == 45_000
+                    && buckets_unscoped[0].agent_ms >= 18_000,
+                "Unscoped bucket totals mismatch: {:?}",
+                buckets_unscoped[0]
+            );
+
+            // Multi-bucket split boundary check across [day_start, day_start + 30_000, day_end].
+            let split_res = world.client_call(
+                "insights.activity_buckets",
+                json!({
+                    "boundaries": [day_start, day_start + 30_000, day_end],
+                    "project_id": pid_local,
+                }),
+                Some(&pid_local),
+            )?;
+            let split_buckets: Vec<ActivityBucket> =
+                serde_json::from_value(split_res["buckets"].clone())?;
+            ensure!(
+                split_buckets.len() == 2
+                    && split_buckets[0].dwell.card == 30_000
+                    && split_buckets[0].dwell.terminal == 0
+                    && split_buckets[1].dwell.card == 60_000
+                    && split_buckets[1].agent_ms >= 8_000,
+                "Split bucket math mismatch: {split_buckets:?}"
+            );
+
+            // Project-scoped parity check on `pid_local`.
+            let act_scoped = world.client_call(
+                "insights.activity",
+                json!({ "from_ms": day_start, "to_ms": day_end, "project_id": pid_local }),
+                Some(&pid_local),
+            )?;
+            let segs_scoped: Vec<ActivitySegment> =
+                serde_json::from_value(act_scoped["segments"].clone())?;
+            let buckets_scoped_res = world.client_call(
+                "insights.activity_buckets",
+                json!({ "boundaries": [day_start, day_end], "project_id": pid_local }),
+                Some(&pid_local),
+            )?;
+            let buckets_scoped: Vec<ActivityBucket> =
+                serde_json::from_value(buckets_scoped_res["buckets"].clone())?;
+            let expected_scoped = aggregate_window(&segs_scoped, day_start, day_end);
+            ensure!(
+                expected_scoped.dwell == buckets_scoped[0].dwell
+                    && expected_scoped.agent_ms == buckets_scoped[0].agent_ms
+                    && expected_scoped.by_project == buckets_scoped[0].by_project
+                    && expected_scoped.by_agent == buckets_scoped[0].by_agent
+                    && buckets_scoped[0].dwell.card == 90_000
+                    && buckets_scoped[0].dwell.terminal == 0,
+                "Project-scoped parity mismatch: expected={expected_scoped:?} actual={:?}",
+                buckets_scoped[0]
+            );
+
+            // Report completion on `cid_views` (produces `execution.reported` with `path` & prose for 10c),
+            // finish terminals, then gracefully stop & bounce `local-server` to verify activity persistence!
+            let views_card_num = world
+                .server("local-server")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .iter()
+                .find(|c| c.id == cid_views)
+                .unwrap()
+                .number;
+            let _ = world.client_call(
+                "execution.report",
+                json!({
+                    "project_id": pid_local,
+                    "card": views_card_num,
+                    "state": "completed",
+                    "message": "Long secret report prose",
+                    "body": "Long secret report prose body",
+                    "request_key": format!("ins-rep-{seed}"),
+                }),
+                Some(&pid_local),
+            )?;
+            let expected_persisted_agent_ms = buckets_unscoped[0].agent_ms;
+            world.stop_server_graceful("local-server")?;
+            world.bounce_server("local-server")?;
+            world.heal_and_quiesce(15_000)?;
+
+            // Verify dwell & closed agent segments persisted accurately across server restart!
+            let post_bounce_buckets: Vec<ActivityBucket> = serde_json::from_value(
+                world.client_call(
+                    "insights.activity_buckets",
+                    json!({ "boundaries": [day_start, day_end] }),
+                    Some(&pid_local),
+                )?["buckets"]
+                    .clone(),
+            )?;
+            ensure!(
+                post_bounce_buckets[0].dwell == buckets_unscoped[0].dwell
+                    && post_bounce_buckets[0].agent_ms == expected_persisted_agent_ms,
+                "Activity buckets drifted across graceful restart: before={:?} after={:?}",
+                buckets_unscoped[0],
+                post_bounce_buckets[0]
+            );
+
+            // 10c. `insights.events`: filters kinds, strips `message` and non-whitelisted `data` keys,
+            //      and excludes cardless events!
+            let views_rev_now = world
+                .server("local-server")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .iter()
+                .find(|c| c.id == cid_views)
+                .unwrap()
+                .revision;
+            let _ = world.client_call(
+                "card.update",
+                json!({
+                    "card_id": cid_views,
+                    "revision": views_rev_now,
+                    "title": "Comment Views Card (edited)",
+                }),
+                Some(&pid_local),
+            )?;
+            // Emit real cardless GitHub events on `pid_local2` for both 10c (`insights.events`) and 10d (pruning).
+            let prune_repo = "acme/prune-sim";
+            world.github.add_repo(prune_repo, 6006, "main");
+            world.github.upsert_issue(
+                prune_repo,
+                SimIssue {
+                    number: 1,
+                    title: "Old cardless 1".into(),
+                    body: String::new(),
+                    state: "open".into(),
+                    author: "alice".into(),
+                    labels: Vec::new(),
+                    updated_at: "2023-01-01T00:00:00Z".into(),
+                    is_pr: false,
+                    draft: false,
+                    merged: false,
+                    head_sha: String::new(),
+                    head_ref: String::new(),
+                    base_ref: String::new(),
+                    check_conclusion: None,
+                },
+            );
+            world.github.upsert_issue(
+                prune_repo,
+                SimIssue {
+                    number: 2,
+                    title: "Old cardless pending".into(),
+                    body: String::new(),
+                    state: "open".into(),
+                    author: "alice".into(),
+                    labels: Vec::new(),
+                    updated_at: "2023-01-01T00:01:00Z".into(),
+                    is_pr: false,
+                    draft: false,
+                    merged: false,
+                    head_sha: String::new(),
+                    head_ref: String::new(),
+                    base_ref: String::new(),
+                    check_conclusion: None,
+                },
+            );
+            let _ = world.client_call(
+                "project.github",
+                json!({
+                    "project_id": pid_local2,
+                    "repository": prune_repo,
+                    "intake": "off",
+                    "pr_intake": "off",
+                }),
+                Some(&pid_local2),
+            )?;
+            // Register a consumer subscription so `github_event_refresh` polls repo issues -> cardless events!
+            let _ = world.client_call(
+                "subscription.save",
+                json!({
+                    "subscription_id": "sub-prune-consumer",
+                    "revision": 0,
+                    "selector": { "types": ["github.issue.discovered"] },
+                    "target": { "type": "consumer" },
+                    "enabled": true,
+                }),
+                Some(&pid_local2),
+            )?;
+            let _ = world.client_call(
+                "github.sync",
+                json!({ "project_id": pid_local2 }),
+                Some(&pid_local2),
+            )?;
+            world.wait_until(10_000, |w| {
+                let evs = w.server("local-server").unwrap().events()?;
+                Ok(evs
+                    .iter()
+                    .filter(|e| {
+                        e.card_id.is_empty()
+                            && e.kind == "github.issue.discovered"
+                            && e.data["repository"] == prune_repo
+                    })
+                    .count()
+                    >= 2)
+            })?;
+
+            let ins_ev_res = world.client_call(
+                "insights.events",
+                json!({ "project_id": pid_local }),
+                Some(&pid_local),
+            )?;
+            let ins_events: Vec<Event> = serde_json::from_value(ins_ev_res["events"].clone())?;
+            ensure!(
+                ins_events.iter().all(|e| !e.card_id.is_empty())
+                    && ins_events.iter().all(|e| e.message.is_empty())
+                    && !ins_events.iter().any(|e| e.kind == "card.updated")
+                    && !ins_events
+                        .iter()
+                        .any(|e| e.kind == "github.issue.discovered"),
+                "insights.events leaked cardless/prose/non-insights events"
+            );
+            let rep_ev = ins_events
+                .iter()
+                .find(|e| e.card_id == cid_views && e.kind == "execution.reported")
+                .context("execution.reported missing from insights.events")?;
+            ensure!(
+                rep_ev.data["state"] == json!("completed")
+                    && rep_ev.data.get("terminal_id").is_some()
+                    && rep_ev.data.get("run_number").is_some()
+                    && rep_ev.data.get("path").is_none(),
+                "insights.events execution.reported data filtering mismatch: {:?}",
+                rep_ev.data
+            );
+
+            // 10d. Real virtual-time cardless event pruning (`CARDLESS_RETENTION_MS` = 7 days):
+            //      preserves journal `highwater`, events with pending `EventDelivery`, recent
+            //      cardless events, and card-bound events while pruning consumed old cardless events!
+            let (ev_old_id, ev_pending_id, hw_before) = {
+                let srv = world.server("local-server").unwrap();
+                let evs = srv.events()?;
+                let mut old_cardless: Vec<Event> = evs
+                    .into_iter()
+                    .filter(|e| {
+                        e.card_id.is_empty()
+                            && e.kind == "github.issue.discovered"
+                            && e.data["repository"] == prune_repo
+                    })
+                    .collect();
+                old_cardless.sort_by_key(|e| e.data["number"].as_u64().unwrap_or(0));
+                ensure!(old_cardless.len() == 2);
+                let old_id = old_cardless[0].id.clone();
+                let pend_id = old_cardless[1].id.clone();
+                // Wait until consumer deliveries exist for both, ack ONLY `old_id`, leaving
+                // `pend_id`'s consumer delivery `pending`!
+                let ev_list = srv.call("event.list", json!({ "after": 0, "limit": 500 }))?;
+                let hw = ev_list["highwater"].as_u64().unwrap();
+                (old_id, pend_id, hw)
+            };
+            // Wait for consumer deliveries to be created, then ack `ev_old_id` so ONLY `ev_pending_id` stays pending.
+            world.wait_until(5_000, |w| {
+                let delivs: Vec<EventDelivery> =
+                    serde_json::from_value(w.server("local-server").unwrap().call(
+                        "subscription.deliveries",
+                        json!({ "subscription_id": "sub-prune-consumer" }),
+                    )?)?;
+                Ok(delivs.iter().any(|d| d.event_id == ev_old_id)
+                    && delivs.iter().any(|d| d.event_id == ev_pending_id))
+            })?;
+            let old_deliv_id = format!("sub-prune-consumer:{ev_old_id}");
+            let _ = world.client_call(
+                "subscription.ack",
+                json!({ "delivery_id": old_deliv_id }),
+                Some(&pid_local2),
+            )?;
+
+            // Advance `local-server` virtual clock by 8 days (> 7d `CARDLESS_RETENTION_MS`) and emit
+            // a Herdr heartbeat + a brand-new recent cardless event #3 so `pump_at_with_prune_state` runs!
+            world.servers["local-server"]
+                .clock
+                .jump_ms(8 * 24 * 60 * 60 * 1_000);
+            world.herdr("local-server").unwrap().emit_heartbeat();
+            world.github.upsert_issue(
+                prune_repo,
+                SimIssue {
+                    number: 3,
+                    title: "Recent cardless 3".into(),
+                    body: String::new(),
+                    state: "open".into(),
+                    author: "alice".into(),
+                    labels: Vec::new(),
+                    updated_at: "2026-06-01T00:10:00Z".into(),
+                    is_pr: false,
+                    draft: false,
+                    merged: false,
+                    head_sha: String::new(),
+                    head_ref: String::new(),
+                    base_ref: String::new(),
+                    check_conclusion: None,
+                },
+            );
+            let _ = world.client_call(
+                "github.sync",
+                json!({ "project_id": pid_local2 }),
+                Some(&pid_local2),
+            )?;
+            world.wait_until(10_000, |w| {
+                let evs = w.server("local-server").unwrap().events()?;
+                Ok(!evs.iter().any(|e| e.id == ev_old_id)
+                    && evs.iter().any(|e| {
+                        e.card_id.is_empty()
+                            && e.data["repository"] == prune_repo
+                            && e.data["number"] == 3
+                    }))
+            })?;
+            {
+                let srv = world.server("local-server").unwrap();
+                let hw_after =
+                    srv.call("event.list", json!({ "after": 0, "limit": 1 }))?["highwater"]
+                        .as_u64()
+                        .unwrap();
+                ensure!(
+                    hw_after >= hw_before,
+                    "Journal highwater decreased after cardless pruning: {hw_after} < {hw_before}"
+                );
+                let remaining = srv.events()?;
+                ensure!(
+                    !remaining.iter().any(|e| e.id == ev_old_id),
+                    "Consumed old cardless event must be pruned"
+                );
+                ensure!(
+                    remaining.iter().any(|e| e.id == ev_pending_id),
+                    "Old cardless event with pending delivery must NOT be pruned"
+                );
+                ensure!(
+                    remaining.iter().any(|e| {
+                        e.card_id.is_empty()
+                            && e.data["repository"] == prune_repo
+                            && e.data["number"] == 3
+                    }),
+                    "Recent cardless event must NOT be pruned"
+                );
+                ensure!(
+                    remaining.iter().any(|e| e.card_id == cid_views),
+                    "Card-bound events must NEVER be pruned by cardless pruning"
+                );
+            }
+            // Ack the remaining pending consumer delivery and close manual shell cleanly.
+            let _ = world.client_call(
+                "subscription.ack",
+                json!({ "delivery_id": format!("sub-prune-consumer:{ev_pending_id}") }),
+                Some(&pid_local2),
+            )?;
+            let _ = world.client_call(
+                "terminal.close",
+                json!({ "terminal_id": id_codex }),
+                Some(&pid_local2),
+            )?;
+            world
+                .herdr("local-server")
+                .unwrap()
+                .finish_terminal(&open_addr, 0, "done");
+
+            world.hit("client_pages.insights_and_activity");
+        }
 
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;
