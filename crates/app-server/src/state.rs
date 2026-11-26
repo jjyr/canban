@@ -55,6 +55,7 @@ impl AppServer {
     }
 
     pub(super) fn state_response(&self, p: &Value) -> Result<Value> {
+        self.app_state_calls.fetch_add(1, Ordering::SeqCst);
         let revision = self.state_cursor();
         let changed = p["after"] != revision;
         let mut response = json!({
@@ -78,6 +79,7 @@ impl AppServer {
     }
 
     pub(super) fn runtime_state_response(&self, _p: &Value) -> Result<Value> {
+        self.runtime_state_calls.fetch_add(1, Ordering::SeqCst);
         Ok(json!({
             "server_id": self.identity,
             "runtime": self.runtime_state()?,

@@ -24,8 +24,8 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use canban_client::{
-    ApiMismatchError, SingleHostSession, format_pairing_uri as format_client_pairing_uri,
-    parse_pairing_invite,
+    ApiMismatchError, ClientEvent, SingleHostSession,
+    format_pairing_uri as format_client_pairing_uri, parse_pairing_invite,
 };
 use canban_transport::TailscalePeerIdentity;
 use canban_types::{
@@ -34,10 +34,11 @@ use canban_types::{
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 pub fn run(seed: u64) -> Result<u64> {
     let mut cfg = SimWorldConfig::desktop_default(seed, "transport_auth");
+    cfg.framed_local_transport = true;
     cfg.remote_hosts = vec!["remote-a".into(), "remote-b".into()];
     cfg.min_latency_ms = 2;
     cfg.max_latency_ms = 12;
@@ -862,6 +863,316 @@ pub fn run(seed: u64) -> Result<u64> {
             &pid_b,
             recovered_card_b["revision"].as_u64().unwrap_or(1),
         );
+
+        // -------------------------------------------------------------------------
+        // (e) Client Push-Topic Separation (`runtime.state`-only skips `app.state`,
+        //     same-rev `application` push non-suppression), Legacy No-`app.subscribe`
+        //     Polling Fallback, `set_host_enabled` Lease/TCP Drop, Side-Channel
+        //     `UtilitiesChanged`/`UsageChanged` Forwarding, Legacy `server.token`
+        //     Auto-Upgrade + `device.remove_legacy_token`, and `host.probe`/`discover_canban`!
+        // -------------------------------------------------------------------------
+        let srv_a = world
+            .server("remote-a")
+            .context("remote-a server missing")?;
+        let srv_b = world
+            .server("remote-b")
+            .context("remote-b server missing")?;
+        let srv_local = world
+            .server("local-server")
+            .context("local-server missing")?;
+
+        // e1: `runtime.state`-only push skips `app.state`; same-rev `application` push is NOT suppressed!
+        world.advance(Duration::from_millis(250))?;
+        let app_before_rt = srv_a.app_state_call_count();
+        let rt_before_rt = srv_a.runtime_state_call_count();
+        srv_a.emit_state_push_for_sim("terminals", true);
+        world.wait_until(8_000, |_| {
+            Ok(srv_a.runtime_state_call_count() > rt_before_rt)
+        })?;
+        world.advance(Duration::from_millis(300))?;
+        ensure!(
+            srv_a.app_state_call_count() == app_before_rt,
+            "runtime-only `terminals` push unexpectedly called app.state ({} -> {})",
+            app_before_rt,
+            srv_a.app_state_call_count()
+        );
+        // Now emit `application` push at the EXACT same `state_revision` -> MUST call `app.state`!
+        srv_a.emit_state_push_for_sim("application", false);
+        world.wait_until(8_000, |_| Ok(srv_a.app_state_call_count() > app_before_rt))?;
+
+        // e2: Legacy daemon lacking `app.subscribe` falls back cleanly to polling!
+        let rej_before = srv_a.subscribe_rejection_count();
+        srv_a.set_disable_app_subscribe(true);
+        world.client_reconnect(Some("remote-a"))?;
+        world.wait_until(15_000, |w| {
+            Ok(srv_a.subscribe_rejection_count() > rej_before
+                && w.client_host_summaries()
+                    .iter()
+                    .any(|s| s.id == "remote-a" && s.is_connected()))
+        })?;
+        let raw_pid_a = canban_types::split_qualified_host_id(&pid_a)
+            .map(|(_, r)| r.to_owned())
+            .unwrap_or_else(|| pid_a.clone());
+        let polled_title = format!("Polled Fallback Card {seed}");
+        let polled_card = world.server_call(
+            "remote-a",
+            "card.create",
+            json!({ "project_id": raw_pid_a, "title": polled_title }),
+        )?;
+        let polled_raw_id = polled_card["id"].as_str().unwrap().to_owned();
+        oracle.record_committed_card(
+            "remote-a",
+            &polled_raw_id,
+            &pid_a,
+            polled_card["revision"].as_u64().unwrap_or(1),
+        );
+        world.wait_until(15_000, |w| {
+            let snap = w.client_merged_snapshot()?;
+            Ok(snap.cards.iter().any(|c| c.title == polled_title))
+        })?;
+        // Re-enable `app.subscribe` and reconnect cleanly!
+        srv_a.set_disable_app_subscribe(false);
+        world.client_reconnect(Some("remote-a"))?;
+        world.wait_until(15_000, |w| {
+            Ok(w.client_host_summaries()
+                .iter()
+                .any(|s| s.id == "remote-a" && s.is_connected()))
+        })?;
+
+        // e3: `set_host_enabled(false)` drops active TCP push connection / lease, re-enable reconnects!
+        ensure!(
+            srv_a.active_tcp_count() >= 1,
+            "Expected active TCP connection on remote-a before disable"
+        );
+        world.client_run_on("ui-client", 10_000, |client| async move {
+            client.set_host_enabled("remote-a", false)
+        })?;
+        world.wait_until(15_000, |w| {
+            Ok(w.client_host_summaries()
+                .iter()
+                .any(|s| s.id == "remote-a" && !s.is_connected())
+                && srv_a.active_tcp_count() == 0)
+        })?;
+        world.client_run_on("ui-client", 10_000, |client| async move {
+            client.set_host_enabled("remote-a", true)
+        })?;
+        world.wait_until(15_000, |w| {
+            Ok(w.client_host_summaries()
+                .iter()
+                .any(|s| s.id == "remote-a" && s.is_connected())
+                && srv_a.active_tcp_count() >= 1)
+        })?;
+
+        // e4: Side-channel `UtilitiesChanged` (local) & `UsageChanged` (remote) push forwarding!
+        // Let remote-a's newly reconnected supervisor attach its `app.subscribe` stream first.
+        world.advance(Duration::from_millis(300))?;
+        let _ = world.drain_client_events();
+        srv_local.emit_utilities();
+        srv_a.emit_usage_for_sim(json!({ "provider": "codex", "percent": 42, "seed": seed }));
+        let mut saw_utilities = false;
+        let mut saw_usage = false;
+        world.wait_until(10_000, |w| {
+            for ev in w.drain_client_events() {
+                match ev {
+                    ClientEvent::UtilitiesChanged { host_id, .. } if host_id == "local" => {
+                        saw_utilities = true;
+                    }
+                    ClientEvent::UsageChanged { host_id, state }
+                        if host_id == "remote-a" && state["percent"] == 42 =>
+                    {
+                        saw_usage = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !saw_utilities {
+                srv_local.emit_utilities();
+            }
+            if !saw_usage {
+                srv_a.emit_usage_for_sim(
+                    json!({ "provider": "codex", "percent": 42, "seed": seed }),
+                );
+            }
+            Ok(saw_utilities && saw_usage)
+        })?;
+
+        // e5: Legacy `server.token` auto-upgrade on connect -> persists `dev_...` in `hosts.json` ->
+        //     `device.remove_legacy_token` deletes `server.token` -> reconnect succeeds with upgraded token!
+        //     Also verify non-upgrade bearer auth rejects pairing code without burning it!
+        let legacy_tok = canban_app_server::network::ensure_server_token(&srv_b_home)?;
+        ensure!(canban_app_server::network::token_path(&srv_b_home).exists());
+        // Disable Tailscale verifier temporarily on `remote-b` so connect genuinely uses legacy token upgrade!
+        srv_b.set_tailscale_verifier(None);
+        world.client_run_on("ui-client", 15_000, |client| async move {
+            client.remove_host("remote-b")
+        })?;
+        let addr_b_leg = addr_b.clone();
+        let legacy_tok_c = legacy_tok.clone();
+        let legacy_upgraded_tok =
+            world.client_run_on("ui-client", 20_000, move |client| async move {
+                let summary = client
+                    .add_host_async(SavedHost {
+                        id: "remote-b".into(),
+                        name: "Legacy Upgraded Remote B".into(),
+                        transport: HostTransport::Tcp {
+                            addr: addr_b_leg,
+                            token: legacy_tok_c,
+                        },
+                        ssh_target: None,
+                        server_id: None,
+                        enabled: true,
+                        added_at: 0,
+                    })
+                    .await?;
+                ensure!(
+                    summary.is_connected(),
+                    "Legacy upgrade host must connect: {summary:?}"
+                );
+                Ok(client
+                    .transport_for_host("remote-b")?
+                    .active_token()
+                    .map(str::to_owned))
+            })?;
+        let legacy_upgraded = legacy_upgraded_tok
+            .context("Legacy server.token upgrade did not store active token")?;
+        ensure!(
+            is_device_token(&legacy_upgraded) && legacy_upgraded != legacy_tok,
+            "Expected legacy token auto-upgrade to dev_... token, got {legacy_upgraded}"
+        );
+        let hosts_after_legacy = std::fs::read_to_string(&hosts_path)?;
+        ensure!(
+            !hosts_after_legacy.contains(&legacy_tok)
+                && hosts_after_legacy.contains(&legacy_upgraded),
+            "hosts.json must persist upgraded dev_... token and not legacy server.token"
+        );
+        let dev_list_before_rm =
+            world.client_call("device.list", json!({ "host_id": "remote-b" }), None)?;
+        ensure!(dev_list_before_rm["has_legacy_token"] == true);
+        let rm_leg = world.client_call(
+            "device.remove_legacy_token",
+            json!({ "host_id": "remote-b" }),
+            None,
+        )?;
+        ensure!(rm_leg["removed"] == true);
+        ensure!(!canban_app_server::network::token_path(&srv_b_home).exists());
+        let dev_list_after_rm =
+            world.client_call("device.list", json!({ "host_id": "remote-b" }), None)?;
+        ensure!(dev_list_after_rm["has_legacy_token"] == false);
+        world.client_reconnect(Some("remote-b"))?;
+        world.wait_until(15_000, |w| {
+            Ok(w.client_host_summaries()
+                .iter()
+                .any(|s| s.id == "remote-b" && s.is_connected()))
+        })?;
+        // Non-upgrade auth (`allow_upgrade = false`) must reject a pairing code WITHOUT burning it!
+        {
+            let cfg_b = srv_b.transport_config();
+            let (no_burn_code, _) = srv_b.create_pairing_code(300)?;
+            let non_upgrade = canban_transport::auth::authenticate_tcp_token(
+                &cfg_b.home,
+                &cfg_b.device_store,
+                &cfg_b.pairing_codes,
+                &no_burn_code,
+                Some("Post-NonUpgrade Device"),
+                false,
+            )?;
+            ensure!(
+                matches!(
+                    non_upgrade,
+                    canban_transport::auth::TcpAuthOutcome::Rejected
+                ),
+                "Non-upgrade auth must reject pairing code"
+            );
+            let upgrade_ok = canban_transport::auth::authenticate_tcp_token(
+                &cfg_b.home,
+                &cfg_b.device_store,
+                &cfg_b.pairing_codes,
+                &no_burn_code,
+                Some("Post-NonUpgrade Device"),
+                true,
+            )?;
+            ensure!(
+                matches!(
+                    upgrade_ok,
+                    canban_transport::auth::TcpAuthOutcome::Authenticated {
+                        upgraded_token: Some(_),
+                        deprecated_legacy: false,
+                        ..
+                    }
+                ),
+                "Rejected non-upgrade check must not burn single-use pairing code!"
+            );
+        }
+
+        // e6: `host.probe` and `host.discover_canban` with deterministic TCP probe override!
+        let probe_res = world.client_call("host.probe", json!({ "host_id": "remote-a" }), None)?;
+        ensure!(
+            probe_res["server_id"].as_str() == Some(srv_a.server_id())
+                && probe_res["hostname"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()),
+            "Unexpected host.probe response: {probe_res}"
+        );
+        let srv_a_hosts_path = world.servers["remote-a"].home.join("config/hosts.json");
+        let saved_for_disc = HostsFile {
+            hosts: vec![
+                SavedHost {
+                    id: "linked-b".into(),
+                    name: "Linked Remote B".into(),
+                    transport: HostTransport::Tcp {
+                        addr: addr_b.clone(),
+                        token: legacy_upgraded.clone(),
+                    },
+                    ssh_target: None,
+                    server_id: Some(remote_b_server_id.clone()),
+                    enabled: true,
+                    added_at: 1,
+                },
+                SavedHost {
+                    id: "dead-peer".into(),
+                    name: "Unreachable Peer".into(),
+                    transport: HostTransport::Tcp {
+                        addr: "192.0.2.1:9999".into(),
+                        token: "dev_dead_token_placeholder".into(),
+                    },
+                    ssh_target: None,
+                    server_id: Some("dead0001".into()),
+                    enabled: true,
+                    added_at: 2,
+                },
+            ],
+        };
+        std::fs::create_dir_all(srv_a_hosts_path.parent().unwrap())?;
+        std::fs::write(
+            &srv_a_hosts_path,
+            serde_json::to_vec_pretty(&saved_for_disc)?,
+        )?;
+        let addr_b_expected = canban_types::normalize_daemon_addr(&addr_b);
+        srv_a.set_tcp_probe_override(Some(Arc::new(move |addr| {
+            if addr == addr_b_expected {
+                Ok(4)
+            } else {
+                anyhow::bail!("simulated unreachable host {addr}")
+            }
+        })));
+        let disc_res = world.client_call(
+            "host.discover_canban",
+            json!({ "host_id": "remote-a" }),
+            None,
+        )?;
+        srv_a.set_tcp_probe_override(None);
+        let disc_hosts = disc_res["hosts"]
+            .as_array()
+            .context("host.discover_canban missing hosts array")?;
+        ensure!(
+            disc_hosts.len() == 1
+                && disc_hosts[0]["addr"].as_str()
+                    == Some(canban_types::normalize_daemon_addr(&addr_b).as_str())
+                && disc_hosts[0]["linked_on_host"] == true
+                && disc_hosts[0]["rtt_ms"] == 4,
+            "Unexpected host.discover_canban result: {disc_res}"
+        );
+        world.hit("transport_auth.legacy_token_and_polling_fallback");
 
         world.heal_and_quiesce(15_000)?;
         oracle.check_quiescent_invariants(world)?;

@@ -24,7 +24,7 @@ const CORE_PROTECTED_KEYS: &[&str] = &[
     "CANBAN_SOURCE_TRUST",
 ];
 
-pub(crate) struct ResolvedEnv {
+pub struct ResolvedEnv {
     pub env: BTreeMap<String, String>,
     pub unset_keys: BTreeSet<String>,
     pub safe_workflow_env: BTreeMap<String, String>,
@@ -458,7 +458,7 @@ fn build_preview_rows(
 }
 
 impl AppServer {
-    pub(super) fn resolve_runtime_env(
+    pub fn resolve_runtime_env(
         &self,
         profile: Option<&Profile>,
         project: Option<&Project>,

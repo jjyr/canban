@@ -33,16 +33,20 @@
 //!   graceful recovery and full convergence without panic or stuck state
 //!   (`storage.corrupt_outbox_recovery`).
 use crate::{
+    exec::SimGitRepo,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
     world::{FsDurability, SimWorldConfig, StorageFaultKind, run_with_world},
 };
 use anyhow::{Context, Result, ensure};
-use canban_types::{Conversation, ExecutionTrigger, qualify_host_id, unqualified_entity_id};
+use canban_types::{
+    Conversation, ExecutionTrigger, ManagedWorktree, TerminalEntry, qualify_host_id,
+    unqualified_entity_id,
+};
 use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 const ADOPT_FLOW_YAML: &str = r#"schema: 12
 id: sessions-adopt-flow
@@ -279,6 +283,42 @@ pub fn run(seed: u64) -> Result<u64> {
             bad_bind.is_err(),
             "Rebinding a different provider session ID should have failed"
         );
+        // Cross-card duplicate provider session ID binding must also be rejected!
+        let dup_card = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid,
+                "title": format!("Duplicate Session Reject Card {seed}"),
+            }),
+            Some(&pid),
+        )?;
+        let dup_cid = dup_card["id"].as_str().unwrap().to_owned();
+        let dup_opened = world.client_call(
+            "agent.open",
+            json!({
+                "card_id": dup_cid,
+                "profile_id": primary_profile,
+                "request_key": format!("open-dup-sess-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        let dup_tid = qualify_host_id(
+            "remote-a",
+            unqualified_entity_id(dup_opened["terminal_id"].as_str().unwrap()),
+        );
+        let cross_card_bind = world.client_call(
+            "agent.bind",
+            json!({
+                "terminal_id": dup_tid,
+                "session_id": sess_id_a,
+            }),
+            Some(&pid),
+        );
+        ensure!(
+            cross_card_bind.is_err(),
+            "Binding the same provider session ID onto a second card must be rejected"
+        );
+        let _ = world.client_call("agent.end", json!({ "terminal_id": dup_tid }), Some(&pid));
 
         // 3. `agent.interrupt` -> interrupts working PTY, transitions working -> idle,
         //    and idempotent replay with same `request_key` does NOT interrupt twice.
@@ -1056,6 +1096,927 @@ pub fn run(seed: u64) -> Result<u64> {
         let _: serde_json::Value =
             serde_json::from_str(&hosts_text).context("Recovered hosts.json is not valid JSON")?;
         world.hit("storage.corrupt_outbox_recovery");
+
+        // ---------------------------------------------------------------------
+        // Part E — 2-Phase `card.adopt`, Unusable PTY Rejection (all 7 cases),
+        //          Savepoint Owner Preservation, `terminal.rename`/`context`,
+        //          CWD Inheritance (Worktree/Subdir/Live Inventory/Core Fence),
+        //          Archive Worktree Protection, Manual Labels & Ephemeral Agent
+        // ---------------------------------------------------------------------
+        let herdr_b = world.herdr("remote-b").unwrap();
+        let exec_b = world
+            .exec_runner("remote-b")
+            .context("remote-b SimExec unavailable")?;
+
+        // E0: First terminal accepts empty inheritance before any project exists on `remote-b`!
+        {
+            let first_bare = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "inherit_terminal_id": "" }),
+            )?;
+            ensure!(
+                first_bare["runtime"]["state"] == "running"
+                    && first_bare["name"] == "Terminal 1"
+                    && first_bare["runtime"]["terminal"].is_string()
+                    && first_bare["conversation_id"].is_null(),
+                "Empty inheritance first terminal mismatch: {first_bare}"
+            );
+            let bare_tid = first_bare["id"].as_str().unwrap().to_owned();
+            let bare_addr = first_bare["runtime"]["terminal"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": bare_tid }),
+            )?;
+            herdr_b.finish_terminal(&bare_addr, 0, "exited");
+        }
+
+        // Create two git-backed projects on `remote-b` for adoption, CWD inheritance & archive protection.
+        let b_dir1 = world.project_dir(&format!("adopt-wt-p1-{seed}"))?;
+        let b_dir1_sub = PathBuf::from(&b_dir1).join("docs");
+        std::fs::create_dir_all(&b_dir1_sub)?;
+        exec_b.register_git_repo(&b_dir1, SimGitRepo::default());
+        let b_dir2 = world.project_dir(&format!("adopt-wt-p2-{seed}"))?;
+        exec_b.register_git_repo(&b_dir2, SimGitRepo::default());
+
+        let pb1 = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-b",
+                "name": format!("AdoptWT1 {seed}"),
+                "directory": b_dir1,
+                "target_branch": "main",
+                "workspace": { "create_worktree": true, "sync_base": false },
+            }),
+            None,
+        )?;
+        let pid_b1 = pb1["id"].as_str().unwrap().to_owned();
+        let raw_pid_b1 = unqualified_entity_id(&pid_b1).to_owned();
+        let pb2 = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-b",
+                "name": format!("AdoptWT2 {seed}"),
+                "directory": b_dir2,
+                "target_branch": "main",
+                "workspace": { "create_worktree": true, "sync_base": false },
+            }),
+            None,
+        )?;
+        let pid_b2 = pb2["id"].as_str().unwrap().to_owned();
+        let raw_pid_b2 = unqualified_entity_id(&pid_b2).to_owned();
+        let b1_sources = world.client_call(
+            "workflow.sources",
+            json!({ "project_id": pid_b1 }),
+            Some(&pid_b1),
+        )?;
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid_b1,
+                "revision": b1_sources["revision"],
+                "sources": [{ "filename": "adopt-flow.yaml", "source": ADOPT_FLOW_YAML }],
+            }),
+            Some(&pid_b1),
+        )?;
+
+        // E1: 2-phase `card.adopt` (workflow-only adopt -> bind manual PTY -> replay without duplicates).
+        {
+            let c2p = world.client_call(
+                "card.create",
+                json!({ "project_id": pid_b1, "title": "Two-Phase Adopt" }),
+                Some(&pid_b1),
+            )?;
+            let raw_c2p = unqualified_entity_id(c2p["id"].as_str().unwrap()).to_owned();
+            let manual_term = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({
+                    "card_id": raw_c2p,
+                    "agent": true,
+                    "profile_id": "codex",
+                    "name": "My session",
+                }),
+            )?;
+            let manual_addr = manual_term["runtime"]["terminal"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let c2p_wt = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .into_iter()
+                .find(|c| c.id == raw_c2p)
+                .unwrap()
+                .worktree
+                .unwrap_or_else(|| b_dir1.clone());
+            let terms_before_adopt = herdr_b.terminal_addresses().len();
+
+            // Phase 1: workflow-only adoption (no runtime_terminal).
+            let first = world.server_call(
+                "remote-b",
+                "card.adopt",
+                json!({
+                    "view": "full",
+                    "card_id": raw_c2p,
+                    "profile_id": "codex",
+                    "request_key": format!("2ph-no-term-{seed}"),
+                }),
+            )?;
+            ensure!(
+                first["workflow_run"]["terminal_id"].is_null(),
+                "Phase 1 workflow-only adopt must leave terminal_id null: {first}"
+            );
+            // Phase 2: bind existing manual PTY onto same workflow run.
+            let adopt_params = json!({
+                "view": "full",
+                "card_id": raw_c2p,
+                "profile_id": "codex",
+                "cwd": c2p_wt,
+                "runtime_terminal": manual_addr,
+                "runtime_session": "default",
+                "request_key": format!("2ph-bind-once-{seed}"),
+            });
+            let second = world.server_call("remote-b", "card.adopt", adopt_params.clone())?;
+            ensure!(
+                first["workflow_run"]["id"] == second["workflow_run"]["id"]
+                    && second["workflow_run"]["terminal_id"]
+                        == Conversation::key(&raw_c2p, "codex"),
+                "Phase 2 adopt must bind existing PTY to same workflow_run: {second}"
+            );
+            // Phase 3: repeat with new request_key -> no duplicate agent terminal or PTY launch!
+            let mut again = adopt_params;
+            again["request_key"] = json!(format!("2ph-bind-again-{seed}"));
+            let _ = world.server_call("remote-b", "card.adopt", again)?;
+            let snap = world.server("remote-b").unwrap().snapshot()?;
+            let c2p_agents = snap
+                .terminals
+                .iter()
+                .filter(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_c2p))
+                .count();
+            ensure!(
+                c2p_agents == 1 && herdr_b.terminal_addresses().len() == terms_before_adopt,
+                "2-phase adopt replay created duplicate terminal or PTY"
+            );
+            // Clean up workflow + PTY.
+            let _ = world.server_call(
+                "remote-b",
+                "workflow.stop",
+                json!({ "run_id": second["workflow_run"]["id"] }),
+            )?;
+            herdr_b.finish_terminal(&manual_addr, 0, "exited");
+        }
+
+        // E2: Unusable PTY rejection across all 7 failure modes (`missing`, `unknown`, `session`,
+        //     `cwd`, `profile`, `ambiguous`, `core`) keeps workflow and manual runtime intact!
+        let remote_b_db = world.servers["remote-b"].home.join("canban.sqlite");
+        for failure in [
+            "missing",
+            "unknown",
+            "session",
+            "cwd",
+            "profile",
+            "ambiguous",
+            "core",
+        ] {
+            let cu = world.client_call(
+                "card.create",
+                json!({ "project_id": pid_b1, "title": format!("Adopt Unusable {failure}") }),
+                Some(&pid_b1),
+            )?;
+            let raw_cu = unqualified_entity_id(cu["id"].as_str().unwrap()).to_owned();
+            let src_val = if failure == "profile" {
+                // Plain shell terminal has no matching agent engine for `profile_id: "claude"`.
+                world.server_call(
+                    "remote-b",
+                    "terminal.create",
+                    json!({
+                        "card_id": raw_cu,
+                        "name": format!("Manual {failure}"),
+                    }),
+                )?
+            } else {
+                world.server_call(
+                    "remote-b",
+                    "terminal.create",
+                    json!({
+                        "card_id": raw_cu,
+                        "agent": true,
+                        "profile_id": "codex",
+                        "name": format!("Manual {failure}"),
+                    }),
+                )?
+            };
+            let src: TerminalEntry = serde_json::from_value(src_val)?;
+            let src_addr = src.runtime.as_ref().unwrap().terminal.clone().unwrap();
+            let cu_wt = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .into_iter()
+                .find(|c| c.id == raw_cu)
+                .unwrap()
+                .worktree
+                .unwrap_or_else(|| b_dir1.clone());
+
+            let mut params = json!({
+                "view": "full",
+                "card_id": raw_cu,
+                "profile_id": "codex",
+                "cwd": cu_wt,
+                "runtime_terminal": src_addr,
+                "runtime_session": "default",
+                "request_key": format!("adopt-fail-{failure}-{seed}"),
+            });
+            let mut inserted_dup_id: Option<String> = None;
+            match failure {
+                "missing" => {
+                    params.as_object_mut().unwrap().remove("runtime_terminal");
+                }
+                "unknown" => params["runtime_terminal"] = json!("t404-missing"),
+                "session" => params["runtime_session"] = json!("another-core"),
+                "cwd" => params["cwd"] = json!(b_dir2),
+                "profile" => params["profile_id"] = json!("claude"),
+                "ambiguous" => {
+                    let dup_id = format!("ambig-dup-{seed}");
+                    let mut dup = src.clone();
+                    dup.id = dup_id.clone();
+                    dup.number += 1000;
+                    let conn = Connection::open(&remote_b_db)?;
+                    conn.execute(
+                        "INSERT INTO terminals(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                        rusqlite::params![
+                            dup.id,
+                            dup.origin_project_id,
+                            dup.origin_card_id,
+                            "running",
+                            dup.number as i64,
+                            serde_json::to_string(&dup)?
+                        ],
+                    )?;
+                    inserted_dup_id = Some(dup_id);
+                }
+                "core" => {
+                    let new_core = format!("core-adopt-replaced-{seed}");
+                    herdr_b.restart_core(new_core.clone());
+                    world.wait_until(5_000, |w| {
+                        let obs = w
+                            .server("remote-b")
+                            .unwrap()
+                            .call("runtime.observation", json!({}))?;
+                        Ok(obs["core_id"].as_str() == Some(new_core.as_str()))
+                    })?;
+                }
+                _ => unreachable!(),
+            }
+            let expected_src_runtime = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| t.id == src.id)
+                .unwrap()
+                .runtime;
+            let adopted = world.server_call("remote-b", "card.adopt", params)?;
+            if let Some(dup_id) = inserted_dup_id {
+                let conn = Connection::open(&remote_b_db)?;
+                conn.execute("DELETE FROM terminals WHERE id=?1", [&dup_id])?;
+            }
+            ensure!(
+                adopted["card"]["stage"] == "develop"
+                    && adopted["workflow_run"]["terminal_id"].is_null(),
+                "[{failure}] Expected workflow-only adopt without binding: {adopted}"
+            );
+            let snap = world.server("remote-b").unwrap().snapshot()?;
+            ensure!(
+                !snap
+                    .terminals
+                    .iter()
+                    .any(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cu)),
+                "[{failure}] Unusable PTY adopt must not create an AgentRun"
+            );
+            ensure!(
+                snap.terminals
+                    .iter()
+                    .find(|t| t.id == src.id)
+                    .unwrap()
+                    .runtime
+                    == expected_src_runtime,
+                "[{failure}] Manual runtime must stay unchanged"
+            );
+            ensure!(
+                !snap.conversations.iter().any(|c| c.card_id == raw_cu),
+                "[{failure}] Unusable PTY adopt must not create a Conversation"
+            );
+            let _ = world.server_call(
+                "remote-b",
+                "workflow.stop",
+                json!({ "run_id": adopted["workflow_run"]["id"] }),
+            )?;
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": src.id }),
+            );
+            herdr_b.finish_terminal(&src_addr, 0, "exited");
+        }
+        // Let observer refresh after the `"core"` restart.
+        world.advance(Duration::from_millis(300))?;
+
+        // E3: Savepoint owner preservation — existing `workflow_run.terminal_id` owner is preserved!
+        {
+            let co = world.client_call(
+                "card.create",
+                json!({ "project_id": pid_b1, "title": "Savepoint Owner Preservation" }),
+                Some(&pid_b1),
+            )?;
+            let raw_co = unqualified_entity_id(co["id"].as_str().unwrap()).to_owned();
+            // Move card to `develop` -> workflow starts and assigns a real agent owner (`terminal_id`)!
+            let _ = world.server_call(
+                "remote-b",
+                "card.move",
+                json!({
+                    "card_id": raw_co,
+                    "revision": co["revision"],
+                    "stage": "develop",
+                }),
+            )?;
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-b").unwrap().snapshot()?;
+                Ok(snap.workflow_runs.iter().any(|r| {
+                    r.card_id.as_deref() == Some(raw_co.as_str())
+                        && r.active()
+                        && r.terminal_id.is_some()
+                }))
+            })?;
+            let (wf_owner_id, existing_owner_tid) = {
+                let snap = world.server("remote-b").unwrap().snapshot()?;
+                let r = snap
+                    .workflow_runs
+                    .iter()
+                    .find(|r| r.card_id.as_deref() == Some(raw_co.as_str()) && r.active())
+                    .unwrap();
+                (r.id.clone(), r.terminal_id.clone().unwrap())
+            };
+            // Open an extra manual terminal with a DIFFERENT profile (`claude`) on the same card and
+            // call `card.adopt` -> savepoint must reject binding and preserve existing owner (`codex`)!
+            let manual_co_val = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "card_id": raw_co, "agent": true, "profile_id": "claude" }),
+            )?;
+            let manual_co: TerminalEntry = serde_json::from_value(manual_co_val)?;
+            let manual_co_addr = manual_co
+                .runtime
+                .as_ref()
+                .unwrap()
+                .terminal
+                .clone()
+                .unwrap();
+            let co_wt = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .into_iter()
+                .find(|c| c.id == raw_co)
+                .unwrap()
+                .worktree
+                .unwrap_or_else(|| b_dir1.clone());
+            let adopt_owner = world.server_call(
+                "remote-b",
+                "card.adopt",
+                json!({
+                    "view": "full",
+                    "card_id": raw_co,
+                    "profile_id": "claude",
+                    "cwd": co_wt,
+                    "runtime_terminal": manual_co_addr,
+                    "runtime_session": "default",
+                    "request_key": format!("adopt-preserve-owner-{seed}"),
+                }),
+            )?;
+            ensure!(
+                adopt_owner["workflow_run"]["terminal_id"].as_str()
+                    == Some(existing_owner_tid.as_str()),
+                "Savepoint must preserve existing workflow owner {existing_owner_tid}, got {adopt_owner}"
+            );
+            ensure!(
+                world
+                    .server("remote-b")
+                    .unwrap()
+                    .snapshot()?
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == manual_co.id)
+                    .unwrap()
+                    .runtime
+                    == manual_co.runtime,
+                "Manual terminal runtime must stay untouched when workflow already has an owner"
+            );
+            let _ = world.server_call(
+                "remote-b",
+                "workflow.stop",
+                json!({ "run_id": wf_owner_id }),
+            )?;
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": manual_co.id }),
+            )?;
+            herdr_b.finish_terminal(&manual_co_addr, 0, "exited");
+            if let Some(addr) = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| t.id == existing_owner_tid)
+                .and_then(|t| t.agent)
+                .and_then(|a| a.terminal)
+            {
+                herdr_b.finish_terminal(&addr, 0, "exited");
+            }
+        }
+
+        // E4: `terminal.rename` (custom + empty reset), `terminal.context`, `terminal.interrupt`
+        //     idempotency, manual labels (`max + 1` per project without durable counter),
+        //     ephemeral agent `origin_card_id`, CWD inheritance (worktree/subdir/live inventory/offline/core fence),
+        //     agent directory context immutability, and archive worktree protection!
+        {
+            // Manual labels (`max + 1` per project) + `terminal.rename` + `terminal.context`.
+            let c_lbl = world.client_call(
+                "card.create",
+                json!({ "project_id": pid_b1, "title": "Labels & Archive Card" }),
+                Some(&pid_b1),
+            )?;
+            let raw_c_lbl = unqualified_entity_id(c_lbl["id"].as_str().unwrap()).to_owned();
+            // Card-role agents must NOT advance independent terminal labels.
+            let _ = world.server_call(
+                "remote-b",
+                "agent.open",
+                json!({ "card_id": raw_c_lbl, "profile_id": "codex" }),
+            )?;
+            let t1 = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b1 }),
+            )?;
+            let t2 = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b1 }),
+            )?;
+            let p2_t1 = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b2 }),
+            )?;
+            ensure!(
+                t1["name"] == "Terminal 1"
+                    && t2["name"] == "Terminal 2"
+                    && p2_t1["name"] == "Terminal 1"
+            );
+            let t1_id = t1["id"].as_str().unwrap().to_owned();
+            let t2_id = t2["id"].as_str().unwrap().to_owned();
+            let p2_t1_id = p2_t1["id"].as_str().unwrap().to_owned();
+            // `terminal.rename` custom name, then empty string resets to `"Terminal N"`.
+            let ren_custom = world.server_call(
+                "remote-b",
+                "terminal.rename",
+                json!({ "terminal_id": t2_id, "name": "Build Shell" }),
+            )?;
+            ensure!(ren_custom["name"] == "Build Shell");
+            let ren_reset = world.server_call(
+                "remote-b",
+                "terminal.rename",
+                json!({ "terminal_id": t2_id, "name": "" }),
+            )?;
+            ensure!(
+                ren_reset["name"] == "Terminal 2",
+                "Empty terminal.rename must restore default name: {ren_reset}"
+            );
+            let ctx1 = world.server_call(
+                "remote-b",
+                "terminal.context",
+                json!({ "terminal_id": t1_id }),
+            )?;
+            ensure!(ctx1["project_id"].as_str() == Some(raw_pid_b1.as_str()));
+
+            // Closing Terminal 2 -> next is Terminal 2; closing Terminal 1 while Terminal 2 live -> next is Terminal 3;
+            // closing all resets back to Terminal 1; zero `terminal-manual-number` counter in SQLite!
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": t2_id }),
+            )?;
+            let t2_reborn = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b1 }),
+            )?;
+            ensure!(t2_reborn["name"] == "Terminal 2");
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": t1_id }),
+            )?;
+            let t3 = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b1 }),
+            )?;
+            ensure!(t3["name"] == "Terminal 3");
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": t2_reborn["id"] }),
+            )?;
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": t3["id"] }),
+            )?;
+            let t_reset = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b1 }),
+            )?;
+            ensure!(t_reset["name"] == "Terminal 1");
+            {
+                let conn =
+                    Connection::open_with_flags(&remote_b_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                let cnt: i64 = conn.query_row(
+                    "SELECT count(*) FROM counters WHERE id='terminal-manual-number'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                ensure!(
+                    cnt == 0,
+                    "Must not store durable terminal-manual-number counter"
+                );
+            }
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": t_reset["id"] }),
+            )?;
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": p2_t1_id }),
+            )?;
+
+            // Ephemeral agent terminal records `origin_card_id` without Conversation or AgentRun!
+            let eph_val = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b1, "card_id": raw_c_lbl, "agent": true }),
+            )?;
+            let eph: TerminalEntry = serde_json::from_value(eph_val)?;
+            ensure!(
+                eph.id.starts_with("agent-")
+                    && eph.origin_card_id.as_deref() == Some(raw_c_lbl.as_str())
+                    && eph.conversation_id.is_none()
+                    && eph.agent.is_none(),
+                "Ephemeral agent terminal fields mismatch: {eph:?}"
+            );
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": eph.id }),
+            )?;
+
+            // CWD inheritance: managed worktree root & subdir, card worktree subdir, project subdir,
+            // deleted subdir fallback, live inventory cwd, independent terminal observed cwd & offline cache!
+            let wt_res = world.server_call(
+                "remote-b",
+                "worktree.create",
+                json!({
+                    "project_id": raw_pid_b1,
+                    "branch": format!("feat/cwd-inherit-{seed}"),
+                    "launch": "shell",
+                    "request_key": format!("cwd-inherit-wt-{seed}"),
+                }),
+            )?;
+            let wt: ManagedWorktree = serde_json::from_value(wt_res["worktree"].clone())?;
+            let wt_tid = wt_res["terminal"]["id"].as_str().unwrap().to_owned();
+            let wt_addr = wt_res["terminal"]["runtime"]["terminal"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let wt_sub = PathBuf::from(&wt.path).join("nested-sub");
+            std::fs::create_dir_all(&wt_sub)?;
+
+            // Inherit managed worktree root.
+            let inh_wt_root = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "inherit_terminal_id": wt_tid }),
+            )?;
+            let inh_wt_root_addr = inh_wt_root["runtime"]["terminal"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            ensure!(
+                herdr_b.terminal_record(&inh_wt_root_addr).unwrap()["cwd"].as_str()
+                    == Some(wt.path.as_str()),
+                "Expected inherited CWD == managed worktree root"
+            );
+            // Move foreground into managed worktree subdir -> wait until observer caches `directory_root`
+            // and `cwd == wt_sub`, then inherit live cwd and verify deleted-subdir fallback to `wt.path`!
+            let wt_canon = std::fs::canonicalize(&wt.path)?;
+            herdr_b.set_foreground(&wt_addr, Some(json!({ "cwd": wt_sub, "name": "zsh" })));
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-b").unwrap().snapshot()?;
+                Ok(snap.terminal_contexts.iter().any(|c| {
+                    c.terminal_id == wt_tid
+                        && c.cwd.as_deref() == wt_sub.to_str()
+                        && c.directory_root
+                            .as_deref()
+                            .and_then(|d| std::fs::canonicalize(d).ok())
+                            .as_deref()
+                            == Some(wt_canon.as_path())
+                }))
+            })?;
+            let inh_wt_sub = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "inherit_terminal_id": wt_tid }),
+            )?;
+            let inh_wt_sub_addr = inh_wt_sub["runtime"]["terminal"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            ensure!(
+                herdr_b.terminal_record(&inh_wt_sub_addr).unwrap()["cwd"].as_str()
+                    == wt_sub.to_str(),
+                "Expected inherited CWD == managed worktree subdirectory"
+            );
+            // Delete subdir -> falls back cleanly to managed worktree root!
+            std::fs::remove_dir_all(&wt_sub)?;
+            let inh_wt_fb = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "inherit_terminal_id": wt_tid }),
+            )?;
+            let inh_wt_fb_addr = inh_wt_fb["runtime"]["terminal"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let inh_wt_fb_cwd = herdr_b.terminal_record(&inh_wt_fb_addr).unwrap()["cwd"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            ensure!(
+                std::fs::canonicalize(&inh_wt_fb_cwd)? == wt_canon,
+                "Deleted worktree subdir must fall back to worktree root: got={inh_wt_fb_cwd}, expected={}",
+                wt_canon.display()
+            );
+
+            // Project subdir inheritance & independent terminal observed CWD + offline cache vs `terminal.context`.
+            let ind_t = world.server_call("remote-b", "terminal.create", json!({}))?;
+            let ind_tid = ind_t["id"].as_str().unwrap().to_owned();
+            let ind_addr = ind_t["runtime"]["terminal"].as_str().unwrap().to_owned();
+            herdr_b.set_foreground(&ind_addr, Some(json!({ "cwd": b_dir1_sub, "name": "zsh" })));
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-b").unwrap().snapshot()?;
+                Ok(snap.terminal_contexts.iter().any(|c| {
+                    c.terminal_id == ind_tid && c.project_id.as_deref() == Some(raw_pid_b1.as_str())
+                }))
+            })?;
+            let ind_inh = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "inherit_terminal_id": ind_tid }),
+            )?;
+            let ind_inh_addr = ind_inh["runtime"]["terminal"].as_str().unwrap().to_owned();
+            ensure!(
+                herdr_b.terminal_record(&ind_inh_addr).unwrap()["cwd"].as_str()
+                    == b_dir1_sub.to_str(),
+                "Independent terminal inheritance must use observed foreground project subdir"
+            );
+            // Move foreground outside all projects -> `project_id` clears; go offline -> cached cwd stays while `terminal.context` reports null!
+            let outside_dir = world.project_dir(&format!("outside-cwd-{seed}"))?;
+            herdr_b.set_foreground(
+                &ind_addr,
+                Some(json!({ "cwd": outside_dir, "name": "zsh" })),
+            );
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-b").unwrap().snapshot()?;
+                Ok(snap.terminal_contexts.iter().any(|c| {
+                    c.terminal_id == ind_tid
+                        && c.project_id.is_none()
+                        && c.cwd.as_deref() == Some(outside_dir.as_str())
+                }))
+            })?;
+            herdr_b.set_offline(true);
+            world.advance(Duration::from_millis(300))?;
+            {
+                let snap = world.server("remote-b").unwrap().snapshot()?;
+                ensure!(
+                    snap.terminal_contexts.iter().any(|c| {
+                        c.terminal_id == ind_tid && c.cwd.as_deref() == Some(outside_dir.as_str())
+                    }),
+                    "Offline Herdr must retain last-known terminal_contexts"
+                );
+                let live_ctx = world.server_call(
+                    "remote-b",
+                    "terminal.context",
+                    json!({ "terminal_id": ind_tid }),
+                )?;
+                ensure!(
+                    live_ctx["cwd"].is_null() && live_ctx["project_id"].is_null(),
+                    "Explicit terminal.context while offline must report null: {live_ctx}"
+                );
+            }
+            herdr_b.set_offline(false);
+            world.advance(Duration::from_millis(300))?;
+
+            // Agent directory context moving to Project 2 MUST NOT reassign its Card/Conversation!
+            world.wait_until(8_000, |w| {
+                let snap = w.server("remote-b").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_c_lbl && a.terminal.is_some() && !a.finished()
+                    })
+                }))
+            })?;
+            let (lbl_agent_tid, lbl_agent_addr) = {
+                let snap = world.server("remote-b").unwrap().snapshot()?;
+                let t = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_c_lbl))
+                    .unwrap();
+                (
+                    t.id.clone(),
+                    t.agent.as_ref().unwrap().terminal.clone().unwrap(),
+                )
+            };
+            herdr_b.set_foreground(
+                &lbl_agent_addr,
+                Some(json!({ "cwd": b_dir2, "name": "codex" })),
+            );
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-b").unwrap().snapshot()?;
+                Ok(snap.terminal_contexts.iter().any(|c| {
+                    c.terminal_id == lbl_agent_tid
+                        && c.project_id.as_deref() == Some(raw_pid_b2.as_str())
+                }))
+            })?;
+            {
+                let snap = world.server("remote-b").unwrap().snapshot()?;
+                let conv = snap
+                    .conversations
+                    .iter()
+                    .find(|c| c.card_id == raw_c_lbl)
+                    .unwrap();
+                ensure!(
+                    conv.project_id == raw_pid_b1 && conv.card_id == raw_c_lbl,
+                    "Agent foreground directory change must never reassign Conversation project/card"
+                );
+            }
+
+            // Archive worktree protection by an unrelated independent terminal whose foreground cwd is inside the worktree!
+            let c_arch = world.client_call(
+                "card.create",
+                json!({ "project_id": pid_b2, "title": "Archive Protected Worktree" }),
+                Some(&pid_b2),
+            )?;
+            let raw_c_arch = unqualified_entity_id(c_arch["id"].as_str().unwrap()).to_owned();
+            let card_sh = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "project_id": raw_pid_b2, "card_id": raw_c_arch }),
+            )?;
+            let card_sh_id = card_sh["id"].as_str().unwrap().to_owned();
+            let arch_wt = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .into_iter()
+                .find(|c| c.id == raw_c_arch)
+                .unwrap()
+                .worktree
+                .context("Card shell terminal must create card worktree")?;
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": card_sh_id }),
+            )?;
+            // Move unrelated independent terminal `ind_tid` into `arch_wt`, then archive card -> worktree survives!
+            herdr_b.set_foreground(&ind_addr, Some(json!({ "cwd": arch_wt, "name": "zsh" })));
+            world.advance(Duration::from_millis(250))?;
+            let arch_rev = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .into_iter()
+                .find(|c| c.id == raw_c_arch)
+                .unwrap()
+                .revision;
+            let _ = world.server_call(
+                "remote-b",
+                "card.archive",
+                json!({ "card_id": raw_c_arch, "revision": arch_rev }),
+            )?;
+            ensure!(
+                std::path::Path::new(&arch_wt).is_dir(),
+                "card.archive deleted worktree still occupied by unrelated independent terminal!"
+            );
+
+            // Manual `terminal.interrupt` idempotency + Core identity fence rejecting `terminal.end` without bumping card rev!
+            let intr_before = herdr_b.interrupted_terminals().len();
+            let intr_args = json!({
+                "terminal_id": ind_tid,
+                "request_key": format!("man-intr-once-{seed}"),
+            });
+            let _ = world.server_call("remote-b", "terminal.interrupt", intr_args.clone())?;
+            let _ = world.server_call("remote-b", "terminal.interrupt", intr_args)?;
+            ensure!(
+                herdr_b.interrupted_terminals().len() == intr_before + 1,
+                "Idempotent terminal.interrupt must send exactly 1 physical interrupt"
+            );
+            let card_rev_before_fence = world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .into_iter()
+                .find(|c| c.id == raw_c_lbl)
+                .unwrap()
+                .revision;
+            herdr_b.restart_core(format!("core-fence-final-{seed}"));
+            world.wait_until(8_000, |w| {
+                let snap = w.server("remote-b").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == ind_tid
+                        && t.runtime
+                            .as_ref()
+                            .is_some_and(|r| r.connection == "replaced")
+                }))
+            })?;
+            ensure!(
+                world
+                    .server_call(
+                        "remote-b",
+                        "terminal.end",
+                        json!({ "terminal_id": ind_tid })
+                    )
+                    .is_err(),
+                "terminal.end must be fenced off after Core identity replacement"
+            );
+            // Core fence for `inherit_terminal_id`: mismatched Core must not supply old subdir cwd!
+            let fenced_inh = world.server_call(
+                "remote-b",
+                "terminal.create",
+                json!({ "inherit_terminal_id": wt_tid }),
+            )?;
+            let fenced_addr = fenced_inh["runtime"]["terminal"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            ensure!(
+                herdr_b.terminal_record(&fenced_addr).unwrap()["cwd"].as_str() != wt_sub.to_str(),
+                "Core identity fence must not inherit stale subdir cwd from replaced Core"
+            );
+            ensure!(
+                world
+                    .server("remote-b")
+                    .unwrap()
+                    .snapshot()?
+                    .cards
+                    .into_iter()
+                    .find(|c| c.id == raw_c_lbl)
+                    .unwrap()
+                    .revision
+                    == card_rev_before_fence,
+                "Manual terminal controls and core fence must never advance unrelated Card revisions"
+            );
+            // Close newly spawned fenced terminal cleanly.
+            let _ = world.server_call(
+                "remote-b",
+                "terminal.close",
+                json!({ "terminal_id": fenced_inh["id"] }),
+            )?;
+            let _ = world.server_call(
+                "remote-b",
+                "worktree.remove",
+                json!({ "worktree_id": wt.id, "force": true }),
+            );
+        }
+        world.hit("sessions.two_phase_adopt_and_cwd_rename");
 
         // Final heal, quiesce, full invariants + SQLite integrity + canonical digest.
         world.heal_and_quiesce(20_000)?;

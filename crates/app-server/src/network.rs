@@ -718,9 +718,22 @@ pub fn collect_canban_discovery_candidates(
 
 /// Performs a one-shot bounded parallel TCP probe across `candidates`, keeping only reachable Canban hosts.
 pub fn probe_canban_discovery_candidates(
-    mut candidates: Vec<DiscoveredCanbanHost>,
+    candidates: Vec<DiscoveredCanbanHost>,
     timeout: Duration,
 ) -> Vec<DiscoveredCanbanHost> {
+    probe_canban_discovery_candidates_with_prober(candidates, |addr| {
+        probe_tcp_reachable(addr, timeout)
+    })
+}
+
+/// Probes `candidates` using a custom reachability prober (used in DST without real TCP sockets).
+pub fn probe_canban_discovery_candidates_with_prober<F>(
+    mut candidates: Vec<DiscoveredCanbanHost>,
+    prober: F,
+) -> Vec<DiscoveredCanbanHost>
+where
+    F: Fn(&str) -> Result<u64> + Sync,
+{
     if candidates.is_empty() {
         return candidates;
     }
@@ -737,7 +750,7 @@ pub fn probe_canban_discovery_candidates(
                     if i >= total {
                         break;
                     }
-                    if let Ok(rtt) = probe_tcp_reachable(&candidates[i].addr, timeout) {
+                    if let Ok(rtt) = prober(&candidates[i].addr) {
                         *results[i].lock().unwrap() = Some(rtt);
                     }
                 }
@@ -762,20 +775,35 @@ pub fn probe_canban_discovery_candidates(
     reachable
 }
 
-/// Discovers reachable Canban hosts across this machine's saved TCP hosts and an optional Tailscale status snapshot.
-pub fn discover_canban_hosts_with_status(
+/// Discovers reachable Canban hosts using a custom TCP reachability prober.
+pub fn discover_canban_hosts_with_status_and_prober<F>(
     home: &Path,
     self_server_id: &str,
     status_json: Option<&str>,
-) -> (Vec<DiscoveredCanbanHost>, bool) {
+    prober: F,
+) -> (Vec<DiscoveredCanbanHost>, bool)
+where
+    F: Fn(&str) -> Result<u64> + Sync,
+{
     let hosts_file: HostsFile = std::fs::read(home.join("config/hosts.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     let (candidates, ts_available) =
         collect_canban_discovery_candidates(&hosts_file.hosts, status_json, self_server_id);
-    let reachable = probe_canban_discovery_candidates(candidates, Duration::from_millis(1500));
+    let reachable = probe_canban_discovery_candidates_with_prober(candidates, prober);
     (reachable, ts_available)
+}
+
+/// Discovers reachable Canban hosts across this machine's saved TCP hosts and an optional Tailscale status snapshot.
+pub fn discover_canban_hosts_with_status(
+    home: &Path,
+    self_server_id: &str,
+    status_json: Option<&str>,
+) -> (Vec<DiscoveredCanbanHost>, bool) {
+    discover_canban_hosts_with_status_and_prober(home, self_server_id, status_json, |addr| {
+        probe_tcp_reachable(addr, Duration::from_millis(1500))
+    })
 }
 
 /// Discovers reachable Canban hosts across this machine's saved TCP hosts and same-user Tailscale peers.

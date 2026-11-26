@@ -3,14 +3,56 @@
 //! `condition` branching (`source_trust == external_pr` vs trusted local), `notify` steps,
 //! `workflow.decide(rework)` + `approve`, `workflow.stop`, and post-bounce recovery assertions.
 use crate::{
+    exec::SimShellOutcome,
     github::SimIssue,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
     world::{SimWorldConfig, run_with_world},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use canban_types::EnvWriteEntry;
 use serde_json::json;
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+fn collect_log_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let path = ent.path();
+        if path.is_dir() {
+            collect_log_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "log") {
+            out.push(path);
+        }
+    }
+}
+
+const EXTERNAL_SECRET_SCRIPT_YAML: &str = r#"schema: 12
+id: ext-sec-wf
+name: External Trust Secret Strip Check
+workspace:
+  create_worktree: false
+  sync_base: false
+on:
+  start_ext_sec:
+    event: manual
+    start_at: script:ext_check
+steps:
+  - id: script:ext_check
+    uses: script
+    env:
+      SEC_REF: "${{ secrets.PROJ_SEC }}"
+      PLAIN_REF: "${{ vars.SAFE_PLAIN }}"
+    run: "sim-ext-sec-check"
+    next: finish
+  - id: finish
+    uses: complete
+"#;
 
 const FAULT_WORKFLOW_YAML: &str = r#"schema: 12
 id: fault-flow
@@ -394,6 +436,139 @@ pub fn run(seed: u64) -> Result<u64> {
         // Terminate external PR workflow with `workflow.stop` + verify clean quiescence!
         let _ = world.client_call("workflow.stop", json!({ "run_id": q_ext_wf }), Some(&pid))?;
         world.hit("workflow_faults.stop_at_gate");
+
+        // 4. External PR & cardless `"external"` runs strip all secrets & log `Skipped secret(s)` notice!
+        let sec_global_ext = format!("EXT_SKIP_GLOBAL_777777_{seed}");
+        let sec_proj_ext = format!("EXT_SKIP_PROJ_888888_{seed}");
+        oracle.track_secret(sec_global_ext.clone());
+        oracle.track_secret(sec_proj_ext.clone());
+        let _ = world.client_call(
+            "env.save",
+            json!({
+                "scope": "global",
+                "target_id": "",
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([(
+                    "GLOBAL_SEC".into(),
+                    EnvWriteEntry::Secret { value: Some(sec_global_ext.clone()), keep_existing: false },
+                )]),
+            }),
+            None,
+        )?;
+        world.client_sync_global_env_now()?;
+        world.heal_and_quiesce(15_000)?;
+        let _ = world.server_call(
+            "remote-a",
+            "env.save",
+            json!({
+                "scope": "project",
+                "target_id": raw_pid,
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([
+                    ("SAFE_PLAIN".into(), EnvWriteEntry::Plain { value: "SAFE_PLAIN_VAL".into() }),
+                    ("PROJ_SEC".into(), EnvWriteEntry::Secret { value: Some(sec_proj_ext.clone()), keep_existing: false }),
+                ]),
+            }),
+        )?;
+        let exec_remote = world
+            .exec_runner("remote-a")
+            .context("remote-a SimExec unavailable")?;
+        exec_remote.set_script_default(
+            "script:ext_check",
+            SimShellOutcome::ok("external-script-ok\n"),
+        );
+
+        let ext_sources =
+            world.client_call("workflow.sources", json!({ "project_id": pid }), Some(&pid))?;
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid,
+                "revision": ext_sources["revision"],
+                "sources": [
+                    { "filename": "fault-flow.yaml", "source": FAULT_WORKFLOW_YAML },
+                    { "filename": "ext-sec-wf.yaml", "source": EXTERNAL_SECRET_SCRIPT_YAML },
+                ],
+            }),
+            Some(&pid),
+        )?;
+        let ext_sec_run = world.client_call(
+            "workflow.start",
+            json!({
+                "workflow_id": "ext-sec-wf",
+                "card_id": ext_cid,
+                "entry": "start_ext_sec",
+                "request_key": format!("wff-ext-sec-run-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        let ext_sec_run_id =
+            canban_types::split_qualified_host_id(ext_sec_run["id"].as_str().unwrap())
+                .map(|(_, r)| r.to_owned())
+                .unwrap_or_else(|| ext_sec_run["id"].as_str().unwrap().to_owned());
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .workflow_runs
+                .iter()
+                .any(|r| r.id == ext_sec_run_id && r.state == "completed"))
+        })?;
+        // Verify recorded script command stripped secrets & kept plain vars!
+        let ext_cmd = exec_remote
+            .recorded_commands()
+            .into_iter()
+            .find(|c| {
+                c.env_set.get("CANBAN_STEP_ID").map(String::as_str) == Some("script:ext_check")
+            })
+            .context("Expected script:ext_check recorded command")?;
+        ensure!(!ext_cmd.env_set.contains_key("GLOBAL_SEC"));
+        ensure!(!ext_cmd.env_set.contains_key("PROJ_SEC"));
+        ensure!(ext_cmd.env_set.get("SEC_REF").map(String::as_str) == Some(""));
+        ensure!(ext_cmd.env_set.get("PLAIN_REF").map(String::as_str) == Some("SAFE_PLAIN_VAL"));
+        ensure!(ext_cmd.env_set.get("SAFE_PLAIN").map(String::as_str) == Some("SAFE_PLAIN_VAL"));
+
+        // Verify script `.log` contains `Skipped secret(s)` notice & zero plaintext secrets!
+        let mut ext_logs = Vec::new();
+        collect_log_files(&world.servers["remote-a"].home, &mut ext_logs);
+        let combined_ext_logs: String = ext_logs
+            .into_iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        ensure!(
+            combined_ext_logs.contains("external-script-ok")
+                && combined_ext_logs.contains("Skipped secret(s)")
+                && (combined_ext_logs.contains("GLOBAL_SEC")
+                    || combined_ext_logs.contains("PROJ_SEC")),
+            "Expected skipped-secret notice in external PR script logs: {combined_ext_logs}"
+        );
+        ensure!(!combined_ext_logs.contains(&sec_global_ext));
+        ensure!(!combined_ext_logs.contains(&sec_proj_ext));
+
+        // Cardless `"external"` trust must also skip secrets & expand `${{ secrets.* }}` -> `""`.
+        {
+            let remote_srv = world.server("remote-a").unwrap();
+            let proj_obj = remote_srv
+                .snapshot()?
+                .projects
+                .into_iter()
+                .find(|p| p.id == raw_pid)
+                .unwrap();
+            let wf_env = BTreeMap::from([("REF".into(), "${{ secrets.PROJ_SEC }}".into())]);
+            let ext_resolved = remote_srv.resolve_runtime_env(
+                None,
+                Some(&proj_obj),
+                &BTreeMap::new(),
+                Some(&wf_env),
+                Some("external"),
+            )?;
+            ensure!(!ext_resolved.env.contains_key("GLOBAL_SEC"));
+            ensure!(!ext_resolved.env.contains_key("PROJ_SEC"));
+            ensure!(ext_resolved.env.get("REF").map(String::as_str) == Some(""));
+            ensure!(
+                ext_resolved.env.get("SAFE_PLAIN").map(String::as_str) == Some("SAFE_PLAIN_VAL")
+            );
+            ensure!(!ext_resolved.skipped_untrusted_secrets.is_empty());
+        }
+        world.hit("workflow_faults.external_secret_stripping");
 
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;

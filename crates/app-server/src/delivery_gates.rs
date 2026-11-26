@@ -63,7 +63,7 @@ impl Gate {
     }
 }
 
-pub(crate) struct GateGuard {
+pub struct GateGuard {
     gate: Arc<Gate>,
 }
 
@@ -154,6 +154,22 @@ impl AppServer {
             .gate(project_id.to_owned())
             .try_lock(project_id)
             .ok()
+    }
+
+    pub fn try_lock_checkout_for_sim(
+        &self,
+        project: &Project,
+        holder: impl Into<String>,
+    ) -> std::result::Result<GateGuard, String> {
+        self.try_lock_checkout(project, holder)
+    }
+
+    pub fn try_lock_card_delivery_for_sim(
+        &self,
+        card_id: &str,
+        holder: impl Into<String>,
+    ) -> Result<GateGuard> {
+        self.try_lock_card_delivery(card_id, holder)
     }
 
     pub(crate) fn try_lock_card_delivery(

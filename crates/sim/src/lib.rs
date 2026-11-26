@@ -24,17 +24,27 @@ mod tests {
 
     #[test]
     fn determinism_same_seed_produces_identical_digest() {
-        let d1 = scenarios::chaos::run(777_001, 40).expect("first chaos run");
-        let d2 = scenarios::chaos::run(777_001, 40).expect("second chaos run");
-        assert_eq!(
-            d1, d2,
-            "Determinism violation: identical chaos seed produced different trace+canonical digests ({d1:#x} vs {d2:#x})"
-        );
-        let d_other = scenarios::chaos::run(777_002, 40).expect("different seed chaos run");
-        assert_ne!(
-            d1, d_other,
-            "Distinct chaos seeds unexpectedly produced identical digests ({d1:#x})"
-        );
+        for scenario in [
+            super::Scenario::CardAutomation,
+            super::Scenario::RemoteFaults,
+            super::Scenario::EnvSync,
+        ] {
+            let d1 = super::run_scenario(scenario, 777_001, 40).expect("first scenario run");
+            let d2 = super::run_scenario(scenario, 777_001, 40).expect("second scenario run");
+            assert_eq!(
+                d1,
+                d2,
+                "Determinism violation in {}: identical seed produced different digests ({d1:#x} vs {d2:#x})",
+                scenario.name(),
+            );
+            let d_other = super::run_scenario(scenario, 777_002, 40).expect("different seed run");
+            assert_ne!(
+                d1,
+                d_other,
+                "Distinct seeds in {} unexpectedly produced identical digests ({d1:#x})",
+                scenario.name(),
+            );
+        }
     }
 
     #[test]

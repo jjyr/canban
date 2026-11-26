@@ -253,8 +253,16 @@ impl AppServer {
                 Ok(serde_json::to_value(catalog)?)
             }
             "host.discover_canban" => {
+                let probe_override = self.tcp_probe_override.lock().unwrap().clone();
                 let has_override = self.tailscale_verifier_override.lock().unwrap().is_some();
-                let (hosts, ts_avail) = if has_override || !self.exec_runner.is_system() {
+                let (hosts, ts_avail) = if let Some(prober) = probe_override {
+                    network::discover_canban_hosts_with_status_and_prober(
+                        &self.home,
+                        &self.identity,
+                        None,
+                        |addr| prober(addr),
+                    )
+                } else if has_override || !self.exec_runner.is_system() {
                     network::discover_canban_hosts_with_status(&self.home, &self.identity, None)
                 } else {
                     network::discover_canban_hosts(&self.home, &self.identity)

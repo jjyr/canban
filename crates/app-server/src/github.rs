@@ -984,6 +984,7 @@ impl AppServer {
             Ok(())
         })?;
         self.wake_runtime();
+        self.request_scripts();
         Ok(())
     }
 }

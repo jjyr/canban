@@ -32,11 +32,13 @@
 //!   `transport.local_framed_rpc`, `oracle.read_your_writes_checked`, `oracle.at_most_once_checked`).
 use crate::{
     exec::{SimGitRepo, SimShellOutcome},
+    github::SimIssue,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
     world::{PRIMARY_CLIENT, SimWorld, SimWorldConfig, StorageFaultKind, run_with_world},
 };
 use anyhow::{Context, Result, ensure};
+use canban_app_server::ScriptExecutionMode;
 use canban_types::{
     ALL_FAILPOINTS, FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE, FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB,
     FP_HERDR_AFTER_SEND_BEFORE_DB, FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
@@ -269,6 +271,55 @@ steps:
     uses: complete
 "#;
 
+const REMOTE_CARDLESS_AGENT_FP1_YAML: &str = r#"schema: 12
+id: remote-cardless-agent-fp1
+name: Remote Cardless Agent FP1 Flow
+on:
+  triage_event:
+    event: github.issue.opened
+    start_at: triage
+    cardless: true
+steps:
+  - id: triage
+    uses: agent
+    with:
+      profile: developer
+      instruction: Triage simulated issue under FP1
+    next: done
+  - id: done
+    uses: complete
+"#;
+
+const REMOTE_SCRIPT_FP1_YAML: &str = r#"schema: 12
+id: remote-script-fp1
+name: Remote Herdr Script FP1 Flow
+workspace:
+  create_worktree: false
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+on:
+  start_card:
+    event: manual
+    start_at: check
+  triage_script:
+    event: github.issue.opened
+    start_at: check
+    cardless: true
+steps:
+  - id: check
+    stage: backlog
+    uses: script
+    with:
+      run: echo hi
+      timeout_seconds: 30
+    next: done
+  - id: done
+    stage: backlog
+    uses: complete
+"#;
+
 fn strip_host(id: &str) -> String {
     canban_types::split_qualified_host_id(id)
         .map(|(_, r)| r.to_owned())
@@ -475,6 +526,8 @@ pub fn run(seed: u64) -> Result<u64> {
     let mut cfg = SimWorldConfig::desktop_default(seed, "scheduler_cross_contention");
     cfg.framed_local_transport = true;
     cfg.remote_hosts = vec!["remote-a".into()];
+    cfg.host_script_execution_modes
+        .insert("remote-a".into(), ScriptExecutionMode::Herdr);
     cfg.tick_ms = 50;
     // Constant message latency + deterministic host step order keep this heavy multi-slice
     // scenario 100% immune to `yamux-0.14.1`'s wall-clock 10s RTT `PING_INTERVAL`
@@ -1782,6 +1835,727 @@ pub fn run(seed: u64) -> Result<u64> {
             refreshed_pr["number"].as_u64().unwrap_or(0) >= 1 && refreshed_pr["state"] == "open",
             "Expected github.pr.refresh to reconcile PR cleanly after FP #3, got {refreshed_pr}"
         );
+        let after_pub_rev = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let c = snap.cards.iter().find(|c| c.id == raw_cid_d3).unwrap();
+            ensure!(
+                c.attention.is_none() && c.human_gate.is_none(),
+                "github.pr.refresh must clear stale attention/human_gate after FP #3 publish"
+            );
+            c.revision
+        };
+
+        // --- Failpoint #3b: `github.pr.merge` hitting FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB + refresh ---
+        let fp3_fired_before_merge = fp_remote
+            .stats_for(FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB)
+            .fired;
+        fp_remote.arm(
+            FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB,
+            FailpointAction::FailOnce("s18-fp3-after-pr-merge".into()),
+        );
+        let merge_res = world.server_call(
+            "remote-a",
+            "github.pr.merge",
+            json!({
+                "card_id": raw_cid_d3,
+                "revision": after_pub_rev,
+                "head": d3_head,
+                "request_key": format!("s18-fp3-merge-{seed}"),
+            }),
+        )?;
+        ensure!(
+            merge_res["state"] == "unknown",
+            "Expected FP #3 github.pr.merge to return state='unknown', got {merge_res}"
+        );
+        ensure!(
+            fp_remote
+                .stats_for(FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB)
+                .fired
+                == fp3_fired_before_merge + 1,
+            "FP #3 merge sub-site must have fired"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let c = snap.cards.iter().find(|c| c.id == raw_cid_d3).unwrap();
+            ensure!(
+                c.delivery.is_none()
+                    && c.attention.is_some()
+                    && c.pull_request.as_ref().is_some_and(|p| !p.merged),
+                "After FP #3 merge crash, expected no delivery + attention + unmerged PR, got delivery={:?} attention={:?} pr={:?}",
+                c.delivery,
+                c.attention,
+                c.pull_request
+            );
+        }
+        let refreshed_merged = world.client_call(
+            "github.pr.refresh",
+            json!({ "card_id": cid_d3 }),
+            Some(&pid_remote),
+        )?;
+        ensure!(
+            refreshed_merged["merged"] == true,
+            "Expected github.pr.refresh to discover merged PR after FP #3 merge, got {refreshed_merged}"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let c = snap.cards.iter().find(|c| c.id == raw_cid_d3).unwrap();
+            ensure!(
+                c.delivery.is_some()
+                    && c.resolved()
+                    && c.attention.is_none()
+                    && c.human_gate.is_none(),
+                "Expected github.pr.refresh to complete delivery & clear attention/human_gate"
+            );
+        }
+
+        // --- Failpoint #1b: `pump_cardless_agents` hitting FP #1 (immediate kill + kill-outage `orphan_kill_pending`) ---
+        let herdr_remote = world.herdr("remote-a").unwrap();
+        let rem_sources_ca = world.client_call(
+            "workflow.sources",
+            json!({ "project_id": pid_remote }),
+            Some(&pid_remote),
+        )?;
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid_remote,
+                "revision": rem_sources_ca["revision"],
+                "sources": [
+                    { "filename": "remote-pr-fp-flow.yaml", "source": REMOTE_PR_FLOW_YAML },
+                    { "filename": "remote-cardless-agent-fp1.yaml", "source": REMOTE_CARDLESS_AGENT_FP1_YAML },
+                ],
+            }),
+            Some(&pid_remote),
+        )?;
+        // Establish GitHub event watermark baseline so subsequent newly-opened issues emit `github.issue.opened`.
+        let _ = world.client_call(
+            "github.sync",
+            json!({ "project_id": pid_remote }),
+            Some(&pid_remote),
+        )?;
+        // Part A: immediate orphan kill when Herdr is healthy.
+        let rem_fp1_before_ca = fp_remote
+            .stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)
+            .fired;
+        let rem_killed_before_ca = herdr_remote.killed_terminals().len();
+        fp_remote.arm(
+            FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+            FailpointAction::FailOnce("s18-cardless-agent-fp1-imm".into()),
+        );
+        world.github.upsert_issue(
+            gh_repo,
+            SimIssue {
+                number: 701,
+                title: format!("Cardless Agent FP1 Part A ({seed})"),
+                body: "Trigger cardless agent FP1 immediate orphan kill".into(),
+                state: "open".into(),
+                author: "alice".into(),
+                labels: vec![],
+                updated_at: "2026-06-01T00:05:00Z".into(),
+                is_pr: false,
+                draft: false,
+                merged: false,
+                head_sha: String::new(),
+                head_ref: String::new(),
+                base_ref: String::new(),
+                check_conclusion: None,
+            },
+        );
+        let _ = world.client_call(
+            "github.sync",
+            json!({ "project_id": pid_remote }),
+            Some(&pid_remote),
+        )?;
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.workflow_runs.iter().any(|r| {
+                r.is_cardless()
+                    && r.workflow_id == "remote-cardless-agent-fp1"
+                    && r.state == "failed"
+                    && r.error.is_some()
+                    && r.inputs.get("agent_terminal").is_none()
+            }))
+        })?;
+        ensure!(
+            fp_remote
+                .stats_for(FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)
+                .fired
+                == rem_fp1_before_ca + 1,
+            "Cardless agent FP #1 Part A must have fired"
+        );
+        ensure!(
+            herdr_remote.killed_terminals().len() == rem_killed_before_ca + 1,
+            "Cardless agent FP #1 Part A must kill orphan PTY immediately"
+        );
+        let ca_part_a_id = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .workflow_runs
+            .into_iter()
+            .find(|r| r.is_cardless() && r.workflow_id == "remote-cardless-agent-fp1")
+            .unwrap()
+            .id;
+
+        // Part B: kill fails -> `orphan_kill_pending` persists across Herdr offline outage -> kills after recovery!
+        let rem_terms_before_ca_b = herdr_remote.terminal_addresses().len();
+        herdr_remote.inject_next_kill_error("s18-cardless-agent-kill-outage-1");
+        herdr_remote.inject_next_kill_error("s18-cardless-agent-kill-outage-2");
+        fp_remote.arm(
+            FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+            FailpointAction::FailOnce("s18-cardless-agent-fp1-outage".into()),
+        );
+        world.github.upsert_issue(
+            gh_repo,
+            SimIssue {
+                number: 702,
+                title: format!("Cardless Agent FP1 Part B ({seed})"),
+                body: "Trigger cardless agent FP1 orphan_kill_pending outage".into(),
+                state: "open".into(),
+                author: "alice".into(),
+                labels: vec![],
+                updated_at: "2026-06-01T00:06:00Z".into(),
+                is_pr: false,
+                draft: false,
+                merged: false,
+                head_sha: String::new(),
+                head_ref: String::new(),
+                base_ref: String::new(),
+                check_conclusion: None,
+            },
+        );
+        let _ = world.client_call(
+            "github.sync",
+            json!({ "project_id": pid_remote }),
+            Some(&pid_remote),
+        )?;
+        let mut ca_orphan_run_id = String::new();
+        let mut ca_orphan_addr = String::new();
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            if let Some(r) = snap.workflow_runs.iter().find(|r| {
+                r.is_cardless()
+                    && r.workflow_id == "remote-cardless-agent-fp1"
+                    && r.id != ca_part_a_id
+                    && r.state == "waiting_agent"
+                    && r.inputs["agent_terminal"]["orphan_kill_pending"].as_bool() == Some(true)
+            }) {
+                ca_orphan_run_id = r.id.clone();
+                ca_orphan_addr = r.inputs["agent_terminal"]["address"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let h = w.herdr("remote-a").unwrap();
+                h.clear_injected_faults();
+                h.set_offline(true);
+                return Ok(true);
+            }
+            Ok(false)
+        })?;
+        ensure!(
+            !ca_orphan_addr.is_empty()
+                && herdr_remote.terminal_addresses().len() == rem_terms_before_ca_b + 1,
+            "Expected exactly 1 orphan cardless agent PTY before offline outage"
+        );
+        // Stay offline for 1.5s: `orphan_kill_pending` must persist with ZERO duplicate launches!
+        world.advance(Duration::from_millis(1_500))?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let r = snap
+                .workflow_runs
+                .iter()
+                .find(|r| r.id == ca_orphan_run_id)
+                .unwrap();
+            ensure!(
+                r.state == "waiting_agent"
+                    && r.inputs["agent_terminal"]["orphan_kill_pending"].as_bool() == Some(true),
+                "orphan_kill_pending must persist while Herdr is offline: {r:?}"
+            );
+            ensure!(
+                herdr_remote.terminal_addresses().len() == rem_terms_before_ca_b + 1,
+                "Cardless agent pump launched a duplicate PTY while Herdr was offline!"
+            );
+        }
+        // Recover Herdr -> next tick kills orphan PTY and transitions run cleanly to `failed`!
+        herdr_remote.set_offline(false);
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.workflow_runs.iter().any(|r| {
+                r.id == ca_orphan_run_id
+                    && r.state == "failed"
+                    && r.inputs.get("agent_terminal").is_none()
+            }))
+        })?;
+        ensure!(
+            herdr_remote
+                .terminal_record(&ca_orphan_addr)
+                .and_then(|v| v["state"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("finished")
+                && herdr_remote.terminal_addresses().len() == rem_terms_before_ca_b + 1,
+            "Cardless agent orphan PTY must be killed cleanly on Herdr recovery without relaunch"
+        );
+
+        // --- Failpoint #1c: `pump_scripts_herdr` hitting FP #1 (card immediate kill + cardless kill-outage) ---
+        let rem_sources_sc = world.client_call(
+            "workflow.sources",
+            json!({ "project_id": pid_remote }),
+            Some(&pid_remote),
+        )?;
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid_remote,
+                "revision": rem_sources_sc["revision"],
+                "sources": [
+                    { "filename": "remote-pr-fp-flow.yaml", "source": REMOTE_PR_FLOW_YAML },
+                    { "filename": "remote-script-fp1.yaml", "source": REMOTE_SCRIPT_FP1_YAML },
+                ],
+            }),
+            Some(&pid_remote),
+        )?;
+        // Part A: Card-bound Herdr script hits FP #1 -> kills orphan PTY immediately & pauses at waiting_approval.
+        let card_d3s = world.client_call(
+            "card.create",
+            json!({ "project_id": pid_remote, "title": format!("FP1 Herdr Script Card ({seed})") }),
+            Some(&pid_remote),
+        )?;
+        let cid_d3s = card_d3s["id"].as_str().unwrap().to_owned();
+        let raw_cid_d3s = strip_host(&cid_d3s);
+        let rem_terms_before_sc_a = herdr_remote.terminal_addresses().len();
+        let rem_killed_before_sc_a = herdr_remote.killed_terminals().len();
+        fp_remote.arm(
+            FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+            FailpointAction::FailOnce("s18-script-herdr-fp1-card".into()),
+        );
+        let _ = world.client_call(
+            "workflow.start",
+            json!({
+                "workflow_id": "remote-script-fp1",
+                "card_id": cid_d3s,
+                "entry": "start_card",
+                "request_key": format!("s18-sc-card-start-{seed}"),
+            }),
+            Some(&pid_remote),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.workflow_runs.iter().any(|r| {
+                r.card_id.as_deref() == Some(raw_cid_d3s.as_str())
+                    && r.state == "waiting_approval"
+                    && r.inputs.get("script_terminal").is_none()
+            }))
+        })?;
+        world.advance(Duration::from_millis(500))?;
+        let sc_card_run_id = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let c = snap.cards.iter().find(|c| c.id == raw_cid_d3s).unwrap();
+            ensure!(
+                c.attention.is_some() && c.human_gate.is_some(),
+                "Card script FP #1 must set attention & human_gate"
+            );
+            ensure!(
+                herdr_remote.terminal_addresses().len() == rem_terms_before_sc_a + 1
+                    && herdr_remote.killed_terminals().len() == rem_killed_before_sc_a + 1,
+                "Card script FP #1 must kill orphan PTY immediately without duplicate launch"
+            );
+            snap.workflow_runs
+                .iter()
+                .find(|r| r.card_id.as_deref() == Some(raw_cid_d3s.as_str()))
+                .unwrap()
+                .id
+                .clone()
+        };
+        let _ = world.client_call(
+            "workflow.stop",
+            json!({ "run_id": canban_types::qualify_host_id("remote-a", &sc_card_run_id) }),
+            Some(&pid_remote),
+        )?;
+
+        // Part B: Cardless Herdr script hits FP #1 + kill outage -> `orphan_kill_pending` persists offline -> kills on recovery!
+        let rem_terms_before_sc_b = herdr_remote.terminal_addresses().len();
+        for i in 1..=10 {
+            herdr_remote.inject_next_kill_error(format!("s18-script-herdr-kill-outage-{i}"));
+        }
+        fp_remote.arm(
+            FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB,
+            FailpointAction::FailOnce("s18-script-herdr-fp1-cardless".into()),
+        );
+        world.github.upsert_issue(
+            gh_repo,
+            SimIssue {
+                number: 703,
+                title: format!("Cardless Script FP1 Part B ({seed})"),
+                body: "Trigger cardless script FP1 orphan_kill_pending outage".into(),
+                state: "open".into(),
+                author: "alice".into(),
+                labels: vec![],
+                updated_at: "2026-06-01T00:07:00Z".into(),
+                is_pr: false,
+                draft: false,
+                merged: false,
+                head_sha: String::new(),
+                head_ref: String::new(),
+                base_ref: String::new(),
+                check_conclusion: None,
+            },
+        );
+        let _ = world.server_call(
+            "remote-a",
+            "github.sync",
+            json!({ "project_id": strip_host(&pid_remote) }),
+        )?;
+        let mut sc_orphan_run_id = String::new();
+        let mut sc_orphan_addr = String::new();
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            if let Some(r) = snap.workflow_runs.iter().find(|r| {
+                r.is_cardless()
+                    && r.workflow_id == "remote-script-fp1"
+                    && r.state == "waiting_script"
+                    && r.inputs["script_terminal"]["orphan_kill_pending"].as_bool() == Some(true)
+            }) {
+                sc_orphan_run_id = r.id.clone();
+                sc_orphan_addr = r.inputs["script_terminal"]["address"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let h = w.herdr("remote-a").unwrap();
+                h.clear_injected_faults();
+                h.set_offline(true);
+                return Ok(true);
+            }
+            Ok(false)
+        })?;
+        ensure!(
+            !sc_orphan_addr.is_empty()
+                && herdr_remote.terminal_addresses().len() == rem_terms_before_sc_b + 1,
+            "Expected exactly 1 orphan script PTY before offline outage"
+        );
+        world.advance(Duration::from_millis(1_500))?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let r = snap
+                .workflow_runs
+                .iter()
+                .find(|r| r.id == sc_orphan_run_id)
+                .unwrap();
+            ensure!(
+                r.state == "waiting_script"
+                    && r.inputs["script_terminal"]["orphan_kill_pending"].as_bool() == Some(true),
+                "Script orphan_kill_pending must persist while Herdr is offline: {r:?}"
+            );
+            ensure!(
+                herdr_remote.terminal_addresses().len() == rem_terms_before_sc_b + 1,
+                "pump_scripts_herdr launched a duplicate PTY while Herdr was offline!"
+            );
+        }
+        herdr_remote.set_offline(false);
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.workflow_runs.iter().any(|r| {
+                r.id == sc_orphan_run_id
+                    && r.state == "failed"
+                    && r.inputs.get("script_terminal").is_none()
+            }))
+        })?;
+        ensure!(
+            herdr_remote
+                .terminal_record(&sc_orphan_addr)
+                .and_then(|v| v["state"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("finished")
+                && herdr_remote.terminal_addresses().len() == rem_terms_before_sc_b + 1,
+            "Cardless script orphan PTY must be killed cleanly on Herdr recovery without relaunch"
+        );
+
+        // --- Failpoint #2b: `continue_assignment` hitting `terminal.send` error, FP #2, and happy path ---
+        let _ = world.client_call(
+            "scheduler.configure",
+            json!({ "max_agents": 4 }),
+            Some(&pid_local),
+        )?;
+        let stage_continue_case = |w: &mut SimWorld,
+                                   tag: &str|
+         -> Result<(String, String, String, String, String)> {
+            let c = w.client_call(
+                "card.create",
+                json!({ "project_id": pid_local, "title": format!("Continue FP2 {tag} ({seed})") }),
+                Some(&pid_local),
+            )?;
+            let cid = c["id"].as_str().unwrap().to_owned();
+            let opened = w.client_call(
+                "agent.open",
+                json!({
+                    "card_id": cid,
+                    "profile_id": "developer",
+                    "request_key": format!("s18-cont-open-{tag}-{seed}"),
+                }),
+                Some(&pid_local),
+            )?;
+            let tid = opened["terminal_id"].as_str().unwrap().to_owned();
+            w.wait_until(10_000, |w| {
+                let snap = w.server("local").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == tid
+                        && t.agent
+                            .as_ref()
+                            .is_some_and(|a| a.state == "running" && a.terminal.is_some())
+                }))
+            })?;
+            let addr = w
+                .server("local")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| t.id == tid)
+                .unwrap()
+                .agent
+                .unwrap()
+                .terminal
+                .unwrap();
+            // Report completed while keeping PTY live; mark `working` and wait for AppServer to
+            // observe `working` so background `flush_agent_work` will not deliver the Question
+            // before our explicit `continue_assignment` call!
+            w.herdr("local").unwrap().set_status(&addr, "working", None);
+            w.wait_until(5_000, |w| {
+                let snap = w.server("local").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == tid
+                        && t.agent.as_ref().is_some_and(|a| {
+                            a.observed
+                                .as_ref()
+                                .and_then(|v| v["status"]["state"].as_str())
+                                == Some("working")
+                        })
+                }))
+            })?;
+            let _ = w.server_call(
+                "local",
+                "execution.report",
+                json!({
+                    "terminal_id": tid,
+                    "state": "completed",
+                    "message": "Retained idle turn complete",
+                    "request_key": format!("s18-cont-done-{tag}-{seed}"),
+                }),
+            )?;
+            let _ = w.server_call(
+                "local",
+                "comment.add",
+                json!({
+                    "card_id": cid,
+                    "body": format!("@developer handle continue case {tag}"),
+                    "request_key": format!("s18-cont-comment-{tag}-{seed}"),
+                }),
+            )?;
+            let wf = w.server_call(
+                "local",
+                "workflow.start",
+                json!({
+                    "workflow_id": "contention-flow",
+                    "card_id": cid,
+                    "entry": "start",
+                    "request_key": format!("s18-cont-wf-{tag}-{seed}"),
+                }),
+            )?;
+            let wf_id = wf["id"].as_str().unwrap().to_owned();
+            let snap = w.server("local").unwrap().snapshot()?;
+            let q = snap
+                .questions
+                .iter()
+                .find(|q| q.card_id == cid && q.terminal_id.as_deref() == Some(tid.as_str()))
+                .context("Pending Question missing before continue_assignment")?;
+            ensure!(
+                q.state == "pending",
+                "Expected Question to stay pending before continue_assignment, got {q:?}"
+            );
+            let qid = q.id.clone();
+            let entry = snap.terminals.iter().find(|t| t.id == tid).unwrap();
+            ensure!(
+                entry.agent.as_ref().is_some_and(|a| a.pending.is_some()),
+                "Expected retained terminal to carry queued pending assignment before continue_assignment"
+            );
+            w.herdr("local").unwrap().set_status(&addr, "idle", None);
+            Ok((cid, tid, addr, qid, wf_id))
+        };
+
+        // Case A: `terminal.send` transport error -> pending Question transitions `delivering` -> `delivery_unknown`.
+        {
+            let (cid_a, tid_a, addr_a, qid_a, wf_a) = stage_continue_case(world, "send-err")?;
+            let sends_before = herdr_local
+                .sent_inputs()
+                .iter()
+                .filter(|s| s.terminal == addr_a)
+                .count();
+            herdr_local.inject_next_send_error("simulated continue terminal.send transport error");
+            let srv = world.server("local").unwrap();
+            let snap_before = srv.snapshot()?;
+            let entry_a = snap_before
+                .terminals
+                .iter()
+                .find(|t| t.id == tid_a)
+                .cloned()
+                .unwrap();
+            let err_a = srv
+                .continue_assignment(&entry_a, &snap_before)
+                .expect_err("continue_assignment must fail when terminal.send errors");
+            ensure!(
+                format!("{err_a:#}").contains("simulated continue terminal.send transport error"),
+                "Unexpected continue_assignment Case A error: {err_a:#}"
+            );
+            let snap_a = srv.snapshot()?;
+            let q_a = snap_a.questions.iter().find(|q| q.id == qid_a).unwrap();
+            ensure!(
+                q_a.state == "delivery_unknown" && q_a.error.is_some(),
+                "Case A Question must transition to delivery_unknown (never delivered), got {q_a:?}"
+            );
+            let run_a = snap_a
+                .terminals
+                .iter()
+                .find(|t| t.id == tid_a)
+                .unwrap()
+                .agent
+                .as_ref()
+                .unwrap();
+            ensure!(run_a.state == "unknown");
+            let card_a = snap_a.cards.iter().find(|c| c.id == cid_a).unwrap();
+            ensure!(card_a.attention.is_some() && card_a.human_gate.is_some());
+            world.advance(Duration::from_secs(1))?;
+            let sends_after = herdr_local
+                .sent_inputs()
+                .iter()
+                .filter(|s| s.terminal == addr_a)
+                .count();
+            ensure!(
+                sends_after == sends_before,
+                "Failed terminal.send must not resend delivery_unknown Question"
+            );
+            let _ =
+                world.client_call("workflow.stop", json!({ "run_id": wf_a }), Some(&pid_local))?;
+            herdr_local.finish_terminal(&addr_a, 0, "exited");
+        }
+
+        // Case B: `terminal.send` succeeds, then FP #2 fires before post-send DB commit -> `delivery_unknown` + `agent.reply` recovery.
+        {
+            let (cid_b, tid_b, addr_b, qid_b, wf_b) = stage_continue_case(world, "fp2")?;
+            let sends_before = herdr_local
+                .sent_inputs()
+                .iter()
+                .filter(|s| s.terminal == addr_b)
+                .count();
+            let fp2_before = fp_local.stats_for(FP_HERDR_AFTER_SEND_BEFORE_DB).fired;
+            fp_local.arm(
+                FP_HERDR_AFTER_SEND_BEFORE_DB,
+                FailpointAction::FailOnce("s18-continue-after-send".into()),
+            );
+            let srv = world.server("local").unwrap();
+            let snap_before = srv.snapshot()?;
+            let entry_b = snap_before
+                .terminals
+                .iter()
+                .find(|t| t.id == tid_b)
+                .cloned()
+                .unwrap();
+            let err_b = srv
+                .continue_assignment(&entry_b, &snap_before)
+                .expect_err("continue_assignment must fail when FP #2 fires");
+            ensure!(
+                format!("{err_b:#}").contains(FP_HERDR_AFTER_SEND_BEFORE_DB),
+                "Unexpected continue_assignment Case B error: {err_b:#}"
+            );
+            ensure!(fp_local.stats_for(FP_HERDR_AFTER_SEND_BEFORE_DB).fired == fp2_before + 1);
+            let snap_b = srv.snapshot()?;
+            let q_b = snap_b.questions.iter().find(|q| q.id == qid_b).unwrap();
+            ensure!(
+                q_b.state == "delivery_unknown" && q_b.error.is_some(),
+                "Case B Question must transition to delivery_unknown (never delivered), got {q_b:?}"
+            );
+            let run_b = snap_b
+                .terminals
+                .iter()
+                .find(|t| t.id == tid_b)
+                .unwrap()
+                .agent
+                .as_ref()
+                .unwrap();
+            ensure!(run_b.state == "unknown");
+            let card_b = snap_b.cards.iter().find(|c| c.id == cid_b).unwrap();
+            ensure!(card_b.attention.is_some() && card_b.human_gate.is_some());
+            world.advance(Duration::from_secs(1))?;
+            let sends_after = herdr_local
+                .sent_inputs()
+                .iter()
+                .filter(|s| s.terminal == addr_b)
+                .count();
+            ensure!(
+                sends_after == sends_before + 1,
+                "Case B delivery_unknown must never double-send (before={sends_before}, after={sends_after})"
+            );
+            let reply_b = world.client_call(
+                "agent.reply",
+                json!({
+                    "card_id": cid_b,
+                    "question_id": qid_b,
+                    "body": "Handled continue Case B",
+                    "request_key": format!("s18-cont-fp2-reply-{seed}"),
+                }),
+                Some(&pid_local),
+            )?;
+            ensure!(reply_b["accepted"] == true);
+            ensure!(
+                world
+                    .server("local")
+                    .unwrap()
+                    .snapshot()?
+                    .questions
+                    .iter()
+                    .find(|q| q.id == qid_b)
+                    .unwrap()
+                    .state
+                    == "replied"
+            );
+            let _ =
+                world.client_call("workflow.stop", json!({ "run_id": wf_b }), Some(&pid_local))?;
+            herdr_local.finish_terminal(&addr_b, 0, "exited");
+        }
+
+        // Case C: Happy path -> Question commits `delivered` only after `terminal.send` succeeds.
+        {
+            let (_cid_c, tid_c, addr_c, qid_c, wf_c) = stage_continue_case(world, "happy")?;
+            let srv = world.server("local").unwrap();
+            let snap_before = srv.snapshot()?;
+            let entry_c = snap_before
+                .terminals
+                .iter()
+                .find(|t| t.id == tid_c)
+                .cloned()
+                .unwrap();
+            srv.continue_assignment(&entry_c, &snap_before)?;
+            let snap_c = srv.snapshot()?;
+            let q_c = snap_c.questions.iter().find(|q| q.id == qid_c).unwrap();
+            ensure!(
+                q_c.state == "delivered",
+                "Case C Question should be delivered: {q_c:?}"
+            );
+            let run_c = snap_c
+                .terminals
+                .iter()
+                .find(|t| t.id == tid_c)
+                .unwrap()
+                .agent
+                .as_ref()
+                .unwrap();
+            ensure!(
+                run_c.state == "running",
+                "Case C AgentRun should be running: {run_c:?}"
+            );
+            let _ =
+                world.client_call("workflow.stop", json!({ "run_id": wf_c }), Some(&pid_local))?;
+            herdr_local.finish_terminal(&addr_c, 0, "exited");
+        }
+        world.hit("sched_contention.failpoint_subsites_complete");
 
         // --- Failpoint #4: FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE (local) ---
         exec_local.enqueue_shell_outcomes(

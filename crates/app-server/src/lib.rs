@@ -21,6 +21,8 @@ pub use canban_context::FsDurability;
 pub use canban_exec::{CommandRunner, CommandSpec, ExecOutput, SystemRunner};
 pub use canban_storage::{StorageFaultInjector, StorageFaultKind};
 pub use canban_transport::auth;
+pub use delivery_gates::GateGuard;
+pub use env::ResolvedEnv;
 pub mod instance;
 mod updates;
 
@@ -98,6 +100,12 @@ impl std::error::Error for LaunchReceiptUncertain {
     }
 }
 
+/// Pluggable TCP discovery probe hook for simulation testing.
+pub type TcpProbeOverride = Arc<dyn Fn(&str) -> Result<u64> + Send + Sync>;
+
+/// Pluggable hook invoked during merge-batch test execution for simulation testing.
+pub type BatchTestsHook = Arc<dyn Fn(&str, &Path) + Send + Sync>;
+
 pub struct AppServer {
     _development: Option<instance::Registration>,
     updates_disabled: bool,
@@ -113,6 +121,12 @@ pub struct AppServer {
     disable_os_watchers: bool,
     script_execution_mode: ScriptExecutionMode,
     failpoints: Option<Arc<canban_types::Failpoints>>,
+    disable_app_subscribe: AtomicBool,
+    app_state_calls: AtomicU64,
+    runtime_state_calls: AtomicU64,
+    subscribe_rejections: AtomicU64,
+    tcp_probe_override: Mutex<Option<TcpProbeOverride>>,
+    on_batch_tests_hook: Mutex<Option<BatchTestsHook>>,
     last_cardless_prune_at: AtomicU64,
     sim_abrupt_crash: Arc<AtomicBool>,
     utilities: utilities::Utilities,
@@ -925,6 +939,12 @@ impl AppServer {
             disable_os_watchers,
             script_execution_mode,
             failpoints,
+            disable_app_subscribe: AtomicBool::new(false),
+            app_state_calls: AtomicU64::new(0),
+            runtime_state_calls: AtomicU64::new(0),
+            subscribe_rejections: AtomicU64::new(0),
+            tcp_probe_override: Mutex::new(None),
+            on_batch_tests_hook: Mutex::new(None),
             last_cardless_prune_at: AtomicU64::new(0),
             sim_abrupt_crash: Arc::new(AtomicBool::new(false)),
             utilities,
@@ -1286,9 +1306,26 @@ impl AppServer {
     pub(crate) fn subscribe_push(&self) -> tokio::sync::broadcast::Receiver<state::PushEvent> {
         self.push_tx.subscribe()
     }
-    #[cfg(test)]
-    pub(crate) fn active_tcp_count(&self) -> usize {
+    pub fn active_tcp_count(&self) -> usize {
         self.active_tcp_connections.load(Ordering::SeqCst)
+    }
+    pub fn set_disable_app_subscribe(&self, disabled: bool) {
+        self.disable_app_subscribe.store(disabled, Ordering::SeqCst);
+    }
+    pub fn app_state_call_count(&self) -> u64 {
+        self.app_state_calls.load(Ordering::SeqCst)
+    }
+    pub fn runtime_state_call_count(&self) -> u64 {
+        self.runtime_state_calls.load(Ordering::SeqCst)
+    }
+    pub fn subscribe_rejection_count(&self) -> u64 {
+        self.subscribe_rejections.load(Ordering::SeqCst)
+    }
+    pub fn set_tcp_probe_override(&self, prober: Option<TcpProbeOverride>) {
+        *self.tcp_probe_override.lock().unwrap() = prober;
+    }
+    pub fn set_on_batch_tests_hook(&self, hook: Option<BatchTestsHook>) {
+        *self.on_batch_tests_hook.lock().unwrap() = hook;
     }
     pub fn endpoint(&self) -> PathBuf {
         self.home.join("app.sock")
@@ -1379,11 +1416,30 @@ impl AppServer {
             state: self.update_state_payload(),
         });
     }
-    pub(crate) fn emit_utilities(&self) {
+    pub fn emit_utilities(&self) {
         let seq = self.push_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = self.push_tx.send(state::PushEvent::UtilitiesChanged {
             seq,
             state: self.utilities.state(),
+        });
+    }
+    pub fn emit_usage_for_sim(&self, state: Value) {
+        let seq = self.push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self
+            .push_tx
+            .send(state::PushEvent::UsageChanged { seq, state });
+    }
+    pub fn emit_state_push_for_sim(&self, topic: &'static str, bump_revision: bool) {
+        if bump_revision {
+            self.state_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        let gh_rev = self.github_revision.load(Ordering::SeqCst);
+        let seq = self.push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.push_tx.send(state::PushEvent::StateChanged {
+            seq,
+            topic,
+            card_id: None,
+            github_revision: gh_rev,
         });
     }
     pub(crate) fn emit_herdr_install(&self) {

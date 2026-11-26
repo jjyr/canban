@@ -460,11 +460,6 @@ impl AppClient {
         &self.transport
     }
 
-    #[cfg(test)]
-    pub(crate) fn upgraded_token(&self) -> Option<&str> {
-        self.transport.upgraded_token()
-    }
-
     pub fn is_remote(&self) -> bool {
         self.explicit_endpoint
     }

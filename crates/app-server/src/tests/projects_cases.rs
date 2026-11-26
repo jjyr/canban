@@ -262,26 +262,6 @@ fn app_shutdown_flushes_rpc_reply_over_tcp_and_yamux_before_teardown() {
 }
 
 #[test]
-fn provider_session_ids_reject_duplicate_bindings_across_cards() {
-    let (_dir, app, p, c) = setup();
-    let second = app
-        .call(
-            "card.create",
-            json!({"view":"full","project_id":p.id,"title":"Another Card"}),
-        )
-        .unwrap();
-    for card in [json!(c.id), second["id"].clone()] {
-        app.call("agent.open", json!({"card_id":card,"profile_id":"codex"}))
-            .unwrap();
-    }
-    let s = app.snapshot().unwrap();
-    let _first = admit(&app, &s.terminals[0]);
-    let _other = admit(&app, &s.terminals[1]);
-    app.call("agent.bind",json!({"project_id":p.id,"card":c.number,"profile_id":"codex","session_id":"short-provider-id"})).unwrap();
-    assert!(app.call("agent.bind",json!({"project_id":p.id,"card":second["number"],"profile_id":"codex","session_id":"short-provider-id"})).is_err());
-}
-
-#[test]
 fn directory_list_returns_sorted_subdirs_home_and_nonexistent_gracefully() {
     let (dir, app, _, _) = setup();
     let ws = dir.path().join("workspace");

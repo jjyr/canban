@@ -571,6 +571,9 @@ impl AppServer {
                     batch.state = "testing".into();
                     self.store.lock().unwrap().write(|db| db.save(&batch))?;
                     self.emit("review", None);
+                    if let Some(hook) = self.on_batch_tests_hook.lock().unwrap().clone() {
+                        hook(&project.id, &worktree);
+                    }
                     let log_path = self
                         .home
                         .join("terminals")

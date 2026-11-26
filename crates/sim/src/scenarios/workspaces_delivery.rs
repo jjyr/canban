@@ -27,9 +27,13 @@ use crate::{
     scenarios::finalize_digest,
     world::{ScriptExecutionMode, SimWorldConfig, run_with_world},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 const WORKSPACES_DELIVERY_YAML: &str = r#"schema: 12
@@ -166,6 +170,69 @@ steps:
       test_command: sim-merge-test --workspace
       max_conflict_attempts: 2
     next: done
+  - id: done
+    stage: review
+    uses: complete
+"#;
+
+const DELIVERY_EDGES_YAML: &str = r#"schema: 12
+id: delivery-edges-flow
+name: Delivery Edges & Merge Queue Flow
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  start_single:
+    event: manual
+    start_at: work_single
+  start_tested:
+    event: manual
+    start_at: work_tested
+steps:
+  - id: work_single
+    stage: develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement single-card delivery edge case
+    next: deliver_single
+  - id: deliver_single
+    stage: review
+    uses: deliver
+    with:
+      target_branch: main
+      strategy: rebase
+      sync_upstream: false
+      batch_size: 1
+      max_conflict_attempts: 2
+    next: done
+    on_changes_requested: work_single
+  - id: work_tested
+    stage: develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement tested batch delivery card
+    next: deliver_tested
+  - id: deliver_tested
+    stage: review
+    uses: deliver
+    with:
+      target_branch: main
+      strategy: rebase
+      sync_upstream: false
+      batch_size: 1
+      test_command: sim-target-adv-test
+      max_conflict_attempts: 2
+    next: done
+    on_changes_requested: work_tested
   - id: done
     stage: review
     uses: complete
@@ -1483,6 +1550,927 @@ pub fn run(seed: u64) -> Result<u64> {
                 == Some(main_after_b2.as_str()),
             "sync_upstream=true must push Merge commit to origin/main"
         );
+
+        // ---------------------------------------------------------------------
+        // (g) Delivery Edges & Worktree GC on `remote-a`:
+        //     auto-commit on `execution.report(completed)` + dirty main checkout pause &
+        //     `workflow.deliver` manual retry, `settle_grace` wrapup & timeout fallback,
+        //     `worktree.gc` (clean vs dirty vs within-retention), main checkout gate release
+        //     during `test_command` + `TargetAdvanced` retry, `failed_rebase_conflict` retry
+        //     without burning attempts, `failed_merger_retry` joining tail behind active card,
+        //     and per-card GitHub PR delivery lock isolation!
+        // ---------------------------------------------------------------------
+        let edges_dir = world.project_dir(&format!("ws-edges-{seed}"))?;
+        exec.register_git_repo(&edges_dir, SimGitRepo::default());
+        exec.set_shell_default(
+            "sim-target-adv-test",
+            SimShellOutcome::ok("target advanced batch tests passed\n"),
+        );
+        let _ = world.client_call(
+            "scheduler.configure",
+            json!({ "max_agents": 4 }),
+            Some(&pid),
+        )?;
+        let proj_edges = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-a",
+                "name": format!("Delivery Edges {seed}"),
+                "directory": edges_dir,
+                "target_branch": "main",
+            }),
+            None,
+        )?;
+        let pid_edges = proj_edges["id"].as_str().unwrap().to_owned();
+        let raw_pid_edges = strip_host(&pid_edges);
+        let edges_sources = world.client_call(
+            "workflow.sources",
+            json!({ "project_id": pid_edges }),
+            Some(&pid_edges),
+        )?;
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid_edges,
+                "revision": edges_sources["revision"],
+                "sources": [{ "filename": "delivery-edges.yaml", "source": DELIVERY_EDGES_YAML }],
+            }),
+            Some(&pid_edges),
+        )?;
+
+        let spawn_edges_card =
+            |w: &mut crate::world::SimWorld,
+             title: &str,
+             entry: &str,
+             tag: &str|
+             -> Result<(String, String, String, String, String, String, String)> {
+                let c = w.client_call(
+                    "card.create",
+                    json!({ "project_id": pid_edges, "title": title }),
+                    Some(&pid_edges),
+                )?;
+                let cid = c["id"].as_str().unwrap().to_owned();
+                let raw_cid = strip_host(&cid);
+                let wf = w.client_call(
+                    "workflow.start",
+                    json!({
+                        "workflow_id": "delivery-edges-flow",
+                        "card_id": cid,
+                        "entry": entry,
+                        "request_key": format!("ws-edge-start-{tag}-{seed}"),
+                    }),
+                    Some(&pid_edges),
+                )?;
+                let wf_id = strip_host(wf["id"].as_str().unwrap());
+                w.wait_until(10_000, |w| {
+                    let snap = w.server("remote-a").unwrap().snapshot()?;
+                    Ok(snap
+                        .cards
+                        .iter()
+                        .find(|c| c.id == raw_cid)
+                        .is_some_and(|c| c.worktree.is_some())
+                        && snap.terminals.iter().any(|t| {
+                            t.agent.as_ref().is_some_and(|a| {
+                                a.card_id == raw_cid && a.state == "running" && a.terminal.is_some()
+                            })
+                        }))
+                })?;
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                let card = snap.cards.iter().find(|c| c.id == raw_cid).unwrap();
+                let term = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid))
+                    .unwrap();
+                Ok((
+                    cid,
+                    raw_cid,
+                    wf_id,
+                    term.id.clone(),
+                    term.agent.as_ref().unwrap().terminal.clone().unwrap(),
+                    card.worktree.clone().unwrap(),
+                    card.branch.clone().unwrap(),
+                ))
+            };
+
+        // g1: Auto-commit dirty card worktree on `execution.report(completed)` + dirty main checkout
+        //     pauses non-destructively in `waiting_delivery` -> clean main -> `workflow.deliver` merges!
+        let (cid_g1, raw_g1, wf_g1, tid_g1, addr_g1, wt_g1, _br_g1) = spawn_edges_card(
+            world,
+            "Edge G1 Dirty Main & AutoCommit",
+            "start_single",
+            "g1",
+        )?;
+        let g1_head_before = exec.head_sha(&wt_g1).unwrap();
+        exec.set_worktree_dirty(&wt_g1, true)?;
+        exec.set_worktree_dirty(&edges_dir, true)?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": tid_g1,
+                "state": "completed",
+                "message": "Auto-commit my uncommitted changes",
+                "request_key": format!("ws-edge-g1-done-{seed}"),
+            }),
+        )?;
+        ensure!(
+            exec.head_sha(&wt_g1).as_deref() != Some(g1_head_before.as_str()),
+            "execution.report(completed) must auto-commit dirty card worktree"
+        );
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&addr_g1, 0, "exited");
+        world.wait_until(8_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.workflow_runs.iter().any(|r| {
+                r.id == wf_g1 && r.state == "waiting_delivery" && r.queue_pause_reason().is_some()
+            }))
+        })?;
+        ensure!(
+            world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g1)
+                .unwrap()
+                .delivery
+                .is_none(),
+            "Dirty main checkout must pause delivery without merging"
+        );
+        exec.set_worktree_dirty(&edges_dir, false)?;
+        let g1_rev = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .cards
+            .into_iter()
+            .find(|c| c.id == raw_g1)
+            .unwrap()
+            .revision;
+        let _ = world.client_call(
+            "workflow.deliver",
+            json!({
+                "card_id": cid_g1,
+                "revision": g1_rev,
+                "request_key": format!("ws-edge-g1-deliver-{seed}"),
+            }),
+            Some(&pid_edges),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g1)
+                .is_some_and(|c| c.resolution.as_ref().map(|r| r.kind.as_str()) == Some("merged")))
+        })?;
+
+        // g2: `settle_grace` Case A (connected agent `working` holds merge until status becomes `done`)
+        //     + Case B (stuck `working` falls back & merges after `DELIVERY_AGENT_SETTLE_MS`)!
+        let (_cid_g2, raw_g2, wf_g2, tid_g2, addr_g2, wt_g2, _br_g2) =
+            spawn_edges_card(world, "Edge G2 Settle Wrapup", "start_single", "g2")?;
+        let _ = exec.commit_in_worktree(&wt_g2, "feat: g2 settle wrapup")?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .set_status(&addr_g2, "working", Some(1));
+        world.advance(Duration::from_millis(200))?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": tid_g2,
+                "state": "completed",
+                "message": "Reported while still wrapping up",
+                "request_key": format!("ws-edge-g2-done-{seed}"),
+            }),
+        )?;
+        world.advance(Duration::from_millis(600))?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let r = snap.workflow_runs.iter().find(|r| r.id == wf_g2).unwrap();
+            ensure!(
+                r.state == "waiting_delivery",
+                "Connected `working` agent must hold merge during turn wrapup, got {}",
+                r.state
+            );
+        }
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .set_status(&addr_g2, "done", Some(2));
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g2)
+                .is_some_and(|c| c.resolution.as_ref().map(|r| r.kind.as_str()) == Some("merged")))
+        })?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&addr_g2, 0, "exited");
+
+        let (cid_g3, raw_g3, wf_g3, tid_g3, addr_g3, wt_g3, _br_g3) = spawn_edges_card(
+            world,
+            "Edge G3 Settle Timeout Fallback",
+            "start_single",
+            "g3",
+        )?;
+        let _ = exec.commit_in_worktree(&wt_g3, "feat: g3 settle timeout")?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .set_status(&addr_g3, "working", Some(1));
+        world.advance(Duration::from_millis(200))?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": tid_g3,
+                "state": "completed",
+                "message": "Reported while status stays stuck working",
+                "request_key": format!("ws-edge-g3-done-{seed}"),
+            }),
+        )?;
+        world.advance(Duration::from_millis(600))?;
+        ensure!(
+            world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .workflow_runs
+                .iter()
+                .find(|r| r.id == wf_g3)
+                .unwrap()
+                .state
+                == "waiting_delivery"
+        );
+        // Jump virtual clock past 180s `DELIVERY_AGENT_SETTLE_MS` grace period and wake delivery
+        // worker via an ordinary non-delivery card comment mutation -> merges cleanly!
+        world.servers["remote-a"].clock.jump_ms(185_000);
+        let _ = world.client_call(
+            "comment.add",
+            json!({ "card_id": cid_g3, "body": "Trigger post-settle-grace delivery wake" }),
+            Some(&pid_edges),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g3)
+                .is_some_and(|c| c.resolution.as_ref().map(|r| r.kind.as_str()) == Some("merged")))
+        })?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&addr_g3, 0, "exited");
+
+        // g3: `worktree.gc` removes clean old merged worktrees (G1, G3), preserves dirty (G2),
+        //     and skips recently merged (G4) within retention window!
+        exec.set_worktree_dirty(&wt_g2, true)?;
+        world.servers["remote-a"]
+            .clock
+            .jump_ms(10 * 24 * 60 * 60 * 1_000);
+        let (_cid_g4, raw_g4, _wf_g4, tid_g4, addr_g4, wt_g4, _br_g4) =
+            spawn_edges_card(world, "Edge G4 Recent Merged", "start_single", "g4")?;
+        let _ = exec.commit_in_worktree(&wt_g4, "feat: g4 recent merged")?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": tid_g4,
+                "state": "completed",
+                "message": "Recent merge",
+                "request_key": format!("ws-edge-g4-done-{seed}"),
+            }),
+        )?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&addr_g4, 0, "exited");
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g4)
+                .is_some_and(|c| c.resolution.as_ref().map(|r| r.kind.as_str()) == Some("merged")))
+        })?;
+        let gc_res = world.server_call(
+            "remote-a",
+            "worktree.gc",
+            json!({ "merged_before": "7d", "project_id": raw_pid_edges }),
+        )?;
+        let gc_removed = gc_res["removed"]
+            .as_array()
+            .context("worktree.gc removed array")?;
+        let gc_dirty = gc_res["dirty"]
+            .as_array()
+            .context("worktree.gc dirty array")?;
+        let gc_skipped = gc_res["skipped"]
+            .as_array()
+            .context("worktree.gc skipped array")?;
+        ensure!(
+            gc_removed
+                .iter()
+                .any(|x| x["card_id"].as_str() == Some(raw_g1.as_str()))
+                && gc_removed
+                    .iter()
+                    .any(|x| x["card_id"].as_str() == Some(raw_g3.as_str())),
+            "Expected clean old merged G1 & G3 removed by worktree.gc: {gc_res}"
+        );
+        ensure!(
+            gc_dirty.iter().any(|x| {
+                x["card_id"].as_str() == Some(raw_g2.as_str())
+                    && x["reason"].as_str() == Some("uncommitted_changes")
+            }),
+            "Expected dirty merged G2 preserved in dirty with uncommitted_changes: {gc_res}"
+        );
+        ensure!(
+            gc_skipped.iter().any(|x| {
+                x["card_id"].as_str() == Some(raw_g4.as_str())
+                    && x["reason"].as_str() == Some("merged_within_retention")
+            }),
+            "Expected recent merged G4 skipped with merged_within_retention: {gc_res}"
+        );
+        ensure!(!Path::new(&wt_g1).exists() && Path::new(&wt_g2).is_dir());
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            ensure!(
+                snap.cards
+                    .iter()
+                    .find(|c| c.id == raw_g1)
+                    .unwrap()
+                    .worktree
+                    .is_none()
+            );
+            ensure!(
+                snap.cards
+                    .iter()
+                    .find(|c| c.id == raw_g2)
+                    .unwrap()
+                    .worktree
+                    .is_some()
+            );
+        }
+        exec.set_worktree_dirty(&wt_g2, false)?;
+
+        // g4: Batch `test_command` releases main checkout gate + `TargetAdvanced` retry converges cleanly!
+        let (cid_g5, raw_g5, _wf_g5, tid_g5, addr_g5, wt_g5, _br_g5) =
+            spawn_edges_card(world, "Edge G5 Target Advanced Retry", "start_tested", "g5")?;
+        let _ = exec.commit_in_worktree(&wt_g5, "feat: g5 target advanced")?;
+        let srv_a = world.server("remote-a").unwrap();
+        let proj_edges_obj = srv_a
+            .snapshot()?
+            .projects
+            .into_iter()
+            .find(|p| p.id == raw_pid_edges)
+            .unwrap();
+        let hook_fired = Arc::new(AtomicBool::new(false));
+        let hook_gate_free = Arc::new(AtomicBool::new(false));
+        {
+            let srv_hook = srv_a.clone();
+            let exec_hook = exec.clone();
+            let dir_hook = edges_dir.clone();
+            let proj_hook = proj_edges_obj.clone();
+            let fired = hook_fired.clone();
+            let gate_free = hook_gate_free.clone();
+            srv_a.set_on_batch_tests_hook(Some(Arc::new(move |proj_id, _wt| {
+                if proj_id == proj_hook.id && !fired.swap(true, Ordering::SeqCst) {
+                    if let Ok(_guard) =
+                        srv_hook.try_lock_checkout_for_sim(&proj_hook, "sim test-phase probe")
+                    {
+                        gate_free.store(true, Ordering::SeqCst);
+                    }
+                    let _ = exec_hook
+                        .commit_in_worktree(&dir_hook, "concurrent main advance during tests");
+                }
+            })));
+        }
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": tid_g5,
+                "state": "completed",
+                "message": "Ready for tested batch with TargetAdvanced",
+                "request_key": format!("ws-edge-g5-done-{seed}"),
+            }),
+        )?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&addr_g5, 0, "exited");
+        world.wait_until(15_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g5)
+                .is_some_and(|c| c.resolution.as_ref().map(|r| r.kind.as_str()) == Some("merged")))
+        })?;
+        srv_a.set_on_batch_tests_hook(None);
+        ensure!(
+            hook_fired.load(Ordering::SeqCst) && hook_gate_free.load(Ordering::SeqCst),
+            "Main checkout gate must be released during batch test_command"
+        );
+        let g5_tl = world.client_call(
+            "timeline.list",
+            json!({ "card_id": cid_g5, "tail": true, "limit": 50, "view": "full" }),
+            Some(&pid_edges),
+        )?;
+        ensure!(
+            g5_tl["events"]
+                .as_array()
+                .is_some_and(|evs| evs.iter().any(|e| e["kind"] == "review.merge_retry")),
+            "Expected review.merge_retry timeline event after TargetAdvanced: {g5_tl}"
+        );
+
+        // g5: `failed_rebase_conflict` retry via `workflow.deliver` without burning attempts +
+        //     `failed_merger_retry` joining tail of merge queue behind active Card!
+        let (cid_g6, raw_g6, wf_g6, tid_g6, addr_g6, wt_g6, _br_g6) = spawn_edges_card(
+            world,
+            "Edge G6 Failed Merger Tail Retry",
+            "start_single",
+            "g6",
+        )?;
+        let (_cid_g7, raw_g7, _wf_g7, tid_g7, addr_g7, wt_g7, _br_g7) =
+            spawn_edges_card(world, "Edge G7 Active Queue Head", "start_single", "g7")?;
+        let g6_commit = exec.commit_in_worktree(&wt_g6, "feat: g6 conflicting work")?;
+        let g7_commit = exec.commit_in_worktree(&wt_g7, "feat: g7 active head work")?;
+        // Advance `main` after both worktrees branched so neither can fast-forward without rebasing!
+        let _ = exec.commit_in_worktree(&edges_dir, "main: diverge before g6/g7 rebase")?;
+        // Inject conflict keyed by each card's commit SHA (`git rebase` checks `cur_head`) so G6
+        // hits rebase conflict and fails `@merger`, and G7 takes `#1` with an active `@merger`!
+        exec.inject_merge_conflict_for_commit(&edges_dir, &g6_commit, vec!["src/g6.rs".into()]);
+        exec.inject_merge_conflict_for_commit(&edges_dir, &g7_commit, vec!["src/g7.rs".into()]);
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": tid_g6,
+                "state": "completed",
+                "message": "G6 ready",
+                "request_key": format!("ws-edge-g6-done-{seed}"),
+            }),
+        )?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&addr_g6, 0, "exited");
+        // Wait for G6's conflict to hand off to `@merger` (or conflict rework).
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.merge_batches.iter().any(|b| {
+                b.project_id == raw_pid_edges
+                    && b.active()
+                    && b.state == "running"
+                    && b.items.iter().any(|i| i.card_id == raw_g6)
+            }) || snap
+                .workflow_runs
+                .iter()
+                .any(|r| r.id == wf_g6 && r.inputs["conflict_attempts"].as_u64().unwrap_or(0) >= 1))
+        })?;
+        // Find if G6 spawned a MergeBatch (batch path) vs direct rebase conflict handoff.
+        if let Some(g6_batch) = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .merge_batches
+            .into_iter()
+            .find(|b| {
+                b.project_id == raw_pid_edges
+                    && b.active()
+                    && b.items.iter().any(|i| i.card_id == raw_g6)
+            })
+        {
+            let _ = world.server_call(
+                "remote-a",
+                "batch.report",
+                json!({
+                    "batch_id": g6_batch.id,
+                    "state": "failed",
+                    "message": "G6 merger failed",
+                    "request_key": format!("ws-edge-g6-merger-fail-{seed}"),
+                }),
+            )?;
+            if let Some(addr) = world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| t.id == g6_batch.id)
+                .and_then(|t| t.runtime)
+                .and_then(|r| r.terminal)
+            {
+                world
+                    .herdr("remote-a")
+                    .unwrap()
+                    .finish_terminal(&addr, 1, "exited");
+            }
+        } else {
+            // Single-card rebase conflict path (`batch_size: 1`, no `test_command`):
+            // wait for conflict rework agent (`@merger` or `work_single`) and mark it failed so
+            // `workflow.deliver` retries without burning another conflict attempt!
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_g6 && a.state == "running" && a.terminal.is_some()
+                    })
+                }))
+            })?;
+            let (_g6_m_tid, g6_m_addr) = {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let t = snap
+                    .terminals
+                    .iter()
+                    .find(|t| {
+                        t.agent.as_ref().is_some_and(|a| {
+                            a.card_id == raw_g6
+                                && a.profile.id == "merger"
+                                && a.state == "running"
+                                && a.terminal.is_some()
+                        })
+                    })
+                    .unwrap();
+                (
+                    t.id.clone(),
+                    t.agent.as_ref().unwrap().terminal.clone().unwrap(),
+                )
+            };
+            // Simulate `@merger` PTY crashing non-zero without reporting -> `agent.state = "failed"`
+            // -> `workflow::reconcile` marks `wf_g6` `"failed"` and vacates merge queue `#1`!
+            world
+                .herdr("remote-a")
+                .unwrap()
+                .finish_terminal(&g6_m_addr, 1, "exited");
+        }
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .workflow_runs
+                .iter()
+                .any(|r| r.id == wf_g6 && r.state == "failed" && r.inputs["queued_at"].is_null()))
+        })?;
+        let g6_attempts_before_retry = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .workflow_runs
+            .into_iter()
+            .find(|r| r.id == wf_g6)
+            .unwrap()
+            .inputs["conflict_attempts"]
+            .as_u64()
+            .unwrap_or(0);
+        ensure!(g6_attempts_before_retry == 1);
+
+        // Now complete G7 so G7 takes merge queue `#1` with an active conflict `@merger`!
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": tid_g7,
+                "state": "completed",
+                "message": "G7 ready to take queue #1",
+                "request_key": format!("ws-edge-g7-done-{seed}"),
+            }),
+        )?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&addr_g7, 0, "exited");
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_g7 && a.state == "running" && a.terminal.is_some()
+                })
+            }))
+        })?;
+        // Retry G6 via `workflow.deliver`: MUST join tail of merge queue behind active G7 (pos 2 of 2)
+        // WITHOUT preempting G7 and WITHOUT burning another `conflict_attempts`!
+        let g6_rev = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .cards
+            .into_iter()
+            .find(|c| c.id == raw_g6)
+            .unwrap()
+            .revision;
+        let _ = world.client_call(
+            "workflow.deliver",
+            json!({
+                "card_id": cid_g6,
+                "revision": g6_rev,
+                "request_key": format!("ws-edge-g6-tail-retry-{seed}"),
+            }),
+            Some(&pid_edges),
+        )?;
+        world.advance(Duration::from_millis(300))?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let q =
+                canban_types::project_merge_queue(&snap.workflow_runs, &snap.cards, &raw_pid_edges);
+            let q_cards: Vec<&str> = q.iter().filter_map(|r| r.card_id.as_deref()).collect();
+            ensure!(
+                q_cards == vec![raw_g7.as_str(), raw_g6.as_str()],
+                "Retried G6 must join tail of merge queue behind active G7! queue={q_cards:?}"
+            );
+            let r6 = snap.workflow_runs.iter().find(|r| r.id == wf_g6).unwrap();
+            ensure!(
+                r6.inputs["conflict_attempts"].as_u64().unwrap_or(0)
+                    == g6_attempts_before_retry.saturating_sub(1),
+                "workflow.deliver retry must refund the failed attempt while queued (before={g6_attempts_before_retry}, got={:?})",
+                r6.inputs["conflict_attempts"]
+            );
+        }
+        // Complete G7's merger -> G7 merges -> G6 advances to `#1` and merges cleanly!
+        let (g7_m_tid, g7_m_addr) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let t = snap
+                .terminals
+                .iter()
+                .find(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_g7 && a.state == "running" && a.terminal.is_some()
+                    })
+                })
+                .unwrap();
+            (
+                t.id.clone(),
+                t.agent.as_ref().unwrap().terminal.clone().unwrap(),
+            )
+        };
+        let _ = exec.resolve_worktree_and_commit(&wt_g7)?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": g7_m_tid,
+                "state": "completed",
+                "message": "G7 resolved conflict",
+                "request_key": format!("ws-edge-g7-mresolved-{seed}"),
+            }),
+        )?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&g7_m_addr, 0, "exited");
+        world.wait_until(15_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g7)
+                .is_some_and(|c| c.resolution.as_ref().map(|r| r.kind.as_str()) == Some("merged")))
+        })?;
+        // Once G7 merges, G6 advances from #2 to #1 and dispatches a fresh `@merger` (since `wt_g6`
+        // is still in unresolved conflict state) without burning another `conflict_attempts`!
+        world.wait_until(12_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_g6
+                        && a.profile.id == "merger"
+                        && a.state == "running"
+                        && a.terminal.is_some()
+                })
+            }))
+        })?;
+        let (g6_m2_tid, g6_m2_addr) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let r6 = snap.workflow_runs.iter().find(|r| r.id == wf_g6).unwrap();
+            ensure!(
+                r6.inputs["conflict_attempts"].as_u64().unwrap_or(0) == g6_attempts_before_retry,
+                "Fresh @merger on G6 after advancing to #1 must not burn an extra conflict_attempts"
+            );
+            let t6 = snap
+                .terminals
+                .iter()
+                .find(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_g6
+                            && a.profile.id == "merger"
+                            && a.state == "running"
+                            && a.terminal.is_some()
+                    })
+                })
+                .unwrap();
+            (
+                t6.id.clone(),
+                t6.agent.as_ref().unwrap().terminal.clone().unwrap(),
+            )
+        };
+        let _ = exec.resolve_worktree_and_commit(&wt_g6)?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": g6_m2_tid,
+                "state": "completed",
+                "message": "G6 fresh merger resolved conflict",
+                "request_key": format!("ws-edge-g6-m2-resolved-{seed}"),
+            }),
+        )?;
+        world
+            .herdr("remote-a")
+            .unwrap()
+            .finish_terminal(&g6_m2_addr, 0, "exited");
+        world.wait_until(15_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_g6)
+                .is_some_and(|c| c.resolution.as_ref().map(|r| r.kind.as_str()) == Some("merged")))
+        })?;
+
+        // g6: Per-card GitHub PR delivery lock isolation (`github.pr.publish`/`merge` never blocked by
+        //     main checkout lock, while per-card lock blocks only same card and leaves other cards free)!
+        let iso_repo = "acme/canban-sim";
+        world.github.add_repo(iso_repo, 9911, "main");
+        world
+            .github
+            .set_collaborators(iso_repo, vec!["alice".into()]);
+        let iso_dir = world.project_dir(&format!("ws-iso-pr-{seed}"))?;
+        exec.register_git_repo(&iso_dir, SimGitRepo::default());
+        let proj_iso = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-a",
+                "name": format!("ISO PR {seed}"),
+                "directory": iso_dir,
+                "target_branch": "main",
+            }),
+            None,
+        )?;
+        let pid_iso = proj_iso["id"].as_str().unwrap().to_owned();
+        let raw_pid_iso = strip_host(&pid_iso);
+        let _ = world.client_call(
+            "project.github",
+            json!({
+                "project_id": pid_iso,
+                "repository": iso_repo,
+                "intake": "off",
+                "delivery_mode": "github_pr",
+            }),
+            Some(&pid_iso),
+        )?;
+        let stage_iso_card =
+            |w: &mut crate::world::SimWorld, title: &str| -> Result<(String, String, String)> {
+                let c = w.client_call(
+                    "card.create",
+                    json!({ "project_id": pid_iso, "title": title }),
+                    Some(&pid_iso),
+                )?;
+                let cid = c["id"].as_str().unwrap().to_owned();
+                let raw_cid = strip_host(&cid);
+                let sh = w.server_call(
+                    "remote-a",
+                    "terminal.create",
+                    json!({ "project_id": raw_pid_iso, "card_id": raw_cid }),
+                )?;
+                let _ = w.server_call(
+                    "remote-a",
+                    "terminal.close",
+                    json!({ "terminal_id": sh["id"] }),
+                )?;
+                let card = w
+                    .server("remote-a")
+                    .unwrap()
+                    .snapshot()?
+                    .cards
+                    .into_iter()
+                    .find(|x| x.id == raw_cid)
+                    .unwrap();
+                let wt = card.worktree.unwrap();
+                let br = card.branch.unwrap();
+                let sha = exec.commit_in_worktree(&wt, &format!("feat: {title}"))?;
+                w.github.set_branch_head(iso_repo, &br, &sha);
+                Ok((cid, raw_cid, sha))
+            };
+        let (cid_iso1, raw_iso1, sha_iso1) = stage_iso_card(world, "ISO PR Card 1")?;
+        let (cid_iso2, raw_iso2, _sha_iso2) = stage_iso_card(world, "ISO PR Card 2")?;
+        let proj_iso_obj = srv_a
+            .snapshot()?
+            .projects
+            .into_iter()
+            .find(|p| p.id == raw_pid_iso)
+            .unwrap();
+        // Holding main checkout lock MUST NOT block `github.pr.publish` on Card 1!
+        let prev1 = world.client_call(
+            "review.preview",
+            json!({ "card_id": cid_iso1 }),
+            Some(&pid_iso),
+        )?;
+        let rev1 = srv_a
+            .snapshot()?
+            .cards
+            .into_iter()
+            .find(|c| c.id == raw_iso1)
+            .unwrap()
+            .revision;
+        {
+            let _main_lock = srv_a
+                .try_lock_checkout_for_sim(&proj_iso_obj, "sim main checkout holder")
+                .expect("acquire main checkout lock");
+            let pub1 = world.client_call(
+                "github.pr.publish",
+                json!({
+                    "card_id": cid_iso1,
+                    "revision": rev1,
+                    "token": prev1["token"],
+                    "request_key": format!("iso-pub-1-{seed}"),
+                }),
+                Some(&pid_iso),
+            )?;
+            ensure!(pub1["number"].as_u64().unwrap_or(0) >= 1);
+        }
+        // Holding per-card delivery lock on Card 1 blocks concurrent Card 1 PR action, while Card 2 proceeds!
+        let prev2 = world.client_call(
+            "review.preview",
+            json!({ "card_id": cid_iso2 }),
+            Some(&pid_iso),
+        )?;
+        let rev1_m = srv_a
+            .snapshot()?
+            .cards
+            .into_iter()
+            .find(|c| c.id == raw_iso1)
+            .unwrap()
+            .revision;
+        let rev2 = srv_a
+            .snapshot()?
+            .cards
+            .into_iter()
+            .find(|c| c.id == raw_iso2)
+            .unwrap()
+            .revision;
+        {
+            let _card1_lock =
+                srv_a.try_lock_card_delivery_for_sim(&raw_iso1, "sim card1 delivery")?;
+            let blocked_err = world
+                .client_call(
+                    "github.pr.merge",
+                    json!({
+                        "card_id": cid_iso1,
+                        "revision": rev1_m,
+                        "head": sha_iso1,
+                        "request_key": format!("iso-merge-blocked-{seed}"),
+                    }),
+                    Some(&pid_iso),
+                )
+                .expect_err("Per-card delivery lock must reject concurrent action on same card");
+            ensure!(
+                format!("{blocked_err:#}")
+                    .contains("Another delivery for this Card is in progress"),
+                "Unexpected per-card lock error: {blocked_err:#}"
+            );
+            let pub2 = world.client_call(
+                "github.pr.publish",
+                json!({
+                    "card_id": cid_iso2,
+                    "revision": rev2,
+                    "token": prev2["token"],
+                    "request_key": format!("iso-pub-2-{seed}"),
+                }),
+                Some(&pid_iso),
+            )?;
+            ensure!(pub2["number"].as_u64().unwrap_or(0) >= 1);
+        }
+        // Dropping Card 1's delivery lock allows `github.pr.merge` to succeed immediately!
+        let merged_iso1 = world.client_call(
+            "github.pr.merge",
+            json!({
+                "card_id": cid_iso1,
+                "revision": rev1_m,
+                "head": sha_iso1,
+                "request_key": format!("iso-merge-ok-{seed}"),
+            }),
+            Some(&pid_iso),
+        )?;
+        ensure!(
+            merged_iso1["pull_request"]["merged"] == true
+                || srv_a
+                    .snapshot()?
+                    .cards
+                    .iter()
+                    .find(|c| c.id == raw_iso1)
+                    .is_some_and(|c| c.resolved() && c.delivery.is_some()),
+            "Expected Card 1 PR merge to complete after releasing per-card lock: {merged_iso1}"
+        );
+        world.hit("delivery.manual_deliver_gc_and_target_advanced");
 
         // Final bounce across BOTH hosts + full quiescent invariants + ZERO blocked OS commands!
         world.bounce_server("remote-a")?;

@@ -476,6 +476,12 @@ async fn serve_stream(
         }
 
         if method == "app.subscribe" {
+            if server.disable_app_subscribe.load(Ordering::SeqCst) {
+                server.subscribe_rejections.fetch_add(1, Ordering::SeqCst);
+                let err_reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Unknown operation: app.subscribe"}});
+                let _ = write_json_line_async(&mut writer, &err_reply).await;
+                return Ok(());
+            }
             if !first {
                 let err_reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"app.subscribe must be the first frame on a connection"}});
                 let _ = write_json_line_async(&mut writer, &err_reply).await;

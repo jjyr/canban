@@ -910,8 +910,6 @@ fn removed_routing_fields_are_rejected_without_mutating_cards() {
     assert!(snapshot.terminals.is_empty());
 }
 
-#[path = "tests/adoption.rs"]
-mod adoption_cases;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle_cases;
 #[path = "tests/terminals.rs"]
@@ -982,9 +980,6 @@ fn continued_assignment_rejects_new_stale_reports_but_preserves_completion_recei
         "continued"
     );
 }
-
-#[path = "tests/board.rs"]
-mod board_cases;
 
 #[test]
 fn reminder_upgrade_baselines_existing_history_without_changing_cards() {
@@ -1171,8 +1166,6 @@ mod workflows;
 mod schedules_cases;
 
 mod multi_host;
-
-mod env;
 
 #[test]
 fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_end_to_end() {
@@ -3340,7 +3333,6 @@ mod memory;
 mod representations;
 
 mod clock_and_livelock;
-mod failpoints;
 
 #[test]
 fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback() {
@@ -3730,218 +3722,6 @@ fn card_create_mentions_launch_mention_reply_tasks_while_card_update_never_trigg
         snap.terminals
             .iter()
             .all(|t| t.agent.as_ref().is_none_or(|a| a.card_id != existing.id))
-    );
-}
-
-#[test]
-fn manual_and_agent_card_resolve_reopen_and_next_day_auto_archive() {
-    let (_dir, app, project, card) = setup();
-
-    // 1. User manually resolves a Backlog Card without code delivery.
-    let resolved: Card = serde_json::from_value(
-        app.call(
-            "card.resolve",
-            json!({
-                "view": "full",
-                "card_id": card.id,
-                "revision": card.revision,
-                "message": "Already answered in discussion",
-                "request_key": "resolve-1"
-            }),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(resolved.resolved());
-    assert!(!resolved.merged());
-    let res = resolved.resolution.as_ref().unwrap();
-    assert_eq!(res.kind, "manual");
-    assert_eq!(res.actor, "user");
-    assert_eq!(
-        res.reason.as_deref(),
-        Some("Already answered in discussion")
-    );
-
-    let evs = app.events().unwrap();
-    assert!(evs.iter().any(|e| {
-        e.card_id == card.id
-            && e.kind == "card.resolved"
-            && e.actor == "user"
-            && e.message == "Resolved: Already answered in discussion"
-    }));
-    // Remains visible on the Board today; archives on the next local calendar day.
-    assert!(!app.try_auto_archive_resolved(&card.id).unwrap());
-    let next_day = now() + 36 * 60 * 60 * 1000;
-
-    // 2. Agent is rejected from reopening (`card.reopen` requires user decision).
-    let agent_reopen_err = app
-        .call(
-            "card.reopen",
-            json!({
-                "card_id": card.id,
-                "revision": resolved.revision,
-                "execution": {"agent": true, "profile_id": "developer"}
-            }),
-        )
-        .unwrap_err();
-    assert!(
-        format!("{agent_reopen_err:#}").contains("explicit user decision"),
-        "{agent_reopen_err:#}"
-    );
-
-    // 3. User reopens the manually resolved Card.
-    let reopened: Card = serde_json::from_value(
-        app.call(
-            "card.reopen",
-            json!({
-                "view": "full",
-                "card_id": card.id,
-                "revision": resolved.revision,
-                "request_key": "reopen-1"
-            }),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(!reopened.resolved());
-    assert!(reopened.resolution.is_none());
-    // Reopened Card does not auto-archive even on the next day.
-    assert!(
-        !app.try_auto_archive_resolved_at(&card.id, next_day)
-            .unwrap()
-    );
-
-    // 4. Move to develop so an automatic workflow + queued Agent run starts, then Agent resolves.
-    app.call(
-        "card.move",
-        json!({
-            "view": "full",
-            "card_id": card.id,
-            "revision": reopened.revision,
-            "stage": "develop"
-        }),
-    )
-    .unwrap();
-    let active_snap = app.snapshot().unwrap();
-    assert!(
-        active_snap
-            .workflow_runs
-            .iter()
-            .any(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
-    );
-    let req = active_snap
-        .terminals
-        .iter()
-        .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card.id))
-        .unwrap()
-        .clone();
-    let running = admit(&app, &req);
-    assert_eq!(running.agent.as_ref().unwrap().state, "running");
-
-    // Preview detects both the active workflow and active Agent before resolving.
-    let preview = app
-        .call("card.resolve.preview", json!({"card_id": card.id}))
-        .unwrap();
-    assert_eq!(preview["has_active_agent"], true);
-    assert!(
-        !preview["warnings"].as_array().unwrap().is_empty(),
-        "{preview}"
-    );
-
-    // Running Agent resolves the Card directly via CLI/RPC.
-    let agent_resolved: Card = serde_json::from_value(
-        app.call(
-            "card.resolve",
-            json!({
-                "view": "full",
-                "card": card.number,
-                "project_id": project.id,
-                "profile_id": "developer",
-                "message": "Duplicate of #130",
-                "request_key": "agent-resolve-1"
-            }),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(agent_resolved.resolved());
-    let agent_res = agent_resolved.resolution.as_ref().unwrap();
-    assert_eq!(agent_res.kind, "agent");
-    assert_eq!(agent_res.actor, "agent:developer");
-    assert_eq!(agent_res.reason.as_deref(), Some("Duplicate of #130"));
-
-    // Active workflow was stopped and caller Agent run was marked completed cleanly.
-    let post_snap = app.snapshot().unwrap();
-    assert!(
-        post_snap
-            .workflow_runs
-            .iter()
-            .filter(|r| r.card_id.as_deref() == Some(card.id.as_str()))
-            .all(|r| !r.active())
-    );
-    let post_term = post_snap
-        .terminals
-        .iter()
-        .find(|t| t.id == running.id)
-        .unwrap();
-    assert_eq!(post_term.agent.as_ref().unwrap().state, "completed");
-
-    // Finish the runtime so auto-archive can proceed on the next local calendar day.
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            let mut t: TerminalEntry = db.get(&running.id)?;
-            t.agent.as_mut().unwrap().observed = Some(json!({"state":"finished","exit_code":0}));
-            db.save(&t)
-        })
-        .unwrap();
-    assert!(!app.try_auto_archive_resolved(&card.id).unwrap());
-    assert!(
-        app.try_auto_archive_resolved_at(&card.id, next_day)
-            .unwrap()
-    );
-    let archived = app.snapshot().unwrap().cards[0].clone();
-    assert!(archived.archived_at.is_some());
-
-    // 5. Merged Cards cannot be reopened.
-    let merged_card: Card = serde_json::from_value(
-        app.call(
-            "card.create",
-            json!({"view":"full","project_id":project.id,"title":"Merged"}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            let mut c: Card = db.get(&merged_card.id)?;
-            c.delivery = Some(Delivery {
-                target_branch: "main".into(),
-                commit: "abc1234".into(),
-                request_key: "merge-1".into(),
-                merged_at: now(),
-            });
-            c.resolution = Some(CardResolution {
-                resolved_at: now(),
-                kind: "merged".into(),
-                reason: None,
-                actor: "user".into(),
-            });
-            db.save(&c)
-        })
-        .unwrap();
-    let reopen_merged_err = app
-        .call(
-            "card.reopen",
-            json!({"card_id": merged_card.id, "revision": merged_card.revision}),
-        )
-        .unwrap_err();
-    assert!(
-        format!("{reopen_merged_err:#}").contains("merged code"),
-        "{reopen_merged_err:#}"
     );
 }
 

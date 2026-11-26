@@ -400,6 +400,238 @@ pub fn run(seed: u64) -> Result<u64> {
             let _ =
                 world.client_call("terminal.end", json!({ "terminal_id": sh_id }), Some(&pid))?;
         }
+
+        // 10. Foreground agent push tracking (`agy` + `RuntimeWait` stability across polls),
+        //     clearing on exit back to `zsh` or Herdr disconnect, canonical `terminal_contexts`
+        //     sorting without spurious emits, card agent context retention, and
+        //     `canban_notifications::reconcile_runtime_reminders` parity!
+        {
+            let sh_fg = world.client_call(
+                "terminal.create",
+                json!({ "project_id": pid, "name": "FG Push Shell" }),
+                Some(&pid),
+            )?;
+            let sh_fg_id = sh_fg["id"].as_str().unwrap().to_owned();
+            let raw_sh_fg_id = canban_types::split_qualified_host_id(&sh_fg_id)
+                .map(|(_, r)| r.to_owned())
+                .unwrap_or_else(|| sh_fg_id.clone());
+            let sh_fg_addr = sh_fg["runtime"]["terminal"].as_str().unwrap().to_owned();
+
+            // 10a: Plain `zsh` foreground -> no observed_agent.
+            herdr.set_foreground(
+                &sh_fg_addr,
+                Some(json!({ "pid": 100, "name": "zsh", "argv": ["/bin/zsh", "-l"], "cwd": dir })),
+            );
+            world.advance(Duration::from_millis(250))?;
+            {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let t = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == raw_sh_fg_id)
+                    .unwrap();
+                ensure!(t.title() == "FG Push Shell");
+                ensure!(t.runtime.as_ref().unwrap().observed_agent.is_none());
+            }
+
+            // 10b: Foreground switches to `agy` + permission block -> `observed_agent = Some("agy")`,
+            //      `HerdrStatus::Blocked`, `RuntimeWait` captured with stable ID & `since` across polls!
+            herdr.set_foreground(
+                &sh_fg_addr,
+                Some(json!({ "pid": 101, "name": "agy", "argv": ["/opt/homebrew/bin/agy"], "cwd": dir })),
+            );
+            herdr.set_status_detailed(
+                &sh_fg_addr,
+                json!({
+                    "state": "blocked",
+                    "app": "agy",
+                    "kind": "permission",
+                    "title": "Allow command?",
+                    "msg": "cargo test",
+                }),
+                Some(1),
+            );
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == raw_sh_fg_id
+                        && t.runtime.as_ref().is_some_and(|rt| {
+                            rt.observed_agent.as_deref() == Some("agy")
+                                && rt.agent_status.as_deref() == Some("blocked")
+                                && rt.waiting.is_some()
+                        })
+                }))
+            })?;
+            let first_wait = {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let t = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == raw_sh_fg_id)
+                    .unwrap();
+                ensure!(t.agent_engine.is_none());
+                ensure!(t.herdr_status() == canban_types::HerdrStatus::Blocked);
+                let w = t.runtime.as_ref().unwrap().waiting.clone().unwrap();
+                ensure!(
+                    w.kind == "permission"
+                        && w.title == "Allow command?"
+                        && w.message == "cargo test"
+                );
+                w
+            };
+            // Re-observing the same block keeps `waiting.id` and `waiting.since` stable!
+            world.advance(Duration::from_millis(500))?;
+            {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let t = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == raw_sh_fg_id)
+                    .unwrap();
+                let second_wait = t.runtime.as_ref().unwrap().waiting.clone().unwrap();
+                ensure!(
+                    second_wait.id == first_wait.id && second_wait.since == first_wait.since,
+                    "RuntimeWait id/since drifted across polls: {first_wait:?} vs {second_wait:?}"
+                );
+            }
+
+            // 10c: Verify `notifications::reconcile_runtime_reminders_at` parity against full projection
+            //      while runtime holds both `replaced` agent terminal and `blocked` shell terminal!
+            {
+                let srv_a = world.server("remote-a").unwrap();
+                let now_a = srv_a.now_ms();
+                let snap_a = srv_a.snapshot()?;
+                let events_a = srv_a.events()?;
+                let full_reminders =
+                    canban_notifications::reminders_from_events_at(&snap_a, &events_a, now_a);
+                let non_runtime_only: Vec<_> = full_reminders
+                    .iter()
+                    .filter(|r| !canban_notifications::is_runtime_reminder_id(&r.id))
+                    .cloned()
+                    .collect();
+                let mut reconciled_snap = snap_a.clone();
+                reconciled_snap.reminders = non_runtime_only.clone();
+                canban_notifications::reconcile_runtime_reminders_at(&mut reconciled_snap, now_a);
+                let full_ids: std::collections::BTreeSet<&str> =
+                    full_reminders.iter().map(|r| r.id.as_str()).collect();
+                let rec_ids: std::collections::BTreeSet<&str> = reconciled_snap
+                    .reminders
+                    .iter()
+                    .map(|r| r.id.as_str())
+                    .collect();
+                ensure!(
+                    !full_ids.is_empty() && full_ids == rec_ids,
+                    "reconcile_runtime_reminders_at mismatch: full={full_ids:?} vs reconciled={rec_ids:?}"
+                );
+                for ev_rem in &non_runtime_only {
+                    ensure!(
+                        reconciled_snap.reminders.iter().any(|r| r.id == ev_rem.id),
+                        "reconcile_runtime_reminders_at dropped non-runtime event reminder {}",
+                        ev_rem.id
+                    );
+                }
+                let prev_times: std::collections::BTreeMap<String, u64> = reconciled_snap
+                    .reminders
+                    .iter()
+                    .map(|r| (r.id.clone(), r.created_at))
+                    .collect();
+                canban_notifications::reconcile_runtime_reminders_at(
+                    &mut reconciled_snap,
+                    now_a + 60_000,
+                );
+                for r in &reconciled_snap.reminders {
+                    if !canban_notifications::is_runtime_reminder_id(&r.id) {
+                        ensure!(
+                            prev_times.get(&r.id) == Some(&r.created_at),
+                            "Repeated reconcile_runtime_reminders_at mutated event reminder {}",
+                            r.id
+                        );
+                    }
+                }
+            }
+
+            // 10d: Agent exits back to `zsh` (even with stale OSC status `done`) -> clears all agent fields!
+            herdr.set_foreground(
+                &sh_fg_addr,
+                Some(json!({ "pid": 100, "name": "zsh", "argv": ["/bin/zsh", "-l"], "cwd": dir })),
+            );
+            herdr.set_status_detailed(
+                &sh_fg_addr,
+                json!({ "state": "done", "app": "agy" }),
+                Some(1),
+            );
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == raw_sh_fg_id
+                        && t.herdr_status() == canban_types::HerdrStatus::PlainShell
+                        && t.runtime.as_ref().is_some_and(|rt| {
+                            rt.observed_agent.is_none()
+                                && rt.agent_status.is_none()
+                                && rt.agent_turn.is_none()
+                                && rt.waiting.is_none()
+                        })
+                }))
+            })?;
+
+            // 10e: Canonical sorting of `terminal_contexts` (lexicographic by `terminal_id`)
+            //      without spurious emits on idle ticks!
+            let sh_fg_2 = world.client_call(
+                "terminal.create",
+                json!({ "project_id": pid, "name": "FG Push Shell 2" }),
+                Some(&pid),
+            )?;
+            let sh_fg_2_id = sh_fg_2["id"].as_str().unwrap().to_owned();
+            world.advance(Duration::from_millis(400))?;
+            {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                ensure!(
+                    snap.terminal_contexts
+                        .windows(2)
+                        .all(|w| w[0].terminal_id < w[1].terminal_id),
+                    "terminal_contexts not canonically sorted: {:?}",
+                    snap.terminal_contexts
+                );
+            }
+
+            // 10f: Herdr disconnect clears `observed_agent` & marks `connection == "unavailable"`.
+            herdr.set_foreground(
+                &sh_fg_addr,
+                Some(json!({ "pid": 102, "name": "codex", "argv": ["codex"], "cwd": dir })),
+            );
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == raw_sh_fg_id
+                        && t.runtime
+                            .as_ref()
+                            .is_some_and(|rt| rt.observed_agent.as_deref() == Some("codex"))
+                }))
+            })?;
+            herdr.set_offline(true);
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == raw_sh_fg_id
+                        && t.runtime.as_ref().is_some_and(|rt| {
+                            rt.connection == "unavailable" && rt.observed_agent.is_none()
+                        })
+                }))
+            })?;
+            herdr.set_offline(false);
+            world.advance(Duration::from_millis(300))?;
+            let _ = world.client_call(
+                "terminal.close",
+                json!({ "terminal_id": sh_fg_id }),
+                Some(&pid),
+            )?;
+            let _ = world.client_call(
+                "terminal.close",
+                json!({ "terminal_id": sh_fg_2_id }),
+                Some(&pid),
+            )?;
+            world.hit("herdr.foreground_push_and_reminders");
+        }
         ensure!(
             world
                 .server("remote-a")

@@ -398,11 +398,7 @@ impl AppServer {
             Ok(json!({"terminal_id":entry.id,"reused":false,"terminal":entry}))
         })
     }
-    pub(super) fn continue_assignment(
-        &self,
-        entry: &TerminalEntry,
-        snapshot: &Snapshot,
-    ) -> Result<()> {
+    pub fn continue_assignment(&self, entry: &TerminalEntry, snapshot: &Snapshot) -> Result<()> {
         let old = entry
             .agent
             .as_ref()
