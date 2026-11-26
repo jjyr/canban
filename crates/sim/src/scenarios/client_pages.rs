@@ -1,16 +1,47 @@
 //! Scenario #4 — Page data fetching & mutations at the `canban-client` / UI boundary:
 //! write receipt hydration, multi-host routing, colliding raw IDs across hosts,
 //! `card.list` & `timeline.list` cursor pagination + `cursor_stale` detection,
-//! offline read-cache + pending comment merge, and Desktop + Mobile topology parity.
+//! offline read-cache + pending comment merge, Desktop + Mobile topology parity,
+//! and real `canban-ui` presenter/projection DST verification (`CommittedWrites`,
+//! timeline pagination + synthetic pending events, `apply_runtime_state_to_snapshot`,
+//! `apply_host_summaries`, `SnapshotIndex`/`QueueIndex`, `overview`, `quick_merge`,
+//! `plan_backend_events` / `is_runtime_only_event_batch`, and draft error watch).
 use crate::{
+    exec::SimGitRepo,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
-    world::{SimWorldConfig, run_with_world},
+    world::{PRIMARY_CLIENT, SimWorldConfig, run_with_world},
 };
 use anyhow::{Result, ensure};
-use serde_json::json;
-use std::collections::BTreeSet;
-use std::time::Duration;
+use canban_types::{
+    AppEvent, Delivery, DeliveryMode, EnvWriteEntry, Event, HumanGate, Report, RuntimeState,
+    Snapshot, TerminalContext,
+};
+use canban_ui::{
+    BackendRefreshAction,
+    backend::BackendEvent,
+    card::quick_merge,
+    index::{KnownTagsIndex, LinkLookup, SnapshotIndex, build_card_status},
+    is_runtime_only_event_batch,
+    overview::{
+        Icon, Tone, describe_row_at, describe_standalone_terminal, describe_unread_update,
+        running_agents_count_from, standalone_terminal_is_running, standalone_terminal_needs_you,
+    },
+    plan_backend_events,
+    presenter::{
+        CardTimelineState, CommittedWrites, apply_around_page, apply_host_summaries,
+        apply_incremental_page, apply_older_page, apply_runtime_state_to_snapshot_at,
+        apply_tail_page, confirmed_max_sequence, parse_timeline_page, submission,
+    },
+    utilities::{should_apply_usage_push, should_apply_utilities_push},
+    with_ui_projection,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+    time::Duration,
+};
 
 pub fn run(seed: u64) -> Result<u64> {
     // Phase A: Desktop mode (local + remote-a + remote-b).
@@ -19,6 +50,10 @@ pub fn run(seed: u64) -> Result<u64> {
         let mut oracle = InvariantOracle::default();
 
         let dir_local = world.project_dir("local")?;
+        world
+            .exec_runner("local-server")
+            .unwrap()
+            .register_git_repo(&dir_local, SimGitRepo::default());
         let dir_a = world.project_dir("a")?;
         let dir_b = world.project_dir("b")?;
         let p_local = world.client_call(
@@ -47,12 +82,37 @@ pub fn run(seed: u64) -> Result<u64> {
             .unwrap_or_else(|| pid_b.clone());
         world.advance(Duration::from_millis(200))?;
 
+        // Track real `apply_host_summaries` (`HostSummary.reconnect_count -> connect_epoch`) across
+        // initial connect, steady polling, partition (`Offline`), heal (`Connected`), and single-tick jump.
+        let mut ui_host_epochs: BTreeMap<String, u64> = BTreeMap::new();
+        let initial_hosts = world.client_host_summaries();
+        let initial_bumped = apply_host_summaries(&[], &initial_hosts, &mut ui_host_epochs);
+        ensure!(
+            initial_bumped.iter().any(|h| h == "remote-a")
+                && ui_host_epochs.get("remote-a").copied() == Some(1)
+                && ui_host_epochs.get("local").copied().unwrap_or(0) == 0,
+            "initial Connected remote-a must bump connect_epoch to 1 and leave local at 0: bumped={initial_bumped:?} epochs={ui_host_epochs:?}"
+        );
+        // Routine RTT/summary refresh while staying Connected at same reconnect_count must NOT bump.
+        let steady_hosts = world.client_host_summaries();
+        let steady_bumped =
+            apply_host_summaries(&initial_hosts, &steady_hosts, &mut ui_host_epochs);
+        ensure!(
+            steady_bumped.is_empty() && ui_host_epochs.get("remote-a").copied() == Some(1),
+            "routine host summary tick must not bump connect_epoch: bumped={steady_bumped:?} epochs={ui_host_epochs:?}"
+        );
+        let mut prev_hosts = steady_hosts;
+
         // 1. Online write receipt hydration: immediate host routing without waiting on resync.
         let c_a = world.client_call(
             "card.create",
-            json!({ "project_id": pid_a, "title": "Page Card A", "body": "initial" }),
+            with_ui_projection(
+                "card.create",
+                json!({ "project_id": pid_a, "title": "Page Card A", "body": "initial" }),
+            ),
             Some(&pid_a),
         )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.create", "remote-a", &c_a);
         let cid_a = c_a["id"].as_str().unwrap().to_owned();
         ensure!(c_a["revision"].as_u64().unwrap_or(0) >= 1);
         let routed =
@@ -63,15 +123,23 @@ pub fn run(seed: u64) -> Result<u64> {
 
         let c_b = world.client_call(
             "card.create",
-            json!({ "project_id": pid_b, "title": "Page Card B", "body": "initial" }),
+            with_ui_projection(
+                "card.create",
+                json!({ "project_id": pid_b, "title": "Page Card B", "body": "initial" }),
+            ),
             Some(&pid_b),
         )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.create", "remote-b", &c_b);
         let cid_b = c_b["id"].as_str().unwrap().to_owned();
         let c_local = world.client_call(
             "card.create",
-            json!({ "project_id": pid_local, "title": "Page Card Local", "body": "initial" }),
+            with_ui_projection(
+                "card.create",
+                json!({ "project_id": pid_local, "title": "Page Card Local", "body": "initial" }),
+            ),
             Some(&pid_local),
         )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.create", "local", &c_local);
         let cid_local = c_local["id"].as_str().unwrap().to_owned();
 
         // 2. Colliding raw Card IDs across `remote-a` and `remote-b`:
@@ -278,7 +346,10 @@ pub fn run(seed: u64) -> Result<u64> {
         )?;
         let tl_offline = world.client_call(
             "timeline.list",
-            json!({ "card_id": cid_a, "tail": true, "limit": 200, "view": "full" }),
+            with_ui_projection(
+                "timeline.list",
+                json!({ "card_id": cid_a, "tail": true, "limit": 200 }),
+            ),
             Some(&pid_a),
         )?;
         let offline_events = tl_offline["events"].as_array().unwrap();
@@ -298,6 +369,54 @@ pub fn run(seed: u64) -> Result<u64> {
         );
         world.hit("client_pages.offline_timeline_merge");
 
+        // Real UI presenter check: pending synthetic events (`data.pending == true`,
+        // `sequence == u64::MAX`) from offline `timeline.list` MUST NOT advance `highwater`!
+        let offline_page = parse_timeline_page(&tl_offline);
+        let mut offline_tl_writes = CommittedWrites::default();
+        let mut offline_tl_state = CardTimelineState::default();
+        let confirmed_before_heal = confirmed_max_sequence(&offline_page.events);
+        ensure!(
+            confirmed_before_heal > 0 && confirmed_before_heal < u64::MAX,
+            "confirmed_max_sequence must ignore pending synthetic u64::MAX events: {confirmed_before_heal}"
+        );
+        ensure!(
+            offline_page
+                .events
+                .iter()
+                .any(|e| e.data["pending"] == true && e.sequence == u64::MAX),
+            "expected synthetic pending event with sequence=u64::MAX in real offline timeline.list"
+        );
+        apply_tail_page(
+            &mut offline_tl_state,
+            offline_page.events,
+            offline_page.highwater,
+            offline_page.has_more_before,
+            offline_page.oldest_sequence,
+            &mut offline_tl_writes,
+            &cid_a,
+        );
+        ensure!(
+            offline_tl_state.highwater == confirmed_before_heal
+                && offline_tl_state.highwater < u64::MAX,
+            "apply_tail_page must not advance highwater to u64::MAX on pending synthetic event: highwater={} confirmed={confirmed_before_heal}",
+            offline_tl_state.highwater
+        );
+
+        // Wait until client marks `remote-a` Offline, and confirm `apply_host_summaries` does NOT bump epoch.
+        let _ = world.wait_until(8_000, |w| {
+            Ok(w.client_host_summaries()
+                .iter()
+                .any(|h| h.id == "remote-a" && !h.connection.is_connected()))
+        });
+        let offline_hosts = world.client_host_summaries();
+        let offline_bumped = apply_host_summaries(&prev_hosts, &offline_hosts, &mut ui_host_epochs);
+        ensure!(
+            !offline_bumped.iter().any(|h| h == "remote-a")
+                && ui_host_epochs.get("remote-a").copied() == Some(1),
+            "going Offline must not bump connect_epoch: bumped={offline_bumped:?} epochs={ui_host_epochs:?}"
+        );
+        prev_hosts = offline_hosts;
+
         // Local & remote-b remain operational while remote-a is partitioned.
         let local_rev = world
             .client_merged_snapshot()?
@@ -306,11 +425,15 @@ pub fn run(seed: u64) -> Result<u64> {
             .find(|c| c.id == cid_local)
             .unwrap()
             .revision;
-        let _ = world.client_call(
+        let moved_local = world.client_call(
             "card.move",
-            json!({ "card_id": cid_local, "revision": local_rev, "stage": "review" }),
+            with_ui_projection(
+                "card.move",
+                json!({ "card_id": cid_local, "revision": local_rev, "stage": "review" }),
+            ),
             Some(&pid_local),
         )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.move", "local", &moved_local);
         let b_rev = world
             .client_merged_snapshot()?
             .cards
@@ -318,15 +441,76 @@ pub fn run(seed: u64) -> Result<u64> {
             .find(|c| c.id == cid_b)
             .unwrap()
             .revision;
-        let _ = world.client_call(
+        let upd_b = world.client_call(
             "card.update",
-            json!({ "card_id": cid_b, "revision": b_rev, "title": "Page Card B Updated" }),
+            with_ui_projection(
+                "card.update",
+                json!({ "card_id": cid_b, "revision": b_rev, "title": "Page Card B Updated" }),
+            ),
             Some(&pid_b),
         )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.update", "remote-b", &upd_b);
 
         oracle.check_step_invariants(world)?;
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;
+
+        // Reconnect after partition must bump `remote-a` connect_epoch 1 -> 2, and a single-tick
+        // `reconnect_count` jump while staying Connected must bump 2 -> 3 (`local` stays 0).
+        let reconnected_hosts = world.client_host_summaries();
+        let reconn_bumped =
+            apply_host_summaries(&prev_hosts, &reconnected_hosts, &mut ui_host_epochs);
+        ensure!(
+            reconn_bumped.iter().any(|h| h == "remote-a")
+                && ui_host_epochs.get("remote-a").copied() == Some(2),
+            "reconnecting remote-a must bump connect_epoch 1 -> 2: bumped={reconn_bumped:?} epochs={ui_host_epochs:?}"
+        );
+        let mut single_tick_hosts = reconnected_hosts.clone();
+        if let Some(ra) = single_tick_hosts.iter_mut().find(|h| h.id == "remote-a") {
+            ra.reconnect_count = ra.reconnect_count.saturating_add(1);
+        }
+        let jump_bumped =
+            apply_host_summaries(&reconnected_hosts, &single_tick_hosts, &mut ui_host_epochs);
+        ensure!(
+            jump_bumped == vec!["remote-a".to_owned()]
+                && ui_host_epochs.get("remote-a").copied() == Some(3)
+                && ui_host_epochs.get("local").copied().unwrap_or(0) == 0,
+            "single-tick reconnect_count jump must bump remote-a 2 -> 3 and keep local at 0: bumped={jump_bumped:?} epochs={ui_host_epochs:?}"
+        );
+
+        // Incremental refresh after heal advances `offline_tl_state.highwater` and reconciles the
+        // offline comment onto its real finite server sequence.
+        let tl_inc_after_heal = world.client_call(
+            "timeline.list",
+            with_ui_projection(
+                "timeline.list",
+                json!({ "card_id": cid_a, "after_sequence": offline_tl_state.highwater, "limit": 50 }),
+            ),
+            Some(&pid_a),
+        )?;
+        let inc_heal_page = parse_timeline_page(&tl_inc_after_heal);
+        apply_incremental_page(
+            &mut offline_tl_state,
+            inc_heal_page.events,
+            inc_heal_page.highwater,
+            &mut offline_tl_writes,
+            &cid_a,
+        );
+        ensure!(
+            offline_tl_state.highwater > confirmed_before_heal
+                && offline_tl_state.highwater < u64::MAX,
+            "post-heal incremental page must advance highwater finitely: before={confirmed_before_heal} after={}",
+            offline_tl_state.highwater
+        );
+        let settled_offline = offline_tl_state
+            .events
+            .iter()
+            .filter(|e| e.kind == "comment.created" && e.message == "offline-pending-comment")
+            .collect::<Vec<_>>();
+        ensure!(
+            settled_offline.len() == 1 && settled_offline[0].sequence < u64::MAX,
+            "reconciled offline comment must appear once with finite sequence: {settled_offline:?}"
+        );
 
         let tl_after = world.client_call(
             "timeline.list",
@@ -361,6 +545,1489 @@ pub fn run(seed: u64) -> Result<u64> {
         ensure!(merged.projects.len() == 3);
         ensure!(merged.cards.len() == 8);
         let _rt = world.client_merged_runtime()?;
+
+        // =========================================================================
+        // 5. Real UI Presenter Timeline Pagination, Optimistic Comment Overlay,
+        //    In-Place `comment.updated` / `comment.deleted` Folding, `older` & `around`.
+        // =========================================================================
+        let tail_raw = world.client_call(
+            "timeline.list",
+            with_ui_projection(
+                "timeline.list",
+                json!({ "card_id": cid_a, "tail": true, "limit": 3 }),
+            ),
+            Some(&pid_a),
+        )?;
+        let tail_parsed = parse_timeline_page(&tail_raw);
+        let mut tl_writes = CommittedWrites::default();
+        let mut tl_state = CardTimelineState::default();
+        apply_tail_page(
+            &mut tl_state,
+            tail_parsed.events,
+            tail_parsed.highwater,
+            tail_parsed.has_more_before,
+            tail_parsed.oldest_sequence,
+            &mut tl_writes,
+            &cid_a,
+        );
+        ensure!(
+            tl_state.initialized
+                && tl_state.has_more_before
+                && tl_state.oldest_seq.is_some()
+                && tl_state.events.len() == 3,
+            "tail page state mismatch: init={} has_more={} oldest={:?} len={}",
+            tl_state.initialized,
+            tl_state.has_more_before,
+            tl_state.oldest_seq,
+            tl_state.events.len()
+        );
+        let tail_comment_ids: Vec<String> = tl_state
+            .events
+            .iter()
+            .filter(|e| e.kind == "comment.created")
+            .map(|e| e.id.clone())
+            .collect();
+        ensure!(
+            tail_comment_ids.len() >= 2,
+            "expected at least 2 comments in 3-item tail page, got {tail_comment_ids:?}"
+        );
+        let edit_comment_id = tail_comment_ids[0].clone();
+        let delete_comment_id = tail_comment_ids[1].clone();
+
+        // Optimistic `comment.add` overlays immediately before incremental refresh arrives.
+        let opt_reply = world.client_call(
+            "comment.add",
+            with_ui_projection(
+                "comment.add",
+                json!({ "card_id": cid_a, "body": "optimistic-tail-comment", "mentions": [] }),
+            ),
+            Some(&pid_a),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "comment.add", "remote-a", &opt_reply);
+        let opt_comment_id = opt_reply["id"].as_str().unwrap().to_owned();
+        tl_writes.record("comment.add", &opt_reply, "remote-a");
+        let stale_rev_before_comment = world
+            .client_merged_snapshot()?
+            .cards
+            .iter()
+            .find(|c| c.id == cid_a)
+            .unwrap()
+            .revision
+            .saturating_sub(1);
+        let mut stale_comment_snap = world.client_merged_snapshot()?;
+        if let Some(c) = stale_comment_snap.cards.iter_mut().find(|c| c.id == cid_a) {
+            c.revision = stale_rev_before_comment;
+        }
+        tl_writes.reconcile(&mut stale_comment_snap);
+        if let Some(expected_card_rev) = opt_reply["card_revision"].as_u64() {
+            let projected_rev = stale_comment_snap
+                .cards
+                .iter()
+                .find(|c| c.id == cid_a)
+                .unwrap()
+                .revision;
+            ensure!(
+                projected_rev >= expected_card_rev,
+                "comment.add receipt card_revision={expected_card_rev} failed to advance stale card rev={projected_rev}"
+            );
+        }
+        tl_writes.overlay_card_events(&cid_a, &mut tl_state.events);
+        ensure!(
+            tl_state
+                .events
+                .iter()
+                .any(|e| e.id == opt_comment_id && e.message == "optimistic-tail-comment"),
+            "optimistic comment.add did not overlay onto CardTimelineState"
+        );
+
+        // Real `comment.update` & `comment.delete` on earlier tail comments.
+        let updated_c = world.client_call(
+            "comment.update",
+            with_ui_projection(
+                "comment.update",
+                json!({
+                    "card_id": cid_a,
+                    "comment_id": edit_comment_id,
+                    "body": "Edited tail body",
+                    "mentions": [],
+                }),
+            ),
+            Some(&pid_a),
+        )?;
+        ensure!(updated_c["body"] == json!("Edited tail body"));
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "comment.update", "remote-a", &updated_c);
+        tl_writes.record("comment.update", &updated_c, "remote-a");
+        let mut optimistic_events = tl_state.events.clone();
+        tl_writes.overlay_card_events(&cid_a, &mut optimistic_events);
+        ensure!(
+            optimistic_events
+                .iter()
+                .find(|e| e.id == edit_comment_id)
+                .is_some_and(|e| e.message == "Edited tail body" && e.data["revision"] == json!(2)),
+            "optimistic comment.update overlay mismatch"
+        );
+
+        let deleted_c = world.client_call(
+            "comment.delete",
+            json!({ "card_id": cid_a, "comment_id": delete_comment_id }),
+            Some(&pid_a),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "comment.delete", "remote-a", &deleted_c);
+        tl_writes.record("comment.delete", &deleted_c, "remote-a");
+        tl_writes.overlay_card_events(&cid_a, &mut optimistic_events);
+        ensure!(
+            optimistic_events
+                .iter()
+                .find(|e| e.id == delete_comment_id)
+                .is_some_and(|e| e.kind == "comment.deleted"),
+            "optimistic comment.delete tombstone overlay mismatch"
+        );
+
+        // Incremental refresh folds `comment.updated` & `comment.deleted` in place and reconciles.
+        let inc_raw = world.client_call(
+            "timeline.list",
+            with_ui_projection(
+                "timeline.list",
+                json!({ "card_id": cid_a, "after_sequence": tl_state.highwater, "limit": 50 }),
+            ),
+            Some(&pid_a),
+        )?;
+        let inc_parsed = parse_timeline_page(&inc_raw);
+        let prev_hw = tl_state.highwater;
+        apply_incremental_page(
+            &mut tl_state,
+            inc_parsed.events,
+            inc_parsed.highwater,
+            &mut tl_writes,
+            &cid_a,
+        );
+        ensure!(
+            tl_state.highwater > prev_hw,
+            "incremental timeline refresh must advance highwater: prev={prev_hw} now={}",
+            tl_state.highwater
+        );
+        ensure!(
+            tl_state
+                .events
+                .iter()
+                .find(|e| e.id == edit_comment_id)
+                .is_some_and(|e| e.message == "Edited tail body"),
+            "apply_incremental_page failed to fold comment.updated in place"
+        );
+        ensure!(
+            tl_state
+                .events
+                .iter()
+                .find(|e| e.id == delete_comment_id)
+                .is_some_and(|e| e.kind == "comment.deleted"),
+            "apply_incremental_page failed to fold comment.deleted in place"
+        );
+        ensure!(
+            tl_writes.pending_comment_count() == 0
+                && tl_writes.pending_deleted_comment_count() == 0,
+            "comment receipts did not drain after authoritative incremental page: comments={} deleted={}",
+            tl_writes.pending_comment_count(),
+            tl_writes.pending_deleted_comment_count()
+        );
+
+        // Load older activity prepends earlier sequences and clears `has_more_before`.
+        let oldest_before = tl_state.oldest_seq.unwrap();
+        let older_raw = world.client_call(
+            "timeline.list",
+            with_ui_projection(
+                "timeline.list",
+                json!({ "card_id": cid_a, "before_sequence": oldest_before, "limit": 50 }),
+            ),
+            Some(&pid_a),
+        )?;
+        let older_parsed = parse_timeline_page(&older_raw);
+        apply_older_page(
+            &mut tl_state,
+            older_parsed.events,
+            older_parsed.has_more_before,
+            older_parsed.oldest_sequence,
+            &mut tl_writes,
+            &cid_a,
+        );
+        ensure!(
+            !tl_state.has_more_before
+                && tl_state.oldest_seq.is_some_and(|s| s < oldest_before)
+                && tl_state
+                    .events
+                    .windows(2)
+                    .all(|w| w[0].sequence <= w[1].sequence),
+            "apply_older_page mismatch: has_more={} oldest={:?} prev_oldest={oldest_before}",
+            tl_state.has_more_before,
+            tl_state.oldest_seq
+        );
+        let mut around_state = CardTimelineState::default();
+        let mid_events: Vec<Event> = tl_state.events.iter().take(3).cloned().collect();
+        apply_around_page(&mut around_state, mid_events, false, &mut tl_writes, &cid_a);
+        ensure!(
+            around_state.events.len() == 3
+                && around_state.oldest_seq == Some(around_state.events[0].sequence),
+            "apply_around_page state mismatch"
+        );
+        world.hit("client_pages.ui_presenter_pagination_checked");
+
+        // =========================================================================
+        // 6. Real `CommittedWrites` + `with_ui_projection` Lifecycle Across Real RPCs
+        //    (projection guards, resolve/reopen, hold_auto_merge, reads, review drafts,
+        //     managed worktrees, card.remove, env.save scopes, terminals + hints/contexts).
+        // =========================================================================
+        ensure!(
+            with_ui_projection("comment.update", json!({"fields": ["body"], "body": "x"}))
+                .get("view")
+                .is_none(),
+            "explicit `fields` must not collide with injected `view: full`"
+        );
+        for m in [
+            "config.agents.save",
+            "utilities.configure",
+            "utilities.awake",
+            "scheduler.configure",
+            "host.env.refresh",
+        ] {
+            ensure!(submission::config_only(m), "{m} must be config_only");
+        }
+        for m in [
+            "card.move",
+            "card.hold_auto_merge",
+            "card.resolve",
+            "card.reopen",
+            "comment.update",
+            "comment.delete",
+            "notifications.read",
+            "schedule.toggle",
+            "terminal.create",
+            "review.run_agent",
+            "review.send_agent",
+            "review.draft.set",
+            "review.draft.clear",
+            "agent.open",
+            "execution.retry",
+            "configuration.open",
+            "worktree.create",
+            "worktree.promote",
+        ] {
+            ensure!(submission::immediate(m), "{m} must be immediate");
+        }
+
+        let mut life_writes = CommittedWrites::default();
+        let stale_before_life = world.client_merged_snapshot()?;
+
+        // Real `card.hold_auto_merge`, `card.resolve`, `card.reopen`, `notifications.read`.
+        let rev_local_now = stale_before_life
+            .cards
+            .iter()
+            .find(|c| c.id == cid_local)
+            .unwrap()
+            .revision;
+        let held_local = world.client_call(
+            "card.hold_auto_merge",
+            with_ui_projection(
+                "card.hold_auto_merge",
+                json!({ "card_id": cid_local, "revision": rev_local_now, "hold": true }),
+            ),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(
+            PRIMARY_CLIENT,
+            "card.hold_auto_merge",
+            "local",
+            &held_local,
+        );
+        life_writes.record("card.hold_auto_merge", &held_local, "local");
+        let mut stale_held = stale_before_life.clone();
+        life_writes.reconcile(&mut stale_held);
+        ensure!(
+            stale_held
+                .cards
+                .iter()
+                .find(|c| c.id == cid_local)
+                .is_some_and(|c| c.hold_auto_merge && c.revision > rev_local_now),
+            "card.hold_auto_merge receipt did not overlay immediately on stale snapshot"
+        );
+
+        let rev_after_hold = held_local["revision"].as_u64().unwrap();
+        let resolved_local = world.client_call(
+            "card.resolve",
+            with_ui_projection(
+                "card.resolve",
+                json!({ "card_id": cid_local, "revision": rev_after_hold, "reason": "verified" }),
+            ),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.resolve", "local", &resolved_local);
+        life_writes.record("card.resolve", &resolved_local, "local");
+        let mut stale_res = stale_before_life.clone();
+        life_writes.overlay(&mut stale_res);
+        ensure!(
+            stale_res
+                .cards
+                .iter()
+                .find(|c| c.id == cid_local)
+                .is_some_and(|c| c.resolved()),
+            "card.resolve receipt did not overlay immediately"
+        );
+
+        let rev_after_res = resolved_local["revision"].as_u64().unwrap();
+        let reopened_local = world.client_call(
+            "card.reopen",
+            with_ui_projection(
+                "card.reopen",
+                json!({ "card_id": cid_local, "revision": rev_after_res }),
+            ),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.reopen", "local", &reopened_local);
+        life_writes.record("card.reopen", &reopened_local, "local");
+        let mut stale_reopen = stale_res.clone();
+        life_writes.overlay(&mut stale_reopen);
+        ensure!(
+            stale_reopen
+                .cards
+                .iter()
+                .find(|c| c.id == cid_local)
+                .is_some_and(|c| !c.resolved() && c.revision > rev_after_res),
+            "card.reopen receipt did not overlay immediately"
+        );
+
+        // Real `notifications.read` receipt overlay & reconcile.
+        let read_rcpt = world.client_call(
+            "notifications.read",
+            json!({ "card_id": cid_a, "sequence": tl_state.highwater }),
+            Some(&pid_a),
+        )?;
+        oracle.record_ui_write_receipt(
+            PRIMARY_CLIENT,
+            "notifications.read",
+            "remote-a",
+            &read_rcpt,
+        );
+        life_writes.record("notifications.read", &read_rcpt, "remote-a");
+        let mut stale_read = stale_before_life.clone();
+        life_writes.overlay(&mut stale_read);
+        ensure!(
+            stale_read
+                .card_reads
+                .iter()
+                .any(|r| r.card_id == cid_a && r.sequence >= tl_state.highwater),
+            "notifications.read receipt failed to overlay on stale snapshot"
+        );
+
+        // Real `review.draft.set` -> overlay -> `review.draft.clear` -> overlay hides draft.
+        let draft_set = world.client_call(
+            "review.draft.set",
+            json!({
+                "card_id": cid_local,
+                "summary": "Check lock order",
+                "verdict": "comment",
+                "comments": [],
+            }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "review.draft.set", "local", &draft_set);
+        life_writes.record("review.draft.set", &draft_set, "local");
+        let mut stale_draft = stale_before_life.clone();
+        life_writes.reconcile(&mut stale_draft);
+        ensure!(
+            stale_draft
+                .review_drafts
+                .iter()
+                .any(|d| d.card_id == cid_local && d.summary == "Check lock order"),
+            "review.draft.set receipt failed to overlay"
+        );
+        let draft_clear = world.client_call(
+            "review.draft.clear",
+            json!({ "card_id": cid_local }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "review.draft.clear", "local", &draft_clear);
+        life_writes.record("review.draft.clear", &draft_clear, "local");
+        life_writes.overlay(&mut stale_draft);
+        ensure!(
+            stale_draft
+                .review_drafts
+                .iter()
+                .all(|d| d.card_id != cid_local),
+            "review.draft.clear failed to hide overlaid draft"
+        );
+
+        // Real `worktree.create` -> overlay -> `worktree.promote` -> removes worktree & adds Card!
+        let wt_created = world.client_call(
+            "worktree.create",
+            json!({
+                "project_id": pid_local,
+                "branch": "feat/ui-dst-wt",
+                "launch": "none",
+            }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "worktree.create", "local", &wt_created);
+        let wt_id = wt_created["worktree"]["id"].as_str().unwrap().to_owned();
+        life_writes.record("worktree.create", &wt_created, "local");
+        let mut stale_wt = stale_before_life.clone();
+        life_writes.reconcile(&mut stale_wt);
+        ensure!(
+            stale_wt.worktrees.iter().any(|w| w.id == wt_id),
+            "worktree.create receipt failed to overlay ManagedWorktree"
+        );
+        let wt_promoted = world.client_call(
+            "worktree.promote",
+            json!({
+                "worktree_id": wt_id,
+                "title": "Promoted Worktree Card",
+                "body": "Investigate #perf and [#lru-cache](tag:lru-cache) bottlenecks",
+            }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "worktree.promote", "local", &wt_promoted);
+        let cid_wt = wt_promoted["id"].as_str().unwrap().to_owned();
+        life_writes.record("worktree.promote", &wt_promoted, "local");
+        life_writes.overlay(&mut stale_wt);
+        ensure!(
+            stale_wt.worktrees.iter().all(|w| w.id != wt_id)
+                && stale_wt.cards.iter().any(|c| c.id == cid_wt),
+            "worktree.promote must replace ManagedWorktree with promoted Card"
+        );
+
+        // Real `card.create` + `card.remove` must NOT resurrect removed Card from create receipt!
+        let temp_created = world.client_call(
+            "card.create",
+            with_ui_projection(
+                "card.create",
+                json!({ "project_id": pid_local, "title": "Ephemeral Card" }),
+            ),
+            Some(&pid_local),
+        )?;
+        let temp_cid = temp_created["id"].as_str().unwrap().to_owned();
+        let temp_rev = temp_created["revision"].as_u64().unwrap();
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.create", "local", &temp_created);
+        life_writes.record("card.create", &temp_created, "local");
+        let temp_removed = world.client_call(
+            "card.remove",
+            json!({ "card_id": temp_cid, "revision": temp_rev }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.remove", "local", &temp_removed);
+        life_writes.record("card.remove", &temp_removed, "local");
+        let mut stale_removed = Snapshot::default();
+        life_writes.reconcile(&mut stale_removed);
+        ensure!(
+            stale_removed.cards.iter().all(|c| c.id != temp_cid),
+            "card.remove must evict create receipt and never resurrect removed Card"
+        );
+
+        // Real `env.save` (global + remote agent scope + project scope, then clear remote agent scope).
+        let plain_entries = BTreeMap::from([(
+            "UI_DST_KEY".to_owned(),
+            EnvWriteEntry::Plain { value: "v1".into() },
+        )]);
+        let env_global = world.client_call(
+            "env.save",
+            json!({ "scope": "global", "entries": plain_entries }),
+            None,
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "env.save", "local", &env_global);
+        life_writes.record("env.save", &env_global, "local");
+        let env_agent = world.client_call(
+            "env.save",
+            json!({
+                "host_id": "remote-a",
+                "scope": "agent",
+                "target_id": "codex",
+                "entries": plain_entries,
+            }),
+            None,
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "env.save", "remote-a", &env_agent);
+        life_writes.record("env.save", &env_agent, "remote-a");
+        let env_proj = world.client_call(
+            "env.save",
+            json!({
+                "scope": "project",
+                "target_id": pid_a,
+                "entries": plain_entries,
+            }),
+            Some(&pid_a),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "env.save", "remote-a", &env_proj);
+        life_writes.record("env.save", &env_proj, "remote-a");
+        let mut stale_env = Snapshot::default();
+        life_writes.overlay(&mut stale_env);
+        ensure!(
+            stale_env.global_env.contains_key("UI_DST_KEY")
+                && stale_env
+                    .agent_env("remote-a", "codex")
+                    .contains_key("UI_DST_KEY")
+                && stale_env.project_env(&pid_a).contains_key("UI_DST_KEY"),
+            "env.save receipts did not overlay global/agent/project scopes"
+        );
+        // Clear remote agent scope with empty map and verify immediate removal + clean reconcile.
+        let env_agent_clear = world.client_call(
+            "env.save",
+            json!({
+                "host_id": "remote-a",
+                "scope": "agent",
+                "target_id": "codex",
+                "entries": BTreeMap::<String, EnvWriteEntry>::new(),
+            }),
+            None,
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "env.save", "remote-a", &env_agent_clear);
+        life_writes.record("env.save", &env_agent_clear, "remote-a");
+        life_writes.overlay(&mut stale_env);
+        ensure!(
+            !stale_env.scoped_env.contains_key("agent:remote-a:codex"),
+            "clearing empty remote agent env scope must remove key immediately"
+        );
+
+        // Real `terminal.create` + `record_terminal_hint` + `reconcile_runtime` + `last_terminal_contexts`
+        // + `terminal.end` drain.
+        let term_rcpt = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid_local, "name": "UI DST Shell", "cwd": dir_local }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "terminal.create", "local", &term_rcpt);
+        let term_id = term_rcpt["id"].as_str().unwrap().to_owned();
+        let mut term_writes = CommittedWrites::default();
+        // Also seed a durable card receipt so we verify `reconcile_runtime` never evicts it!
+        term_writes.record("card.reopen", &reopened_local, "local");
+        term_writes.record("terminal.create", &term_rcpt, "local");
+        let mut rt_probe = Snapshot::default();
+        term_writes.reconcile_runtime(&mut rt_probe);
+        ensure!(
+            rt_probe.terminals.iter().any(|t| t.id == term_id)
+                && term_writes.pending_card_count() == 1,
+            "reconcile_runtime must overlay terminal while preserving durable card receipts"
+        );
+        // Wait until real terminal binds to Herdr and gets observed with real cwd.
+        world.wait_until(10_000, |w| {
+            let s = w.client_merged_snapshot()?;
+            Ok(s.terminals.iter().any(|t| {
+                t.id == term_id
+                    && t.runtime
+                        .as_ref()
+                        .is_some_and(|r| r.core_id.is_some() && r.terminal.is_some())
+            }) && s
+                .terminal_contexts
+                .iter()
+                .any(|c| c.terminal_id == term_id && c.cwd.is_some()))
+        })?;
+        let live_term_snap = world.client_merged_snapshot()?;
+        let live_term_entry = live_term_snap
+            .terminals
+            .iter()
+            .find(|t| t.id == term_id)
+            .unwrap()
+            .clone();
+        let live_rt = live_term_entry.runtime.as_ref().unwrap();
+        let hint = TerminalContext {
+            terminal_id: term_id.clone(),
+            core_id: live_rt.core_id.clone().unwrap(),
+            terminal: live_rt.terminal.clone().unwrap(),
+            cwd: Some(dir_local.clone()),
+            directory_root: Some(dir_local.clone()),
+            project_id: Some(pid_local.clone()),
+            ..Default::default()
+        };
+        let mut hint_writes = CommittedWrites::default();
+        hint_writes.record_terminal_hint(hint.clone());
+        let mut unknown_cwd_snap = live_term_snap.clone();
+        for ctx in &mut unknown_cwd_snap.terminal_contexts {
+            if ctx.terminal_id == term_id {
+                ctx.cwd = None;
+                ctx.directory_root = None;
+                ctx.project_id = None;
+            }
+        }
+        hint_writes.reconcile(&mut unknown_cwd_snap);
+        ensure!(
+            unknown_cwd_snap
+                .terminal_contexts
+                .iter()
+                .any(|c| c.terminal_id == term_id && c.cwd.as_deref() == Some(dir_local.as_str()))
+                && hint_writes.pending_terminal_hint_count() == 1,
+            "terminal placement hint must survive cwd: None until observed"
+        );
+        // Real observed snapshot clears the placement hint and populates `last_terminal_contexts`.
+        let mut obs_snap = live_term_snap.clone();
+        hint_writes.reconcile(&mut obs_snap);
+        ensure!(
+            hint_writes.pending_terminal_hint_count() == 0
+                && hint_writes.last_terminal_context_count() >= 1,
+            "observed cwd must clear hint and retain last_terminal_context"
+        );
+        // Transient drop of cwd/context on a still-running terminal retains last observed context!
+        let mut transient_snap = live_term_snap.clone();
+        transient_snap
+            .terminal_contexts
+            .retain(|c| c.terminal_id != term_id);
+        hint_writes.reconcile(&mut transient_snap);
+        ensure!(
+            transient_snap
+                .terminal_contexts
+                .iter()
+                .any(|c| c.terminal_id == term_id && c.cwd.is_some()),
+            "live terminal must retain last observed context across transient context omission"
+        );
+        // Ending the real terminal clears retained context cleanly once finished!
+        let _ = world.client_call(
+            "terminal.end",
+            json!({ "terminal_id": term_id }),
+            Some(&pid_local),
+        )?;
+        world.wait_until(10_000, |w| {
+            let s = w.client_merged_snapshot()?;
+            Ok(s.terminals.iter().any(|t| {
+                t.id == term_id && t.runtime.as_ref().is_some_and(|r| r.state == "finished")
+            }))
+        })?;
+        let mut finished_snap = world.client_merged_snapshot()?;
+        finished_snap
+            .terminal_contexts
+            .retain(|c| c.terminal_id != term_id);
+        hint_writes.reconcile(&mut finished_snap);
+        ensure!(
+            finished_snap
+                .terminal_contexts
+                .iter()
+                .all(|c| c.terminal_id != term_id),
+            "finished terminal must clear retained last_terminal_context"
+        );
+
+        world.heal_and_quiesce(20_000)?;
+        let mut caught_up_life = world.client_merged_snapshot()?;
+        life_writes.reconcile(&mut caught_up_life);
+        ensure!(
+            life_writes.pending_card_count() == 0
+                && life_writes.pending_card_read_count() == 0
+                && life_writes.pending_review_draft_count() == 0
+                && life_writes.pending_worktree_count() == 0
+                && life_writes.pending_env_update_count() == 0,
+            "CommittedWrites did not drain cleanly at quiescence: cards={} reads={} drafts={} wt={} env={}",
+            life_writes.pending_card_count(),
+            life_writes.pending_card_read_count(),
+            life_writes.pending_review_draft_count(),
+            life_writes.pending_worktree_count(),
+            life_writes.pending_env_update_count(),
+        );
+
+        // =========================================================================
+        // 7. Real `quick_merge`, `SnapshotIndex`/`KnownTagsIndex`/`LinkLookup`/
+        //    `QueueIndex` (`build_card_status`), & `apply_runtime_state_to_snapshot`.
+        // =========================================================================
+        let snap_for_idx = world.client_merged_snapshot()?;
+        let wt_card = snap_for_idx
+            .cards
+            .iter()
+            .find(|c| c.id == cid_wt)
+            .unwrap()
+            .clone();
+        let local_proj = snap_for_idx
+            .projects
+            .iter()
+            .find(|p| p.id == pid_local)
+            .unwrap();
+        ensure!(
+            quick_merge::eligible(&wt_card, Some(local_proj))
+                && quick_merge::message(&wt_card)
+                    == format!("Canban #{}: {}", wt_card.number, wt_card.title),
+            "promoted worktree card must be quick_merge eligible"
+        );
+        let no_wt_card = snap_for_idx
+            .cards
+            .iter()
+            .find(|c| c.id == cid_local)
+            .unwrap();
+        ensure!(!quick_merge::eligible(no_wt_card, Some(local_proj)));
+        let mut pr_mode_card = wt_card.clone();
+        pr_mode_card.delivery_mode = Some(DeliveryMode::GitHubPr);
+        ensure!(!quick_merge::eligible(&pr_mode_card, Some(local_proj)));
+        let mut archived_card = wt_card.clone();
+        archived_card.archived_at = Some(1);
+        ensure!(!quick_merge::eligible(&archived_card, Some(local_proj)));
+        let mut delivered_card = wt_card.clone();
+        delivered_card.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "abc123".into(),
+            request_key: "req-1".into(),
+            merged_at: 1,
+        });
+        ensure!(!quick_merge::eligible(&delivered_card, Some(local_proj)));
+
+        // `SnapshotIndex`, `KnownTagsIndex` (`#perf` + `[#lru-cache](tag:lru-cache)`), and
+        // `LinkLookup` stability across `card_summaries` update (`comment.add`).
+        let idx1 = SnapshotIndex::reuse_or_build(None, &snap_for_idx);
+        let known_tags = KnownTagsIndex::build(
+            &idx1,
+            &BTreeSet::from(["perf".to_owned(), "local-tag".to_owned()]),
+        );
+        let wt_tags = known_tags.tags_for_card(&cid_wt);
+        ensure!(
+            wt_tags.contains(&"perf".to_owned()) && wt_tags.contains(&"lru-cache".to_owned()),
+            "KnownTagsIndex must extract #perf and explicit tag:lru-cache from real Card body: {wt_tags:?}"
+        );
+        let lookup1 = LinkLookup::build(&idx1);
+        ensure!(
+            lookup1.resolve_card_number(&pid_local, wt_card.number) == Some(cid_wt.as_str()),
+            "LinkLookup must resolve real Card number to ID"
+        );
+        let c_sum = world.client_call(
+            "comment.add",
+            with_ui_projection(
+                "comment.add",
+                json!({ "card_id": cid_wt, "body": "summary bump", "mentions": [] }),
+            ),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "comment.add", "local", &c_sum);
+        world.heal_and_quiesce(15_000)?;
+        let snap_after_sum = world.client_merged_snapshot()?;
+        let idx2 = SnapshotIndex::reuse_or_build(Some(&idx1), &snap_after_sum);
+        ensure!(
+            !Rc::ptr_eq(&idx1, &idx2) && idx1 != idx2 && idx2.reply_count(&cid_wt) >= 1,
+            "comment.add card_summaries bump must rebuild SnapshotIndex and advance reply_count"
+        );
+        let lookup2 = LinkLookup::build(&idx2);
+        ensure!(
+            lookup1 == lookup2,
+            "LinkLookup must remain equal across card_summaries-only changes"
+        );
+
+        // `build_card_status` (`QueueIndex`) FIFO + hold + pause parity across projects.
+        let mut q_snap = snap_after_sum.clone();
+        for (i, c) in q_snap
+            .cards
+            .iter_mut()
+            .filter(|c| c.active())
+            .take(3)
+            .enumerate()
+        {
+            c.stage = "review".into();
+            q_snap.workflow_runs.push(
+                serde_json::from_value(json!({
+                    "id": format!("sim-q-run-{i}"),
+                    "project_id": c.project_id,
+                    "card_id": c.id,
+                    "workflow_id": "delivery",
+                    "definition_revision": 1,
+                    "definition": {
+                        "id": "delivery", "name": "Delivery",
+                        "entries": { "review": "deliver" },
+                        "steps": {
+                            "deliver": { "type": "deliver", "sync_upstream": true, "max_conflict_attempts": 3, "next": "done" },
+                            "done": { "type": "complete" }
+                        }
+                    },
+                    "state": "waiting_delivery",
+                    "step": "deliver",
+                    "visit": 1,
+                    "trigger_event_id": null,
+                    "input_digest": "d",
+                    "inputs": { "queued_at": 10 - i },
+                    "outputs": {},
+                    "history": [],
+                    "error": null,
+                    "created_at": 0,
+                    "updated_at": 0
+                }))
+                .unwrap(),
+            );
+        }
+        for paused in [false, true] {
+            if let Some(r) = q_snap.workflow_runs.last_mut() {
+                r.inputs["queue_pause_reason"] = if paused {
+                    json!("Checkout busy")
+                } else {
+                    Value::Null
+                };
+            }
+            if let Some(c) = q_snap.cards.first_mut() {
+                c.hold_auto_merge = paused;
+            }
+            let status_map = build_card_status(&q_snap);
+            for c in q_snap.cards.iter().filter(|c| c.active()) {
+                let d = &status_map[&c.id];
+                ensure!(
+                    d.is_merging == canban_ui::components::activity::is_merging(&q_snap, c)
+                        && d.specs_normal
+                            == canban_ui::components::activity::card_status_specs(
+                                &q_snap, c, false
+                            )
+                        && d.specs_ui_merging
+                            == canban_ui::components::activity::card_status_specs(&q_snap, c, true),
+                    "build_card_status parity failed under paused={paused} for Card {}",
+                    c.id
+                );
+            }
+        }
+
+        // Real `agent.open` on `cid_wt` -> real `client_merged_runtime()` -> `apply_runtime_state_to_snapshot`
+        // + real `SimHerdr` permission wait -> `reminders` / `sound_items_with_reminders` / `describe_row`!
+        let base_snap_rt = world.client_merged_snapshot()?;
+        let base_idx_rt = SnapshotIndex::reuse_or_build(None, &base_snap_rt);
+        let agent_open = world.client_call(
+            "agent.open",
+            json!({ "card_id": cid_wt, "profile_id": "codex" }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "agent.open", "local", &agent_open);
+        world.wait_until(10_000, |w| {
+            let s = w.client_merged_snapshot()?;
+            Ok(s.terminals.iter().any(|t| {
+                t.agent
+                    .as_ref()
+                    .is_some_and(|a| a.card_id == cid_wt && a.terminal.is_some())
+            }))
+        })?;
+        let live_rt_state = world.client_merged_runtime()?;
+        let mut rt_writes = CommittedWrites::default();
+        let applied_rt = apply_runtime_state_to_snapshot_at(
+            &base_snap_rt,
+            live_rt_state.clone(),
+            &mut rt_writes,
+            world.now_ms(),
+        )
+        .expect("apply_runtime_state_to_snapshot_at must succeed for known cards");
+        let idx_after_rt = SnapshotIndex::reuse_or_build(Some(&base_idx_rt), &applied_rt);
+        ensure!(
+            Rc::ptr_eq(&base_idx_rt, &idx_after_rt)
+                && base_idx_rt.generation == idx_after_rt.generation,
+            "apply_runtime_state_to_snapshot must keep SnapshotIndex Rc & generation unchanged"
+        );
+        ensure!(
+            applied_rt
+                .host_summaries
+                .get("local")
+                .is_some_and(|h| h.active_agents >= 1),
+            "apply_runtime_state_to_snapshot must reflect local active_agents"
+        );
+        // `observed_at` + context churn while working keeps `build_card_status` equal.
+        let status_working = build_card_status(&applied_rt);
+        let mut churn_rt = live_rt_state;
+        for t in &mut churn_rt.terminals {
+            if let Some(a) = &mut t.agent {
+                a.lifecycle.observed_at = a.lifecycle.observed_at.map(|v| v + 1_000);
+            }
+        }
+        for c in &mut churn_rt.terminal_contexts {
+            c.additions += 14;
+        }
+        let applied_churn = apply_runtime_state_to_snapshot_at(
+            &applied_rt,
+            churn_rt,
+            &mut rt_writes,
+            world.now_ms(),
+        )
+        .unwrap();
+        ensure!(
+            build_card_status(&applied_churn) == status_working,
+            "observed_at + additions churn must keep build_card_status equal"
+        );
+
+        // Real Herdr permission block -> `apply_runtime_state_to_snapshot_at` reconciles reminders +
+        // `sound_items_with_reminders` + `overview::describe_row_at` -> `Icon::ShieldAlert` / `"Permission required"`.
+        let wt_agent_addr = world
+            .server("local-server")
+            .unwrap()
+            .snapshot()?
+            .terminals
+            .iter()
+            .find_map(|t| {
+                t.agent
+                    .as_ref()
+                    .filter(|a| a.card_id == cid_wt)
+                    .and_then(|a| a.terminal.clone())
+            })
+            .expect("agent herdr addr");
+        world.herdr("local-server").unwrap().set_status_detailed(
+            &wt_agent_addr,
+            json!({
+                "state": "blocked",
+                "kind": "permission",
+                "title": "Allow command?",
+                "msg": "cargo test --workspace"
+            }),
+            Some(1),
+        );
+        world.wait_until(10_000, |w| {
+            let s = w.client_merged_snapshot()?;
+            Ok(s.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == cid_wt
+                        && a.lifecycle
+                            .waiting
+                            .as_ref()
+                            .is_some_and(|wt| wt.kind == "permission")
+                })
+            }))
+        })?;
+        let blocked_rt = world.client_merged_runtime()?;
+        let blocked_now = world.now_ms();
+        let applied_blocked = apply_runtime_state_to_snapshot_at(
+            &applied_churn,
+            blocked_rt,
+            &mut rt_writes,
+            blocked_now,
+        )
+        .expect("blocked RuntimeState must apply");
+        let wait_id = applied_blocked
+            .terminals
+            .iter()
+            .find_map(|t| {
+                t.agent
+                    .as_ref()
+                    .filter(|a| a.card_id == cid_wt)
+                    .and_then(|a| a.lifecycle.waiting.as_ref())
+                    .map(|w| format!("wait:{}", w.id))
+            })
+            .expect("expected RuntimeWait id");
+        let blocked_rems = canban_notifications::reminders(&applied_blocked);
+        let sound_ids =
+            canban_notifications::sound_items_with_reminders(&applied_blocked, &blocked_rems);
+        ensure!(
+            blocked_rems.iter().any(|r| r.id == wait_id)
+                && sound_ids.iter().any(|id| id == &wait_id),
+            "blocked RuntimeWait must reconcile into reminders & sound_items: wait_id={wait_id}"
+        );
+        let perm_rows = canban_notifications::overview_at(&applied_blocked, blocked_now);
+        let perm_row = perm_rows
+            .iter()
+            .find(|r| r.card.id == cid_wt)
+            .expect("expected overview row for blocked agent card");
+        let perm_ev = describe_row_at(&applied_blocked, perm_row, blocked_now);
+        ensure!(
+            perm_ev.icon == Icon::ShieldAlert
+                && perm_ev.tone == Tone::Attention
+                && perm_ev.headline == "Permission required"
+                && perm_ev.detail.as_deref() == Some("Allow command? · cargo test --workspace"),
+            "permission-blocked describe_row mismatch: {perm_ev:?}"
+        );
+
+        // Unknown Card reference in `RuntimeState` must return `None` (escalating to full `app.state`).
+        let unknown_rt = RuntimeState {
+            terminals: vec![
+                serde_json::from_value(json!({
+                    "id": "unknown-card-term",
+                    "number": 99,
+                    "origin_card_id": "missing-card-id",
+                    "created_at": 1
+                }))
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        ensure!(
+            apply_runtime_state_to_snapshot_at(
+                &applied_blocked,
+                unknown_rt,
+                &mut rt_writes,
+                blocked_now,
+            )
+            .is_none(),
+            "unknown Card in RuntimeState must return None to escalate to full app.state"
+        );
+
+        // =========================================================================
+        // 8. Real UI `overview` Classification Matrix: Review / Merge Conflict /
+        //    Failed Gate / Unread Prefixes / 1h Automatic Unreported Idle / Standalone Shells.
+        // =========================================================================
+        {
+            let mut gate_snap = applied_blocked.clone();
+            let wt_tid = gate_snap
+                .terminals
+                .iter()
+                .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == cid_wt))
+                .unwrap()
+                .id
+                .clone();
+            if let Some(t) = gate_snap.terminals.iter_mut().find(|t| t.id == wt_tid)
+                && let Some(a) = &mut t.agent
+            {
+                a.state = "completed".into();
+                a.terminal = None;
+                a.lifecycle.waiting = None;
+            }
+            if let Some(c) = gate_snap.cards.iter_mut().find(|c| c.id == cid_wt) {
+                c.stage = "review".into();
+                c.human_gate = Some(HumanGate {
+                    reason: "Agent report ready; human review required".into(),
+                    terminal_id: Some(wt_tid.clone()),
+                    next_stage: None,
+                });
+            }
+            gate_snap.reports.push(Report {
+                id: "sim-rep-1".into(),
+                terminal_id: Some(wt_tid.clone()),
+                workflow_run_id: None,
+                actor: "agent:developer".into(),
+                project_id: pid_local.clone(),
+                card_id: cid_wt.clone(),
+                state: "completed".into(),
+                message: "Implemented event-first hierarchy and semantic icons".into(),
+                path: None,
+                request_key: "sim-rk-1".into(),
+                fingerprint: "sim-fp-1".into(),
+                created_at: world.now_ms(),
+            });
+            let r_rows = canban_notifications::overview_at(&gate_snap, world.now_ms());
+            let r_row = r_rows.iter().find(|r| r.card.id == cid_wt).unwrap();
+            let r_ev = describe_row_at(&gate_snap, r_row, world.now_ms());
+            ensure!(
+                r_ev.icon == Icon::Eye
+                    && r_ev.tone == Tone::Attention
+                    && r_ev.headline == "Ready for review"
+                    && r_ev.detail.as_deref()
+                        == Some("Implemented event-first hierarchy and semantic icons"),
+                "review gate describe_row mismatch: {r_ev:?}"
+            );
+
+            // Merge conflict gate.
+            gate_snap
+                .cards
+                .iter_mut()
+                .find(|c| c.id == cid_wt)
+                .unwrap()
+                .human_gate
+                .as_mut()
+                .unwrap()
+                .reason = "Merge conflict with main after 2 attempts".into();
+            let m_rows = canban_notifications::overview_at(&gate_snap, world.now_ms());
+            let m_ev = describe_row_at(
+                &gate_snap,
+                m_rows.iter().find(|r| r.card.id == cid_wt).unwrap(),
+                world.now_ms(),
+            );
+            ensure!(
+                m_ev.icon == Icon::GitMerge
+                    && m_ev.headline == "Merge conflict"
+                    && m_ev.detail.as_deref() == Some("Merge conflict with main after 2 attempts"),
+                "merge conflict describe_row mismatch: {m_ev:?}"
+            );
+
+            // Failed agent gate strips `failed: `.
+            gate_snap
+                .terminals
+                .iter_mut()
+                .find(|t| t.id == wt_tid)
+                .unwrap()
+                .agent
+                .as_mut()
+                .unwrap()
+                .state = "failed".into();
+            gate_snap
+                .cards
+                .iter_mut()
+                .find(|c| c.id == cid_wt)
+                .unwrap()
+                .human_gate
+                .as_mut()
+                .unwrap()
+                .reason = "failed: Build failed due to missing symbol".into();
+            let f_rows = canban_notifications::overview_at(&gate_snap, world.now_ms());
+            let f_ev = describe_row_at(
+                &gate_snap,
+                f_rows.iter().find(|r| r.card.id == cid_wt).unwrap(),
+                world.now_ms(),
+            );
+            ensure!(
+                f_ev.icon == Icon::TriangleAlert
+                    && f_ev.tone == Tone::Danger
+                    && f_ev.headline == "Agent failed"
+                    && f_ev.detail.as_deref() == Some("Build failed due to missing symbol"),
+                "failed gate describe_row mismatch: {f_ev:?}"
+            );
+
+            // `describe_unread_update` strips machine prefixes & maps semantic icons.
+            let mut rem_snap = Snapshot {
+                cards: vec![wt_card.clone()],
+                ..Default::default()
+            };
+            let ev_reply = Event {
+                id: "sim-u1".into(),
+                project_id: pid_local.clone(),
+                card_id: cid_wt.clone(),
+                sequence: 1,
+                kind: "comment.replied".into(),
+                actor: "agent:agy".into(),
+                message: "Ready for confirmation".into(),
+                data: json!({"question_id": "q1"}),
+                created_at: 1,
+            };
+            rem_snap.reminders = canban_notifications::reminders_from_events_at(
+                &rem_snap,
+                &[ev_reply],
+                world.now_ms(),
+            );
+            let u1 = describe_unread_update(canban_notifications::reminders(&rem_snap).first());
+            ensure!(
+                u1.icon == Icon::MessageSquare
+                    && u1.tone == Tone::Info
+                    && u1.headline == "@agy replied"
+                    && u1.detail.as_deref() == Some("Ready for confirmation"),
+                "comment.replied describe_unread_update mismatch: {u1:?}"
+            );
+            let ev_done = Event {
+                id: "sim-u2".into(),
+                project_id: pid_local.clone(),
+                card_id: cid_wt.clone(),
+                sequence: 2,
+                kind: "execution.reported".into(),
+                actor: "agent:developer".into(),
+                message: "completed: All checks passed".into(),
+                data: json!({"report_id": "r2", "state": "completed"}),
+                created_at: 2,
+            };
+            rem_snap.reminders = canban_notifications::reminders_from_events_at(
+                &rem_snap,
+                &[ev_done],
+                world.now_ms(),
+            );
+            let u2 = describe_unread_update(canban_notifications::reminders(&rem_snap).first());
+            ensure!(
+                u2.icon == Icon::Check
+                    && u2.tone == Tone::Success
+                    && u2.headline == "Stage completed · @developer"
+                    && u2.detail.as_deref() == Some("All checks passed"),
+                "completed describe_unread_update mismatch: {u2:?}"
+            );
+            let ev_backlog = Event {
+                id: "sim-u3".into(),
+                project_id: pid_local.clone(),
+                card_id: cid_wt.clone(),
+                sequence: 3,
+                kind: "execution.reported".into(),
+                actor: "agent:developer".into(),
+                message: "Returned to Backlog: Already landed".into(),
+                data: json!({"report_id": "r3", "state": "backlog"}),
+                created_at: 3,
+            };
+            rem_snap.reminders = canban_notifications::reminders_from_events_at(
+                &rem_snap,
+                &[ev_backlog],
+                world.now_ms(),
+            );
+            let u3 = describe_unread_update(canban_notifications::reminders(&rem_snap).first());
+            ensure!(
+                u3.icon == Icon::Undo
+                    && u3.tone == Tone::Neutral
+                    && u3.headline == "Returned to Backlog"
+                    && u3.detail.as_deref() == Some("Already landed"),
+                "backlog describe_unread_update mismatch: {u3:?}"
+            );
+
+            // Automatic unreported idle suppression until `UNREPORTED_IDLE_ALERT_MS` using deterministic `overview_at`.
+            let now_ms = world.now_ms();
+            let mut idle_snap = applied_blocked.clone();
+            if let Some(t) = idle_snap.terminals.iter_mut().find(|t| t.id == wt_tid)
+                && let Some(a) = &mut t.agent
+            {
+                a.trigger = canban_types::ExecutionTrigger::StageEntry;
+                a.state = "running".into();
+                a.observed = Some(json!({"state": "live", "turn": 1, "status": {"state": "idle"}}));
+                a.lifecycle.waiting = None;
+                a.lifecycle.observed_at = Some(now_ms);
+                a.lifecycle.idle_since = Some(now_ms.saturating_sub(5 * 60_000));
+            }
+            let quiet_rows = canban_notifications::overview_at(&idle_snap, now_ms);
+            let quiet_row = quiet_rows.iter().find(|r| r.card.id == cid_wt).unwrap();
+            let quiet_ev = describe_row_at(&idle_snap, quiet_row, now_ms);
+            ensure!(
+                quiet_row.group == "Idle"
+                    && !quiet_row.actionable()
+                    && quiet_ev.tone == Tone::Neutral
+                    && quiet_ev.headline == "Idle",
+                "automatic unreported idle <1h must stay quiet Idle: row={:?} ev={quiet_ev:?}",
+                quiet_row.group
+            );
+            let later_ms = now_ms + canban_notifications::UNREPORTED_IDLE_ALERT_MS + 1_000;
+            if let Some(t) = idle_snap.terminals.iter_mut().find(|t| t.id == wt_tid)
+                && let Some(a) = &mut t.agent
+            {
+                a.lifecycle.observed_at = Some(later_ms);
+            }
+            let stalled_rows = canban_notifications::overview_at(&idle_snap, later_ms);
+            let stalled_row = stalled_rows.iter().find(|r| r.card.id == cid_wt).unwrap();
+            let stalled_ev = describe_row_at(&idle_snap, stalled_row, later_ms);
+            ensure!(
+                stalled_row.group == "Needs attention"
+                    && stalled_row.actionable()
+                    && stalled_ev.icon == Icon::TriangleAlert
+                    && stalled_ev.tone == Tone::Danger
+                    && stalled_ev.headline == "Stopped before reporting"
+                    && stalled_ev.detail.as_deref() == Some("Inspect terminal"),
+                "automatic unreported idle >1h must surface Stopped before reporting: {stalled_ev:?}"
+            );
+        }
+
+        // End the card agent so scheduler active_count returns to 0, then verify 3 real standalone
+        // shells: plain shell, working `claude` shell, and permission-blocked `agy` shell!
+        world
+            .herdr("local-server")
+            .unwrap()
+            .finish_terminal(&wt_agent_addr, 0, "done");
+        world.wait_until(10_000, |w| {
+            let srv = w.server("local-server").unwrap();
+            Ok(canban_scheduler::active_count_at(&srv.snapshot()?, srv.now_ms()) == 0)
+        })?;
+        let sh_plain = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid_local, "name": "Plain Shell", "cwd": dir_local }),
+            Some(&pid_local),
+        )?;
+        let sh_claude = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid_local, "name": "Manual Claude", "cwd": dir_local }),
+            Some(&pid_local),
+        )?;
+        let sh_agy = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid_local, "name": "Manual Agy", "cwd": dir_local }),
+            Some(&pid_local),
+        )?;
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "terminal.create", "local", &sh_plain);
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "terminal.create", "local", &sh_claude);
+        oracle.record_ui_write_receipt(PRIMARY_CLIENT, "terminal.create", "local", &sh_agy);
+        let id_plain = sh_plain["id"].as_str().unwrap().to_owned();
+        let id_claude = sh_claude["id"].as_str().unwrap().to_owned();
+        let id_agy = sh_agy["id"].as_str().unwrap().to_owned();
+        world.wait_until(10_000, |w| {
+            let s = w.server("local-server").unwrap().snapshot()?;
+            Ok([&id_plain, &id_claude, &id_agy].iter().all(|tid| {
+                s.terminals.iter().any(|t| {
+                    t.id == **tid
+                        && t.runtime
+                            .as_ref()
+                            .and_then(|r| r.terminal.as_ref())
+                            .is_some()
+                })
+            }))
+        })?;
+        let srv_terms = world.server("local-server").unwrap().snapshot()?.terminals;
+        let addr_of = |tid: &str| -> String {
+            srv_terms
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.runtime.as_ref())
+                .and_then(|r| r.terminal.clone())
+                .unwrap()
+        };
+        let addr_claude = addr_of(&id_claude);
+        let addr_agy = addr_of(&id_agy);
+        let local_herdr = world.herdr("local-server").unwrap();
+        local_herdr.upsert_terminal(&addr_claude, &dir_local, "working", 1, Some("claude"));
+        local_herdr.upsert_terminal(&addr_agy, &dir_local, "blocked", 1, Some("agy"));
+        local_herdr.set_status_detailed(
+            &addr_agy,
+            json!({
+                "state": "blocked",
+                "app": "agy",
+                "kind": "permission",
+                "title": "Allow command?",
+                "msg": "git status"
+            }),
+            Some(1),
+        );
+        world.wait_until(10_000, |w| {
+            let s = w.client_merged_snapshot()?;
+            let c_ok = s.terminals.iter().any(|t| {
+                t.id == id_claude
+                    && t.runtime.as_ref().is_some_and(|r| {
+                        r.observed_agent.as_deref() == Some("claude")
+                            && r.agent_status.as_deref() == Some("working")
+                    })
+            });
+            let a_ok = s.terminals.iter().any(|t| {
+                t.id == id_agy
+                    && t.runtime.as_ref().is_some_and(|r| {
+                        r.observed_agent.as_deref() == Some("agy")
+                            && r.agent_status.as_deref() == Some("blocked")
+                            && r.waiting.as_ref().is_some_and(|wt| wt.kind == "permission")
+                    })
+            });
+            Ok(c_ok && a_ok)
+        })?;
+        let sh_snap = world.client_merged_snapshot()?;
+        ensure!(
+            canban_scheduler::active_count_at(&sh_snap, world.now_ms()) == 0,
+            "standalone manual shell agents must consume 0 Scheduler slots"
+        );
+        let sh_entries = canban_ui::terminals::entries(&sh_snap);
+        let e_plain = sh_entries.iter().find(|e| e.saved.id == id_plain).unwrap();
+        let e_claude = sh_entries.iter().find(|e| e.saved.id == id_claude).unwrap();
+        let e_agy = sh_entries.iter().find(|e| e.saved.id == id_agy).unwrap();
+        ensure!(
+            !standalone_terminal_needs_you(&sh_snap, e_plain)
+                && !standalone_terminal_is_running(&sh_snap, e_plain),
+            "plain shell must be neither needs_you nor running"
+        );
+        ensure!(
+            !standalone_terminal_needs_you(&sh_snap, e_claude)
+                && standalone_terminal_is_running(&sh_snap, e_claude),
+            "working claude shell must be running and not needs_you"
+        );
+        let claude_ev = describe_standalone_terminal(e_claude, false, None, None);
+        ensure!(
+            claude_ev.headline == "Working" && claude_ev.live,
+            "working claude standalone terminal describe mismatch: {claude_ev:?}"
+        );
+        ensure!(
+            standalone_terminal_needs_you(&sh_snap, e_agy)
+                && !standalone_terminal_is_running(&sh_snap, e_agy),
+            "permission-blocked agy shell must be needs_you and not running"
+        );
+        let agy_ev = describe_standalone_terminal(e_agy, false, None, None);
+        ensure!(
+            agy_ev.icon == Icon::ShieldAlert
+                && agy_ev.tone == Tone::Attention
+                && agy_ev.headline == "Permission required"
+                && agy_ev.detail.as_deref() == Some("Allow command? · git status"),
+            "blocked agy standalone terminal describe mismatch: {agy_ev:?}"
+        );
+        let sh_rows = canban_notifications::overview_at(&sh_snap, world.now_ms());
+        ensure!(
+            running_agents_count_from(&sh_snap, &sh_rows, &sh_entries, Some(&pid_local)) == 1,
+            "expected exactly 1 running standalone agent (claude) in local project"
+        );
+
+        // =========================================================================
+        // 9. Real UI Event-Batch Classification, Side-Channel Guards & Draft Error Watch.
+        // =========================================================================
+        let real_backend_events: Vec<BackendEvent> = world
+            .drain_client_events()
+            .into_iter()
+            .map(BackendEvent::from_client_event)
+            .collect();
+        ensure!(
+            !real_backend_events.is_empty(),
+            "expected real MultiHostClient ClientEvents during desktop scenario"
+        );
+        let real_plan = plan_backend_events(real_backend_events, true);
+        ensure!(
+            real_plan.refresh_action != BackendRefreshAction::None,
+            "real mixed ClientEvents must schedule a refresh action: {real_plan:?}"
+        );
+
+        let host_ev = |host: &str, topic: &'static str| BackendEvent::Host {
+            host_id: host.into(),
+            event: AppEvent::Changed {
+                topic,
+                card_id: None,
+            },
+        };
+        ensure!(!is_runtime_only_event_batch(&[]));
+        ensure!(is_runtime_only_event_batch(&[host_ev(
+            "local",
+            "terminals"
+        )]));
+        ensure!(is_runtime_only_event_batch(&[host_ev("local", "reclaim")]));
+        ensure!(is_runtime_only_event_batch(&[
+            host_ev("local", "terminals"),
+            host_ev("local", "reclaim"),
+        ]));
+        for non_rt in [
+            vec![
+                host_ev("local", "terminals"),
+                host_ev("local", "application"),
+            ],
+            vec![host_ev("local", "application")],
+            vec![host_ev("local", "review")],
+            vec![host_ev("local", "github")],
+            vec![host_ev("local", "resync")],
+            vec![host_ev("local", "runtime")],
+            vec![BackendEvent::UtilitiesChanged {
+                host_id: "local".into(),
+                state: json!({}),
+            }],
+        ] {
+            ensure!(
+                !is_runtime_only_event_batch(&non_rt),
+                "batch must not classify as runtime-only: {non_rt:?}"
+            );
+        }
+
+        // Side-channel routing & optimistic pending guards (`UpdateChanged`, `UtilitiesChanged`, `UsageChanged`).
+        let side_plan = plan_backend_events(
+            vec![
+                BackendEvent::UpdateChanged {
+                    host_id: "remote-a".into(),
+                    state: json!({"state": {"phase": "ignored"}}),
+                },
+                BackendEvent::UpdateChanged {
+                    host_id: "local".into(),
+                    state: json!({"state": {"phase": "downloading", "progress": 60}}),
+                },
+                BackendEvent::UtilitiesChanged {
+                    host_id: "remote-a".into(),
+                    state: json!({"preferences": {"theme": "ignored"}}),
+                },
+                BackendEvent::UtilitiesChanged {
+                    host_id: "local".into(),
+                    state: json!({"preferences": {"theme": "nord"}}),
+                },
+                BackendEvent::UsageChanged {
+                    host_id: "other-host".into(),
+                    state: json!({"readings": [{"provider": "ignored"}]}),
+                },
+                BackendEvent::UsageChanged {
+                    host_id: "local".into(),
+                    state: json!({"readings": [{"provider": "codex", "used": 17}]}),
+                },
+            ],
+            true,
+        );
+        ensure!(
+            side_plan.local_update_pushes.len() == 1
+                && side_plan.local_update_pushes[0]["state"]["phase"] == "downloading"
+                && side_plan.local_utility_pushes.len() == 1
+                && side_plan.local_utility_pushes[0]["preferences"]["theme"] == "nord"
+                && side_plan.usage_pushes.len() == 2
+                && side_plan.refresh_action == BackendRefreshAction::None,
+            "side-channel event plan mismatch: {side_plan:?}"
+        );
+        ensure!(should_apply_utilities_push(&BTreeSet::new()));
+        ensure!(!should_apply_utilities_push(&BTreeSet::from([
+            "utilities.configure"
+        ])));
+        ensure!(should_apply_usage_push("local", "local"));
+        ensure!(!should_apply_usage_push("local", "other-host"));
+
+        // `global_env_sync`-only bumps env_sync_epoch without refreshing; `resync` sets all flags;
+        // runtime-only escalates to Full when `!snapshot_ready`.
+        let env_only_plan = plan_backend_events(vec![host_ev("local", "global_env_sync")], true);
+        ensure!(
+            env_only_plan.bump_env_sync_epoch
+                && env_only_plan.refresh_action == BackendRefreshAction::None
+        );
+        let rt_ready_plan = plan_backend_events(vec![host_ev("local", "terminals")], true);
+        ensure!(rt_ready_plan.refresh_action == BackendRefreshAction::Runtime);
+        let rt_unready_plan = plan_backend_events(vec![host_ev("local", "terminals")], false);
+        ensure!(rt_unready_plan.refresh_action == BackendRefreshAction::Full);
+        let resync_plan = plan_backend_events(vec![host_ev("local", "resync")], true);
+        ensure!(
+            resync_plan.notification_resync
+                && resync_plan.refresh_local_side_channels
+                && resync_plan.bump_github_epoch
+                && resync_plan.bump_env_sync_epoch
+                && resync_plan.refresh_action == BackendRefreshAction::Full
+        );
+
+        // Draft persistence error watch wakes subscribers immediately without polling.
+        let mut draft_err_rx = canban_ui::drafts::persistence::subscribe_error_epoch();
+        let before_err_epoch = *draft_err_rx.borrow();
+        canban_ui::drafts::persistence::bump_error_epoch();
+        ensure!(
+            draft_err_rx.has_changed().unwrap_or(false)
+                && *draft_err_rx.borrow_and_update() > before_err_epoch,
+            "drafts::persistence error watch must wake consumer immediately on bump"
+        );
+        world.hit("client_pages.ui_event_batch_checked");
+
+        world.heal_and_quiesce(20_000)?;
+        oracle.check_quiescent_invariants(world)?;
 
         Ok(finalize_digest(world))
     })?;

@@ -3,13 +3,15 @@
 use crate::world::SimWorld;
 use anyhow::{Context, Result, bail, ensure};
 use canban_types::{
-    Card, EnvEntryMeta, ExecutionTrigger, HostConnectionState, HumanGate, Snapshot, SyncItemState,
-    WorkflowRun,
+    Card, DeliveryMode, EnvEntryMeta, ExecutionTrigger, HostConnectionState, HostSummary,
+    HumanGate, Snapshot, SyncItemState, WorkflowRun,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::{
+    cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    rc::Rc,
     sync::atomic::Ordering,
 };
 
@@ -120,6 +122,19 @@ pub struct InvariantOracle {
     pub archive_epoch: BTreeMap<(String, String), u64>,
     /// Latest archive epoch already observed (as an absent project) by `(client_id, norm_host, raw_project_id)`.
     pub client_seen_archive_epoch: BTreeMap<(String, String, String), u64>,
+    /// Shadow per-client real `canban_ui::presenter::CommittedWrites` overlay tracking acknowledged
+    /// UI write receipts and asserting monotonic projection + clean quiescence reconciliation.
+    pub shadow_ui_writes: BTreeMap<String, canban_ui::presenter::CommittedWrites>,
+    /// Monotonic floor per `(client_id, qualified_card_id)` observed in the UI-projected snapshot
+    /// or recorded from an acknowledged UI write receipt.
+    pub shadow_ui_card_rev: BTreeMap<(String, String), u64>,
+    /// Per-client cached `Rc<SnapshotIndex>` verifying `SnapshotIndex::reuse_or_build` generation
+    /// reuse vs rebuild parity against raw `merged_snapshot`.
+    pub shadow_ui_index: BTreeMap<String, Rc<canban_ui::index::SnapshotIndex>>,
+    /// Per-client `(prev_summaries, host_connect_epochs)` verifying `apply_host_summaries`.
+    pub shadow_ui_hosts: BTreeMap<String, (Vec<HostSummary>, BTreeMap<String, u64>)>,
+    /// Total real acknowledged write receipts fed into `shadow_ui_writes`.
+    pub shadow_ui_receipt_count: u64,
 }
 
 impl InvariantOracle {
@@ -345,10 +360,96 @@ impl InvariantOracle {
             .retain(|(_, h, cid), _| !(h == &norm_host && removed_cards.contains(cid)));
         self.min_snapshot_rev
             .retain(|(_, h, cid), _| !(h == &norm_host && removed_cards.contains(cid)));
+        self.shadow_ui_card_rev.retain(|(_, q_cid), _| {
+            let raw = strip_host_prefix(q_cid);
+            !removed_cards.contains(&raw)
+        });
         let proj_key = (norm_host, raw_proj);
         self.archived_projects.insert(proj_key.clone());
         let epoch = self.archive_epoch.entry(proj_key).or_insert(0);
         *epoch = epoch.saturating_add(1);
+    }
+
+    /// Resets per-client in-memory shadow UI state when that client process crashes and bounces.
+    pub fn reset_ui_shadow_client(&mut self, client_id: &str) {
+        self.shadow_ui_writes.remove(client_id);
+        self.shadow_ui_index.remove(client_id);
+        self.shadow_ui_hosts.remove(client_id);
+        self.shadow_ui_card_rev.retain(|(c, _), _| c != client_id);
+    }
+
+    /// Feeds a real acknowledged write receipt (from an RPC wrapped with `canban_ui::with_ui_projection`)
+    /// into the shadow `canban_ui::presenter::CommittedWrites` overlay for `client_id`.
+    pub fn record_ui_write_receipt(
+        &mut self,
+        client_id: &str,
+        method: &str,
+        host_id: &str,
+        receipt: &serde_json::Value,
+    ) {
+        let norm_host = normalize_client_host_id(host_id);
+        self.shadow_ui_writes
+            .entry(client_id.to_owned())
+            .or_default()
+            .record(method, receipt, &norm_host);
+        self.shadow_ui_receipt_count = self.shadow_ui_receipt_count.saturating_add(1);
+
+        if method == "card.remove" && receipt["removed"] == true {
+            if let Some(cid) = receipt["card_id"].as_str() {
+                self.shadow_ui_card_rev
+                    .remove(&(client_id.to_owned(), cid.to_owned()));
+            }
+            return;
+        }
+        let card_id = receipt
+            .get("card_record")
+            .and_then(|v| v.get("id"))
+            .or_else(|| receipt.get("card_id"))
+            .or_else(|| {
+                matches!(
+                    method,
+                    "card.create"
+                        | "card.update"
+                        | "card.move"
+                        | "card.archive"
+                        | "card.restore"
+                        | "card.resolve"
+                        | "card.reopen"
+                        | "card.hold_auto_merge"
+                        | "worktree.promote"
+                )
+                .then(|| receipt.get("id"))
+                .flatten()
+            })
+            .and_then(serde_json::Value::as_str);
+        let rev = receipt
+            .get("card_record")
+            .and_then(|v| v.get("revision"))
+            .or_else(|| receipt.get("card_revision"))
+            .or_else(|| {
+                matches!(
+                    method,
+                    "card.create"
+                        | "card.update"
+                        | "card.move"
+                        | "card.archive"
+                        | "card.restore"
+                        | "card.resolve"
+                        | "card.reopen"
+                        | "card.hold_auto_merge"
+                        | "worktree.promote"
+                        | "comment.delete"
+                )
+                .then(|| receipt.get("revision"))
+                .flatten()
+            })
+            .and_then(serde_json::Value::as_u64);
+        if let (Some(cid), Some(r)) = (card_id, rev) {
+            self.shadow_ui_card_rev
+                .entry((client_id.to_owned(), cid.to_owned()))
+                .and_modify(|cur| *cur = (*cur).max(r))
+                .or_insert(r);
+        }
     }
 
     /// Marks an archived project as restored via `project.restore`.
@@ -1024,6 +1125,14 @@ impl InvariantOracle {
         self.check_workflow_invariants(world)?;
         self.check_snapshot_boundedness(world)?;
         self.check_committed_durability(world)?;
+        self.check_column_ranks_ordered(world)?;
+        self.check_ui_host_connect_epochs(world)?;
+        self.check_ui_index_oracle(world)?;
+        self.check_ui_overview_oracle(world)?;
+        self.check_ui_quick_merge_oracle(world, false)?;
+        if !self.shadow_ui_writes.is_empty() || self.shadow_ui_receipt_count > 0 {
+            self.check_ui_committed_writes(world, false)?;
+        }
         if !self.min_seen_rev.is_empty()
             || !self.min_snapshot_rev.is_empty()
             || !self.archive_epoch.is_empty()
@@ -1061,6 +1170,10 @@ impl InvariantOracle {
         }
         self.check_outbox_drained(world)?;
         self.check_client_server_convergence(world)?;
+        self.check_ui_quick_merge_oracle(world, true)?;
+        if !self.shadow_ui_writes.is_empty() || self.shadow_ui_receipt_count > 0 {
+            self.check_ui_committed_writes(world, true)?;
+        }
         Self::check_sqlite_integrity(world)?;
         Self::check_post_bounce_recovery_all(world)?;
         Ok(())
@@ -2491,6 +2604,862 @@ impl InvariantOracle {
         }
         Ok(())
     }
+
+    /// Shadow UI `CommittedWrites` write-receipt overlay oracle:
+    /// runs REAL `canban_ui::presenter::CommittedWrites` (`reconcile_runtime` + `reconcile`) over
+    /// every client's `merged_snapshot`, asserting monotonic card revisions across lagging/faulted
+    /// snapshots, zero duplicate entities, and clean overlay drain at quiescence matching servers.
+    pub fn check_ui_committed_writes(
+        &mut self,
+        world: &SimWorld,
+        at_quiescence: bool,
+    ) -> Result<()> {
+        world.hit("oracle.ui_committed_writes_checked");
+
+        let mut live_servers: BTreeMap<String, (String, Snapshot)> = BTreeMap::new();
+        for (host_name, handle) in &world.servers {
+            if let Some(server) = handle.server() {
+                let norm_host = normalize_client_host_id(host_name);
+                live_servers.insert(norm_host, (host_name.clone(), server.snapshot()?));
+            }
+        }
+
+        for client_name in world.client_names() {
+            let Some(writes) = self.shadow_ui_writes.get_mut(&client_name) else {
+                continue;
+            };
+            let raw_merged = world.client_merged_snapshot_on(&client_name)?;
+            let sync_items = world.client_sync_items_on(&client_name);
+            let conflict_cards: BTreeSet<(String, String)> = sync_items
+                .iter()
+                .filter(|it| matches!(it.state, SyncItemState::Conflict | SyncItemState::Failed))
+                .map(|it| {
+                    (
+                        normalize_client_host_id(&it.host_id),
+                        strip_host_prefix(&it.card_id),
+                    )
+                })
+                .collect();
+
+            // 1. Runtime-only reconcile must NEVER evict durable card receipts.
+            let pending_cards_before = writes.pending_card_count();
+            let mut rt_probe = raw_merged.clone();
+            writes.reconcile_runtime(&mut rt_probe);
+            ensure!(
+                writes.pending_card_count() == pending_cards_before,
+                "[{client_name}] UI CommittedWrites::reconcile_runtime unexpectedly evicted durable card receipts ({} -> {})",
+                pending_cards_before,
+                writes.pending_card_count()
+            );
+
+            // 2. Full UI projection reconcile over the live merged_snapshot.
+            let mut projected = raw_merged.clone();
+            writes.reconcile(&mut projected);
+
+            // Verify no duplicate cards, terminals, worktrees, or schedule_states were introduced.
+            let mut seen_cards = BTreeSet::new();
+            let mut proj_card_revs: BTreeMap<String, u64> = BTreeMap::new();
+            for c in &projected.cards {
+                ensure!(
+                    seen_cards.insert(c.id.clone()),
+                    "[{client_name}] UI CommittedWrites overlay introduced duplicate Card ID {}",
+                    c.id
+                );
+                proj_card_revs.insert(c.id.clone(), c.revision);
+            }
+            let mut seen_terms = BTreeSet::new();
+            for t in &projected.terminals {
+                ensure!(
+                    seen_terms.insert(t.id.clone()),
+                    "[{client_name}] UI CommittedWrites overlay introduced duplicate Terminal ID {}",
+                    t.id
+                );
+            }
+            let mut seen_wts = BTreeSet::new();
+            for wt in &projected.worktrees {
+                ensure!(
+                    seen_wts.insert(wt.id.clone()),
+                    "[{client_name}] UI CommittedWrites overlay introduced duplicate Worktree ID {}",
+                    wt.id
+                );
+            }
+            let mut seen_scheds = BTreeSet::new();
+            for st in &projected.schedule_states {
+                ensure!(
+                    seen_scheds.insert(st.id.clone()),
+                    "[{client_name}] UI CommittedWrites overlay introduced duplicate ScheduleState ID {}",
+                    st.id
+                );
+            }
+
+            // 3. Monotonic revision assertion against all recorded UI write receipts.
+            for c in &projected.cards {
+                let host_id = projected
+                    .entity_hosts
+                    .get(&c.id)
+                    .map(String::as_str)
+                    .or_else(|| canban_types::split_qualified_host_id(&c.id).map(|(h, _)| h))
+                    .unwrap_or("local");
+                let norm_host = normalize_client_host_id(host_id);
+                let raw_cid = strip_host_prefix(&c.id);
+                if conflict_cards.contains(&(norm_host.clone(), raw_cid)) {
+                    continue;
+                }
+                let raw_pid = strip_host_prefix(&c.project_id);
+                let project_archived = !raw_pid.is_empty()
+                    && (self
+                        .archived_projects
+                        .contains(&(norm_host.clone(), raw_pid.clone()))
+                        || live_servers
+                            .get(&norm_host)
+                            .is_some_and(|(_, s)| !s.projects.iter().any(|p| p.id == raw_pid)));
+                if project_archived {
+                    continue;
+                }
+                let key = (client_name.clone(), c.id.clone());
+                if let Some(&floor) = self.shadow_ui_card_rev.get(&key) {
+                    ensure!(
+                        c.revision >= floor,
+                        "[{client_name}] UI COMMITTED_WRITES MONOTONICITY VIOLATION: projected Card {} regressed to rev {} < recorded floor {floor}",
+                        c.id,
+                        c.revision
+                    );
+                    if c.revision > floor {
+                        self.shadow_ui_card_rev.insert(key, c.revision);
+                    }
+                }
+            }
+
+            let tracked_floors: Vec<(String, u64)> = self
+                .shadow_ui_card_rev
+                .iter()
+                .filter(|((c, _), _)| c == &client_name)
+                .map(|((_, cid), &rev)| (cid.clone(), rev))
+                .collect();
+            for (cid, min_rev) in tracked_floors {
+                let host_id = projected
+                    .entity_hosts
+                    .get(&cid)
+                    .map(String::as_str)
+                    .or_else(|| canban_types::split_qualified_host_id(&cid).map(|(h, _)| h))
+                    .unwrap_or("local");
+                let norm_host = normalize_client_host_id(host_id);
+                let raw_cid = strip_host_prefix(&cid);
+                if conflict_cards.contains(&(norm_host.clone(), raw_cid.clone())) {
+                    continue;
+                }
+                let proj_archived = self
+                    .card_projects
+                    .get(&(norm_host.clone(), raw_cid.clone()))
+                    .is_some_and(|raw_pid| {
+                        self.archived_projects
+                            .contains(&(norm_host.clone(), raw_pid.clone()))
+                            || live_servers
+                                .get(&norm_host)
+                                .is_some_and(|(_, s)| !s.projects.iter().any(|p| p.id == *raw_pid))
+                    });
+                if proj_archived {
+                    continue;
+                }
+                if let Some(&proj_rev) = proj_card_revs.get(&cid) {
+                    ensure!(
+                        proj_rev >= min_rev,
+                        "[{client_name}] UI COMMITTED_WRITES VIOLATION: Card {cid} projected rev {proj_rev} < recorded receipt rev {min_rev}"
+                    );
+                } else if live_servers
+                    .get(&norm_host)
+                    .is_some_and(|(_, s)| s.cards.iter().any(|c| c.id == raw_cid))
+                {
+                    bail!(
+                        "[{client_name}] UI COMMITTED_WRITES VIOLATION: Card {cid} (min_rev={min_rev}) vanished from UI-projected snapshot despite existing on live server [{norm_host}]"
+                    );
+                }
+            }
+
+            // 4. At quiescence, reconcile any pending comment overlays against authoritative server
+            //    events and assert all pending overlays drained cleanly (for conflict-free clients).
+            if at_quiescence {
+                let pending_comment_cards = writes.pending_comment_card_ids();
+                for cid in pending_comment_cards {
+                    let host_id = projected
+                        .entity_hosts
+                        .get(&cid)
+                        .map(String::as_str)
+                        .or_else(|| canban_types::split_qualified_host_id(&cid).map(|(h, _)| h))
+                        .unwrap_or("local");
+                    let srv_name = normalize_server_host_name(host_id);
+                    let raw_cid = strip_host_prefix(&cid);
+                    if let Some(srv) = world.server(&srv_name)
+                        && let Ok(all_events) = srv.events()
+                    {
+                        let mut card_evs: Vec<canban_types::Event> = all_events
+                            .into_iter()
+                            .filter(|e| e.card_id == raw_cid)
+                            .collect();
+                        for ev in &mut card_evs {
+                            ev.card_id = cid.clone();
+                        }
+                        writes.reconcile_card_events(&cid, &card_evs);
+                    }
+                }
+
+                if sync_items.is_empty() {
+                    ensure!(
+                        writes.pending_card_count() == 0
+                            && writes.pending_card_revisions().is_empty()
+                            && writes.pending_comment_count() == 0
+                            && writes.pending_deleted_comment_count() == 0
+                            && writes.pending_terminal_count() == 0
+                            && writes.pending_card_read_count() == 0
+                            && writes.pending_schedule_state_count() == 0
+                            && writes.pending_review_draft_count() == 0
+                            && writes.pending_worktree_count() == 0
+                            && writes.pending_env_update_count() == 0,
+                        "[{client_name}] UI CommittedWrites did not drain cleanly at quiescence: cards={} ({:?}) card_revs={:?} comments={} deleted_comments={} terminals={} card_reads={} schedules={} drafts={} worktrees={} env={}",
+                        writes.pending_card_count(),
+                        writes.pending_card_ids(),
+                        writes.pending_card_revisions(),
+                        writes.pending_comment_count(),
+                        writes.pending_deleted_comment_count(),
+                        writes.pending_terminal_count(),
+                        writes.pending_card_read_count(),
+                        writes.pending_schedule_state_count(),
+                        writes.pending_review_draft_count(),
+                        writes.pending_worktree_count(),
+                        writes.pending_env_update_count(),
+                    );
+                    // Also verify projected snapshot equals authoritative server state on every live host.
+                    for (norm_host, (_, srv_snap)) in &live_servers {
+                        if norm_host == "local"
+                            && !world
+                                .client_named(&client_name)
+                                .is_some_and(|c| c.capabilities().local_host)
+                        {
+                            continue;
+                        }
+                        assert_host_converged(norm_host, srv_snap, &projected, &conflict_cards)
+                            .with_context(|| {
+                                format!(
+                                    "[{client_name}] UI CommittedWrites-projected snapshot diverged from authoritative server [{norm_host}] at quiescence"
+                                )
+                            })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Shadow UI `SnapshotIndex` / `build_card_status` (QueueIndex) / `LinkLookup` / `KnownTagsIndex`
+    /// parity oracle over every live client's `merged_snapshot`.
+    pub fn check_ui_index_oracle(&mut self, world: &SimWorld) -> Result<()> {
+        world.hit("oracle.ui_index_checked");
+
+        for client_name in world.client_names() {
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+            let prev = self.shadow_ui_index.get(&client_name);
+            let prev_matched = prev.is_some_and(|p| p.matches_workspace(&merged));
+            let reused = canban_ui::index::SnapshotIndex::reuse_or_build(prev, &merged);
+
+            if let Some(prev_rc) = prev
+                && prev_matched
+            {
+                ensure!(
+                    Rc::ptr_eq(prev_rc, &reused) && prev_rc.generation == reused.generation,
+                    "[{client_name}] SnapshotIndex::reuse_or_build rebuilt unnecessarily despite matching workspace"
+                );
+            }
+            ensure!(
+                reused.matches_workspace(&merged),
+                "[{client_name}] SnapshotIndex::matches_workspace returned false for its own snapshot"
+            );
+
+            // Structural parity against a fresh `SnapshotIndex::build(&merged)`.
+            let fresh = canban_ui::index::SnapshotIndex::build(&merged);
+            ensure!(
+                reused.projects == fresh.projects
+                    && reused.project_order == merged.projects
+                    && reused.cards == fresh.cards
+                    && reused.cards.len() == merged.cards.len()
+                    && reused.card_summaries == merged.card_summaries
+                    && reused.last_event_by_card == fresh.last_event_by_card
+                    && reused.reply_counts == fresh.reply_counts
+                    && reused.artifacts == merged.artifacts
+                    && reused.artifact_counts == fresh.artifact_counts
+                    && reused.github_issues == fresh.github_issues
+                    && reused.project_has_deliver == fresh.project_has_deliver
+                    && reused.project_has_github_cards == fresh.project_has_github_cards
+                    && reused.explicit_body_tags == fresh.explicit_body_tags
+                    && reused.review_drafts == fresh.review_drafts,
+                "[{client_name}] SnapshotIndex::reuse_or_build diverged from fresh SnapshotIndex::build"
+            );
+
+            // Runtime-only mutations (`merging_cards`, `terminals`, `terminal_contexts`) must
+            // preserve the exact `Rc<SnapshotIndex>` generation without rebuilding.
+            let mut rt_only = merged.clone();
+            rt_only.merging_cards.push("__sim_runtime_probe__".into());
+            let rt_reused =
+                canban_ui::index::SnapshotIndex::reuse_or_build(Some(&reused), &rt_only);
+            ensure!(
+                Rc::ptr_eq(&reused, &rt_reused) && reused == rt_reused,
+                "[{client_name}] SnapshotIndex::reuse_or_build failed to reuse Rc across runtime-only update"
+            );
+
+            // QueueIndex (`build_card_status`) parity against direct `is_merging` / `card_status_specs`.
+            let status_map = canban_ui::index::build_card_status(&merged);
+            let active_count = merged.cards.iter().filter(|c| c.active()).count();
+            ensure!(
+                status_map.len() == active_count,
+                "[{client_name}] build_card_status returned {} entries for {active_count} active cards",
+                status_map.len()
+            );
+            for card in merged.cards.iter().filter(|c| c.active()) {
+                let digest = status_map.get(&card.id).with_context(|| {
+                    format!(
+                        "[{client_name}] active Card {} missing from build_card_status",
+                        card.id
+                    )
+                })?;
+                ensure!(
+                    digest.is_merging == canban_ui::components::activity::is_merging(&merged, card),
+                    "[{client_name}] QueueIndex is_merging mismatch for Card {}: indexed={} direct={}",
+                    card.id,
+                    digest.is_merging,
+                    canban_ui::components::activity::is_merging(&merged, card)
+                );
+                let direct_normal =
+                    canban_ui::components::activity::card_status_specs(&merged, card, false);
+                ensure!(
+                    digest.specs_normal == direct_normal,
+                    "[{client_name}] QueueIndex specs_normal mismatch for Card {}: indexed={:?} direct={:?}",
+                    card.id,
+                    digest.specs_normal,
+                    direct_normal
+                );
+                let direct_ui_merging =
+                    canban_ui::components::activity::card_status_specs(&merged, card, true);
+                ensure!(
+                    digest.specs_ui_merging == direct_ui_merging,
+                    "[{client_name}] QueueIndex specs_ui_merging mismatch for Card {}: indexed={:?} direct={:?}",
+                    card.id,
+                    digest.specs_ui_merging,
+                    direct_ui_merging
+                );
+            }
+
+            // `LinkLookup` & `KnownTagsIndex` parity against raw snapshot.
+            // Multiple offline-queued `card.create` drafts can share provisional `number == 0`;
+            // `LinkLookup::build` iterates `SnapshotIndex::cards` in deterministic `card.id` order.
+            let link_lookup = canban_ui::index::LinkLookup::build(&reused);
+            let known_tags = canban_ui::index::KnownTagsIndex::build(&reused, &BTreeSet::new());
+            let mut non_removed: Vec<&Card> = merged
+                .cards
+                .iter()
+                .filter(|c| c.removed_at.is_none())
+                .collect();
+            non_removed.sort_by(|a, b| a.id.cmp(&b.id));
+            let mut seen_num: BTreeSet<(String, u64)> = BTreeSet::new();
+            for card in non_removed {
+                let proj_has_gh = merged
+                    .projects
+                    .iter()
+                    .any(|p| p.id == card.project_id && p.github.is_some());
+                if seen_num.insert((card.project_id.clone(), card.number)) {
+                    let expected_ref = (!proj_has_gh).then_some(card.id.as_str());
+                    let actual_ref = link_lookup.resolve_card_number(&card.project_id, card.number);
+                    ensure!(
+                        actual_ref == expected_ref,
+                        "[{client_name}] LinkLookup::resolve_card_number({}, {}) expected {:?}, got {:?}",
+                        card.project_id,
+                        card.number,
+                        expected_ref,
+                        actual_ref
+                    );
+                }
+                let expected_tags = canban_ui::tags::card_tags(
+                    card,
+                    &known_tags.for_project(Some(&card.project_id)),
+                );
+                ensure!(
+                    known_tags.tags_for_card(&card.id) == expected_tags,
+                    "[{client_name}] KnownTagsIndex mismatch for Card {}",
+                    card.id
+                );
+            }
+
+            self.shadow_ui_index.insert(client_name, reused);
+        }
+        Ok(())
+    }
+
+    /// Shadow UI `overview` row/attention/unread/standalone-terminal classification oracle over
+    /// every live client's `merged_snapshot`.
+    pub fn check_ui_overview_oracle(&self, world: &SimWorld) -> Result<()> {
+        use canban_ui::overview::{
+            Icon, Tone, describe_row_at, describe_standalone_terminal, describe_unread_update,
+            running_agents_count_from, standalone_terminal_is_running,
+            standalone_terminal_needs_you,
+        };
+
+        world.hit("oracle.ui_overview_checked");
+        let now_ms = world.now_ms();
+        const MACHINE_PREFIXES: &[&str] = &[
+            "completed: ",
+            "blocked: ",
+            "failed: ",
+            "backlog: ",
+            "Returned to Backlog: ",
+        ];
+
+        for client_name in world.client_names() {
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+            let card_ids: BTreeSet<&str> = merged.cards.iter().map(|c| c.id.as_str()).collect();
+            let rows = canban_notifications::overview_at(&merged, now_ms);
+            let reminders = canban_notifications::reminders(&merged);
+            let entries = canban_ui::terminals::entries(&merged);
+
+            // 1. Overview rows & `describe_row_at` classification invariants.
+            for row in &rows {
+                ensure!(
+                    card_ids.contains(row.card.id.as_str()),
+                    "[{client_name}] overview() emitted row {} for missing Card {}",
+                    row.id,
+                    row.card.id
+                );
+                if row.card.archived_at.is_some() {
+                    ensure!(
+                        !row.reasons
+                            .iter()
+                            .any(|r| matches!(r.source.as_str(), "review" | "task")),
+                        "[{client_name}] overview() emitted review/task gate on archived Card {}: {:?}",
+                        row.card.id,
+                        row.reasons
+                    );
+                }
+                let ev = describe_row_at(&merged, row, now_ms);
+                ensure!(
+                    !ev.headline.trim().is_empty(),
+                    "[{client_name}] overview::describe_row returned empty headline for row {}",
+                    row.id
+                );
+                if row.actionable() {
+                    ensure!(
+                        !row.reasons.is_empty() && !ev.live,
+                        "[{client_name}] actionable overview row {} must have reasons and live=false (reasons={}, live={})",
+                        row.id,
+                        row.reasons.len(),
+                        ev.live
+                    );
+                    if row.reasons.len() == 1 {
+                        let reason = &row.reasons[0];
+                        if reason.source == "runtime"
+                            && row.agent().map(|a| a.runtime_status_at(now_ms)) == Some("blocked")
+                            && row
+                                .agent()
+                                .and_then(|a| a.lifecycle.waiting.as_ref())
+                                .is_some_and(|w| w.kind == "permission")
+                        {
+                            ensure!(
+                                ev.icon == Icon::ShieldAlert
+                                    && ev.tone == Tone::Attention
+                                    && ev.headline == "Permission required",
+                                "[{client_name}] permission-blocked row {} misclassified: {ev:?}",
+                                row.id
+                            );
+                        }
+                        if reason.source == "review" {
+                            let lower = reason.message.to_lowercase();
+                            let is_merge = (row.card.hold_auto_merge && !row.card.resolved())
+                                || lower.contains("merge")
+                                || lower.contains("conflict")
+                                || lower.contains("upstream")
+                                || lower.contains("fast-forward")
+                                || lower.contains("diverged");
+                            if is_merge {
+                                ensure!(
+                                    ev.icon == Icon::GitMerge && ev.tone == Tone::Attention,
+                                    "[{client_name}] merge-gate review row {} misclassified: {ev:?}",
+                                    row.id
+                                );
+                            } else {
+                                ensure!(
+                                    ev.icon == Icon::Eye
+                                        && ev.tone == Tone::Attention
+                                        && ev.headline == "Ready for review",
+                                    "[{client_name}] normal review row {} misclassified: {ev:?}",
+                                    row.id
+                                );
+                            }
+                        }
+                    }
+                    if let Some(detail) = ev.detail.as_deref() {
+                        for prefix in MACHINE_PREFIXES {
+                            ensure!(
+                                !detail.starts_with(prefix),
+                                "[{client_name}] overview::describe_row leaked raw machine prefix {prefix:?} in detail {detail:?}"
+                            );
+                        }
+                    }
+                } else if row.group == "Working"
+                    && row
+                        .agent()
+                        .is_some_and(|a| !a.finished() && a.connection_state == "connected")
+                {
+                    ensure!(
+                        ev.live && ev.tone == Tone::Info && ev.headline == "Working",
+                        "[{client_name}] working row {} misclassified: {ev:?}",
+                        row.id
+                    );
+                } else if row.group == "Idle"
+                    && row
+                        .agent()
+                        .is_none_or(|a| !a.finished() && a.connection_state == "connected")
+                {
+                    ensure!(
+                        !ev.live && ev.tone == Tone::Neutral && ev.headline == "Idle",
+                        "[{client_name}] idle row {} misclassified: {ev:?}",
+                        row.id
+                    );
+                }
+            }
+
+            // 2. Unread updates (`describe_unread_update`) prefix-stripping & semantic icon checks.
+            for rem in &reminders {
+                let uev = describe_unread_update(Some(rem));
+                ensure!(
+                    !uev.headline.trim().is_empty() && !uev.live,
+                    "[{client_name}] describe_unread_update invalid for reminder {}: {uev:?}",
+                    rem.id
+                );
+                if let Some(detail) = uev.detail.as_deref() {
+                    for prefix in MACHINE_PREFIXES {
+                        ensure!(
+                            !detail.starts_with(prefix),
+                            "[{client_name}] describe_unread_update leaked raw machine prefix {prefix:?} in detail {detail:?}"
+                        );
+                    }
+                }
+                if let Some(ev) = rem.event.as_ref() {
+                    match ev.kind.as_str() {
+                        "comment.replied" => ensure!(
+                            uev.icon == Icon::MessageSquare && uev.tone == Tone::Info,
+                            "[{client_name}] comment.replied reminder misclassified: {uev:?}"
+                        ),
+                        "execution.reported" => match ev.state.as_deref().unwrap_or("completed") {
+                            "backlog" => ensure!(
+                                uev.icon == Icon::Undo
+                                    && uev.tone == Tone::Neutral
+                                    && uev.headline == "Returned to Backlog",
+                                "[{client_name}] backlog execution.reported misclassified: {uev:?}"
+                            ),
+                            "blocked" => ensure!(
+                                uev.icon == Icon::CirclePause && uev.tone == Tone::Attention,
+                                "[{client_name}] blocked execution.reported misclassified: {uev:?}"
+                            ),
+                            "failed" => ensure!(
+                                uev.icon == Icon::TriangleAlert && uev.tone == Tone::Danger,
+                                "[{client_name}] failed execution.reported misclassified: {uev:?}"
+                            ),
+                            _ => ensure!(
+                                uev.icon == Icon::Check && uev.tone == Tone::Success,
+                                "[{client_name}] completed execution.reported misclassified: {uev:?}"
+                            ),
+                        },
+                        _ => {}
+                    }
+                }
+            }
+
+            // 3. Standalone terminal routing (`needs_you` vs `is_running` mutual exclusion) & counts.
+            let mut expected_standalone_running = 0usize;
+            for entry in &entries {
+                let needs_you = standalone_terminal_needs_you(&merged, entry);
+                let is_running = standalone_terminal_is_running(&merged, entry);
+                ensure!(
+                    !(needs_you && is_running),
+                    "[{client_name}] standalone terminal {} classified as BOTH needs_you and running",
+                    entry.saved.id
+                );
+                if entry.agent.is_some() {
+                    ensure!(
+                        !needs_you && !is_running,
+                        "[{client_name}] card-bound agent terminal {} leaked into standalone classification",
+                        entry.saved.id
+                    );
+                }
+                if is_running {
+                    expected_standalone_running += 1;
+                }
+                if needs_you || is_running {
+                    let is_cfg = merged.configuration_sessions.iter().any(|c| {
+                        c.id == entry.saved.id
+                            && !matches!(c.state.as_str(), "finished" | "cancelled")
+                    });
+                    let batch = merged.merge_batches.iter().find(|b| b.id == entry.saved.id);
+                    let sched = merged
+                        .scheduled_runs
+                        .iter()
+                        .find(|r| r.id == entry.saved.id);
+                    let sev = describe_standalone_terminal(entry, is_cfg, batch, sched);
+                    ensure!(
+                        !sev.headline.trim().is_empty(),
+                        "[{client_name}] describe_standalone_terminal returned empty headline for {}",
+                        entry.saved.id
+                    );
+                    if needs_you {
+                        ensure!(
+                            !sev.live,
+                            "[{client_name}] needs_you standalone terminal {} must not set live=true: {sev:?}",
+                            entry.saved.id
+                        );
+                    }
+                }
+            }
+            let expected_card_running = rows
+                .iter()
+                .filter(|r| r.group == "Working" && !r.actionable())
+                .count();
+            let actual_running = running_agents_count_from(&merged, &rows, &entries, None);
+            ensure!(
+                actual_running == expected_card_running + expected_standalone_running,
+                "[{client_name}] running_agents_count_from mismatch: actual={actual_running} expected={}",
+                expected_card_running + expected_standalone_running
+            );
+        }
+        Ok(())
+    }
+
+    /// Shadow UI `quick_merge` eligibility & commit-message parity oracle over every live client
+    /// `merged_snapshot` and (at quiescence) authoritative live server state.
+    pub fn check_ui_quick_merge_oracle(&self, world: &SimWorld, at_quiescence: bool) -> Result<()> {
+        world.hit("oracle.ui_quick_merge_checked");
+
+        let mut server_eligibility: BTreeMap<(String, String), bool> = BTreeMap::new();
+        if at_quiescence {
+            for (host_name, handle) in &world.servers {
+                let Some(server) = handle.server() else {
+                    continue;
+                };
+                let norm_host = normalize_client_host_id(host_name);
+                let srv_snap = server.snapshot()?;
+                let srv_projs: BTreeMap<&str, &canban_types::Project> = srv_snap
+                    .projects
+                    .iter()
+                    .map(|p| (p.id.as_str(), p))
+                    .collect();
+                for card in &srv_snap.cards {
+                    let proj = srv_projs.get(card.project_id.as_str()).copied();
+                    server_eligibility.insert(
+                        (norm_host.clone(), card.id.clone()),
+                        canban_ui::card::quick_merge::eligible(card, proj),
+                    );
+                }
+            }
+        }
+
+        for client_name in world.client_names() {
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+            let sync_items = world.client_sync_items_on(&client_name);
+            let conflict_cards: BTreeSet<(String, String)> = sync_items
+                .iter()
+                .filter(|it| matches!(it.state, SyncItemState::Conflict | SyncItemState::Failed))
+                .map(|it| {
+                    (
+                        normalize_client_host_id(&it.host_id),
+                        strip_host_prefix(&it.card_id),
+                    )
+                })
+                .collect();
+            let projects: BTreeMap<&str, &canban_types::Project> =
+                merged.projects.iter().map(|p| (p.id.as_str(), p)).collect();
+
+            for card in &merged.cards {
+                let proj = projects.get(card.project_id.as_str()).copied();
+                let actual = canban_ui::card::quick_merge::eligible(card, proj);
+                let effective_mode = card
+                    .delivery_mode
+                    .clone()
+                    .or_else(|| proj.map(|p| p.delivery_mode.clone()))
+                    .unwrap_or_default();
+                let expected = card.active()
+                    && card.worktree.is_some()
+                    && effective_mode != DeliveryMode::GitHubPr
+                    && !card.is_github_pr()
+                    && card.delivery.is_none()
+                    && card.pull_request.is_none();
+                ensure!(
+                    actual == expected,
+                    "[{client_name}] quick_merge::eligible mismatch for Card {}: actual={actual} expected={expected}",
+                    card.id
+                );
+                let msg = canban_ui::card::quick_merge::message(card);
+                ensure!(
+                    msg == format!("Canban #{}: {}", card.number, card.title),
+                    "[{client_name}] quick_merge::message mismatch for Card {}: got {msg:?}",
+                    card.id
+                );
+
+                if at_quiescence {
+                    let host_id = merged
+                        .entity_hosts
+                        .get(&card.id)
+                        .map(String::as_str)
+                        .or_else(|| canban_types::split_qualified_host_id(&card.id).map(|(h, _)| h))
+                        .unwrap_or("local");
+                    let norm_host = normalize_client_host_id(host_id);
+                    let raw_cid = strip_host_prefix(&card.id);
+                    if !conflict_cards.contains(&(norm_host.clone(), raw_cid.clone()))
+                        && let Some(&srv_elig) =
+                            server_eligibility.get(&(norm_host.clone(), raw_cid))
+                    {
+                        ensure!(
+                            actual == srv_elig,
+                            "[{client_name}][{norm_host}] quick_merge::eligible diverged from server for Card {}: client={actual} server={srv_elig}",
+                            card.id
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Shadow UI `apply_host_summaries` (`HostSummary.reconnect_count -> host_connect_epochs`)
+    /// invariant check across live client host transitions.
+    pub fn check_ui_host_connect_epochs(&mut self, world: &SimWorld) -> Result<()> {
+        for client_name in world.client_names() {
+            let summaries = world.client_host_summaries_on(&client_name);
+            let (prev, epochs) = self.shadow_ui_hosts.entry(client_name.clone()).or_default();
+            let prev_snapshot = prev.clone();
+            let bumped =
+                canban_ui::presenter::apply_host_summaries(&prev_snapshot, &summaries, epochs);
+
+            ensure!(
+                !bumped.iter().any(|id| id == "local")
+                    && epochs.get("local").copied().unwrap_or(0) == 0,
+                "[{client_name}] apply_host_summaries must never bump local host connect_epoch (bumped={bumped:?})"
+            );
+            for hid in &bumped {
+                let cur = summaries.iter().find(|h| &h.id == hid).with_context(|| {
+                    format!("[{client_name}] bumped host {hid} missing from summaries")
+                })?;
+                ensure!(
+                    !cur.is_local && cur.connection.is_connected(),
+                    "[{client_name}] bumped host {hid} is not a connected remote host: {cur:?}"
+                );
+                let prev_h = prev_snapshot.iter().find(|h| &h.id == hid);
+                let valid_reason = prev_h.is_none_or(|old| {
+                    !old.connection.is_connected() || old.reconnect_count != cur.reconnect_count
+                });
+                ensure!(
+                    valid_reason,
+                    "[{client_name}] host {hid} connect_epoch bumped without reconnect transition: prev={prev_h:?} cur={cur:?}"
+                );
+            }
+            // Idempotency: re-applying unchanged summaries must produce zero bumps.
+            let mut epochs_probe = epochs.clone();
+            let noop = canban_ui::presenter::apply_host_summaries(
+                &summaries,
+                &summaries,
+                &mut epochs_probe,
+            );
+            ensure!(
+                noop.is_empty() && epochs_probe == *epochs,
+                "[{client_name}] apply_host_summaries was not idempotent on identical summaries: {noop:?}"
+            );
+            *prev = summaries;
+        }
+        Ok(())
+    }
+
+    /// Verifies per-column `Card::board_cmp` strict total ordering, unresolved-before-resolved
+    /// partitioning, resolved descending timestamps, and non-overflowing `board_order` ranks
+    /// across every live server and every live client `merged_snapshot`.
+    pub fn check_column_ranks_ordered(&self, world: &SimWorld) -> Result<()> {
+        world.hit("oracle.column_ranks_ordered_checked");
+
+        let validate_snapshot = |label: &str, snap: &Snapshot| -> Result<()> {
+            let mut by_col: BTreeMap<(&str, &str), Vec<&Card>> = BTreeMap::new();
+            for c in &snap.cards {
+                if !c.active() {
+                    continue;
+                }
+                if let Some(order) = c.board_order {
+                    ensure!(
+                        order > i64::MIN / 2 && order < i64::MAX / 2,
+                        "[{label}] Card {} board_order={order} approached i64 overflow bounds",
+                        c.id
+                    );
+                }
+                by_col
+                    .entry((c.project_id.as_str(), c.stage.as_str()))
+                    .or_default()
+                    .push(c);
+            }
+            for ((pid, stage), mut col) in by_col {
+                col.sort_by(|a, b| a.board_cmp(b));
+                let mut saw_resolved = false;
+                let mut prev_unresolved_rank: Option<i64> = None;
+                let mut prev_resolved_at: Option<Option<u64>> = None;
+                for (idx, card) in col.iter().enumerate() {
+                    ensure!(
+                        card.board_cmp(card) == CmpOrdering::Equal,
+                        "[{label}] Card::board_cmp not reflexive for {}",
+                        card.id
+                    );
+                    if idx > 0 {
+                        let prev = col[idx - 1];
+                        ensure!(
+                            prev.board_cmp(card) == CmpOrdering::Less
+                                && card.board_cmp(prev) == CmpOrdering::Greater,
+                            "[{label}] column ({pid}, {stage}) Card::board_cmp violated strict total order between {} and {}",
+                            prev.id,
+                            card.id
+                        );
+                    }
+                    if card.resolved() {
+                        saw_resolved = true;
+                        if let Some(prev_ts) = prev_resolved_at {
+                            ensure!(
+                                prev_ts >= card.resolved_at(),
+                                "[{label}] column ({pid}, {stage}) resolved cards not sorted descending by resolved_at: prev={prev_ts:?} cur={:?}",
+                                card.resolved_at()
+                            );
+                        }
+                        prev_resolved_at = Some(card.resolved_at());
+                    } else {
+                        ensure!(
+                            !saw_resolved,
+                            "[{label}] column ({pid}, {stage}) unresolved Card {} appeared after a resolved Card",
+                            card.id
+                        );
+                        let rank = card.board_rank();
+                        if let Some(prev_r) = prev_unresolved_rank {
+                            ensure!(
+                                prev_r <= rank,
+                                "[{label}] column ({pid}, {stage}) unresolved board_rank decreased: {prev_r} > {rank} (card={})",
+                                card.id
+                            );
+                        }
+                        prev_unresolved_rank = Some(rank);
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        for (host_name, handle) in &world.servers {
+            if let Some(server) = handle.server() {
+                let snap = server.snapshot()?;
+                validate_snapshot(host_name, &snap)?;
+            }
+        }
+        for client_name in world.client_names() {
+            let merged = world.client_merged_snapshot_on(&client_name)?;
+            validate_snapshot(&client_name, &merged)?;
+        }
+        Ok(())
+    }
 }
 
 fn strip_host_prefix(id: &str) -> String {
@@ -2613,8 +3582,10 @@ fn assert_host_converged(
                 && mc.attention == sc.attention
                 && normalize_human_gate(&mc.human_gate) == normalize_human_gate(&sc.human_gate)
                 && mc.delivery == sc.delivery
-                && mc.pull_request == sc.pull_request,
-            "[{host_id}] Card {raw_id} diverged at quiescence:\n  server: title={:?} stage={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?}\n  client: title={:?} stage={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?}",
+                && mc.pull_request == sc.pull_request
+                && mc.board_order == sc.board_order
+                && mc.hold_auto_merge == sc.hold_auto_merge,
+            "[{host_id}] Card {raw_id} diverged at quiescence:\n  server: title={:?} stage={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?} order={:?} hold={}\n  client: title={:?} stage={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?} order={:?} hold={}",
             sc.title,
             sc.stage,
             sc.revision,
@@ -2624,6 +3595,8 @@ fn assert_host_converged(
             sc.human_gate,
             sc.delivery,
             sc.pull_request,
+            sc.board_order,
+            sc.hold_auto_merge,
             mc.title,
             mc.stage,
             mc.revision,
@@ -2633,6 +3606,46 @@ fn assert_host_converged(
             mc.human_gate,
             mc.delivery,
             mc.pull_request,
+            mc.board_order,
+            mc.hold_auto_merge,
+        );
+    }
+
+    // Per-column board_cmp ordering convergence for non-conflict cards.
+    let mut srv_cols: BTreeMap<(&str, &str), Vec<&Card>> = BTreeMap::new();
+    for c in &server_snap.cards {
+        if c.active() && !conflict_cards.contains(&(host_id.to_owned(), c.id.clone())) {
+            srv_cols
+                .entry((c.project_id.as_str(), c.stage.as_str()))
+                .or_default()
+                .push(c);
+        }
+    }
+    let mut cli_cols: BTreeMap<(String, String), Vec<(String, &Card)>> = BTreeMap::new();
+    for c in &merged.cards {
+        if owner_of(&c.id) != host_id || !c.active() {
+            continue;
+        }
+        let raw_cid = strip_host_prefix(&c.id);
+        if conflict_cards.contains(&(host_id.to_owned(), raw_cid.clone())) {
+            continue;
+        }
+        cli_cols
+            .entry((strip_host_prefix(&c.project_id), c.stage.clone()))
+            .or_default()
+            .push((raw_cid, c));
+    }
+    for ((pid, stage), mut scards) in srv_cols {
+        scards.sort_by(|a, b| a.board_cmp(b));
+        let srv_order: Vec<&str> = scards.iter().map(|c| c.id.as_str()).collect();
+        let mut ccards = cli_cols
+            .remove(&(pid.to_owned(), stage.to_owned()))
+            .unwrap_or_default();
+        ccards.sort_by(|a, b| a.1.board_cmp(b.1));
+        let cli_order: Vec<&str> = ccards.iter().map(|(raw, _)| raw.as_str()).collect();
+        ensure!(
+            srv_order == cli_order,
+            "[{host_id}] column ({pid}, {stage}) board_cmp order diverged at quiescence: server={srv_order:?} client={cli_order:?}"
         );
     }
 

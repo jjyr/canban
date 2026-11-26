@@ -4,6 +4,7 @@ use crate::{
     presenter::*,
 };
 use canban_notifications::{OverviewRow, overview};
+pub use canban_ui_kit::{Icon, Tone};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
@@ -144,7 +145,10 @@ pub fn mark_all_read(ui: Ui, project_scope: Option<String>) {
     );
 }
 
-fn standalone_terminal_needs_you(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
+pub fn standalone_terminal_needs_you(
+    s: &canban_types::Snapshot,
+    e: &crate::terminals::Entry,
+) -> bool {
     e.agent.is_none()
         && e.listed()
         && (e.needs_attention()
@@ -155,7 +159,10 @@ fn standalone_terminal_needs_you(s: &canban_types::Snapshot, e: &crate::terminal
                     .any(|r| r.id == e.saved.id && r.state == "blocked")))
 }
 
-fn standalone_terminal_is_running(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
+pub fn standalone_terminal_is_running(
+    s: &canban_types::Snapshot,
+    e: &crate::terminals::Entry,
+) -> bool {
     if e.agent.is_some() || !e.listed() || standalone_terminal_needs_you(s, e) {
         return false;
     }
@@ -179,7 +186,7 @@ fn standalone_terminal_is_running(s: &canban_types::Snapshot, e: &crate::termina
             ))
 }
 
-fn running_agents_count_from(
+pub fn running_agents_count_from(
     s: &canban_types::Snapshot,
     rows: &[OverviewRow],
     entries: &[crate::terminals::Entry],
@@ -733,12 +740,12 @@ fn primary(row: &OverviewRow) -> &'static str {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RowEvent {
-    icon: Icon,
-    tone: Tone,
-    live: bool,
-    headline: String,
-    detail: Option<String>,
+pub struct RowEvent {
+    pub icon: Icon,
+    pub tone: Tone,
+    pub live: bool,
+    pub headline: String,
+    pub detail: Option<String>,
 }
 
 fn single_line(s: &str) -> String {
@@ -836,9 +843,18 @@ fn classify_reason(
     row: &OverviewRow,
     reason: &canban_notifications::OverviewReason,
 ) -> (Icon, Tone, &'static str, Option<String>) {
+    classify_reason_at(snapshot, row, reason, canban_types::now())
+}
+
+fn classify_reason_at(
+    snapshot: &canban_types::Snapshot,
+    row: &OverviewRow,
+    reason: &canban_notifications::OverviewReason,
+    now_ms: u64,
+) -> (Icon, Tone, &'static str, Option<String>) {
     match reason.source.as_str() {
         "runtime" => {
-            let runtime = row.agent().map(|a| a.runtime_status());
+            let runtime = row.agent().map(|a| a.runtime_status_at(now_ms));
             if runtime == Some("blocked") {
                 if let Some(w) = row.agent().and_then(|a| a.lifecycle.waiting.as_ref()) {
                     classify_runtime_wait(w)
@@ -1043,10 +1059,10 @@ fn classify_reason(
     }
 }
 
-fn reason_priority(source: &str, row: &OverviewRow) -> u8 {
+fn reason_priority_at(source: &str, row: &OverviewRow, now_ms: u64) -> u8 {
     match source {
         "runtime" => {
-            if row.agent().map(|a| a.runtime_status()) == Some("blocked") {
+            if row.agent().map(|a| a.runtime_status_at(now_ms)) == Some("blocked") {
                 0
             } else {
                 1
@@ -1060,16 +1076,26 @@ fn reason_priority(source: &str, row: &OverviewRow) -> u8 {
     }
 }
 
-fn describe_row(snapshot: &canban_types::Snapshot, row: &OverviewRow) -> RowEvent {
+pub fn describe_row(snapshot: &canban_types::Snapshot, row: &OverviewRow) -> RowEvent {
+    describe_row_at(snapshot, row, canban_types::now())
+}
+
+/// Deterministic clock-injected variant of [`describe_row`].
+pub fn describe_row_at(
+    snapshot: &canban_types::Snapshot,
+    row: &OverviewRow,
+    now_ms: u64,
+) -> RowEvent {
     if !row.reasons.is_empty() {
         let mut ordered: Vec<_> = row.reasons.iter().collect();
-        ordered.sort_by_key(|r| reason_priority(&r.source, row));
-        let (icon, tone, headline, mut detail) = classify_reason(snapshot, row, ordered[0]);
+        ordered.sort_by_key(|r| reason_priority_at(&r.source, row, now_ms));
+        let (icon, tone, headline, mut detail) =
+            classify_reason_at(snapshot, row, ordered[0], now_ms);
         if ordered.len() > 1 {
             let extras: Vec<_> = ordered[1..]
                 .iter()
                 .map(|r| {
-                    let (_, _, h, d) = classify_reason(snapshot, row, r);
+                    let (_, _, h, d) = classify_reason_at(snapshot, row, r, now_ms);
                     match d {
                         Some(d) => format!("{h}: {d}"),
                         None => h.to_owned(),
@@ -1190,7 +1216,7 @@ fn describe_row(snapshot: &canban_types::Snapshot, row: &OverviewRow) -> RowEven
     }
 }
 
-fn describe_unread_update(latest: Option<&canban_notifications::Reminder>) -> RowEvent {
+pub fn describe_unread_update(latest: Option<&canban_notifications::Reminder>) -> RowEvent {
     let raw_msg = latest.map(|i| i.message.as_str()).unwrap_or("");
     let matched_event = latest.and_then(|rem| rem.event.as_ref());
     let agent_tag = matched_event
@@ -2120,7 +2146,7 @@ pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
     render_prepared_overview_row(ui, prepared, Some(selected), stored(true))
 }
 
-fn describe_standalone_terminal(
+pub fn describe_standalone_terminal(
     entry: &crate::terminals::Entry,
     is_config: bool,
     merge_batch: Option<&canban_types::MergeBatch>,
@@ -2647,392 +2673,6 @@ mod tests {
             "created_at": 1
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn describe_row_promotes_permission_and_cleans_redundant_prefixes() {
-        let mut s = canban_types::Snapshot::default();
-        let card = base_card();
-        let mut attempt: canban_types::AgentRun = serde_json::from_value(json!({
-            "project_id": "p1",
-            "card_id": "c1",
-            "number": 1,
-            "stage": "develop",
-            "trigger": "stage_entry",
-            "profile": canban_types::Config::default().profiles[0],
-            "instruction": "task",
-            "state": "running",
-            "terminal": "t1",
-            "cwd": "/tmp",
-            "input_path": "in",
-            "connection_state": "connected",
-            "observed": {
-                "state": "live",
-                "status": {
-                    "state": "blocked",
-                    "kind": "permission",
-                    "title": "Allow command?",
-                    "msg": "cargo test --workspace"
-                }
-            },
-            "updated_at": 1
-        }))
-        .unwrap();
-        attempt.lifecycle.observed_at = Some(u64::MAX);
-        attempt.lifecycle.waiting = Some(canban_types::RuntimeWait {
-            id: "w1".into(),
-            kind: "permission".into(),
-            title: "Allow command?".into(),
-            message: "cargo test --workspace".into(),
-            since: 1,
-        });
-        s.cards.push(card);
-        s.terminals.push(canban_types::TerminalEntry {
-            id: "c1:codex".into(),
-            conversation_id: Some("c1:codex".into()),
-            number: 1,
-            name: None,
-            origin_project_id: None,
-            origin_card_id: Some("c1".into()),
-            agent_engine: None,
-            runtime: None,
-            agent: Some(attempt),
-            created_at: 1,
-        });
-
-        let rows = overview(&s);
-        let ev = describe_row(&s, &rows[0]);
-        assert_eq!(ev.icon, Icon::ShieldAlert);
-        assert_eq!(ev.tone, Tone::Attention);
-        assert_eq!(ev.headline, "Permission required");
-        assert_eq!(
-            ev.detail.as_deref(),
-            Some("Allow command? · cargo test --workspace")
-        );
-    }
-
-    #[test]
-    fn describe_row_distinguishes_review_merge_conflict_and_failure_states() {
-        let mut s = canban_types::Snapshot::default();
-        let mut card = base_card();
-        card.stage = "review".into();
-        let mut att = canban_scheduler::agent_run(
-            "p1",
-            "c1",
-            1,
-            "review",
-            "stage_entry",
-            canban_types::Config::default().profiles[0].clone(),
-            "review".into(),
-            None,
-        );
-        att.state = "completed".into();
-        let tid = "c1:codex".to_owned();
-        card.human_gate = Some(canban_types::HumanGate {
-            reason: "Agent report ready; human review required".into(),
-            terminal_id: Some(tid.clone()),
-            next_stage: None,
-        });
-        s.reports.push(canban_types::Report {
-            id: "rep-1".into(),
-            terminal_id: Some(tid.clone()),
-            workflow_run_id: None,
-            actor: "agent:developer".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            state: "completed".into(),
-            message: "Implemented event-first hierarchy and semantic icons".into(),
-            path: None,
-            request_key: "k1".into(),
-            fingerprint: "f1".into(),
-            created_at: 2,
-        });
-        s.cards.push(card);
-        s.terminals.push(canban_types::TerminalEntry {
-            id: tid.clone(),
-            conversation_id: Some(tid),
-            number: 1,
-            name: None,
-            origin_project_id: None,
-            origin_card_id: Some("c1".into()),
-            agent_engine: None,
-            runtime: None,
-            agent: Some(att),
-            created_at: 1,
-        });
-
-        let rows = overview(&s);
-        let ev = describe_row(&s, &rows[0]);
-        assert_eq!(ev.icon, Icon::Eye);
-        assert_eq!(ev.tone, Tone::Attention);
-        assert_eq!(ev.headline, "Ready for review");
-        assert_eq!(
-            ev.detail.as_deref(),
-            Some("Implemented event-first hierarchy and semantic icons")
-        );
-
-        // Merge conflict gate surfaces GitMerge icon + Merge conflict headline.
-        s.cards[0].human_gate.as_mut().unwrap().reason =
-            "Merge conflict with main after 2 attempts".into();
-        let rows = overview(&s);
-        let merge_ev = describe_row(&s, &rows[0]);
-        assert_eq!(merge_ev.icon, Icon::GitMerge);
-        assert_eq!(merge_ev.headline, "Merge conflict");
-        assert_eq!(
-            merge_ev.detail.as_deref(),
-            Some("Merge conflict with main after 2 attempts")
-        );
-
-        // Failed Agent run gate surfaces Danger TriangleAlert + Agent failed.
-        s.terminals[0].agent.as_mut().unwrap().state = "failed".into();
-        s.cards[0].human_gate.as_mut().unwrap().reason =
-            "failed: Build failed due to missing symbol".into();
-        let rows = overview(&s);
-        let fail_ev = describe_row(&s, &rows[0]);
-        assert_eq!(fail_ev.icon, Icon::TriangleAlert);
-        assert_eq!(fail_ev.tone, Tone::Danger);
-        assert_eq!(fail_ev.headline, "Agent failed");
-        assert_eq!(
-            fail_ev.detail.as_deref(),
-            Some("Build failed due to missing symbol")
-        );
-    }
-
-    #[test]
-    fn describe_unread_update_strips_machine_prefixes_and_maps_semantic_icons() {
-        let mut s = canban_types::Snapshot::default();
-        s.cards.push(base_card());
-        let mut events = vec![canban_types::Event {
-            id: "e1".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            sequence: 1,
-            kind: "comment.replied".into(),
-            actor: "agent:agy".into(),
-            message: "已整理好 ASCII 方案，请确认".into(),
-            data: json!({"question_id": "q1"}),
-            created_at: 1,
-        }];
-        s.reminders = canban_notifications::reminders_from_events(&s, &events);
-        let items = canban_notifications::reminders(&s);
-        let ev = describe_unread_update(items.first());
-        assert_eq!(ev.icon, Icon::MessageSquare);
-        assert_eq!(ev.tone, Tone::Info);
-        assert_eq!(ev.headline, "@agy replied");
-        assert_eq!(ev.detail.as_deref(), Some("已整理好 ASCII 方案，请确认"));
-
-        // Stage completed report strips `completed: ` prefix.
-        events.push(canban_types::Event {
-            id: "e2".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            sequence: 2,
-            kind: "execution.reported".into(),
-            actor: "agent:developer".into(),
-            message: "completed: All unit tests passed".into(),
-            data: json!({"report_id": "r2", "state": "completed"}),
-            created_at: 2,
-        });
-        s.reminders = canban_notifications::reminders_from_events(&s, &events);
-        let items = canban_notifications::reminders(&s);
-        let latest = items.iter().max_by_key(|i| i.sequence);
-        let done_ev = describe_unread_update(latest);
-        assert_eq!(done_ev.icon, Icon::Check);
-        assert_eq!(done_ev.tone, Tone::Success);
-        assert_eq!(done_ev.headline, "Stage completed · @developer");
-        assert_eq!(done_ev.detail.as_deref(), Some("All unit tests passed"));
-
-        // Returned to Backlog strips `Returned to Backlog: ` prefix.
-        events.push(canban_types::Event {
-            id: "e3".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            sequence: 3,
-            kind: "execution.reported".into(),
-            actor: "agent:developer".into(),
-            message: "Returned to Backlog: Already implemented in main".into(),
-            data: json!({"report_id": "r3", "state": "backlog"}),
-            created_at: 3,
-        });
-        s.reminders = canban_notifications::reminders_from_events(&s, &events);
-        let items = canban_notifications::reminders(&s);
-        let latest = items.iter().max_by_key(|i| i.sequence);
-        let backlog_ev = describe_unread_update(latest);
-        assert_eq!(backlog_ev.icon, Icon::Undo);
-        assert_eq!(backlog_ev.tone, Tone::Neutral);
-        assert_eq!(backlog_ev.headline, "Returned to Backlog");
-        assert_eq!(
-            backlog_ev.detail.as_deref(),
-            Some("Already implemented in main")
-        );
-    }
-
-    #[test]
-    fn describe_row_suppresses_automatic_unreported_idle_until_one_hour_fallback() {
-        let mut s = canban_types::Snapshot::default();
-        s.cards.push(base_card());
-        let mut attempt = canban_scheduler::agent_run(
-            "p1",
-            "c1",
-            1,
-            "develop",
-            "stage_entry",
-            canban_types::Config::default().profiles[0].clone(),
-            "implement".into(),
-            None,
-        );
-        attempt.state = "running".into();
-        attempt.terminal = Some("t1".into());
-        attempt.connection_state = "connected".into();
-        attempt.observed = Some(json!({"state": "live", "turn": 1, "status": {"state": "idle"}}));
-        attempt.lifecycle.observed_at = Some(u64::MAX);
-        attempt.lifecycle.idle_since = Some(canban_types::now().saturating_sub(5 * 60_000));
-        s.terminals.push(canban_types::TerminalEntry {
-            id: "c1:agy".into(),
-            conversation_id: Some("c1:agy".into()),
-            number: 1,
-            name: None,
-            origin_project_id: None,
-            origin_card_id: Some("c1".into()),
-            agent_engine: None,
-            runtime: None,
-            agent: Some(attempt),
-            created_at: 1,
-        });
-
-        // Under 1 hour (e.g. agy running background tasks), no "Stopped before reporting" error.
-        let rows = overview(&s);
-        assert_eq!(rows[0].group, "Idle");
-        assert!(!rows[0].actionable());
-        let quiet_ev = describe_row(&s, &rows[0]);
-        assert_eq!(quiet_ev.tone, Tone::Neutral);
-        assert_eq!(quiet_ev.headline, "Idle");
-
-        // After 1 continuous hour without reporting, surfaces "Stopped before reporting".
-        s.terminals[0].agent.as_mut().unwrap().lifecycle.idle_since = Some(
-            canban_types::now()
-                .saturating_sub(canban_notifications::UNREPORTED_IDLE_ALERT_MS + 1_000),
-        );
-        let rows = overview(&s);
-        assert_eq!(rows[0].group, "Needs attention");
-        assert!(rows[0].actionable());
-        let stalled_ev = describe_row(&s, &rows[0]);
-        assert_eq!(stalled_ev.icon, Icon::TriangleAlert);
-        assert_eq!(stalled_ev.tone, Tone::Danger);
-        assert_eq!(stalled_ev.headline, "Stopped before reporting");
-        assert_eq!(stalled_ev.detail.as_deref(), Some("Inspect terminal"));
-    }
-
-    #[test]
-    fn standalone_and_manual_shell_agent_terminals_route_into_needs_you_and_running() {
-        let mut s = canban_types::Snapshot::default();
-        s.projects.push(
-            serde_json::from_value(json!({
-                "id": "p1",
-                "name": "Canban",
-                "directory": "/tmp/canban",
-                "workflow": canban_types::Workflow::default(),
-                "created_at": 1
-            }))
-            .unwrap(),
-        );
-        // 1. Plain shell in zsh -> neither Needs you nor Running.
-        s.terminals.push(canban_types::TerminalEntry {
-            id: "shell-plain".into(),
-            conversation_id: None,
-            number: 1,
-            name: Some("Terminal 1".into()),
-            origin_project_id: Some("p1".into()),
-            origin_card_id: None,
-            agent_engine: None,
-            runtime: Some(canban_types::TerminalRuntime {
-                core_id: Some("core".into()),
-                terminal: Some("pty-1".into()),
-                state: "running".into(),
-                connection: "connected".into(),
-                error: None,
-                agent_status: None,
-                agent_turn: None,
-                observed_agent: None,
-                waiting: None,
-            }),
-            agent: None,
-            created_at: 1,
-        });
-        // 2. Manual shell running `claude` in `working` -> enters Running, not Needs you, and consumes 0 Scheduler slots!
-        s.terminals.push(canban_types::TerminalEntry {
-            id: "shell-working-claude".into(),
-            conversation_id: None,
-            number: 2,
-            name: Some("Terminal 2".into()),
-            origin_project_id: Some("p1".into()),
-            origin_card_id: None,
-            agent_engine: None,
-            runtime: Some(canban_types::TerminalRuntime {
-                core_id: Some("core".into()),
-                terminal: Some("pty-2".into()),
-                state: "running".into(),
-                connection: "connected".into(),
-                error: None,
-                agent_status: Some("working".into()),
-                agent_turn: Some(1),
-                observed_agent: Some("claude".into()),
-                waiting: None,
-            }),
-            agent: None,
-            created_at: 2,
-        });
-        // 3. Manual shell running `agy` blocked on permission -> enters Needs you with Permission required!
-        s.terminals.push(canban_types::TerminalEntry {
-            id: "shell-blocked-agy".into(),
-            conversation_id: None,
-            number: 3,
-            name: Some("Terminal 3".into()),
-            origin_project_id: Some("p1".into()),
-            origin_card_id: None,
-            agent_engine: None,
-            runtime: Some(canban_types::TerminalRuntime {
-                core_id: Some("core".into()),
-                terminal: Some("pty-3".into()),
-                state: "running".into(),
-                connection: "connected".into(),
-                error: None,
-                agent_status: Some("blocked".into()),
-                agent_turn: Some(1),
-                observed_agent: Some("agy".into()),
-                waiting: Some(canban_types::RuntimeWait {
-                    id: "w-perm".into(),
-                    kind: "permission".into(),
-                    title: "Allow command?".into(),
-                    message: "git status".into(),
-                    since: 10,
-                }),
-            }),
-            agent: None,
-            created_at: 3,
-        });
-
-        assert_eq!(canban_scheduler::active_count(&s), 0);
-        let entries = crate::terminals::entries(&s);
-        assert!(!standalone_terminal_needs_you(&s, &entries[0]));
-        assert!(!standalone_terminal_is_running(&s, &entries[0]));
-
-        assert!(!standalone_terminal_needs_you(&s, &entries[1]));
-        assert!(standalone_terminal_is_running(&s, &entries[1]));
-        let working_ev = describe_standalone_terminal(&entries[1], false, None, None);
-        assert_eq!(working_ev.headline, "Working");
-        assert!(working_ev.live);
-
-        assert!(standalone_terminal_needs_you(&s, &entries[2]));
-        assert!(!standalone_terminal_is_running(&s, &entries[2]));
-        let blocked_ev = describe_standalone_terminal(&entries[2], false, None, None);
-        assert_eq!(blocked_ev.icon, Icon::ShieldAlert);
-        assert_eq!(blocked_ev.tone, Tone::Attention);
-        assert_eq!(blocked_ev.headline, "Permission required");
-        assert_eq!(
-            blocked_ev.detail.as_deref(),
-            Some("Allow command? · git status")
-        );
     }
 
     #[test]

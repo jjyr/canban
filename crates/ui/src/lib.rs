@@ -16,7 +16,7 @@ pub mod editor;
 pub mod frame;
 pub mod github;
 pub mod hosts;
-pub(crate) mod index;
+pub mod index;
 pub mod insights;
 pub mod links;
 pub mod mobile;
@@ -49,7 +49,7 @@ pub mod workspace;
 use nsh_core::prelude::*;
 use presenter::*;
 
-pub(crate) fn with_ui_projection(method: &str, mut params: serde_json::Value) -> serde_json::Value {
+pub fn with_ui_projection(method: &str, mut params: serde_json::Value) -> serde_json::Value {
     if params.get("fields").is_none()
         && matches!(
             method,
@@ -215,7 +215,28 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     frame::screen(ui)
 }
 
-pub(crate) fn is_runtime_only_event_batch(events: &[backend::BackendEvent]) -> bool {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackendRefreshAction {
+    #[default]
+    None,
+    Runtime,
+    Full,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BackendEventPlan {
+    pub local_update_pushes: Vec<serde_json::Value>,
+    pub local_utility_pushes: Vec<serde_json::Value>,
+    pub usage_pushes: Vec<(String, serde_json::Value)>,
+    pub host_events: Vec<backend::BackendEvent>,
+    pub notification_resync: bool,
+    pub refresh_local_side_channels: bool,
+    pub bump_github_epoch: bool,
+    pub bump_env_sync_epoch: bool,
+    pub refresh_action: BackendRefreshAction,
+}
+
+pub fn is_runtime_only_event_batch(events: &[backend::BackendEvent]) -> bool {
     !events.is_empty()
         && events.iter().all(|ev| {
             matches!(
@@ -228,36 +249,36 @@ pub(crate) fn is_runtime_only_event_batch(events: &[backend::BackendEvent]) -> b
         })
 }
 
-pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) {
-    if ui.snapshot_ready.try_get().is_none() {
-        return;
-    }
-    let mut host_events = Vec::new();
+pub fn plan_backend_events(
+    events: Vec<backend::BackendEvent>,
+    snapshot_ready: bool,
+) -> BackendEventPlan {
+    let mut plan = BackendEventPlan::default();
     for ev in events {
         match ev {
             backend::BackendEvent::UpdateChanged { host_id, state } => {
                 if host_id == "local" {
-                    updates::apply_push(ui, state);
+                    plan.local_update_pushes.push(state);
                 }
             }
             backend::BackendEvent::UtilitiesChanged { host_id, state } => {
                 if host_id == "local" {
-                    utilities::apply_push(ui, state);
+                    plan.local_utility_pushes.push(state);
                 }
             }
             backend::BackendEvent::UsageChanged { host_id, state } => {
-                utilities::apply_usage_push(ui, &host_id, state);
+                plan.usage_pushes.push((host_id, state));
             }
             backend::BackendEvent::HerdrInstall { .. } => {}
             ev @ backend::BackendEvent::Host { .. } => {
-                host_events.push(ev);
+                plan.host_events.push(ev);
             }
         }
     }
-    if host_events.is_empty() {
-        return;
+    if plan.host_events.is_empty() {
+        return plan;
     }
-    if host_events.iter().any(|e| {
+    plan.notification_resync = plan.host_events.iter().any(|e| {
         matches!(
             e.app_event(),
             Some(canban_types::AppEvent::Changed {
@@ -265,10 +286,8 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
                 ..
             })
         )
-    }) {
-        ui.notification_resync.replace(true);
-    }
-    if host_events.iter().any(|e| {
+    });
+    plan.refresh_local_side_channels = plan.host_events.iter().any(|e| {
         e.host_id() == "local"
             && matches!(
                 e.app_event(),
@@ -277,11 +296,8 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
                     ..
                 })
             )
-    }) {
-        updates::refresh(ui);
-        utilities::refresh(ui);
-    }
-    if host_events.iter().any(|e| {
+    });
+    plan.bump_github_epoch = plan.host_events.iter().any(|e| {
         matches!(
             e.app_event(),
             Some(canban_types::AppEvent::Changed {
@@ -289,11 +305,8 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
                 ..
             })
         )
-    }) {
-        ui.github.epoch.update(|v| *v += 1);
-    }
-    review::handle_host_events(ui, &host_events);
-    if host_events.iter().any(|e| {
+    });
+    plan.bump_env_sync_epoch = plan.host_events.iter().any(|e| {
         matches!(
             e.app_event(),
             Some(canban_types::AppEvent::Changed {
@@ -301,10 +314,8 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
                 ..
             })
         )
-    }) {
-        ui.env_sync_epoch.update(|v| *v += 1);
-    }
-    if host_events.iter().all(|e| {
+    });
+    let env_sync_only = plan.host_events.iter().all(|e| {
         matches!(
             e.app_event(),
             Some(canban_types::AppEvent::Changed {
@@ -312,13 +323,52 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
                 ..
             })
         )
-    }) {
+    });
+    if !env_sync_only {
+        plan.refresh_action = if snapshot_ready && is_runtime_only_event_batch(&plan.host_events) {
+            BackendRefreshAction::Runtime
+        } else {
+            BackendRefreshAction::Full
+        };
+    }
+    plan
+}
+
+pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) {
+    let Some(snapshot_ready) = ui.snapshot_ready.try_get() else {
+        return;
+    };
+    let plan = plan_backend_events(events, snapshot_ready);
+    for state in plan.local_update_pushes {
+        updates::apply_push(ui, state);
+    }
+    for state in plan.local_utility_pushes {
+        utilities::apply_push(ui, state);
+    }
+    for (host_id, state) in plan.usage_pushes {
+        utilities::apply_usage_push(ui, &host_id, state);
+    }
+    if plan.host_events.is_empty() {
         return;
     }
-    if ui.snapshot_ready.get_untracked() && is_runtime_only_event_batch(&host_events) {
-        refresh_runtime(ui);
-    } else {
-        refresh(ui);
+    if plan.notification_resync {
+        ui.notification_resync.replace(true);
+    }
+    if plan.refresh_local_side_channels {
+        updates::refresh(ui);
+        utilities::refresh(ui);
+    }
+    if plan.bump_github_epoch {
+        ui.github.epoch.update(|v| *v += 1);
+    }
+    review::handle_host_events(ui, &plan.host_events);
+    if plan.bump_env_sync_epoch {
+        ui.env_sync_epoch.update(|v| *v += 1);
+    }
+    match plan.refresh_action {
+        BackendRefreshAction::None => {}
+        BackendRefreshAction::Runtime => refresh_runtime(ui),
+        BackendRefreshAction::Full => refresh(ui),
     }
 }
 
@@ -369,225 +419,4 @@ fn run_application(ran_window: &mut bool) -> Result<()> {
         anyhow::bail!("Native application exited with an error");
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod push_tests {
-    use super::*;
-    use serde_json::{Value, json};
-    use std::sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    };
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn handle_backend_events_applies_side_channels_and_guards_pending_utilities() {
-        static EVENTS_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<backend::BackendEvent>> =
-            OnceLock::new();
-        static PENDING_ON: AtomicBool = AtomicBool::new(false);
-        static OBSERVED_PHASE: Mutex<String> = Mutex::new(String::new());
-        static OBSERVED_THEME: Mutex<String> = Mutex::new(String::new());
-        static OBSERVED_USAGE: Mutex<Value> = Mutex::new(Value::Null);
-
-        #[component]
-        fn ProbeRoot() -> impl IntoElement {
-            let ui = Ui::new();
-            ui.snapshot_ready.set(true);
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let _ = EVENTS_TX.set(tx);
-            ui.spawn(async move {
-                while let Some(first) = rx.recv().await {
-                    let mut batch = vec![first];
-                    while let Ok(more) = rx.try_recv() {
-                        batch.push(more);
-                    }
-                    if PENDING_ON.load(Ordering::SeqCst) {
-                        ui.pending_methods.update(|s| {
-                            s.insert("utilities.configure");
-                        });
-                    } else {
-                        ui.pending_methods.update(|s| {
-                            s.remove("utilities.configure");
-                        });
-                    }
-                    handle_backend_events(ui, batch);
-                    *OBSERVED_PHASE.lock().unwrap() = ui
-                        .update
-                        .with_untracked(|v| v["state"]["phase"].as_str().unwrap_or("").to_owned());
-                    *OBSERVED_THEME.lock().unwrap() = ui.utility.with_untracked(|v| {
-                        v["preferences"]["theme"].as_str().unwrap_or("").to_owned()
-                    });
-                    *OBSERVED_USAGE.lock().unwrap() = ui.usage.get_untracked();
-                }
-            });
-            view()
-        }
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_time()
-            .build()
-            .unwrap();
-        let mut core = nsh_core::Core::new(
-            nsh_core::ApproxTextEngine,
-            nsh_core::geometry::size(px(300.), px(200.)),
-        );
-        core.set_task_runtime(runtime.handle().clone());
-        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
-        core.run_component_tasks();
-        core.commit();
-
-        let tx = EVENTS_TX.get().unwrap();
-        // Remote update.changed is ignored; local update.changed updates ui.update immediately.
-        tx.send(backend::BackendEvent::UpdateChanged {
-            host_id: "remote-1".into(),
-            state: json!({"state": {"phase": "ignored"}}),
-        })
-        .unwrap();
-        tx.send(backend::BackendEvent::UpdateChanged {
-            host_id: "local".into(),
-            state: json!({"state": {"phase": "downloading", "progress": 60}}),
-        })
-        .unwrap();
-        tx.send(backend::BackendEvent::UtilitiesChanged {
-            host_id: "local".into(),
-            state: json!({"preferences": {"theme": "nord"}}),
-        })
-        .unwrap();
-        // Mismatched usage host is ignored; matching local host applies.
-        tx.send(backend::BackendEvent::UsageChanged {
-            host_id: "other-host".into(),
-            state: json!({"readings": [{"provider": "ignored"}]}),
-        })
-        .unwrap();
-        tx.send(backend::BackendEvent::UsageChanged {
-            host_id: "local".into(),
-            state: json!({"readings": [{"provider": "codex", "used": 17}]}),
-        })
-        .unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            core.run_component_tasks();
-            core.commit();
-            if OBSERVED_PHASE.lock().unwrap().as_str() == "downloading"
-                && OBSERVED_THEME.lock().unwrap().as_str() == "nord"
-                && OBSERVED_USAGE.lock().unwrap()["readings"][0]["used"] == 17
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(OBSERVED_PHASE.lock().unwrap().as_str(), "downloading");
-        assert_eq!(OBSERVED_THEME.lock().unwrap().as_str(), "nord");
-        assert_eq!(OBSERVED_USAGE.lock().unwrap()["host_id"], "local");
-
-        // Optimistic `utilities.configure` in flight blocks overwriting `ui.utility`.
-        PENDING_ON.store(true, Ordering::SeqCst);
-        tx.send(backend::BackendEvent::UtilitiesChanged {
-            host_id: "local".into(),
-            state: json!({"preferences": {"theme": "stale-theme"}}),
-        })
-        .unwrap();
-        for _ in 0..10 {
-            core.run_component_tasks();
-            core.commit();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(
-            OBSERVED_THEME.lock().unwrap().as_str(),
-            "nord",
-            "pending utilities.configure must protect optimistic preference state"
-        );
-
-        drop(core);
-        drop(runtime);
-    }
-
-    #[test]
-    fn draft_error_watch_wakes_ui_spawn_consumer_without_polling() {
-        static DRAFT_STATUS_VAL: AtomicU64 = AtomicU64::new(0);
-
-        #[component]
-        fn ProbeDrafts() -> impl IntoElement {
-            let ui = Ui::new();
-            let mut rx = drafts::persistence::subscribe_error_epoch();
-            ui.spawn(async move {
-                while rx.changed().await.is_ok() {
-                    if let Some(cur) = ui.draft_status.try_get() {
-                        let next = cur.wrapping_add(1);
-                        let _ = ui.draft_status.try_set(next);
-                        DRAFT_STATUS_VAL.store(next, Ordering::SeqCst);
-                    }
-                }
-            });
-            view()
-        }
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_time()
-            .build()
-            .unwrap();
-        let mut core = nsh_core::Core::new(
-            nsh_core::ApproxTextEngine,
-            nsh_core::geometry::size(px(300.), px(200.)),
-        );
-        core.set_task_runtime(runtime.handle().clone());
-        core.mount_root(&nsh_core::element::Root::of::<ProbeDrafts>());
-        core.run_component_tasks();
-        core.commit();
-
-        assert_eq!(DRAFT_STATUS_VAL.load(Ordering::SeqCst), 0);
-        let worker = std::thread::spawn(|| {
-            drafts::persistence::bump_error_epoch();
-        });
-        worker.join().unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline && DRAFT_STATUS_VAL.load(Ordering::SeqCst) == 0 {
-            core.run_component_tasks();
-            core.commit();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(DRAFT_STATUS_VAL.load(Ordering::SeqCst), 1);
-
-        drop(core);
-        drop(runtime);
-    }
-
-    #[test]
-    fn runtime_only_event_batch_classification() {
-        let host_ev = |topic: &'static str| backend::BackendEvent::Host {
-            host_id: "local".into(),
-            event: canban_types::AppEvent::Changed {
-                topic,
-                card_id: None,
-            },
-        };
-
-        assert!(!is_runtime_only_event_batch(&[]));
-        assert!(is_runtime_only_event_batch(&[host_ev("terminals")]));
-        assert!(is_runtime_only_event_batch(&[host_ev("reclaim")]));
-        assert!(is_runtime_only_event_batch(&[
-            host_ev("terminals"),
-            host_ev("reclaim"),
-        ]));
-        assert!(!is_runtime_only_event_batch(&[
-            host_ev("terminals"),
-            host_ev("application"),
-        ]));
-        assert!(!is_runtime_only_event_batch(&[host_ev("application")]));
-        assert!(!is_runtime_only_event_batch(&[host_ev("review")]));
-        assert!(!is_runtime_only_event_batch(&[host_ev("github")]));
-        assert!(!is_runtime_only_event_batch(&[host_ev("resync")]));
-        assert!(!is_runtime_only_event_batch(&[host_ev("runtime")]));
-        assert!(!is_runtime_only_event_batch(&[
-            backend::BackendEvent::UtilitiesChanged {
-                host_id: "local".into(),
-                state: serde_json::json!({}),
-            }
-        ]));
-    }
 }

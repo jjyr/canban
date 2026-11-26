@@ -1,5 +1,5 @@
 use crate::drafts::Draft;
-pub(crate) mod submission;
+pub mod submission;
 use canban_types::Event;
 use canban_types::*;
 use nsh_core::prelude::*;
@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
+pub use submission::CommittedWrites;
 
 pub const REPORT_BODY_CACHE_CAP: usize = 128;
 pub const LINK_PREVIEW_CACHE_CAP: usize = 128;
@@ -325,19 +326,14 @@ impl Ui {
     }
 
     pub(crate) fn accept_runtime_state(self, runtime: RuntimeState) -> bool {
-        let mut next = self.snapshot.get_untracked();
-        if runtime_references_unknown_entity(&next, &runtime) {
-            return false;
-        }
-        next.apply_runtime_state(runtime);
-        canban_notifications::reconcile_runtime_reminders(&mut next);
-        if self
+        let current = self.snapshot.get_untracked();
+        let Some(next) = self
             .committed_writes
-            .try_with(|writes| writes.reconcile_runtime(&mut next))
-            .is_none()
-        {
+            .try_with(|writes| apply_runtime_state_to_snapshot(&current, runtime, writes))
+            .flatten()
+        else {
             return false;
-        }
+        };
         let summaries = snapshot_summaries(&next);
         let different = self.snapshot.with_untracked(|old| old != &next);
         let hosts_changed =
@@ -784,25 +780,10 @@ impl Ui {
         if prev == summaries {
             return;
         }
-        let mut to_bump = Vec::new();
-        for h in &summaries {
-            if h.is_local || !h.connection.is_connected() {
-                continue;
-            }
-            let reconnected = prev.iter().find(|old| old.id == h.id).is_none_or(|old| {
-                !old.connection.is_connected() || old.reconnect_count != h.reconnect_count
-            });
-            if reconnected {
-                to_bump.push(h.id.clone());
-            }
-        }
+        let mut next_epochs = self.host_connect_epochs.get_untracked();
+        let to_bump = apply_host_summaries(&prev, &summaries, &mut next_epochs);
         if !to_bump.is_empty() {
-            self.host_connect_epochs.update(|epochs| {
-                for hid in &to_bump {
-                    let next = epochs.get(hid).copied().unwrap_or(0).saturating_add(1);
-                    epochs.insert(hid.clone(), next);
-                }
-            });
+            self.host_connect_epochs.set(next_epochs);
             for hid in to_bump {
                 canban_terminal::evict_idle_host_sessions(&hid);
             }
@@ -1440,6 +1421,63 @@ impl Ui {
         });
     }
 }
+/// Pure projection for `Ui::accept_runtime_state`: applies a lightweight runtime slice,
+/// reconciles runtime reminders and terminal receipts, and returns `None` if the runtime
+/// references an unknown Card or Project (signaling the caller to escalate to full `app.state`).
+pub fn apply_runtime_state_to_snapshot(
+    current: &Snapshot,
+    runtime: RuntimeState,
+    writes: &mut submission::CommittedWrites,
+) -> Option<Snapshot> {
+    apply_runtime_state_to_snapshot_at(current, runtime, writes, canban_types::now())
+}
+
+/// Deterministic clock-injected variant of [`apply_runtime_state_to_snapshot`].
+pub fn apply_runtime_state_to_snapshot_at(
+    current: &Snapshot,
+    runtime: RuntimeState,
+    writes: &mut submission::CommittedWrites,
+    now_ms: u64,
+) -> Option<Snapshot> {
+    let mut next = current.clone();
+    if runtime_references_unknown_entity(&next, &runtime) {
+        return None;
+    }
+    next.apply_runtime_state(runtime);
+    canban_notifications::reconcile_runtime_reminders_at(&mut next, now_ms);
+    writes.reconcile_runtime(&mut next);
+    Some(next)
+}
+
+/// Pure projection for `Ui::apply_hosts`: bumps per-remote-host connect epochs strictly when a
+/// remote host transitions to `Connected` or increments `reconnect_count`, returning bumped IDs.
+pub fn apply_host_summaries(
+    prev: &[HostSummary],
+    summaries: &[HostSummary],
+    epochs: &mut BTreeMap<String, u64>,
+) -> Vec<String> {
+    if prev == summaries {
+        return Vec::new();
+    }
+    let mut to_bump = Vec::new();
+    for h in summaries {
+        if h.is_local || !h.connection.is_connected() {
+            continue;
+        }
+        let reconnected = prev.iter().find(|old| old.id == h.id).is_none_or(|old| {
+            !old.connection.is_connected() || old.reconnect_count != h.reconnect_count
+        });
+        if reconnected {
+            to_bump.push(h.id.clone());
+        }
+    }
+    for hid in &to_bump {
+        let next = epochs.get(hid).copied().unwrap_or(0).saturating_add(1);
+        epochs.insert(hid.clone(), next);
+    }
+    to_bump
+}
+
 fn runtime_references_unknown_entity(snapshot: &Snapshot, runtime: &RuntimeState) -> bool {
     let has_card = |cid: &str| snapshot.cards.iter().any(|c| c.id == cid);
     let has_project = |pid: &str| {
@@ -2238,29 +2276,41 @@ pub fn copy_text(ui: Ui, value: String) {
     drop(set_clipboard(&value));
     ui.notify("Copied to clipboard");
 }
-struct ParsedTimelinePage {
-    events: Vec<Event>,
-    highwater: u64,
-    has_more_before: bool,
-    oldest_sequence: Option<u64>,
+pub struct ParsedTimelinePage {
+    pub events: Vec<Event>,
+    pub highwater: u64,
+    pub has_more_before: bool,
+    pub oldest_sequence: Option<u64>,
 }
 
-fn parse_timeline_page(val: &Value) -> ParsedTimelinePage {
+pub fn parse_timeline_page(val: &Value) -> ParsedTimelinePage {
     let events = val["events"]
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| serde_json::from_value::<Event>(v.clone()).ok())
+                .filter_map(|v| {
+                    let mut normalized = v.clone();
+                    if let Some(obj) = normalized.as_object_mut()
+                        && obj.contains_key("message")
+                        && obj.contains_key("body")
+                    {
+                        obj.remove("body");
+                    }
+                    serde_json::from_value::<Event>(normalized).ok()
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     let highwater = val["highwater"]
         .as_u64()
-        .unwrap_or_else(|| events.last().map(|e| e.sequence).unwrap_or(0));
+        .unwrap_or_else(|| confirmed_max_sequence(&events));
     let has_more_before = val["has_more_before"].as_bool().unwrap_or(false);
-    let oldest_sequence = val["oldest_sequence"]
-        .as_u64()
-        .or_else(|| events.first().map(|e| e.sequence));
+    let oldest_sequence = val["oldest_sequence"].as_u64().or_else(|| {
+        events
+            .iter()
+            .find(|e| e.data["pending"] != true)
+            .map(|e| e.sequence)
+    });
     ParsedTimelinePage {
         events,
         highwater,
@@ -2280,7 +2330,7 @@ fn merge_events_by_id(target: &mut Vec<Event>, incoming: Vec<Event>) {
     target.sort_by_key(|e| e.sequence);
 }
 
-pub(crate) fn confirmed_max_sequence(events: &[Event]) -> u64 {
+pub fn confirmed_max_sequence(events: &[Event]) -> u64 {
     events
         .iter()
         .filter(|e| e.data["pending"] != true)
@@ -2289,7 +2339,7 @@ pub(crate) fn confirmed_max_sequence(events: &[Event]) -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn apply_tail_page(
+pub fn apply_tail_page(
     state: &mut CardTimelineState,
     mut events: Vec<Event>,
     highwater: u64,
@@ -2316,7 +2366,7 @@ pub(crate) fn apply_tail_page(
     state.initialized = true;
 }
 
-pub(crate) fn apply_incremental_page(
+pub fn apply_incremental_page(
     state: &mut CardTimelineState,
     events: Vec<Event>,
     highwater: u64,
@@ -2330,7 +2380,12 @@ pub(crate) fn apply_incremental_page(
             && let Some(target) = state.events.iter_mut().find(|e| e.id == target_id)
             && target.kind != "comment.deleted"
         {
-            if let Some(body) = ev.data["body"].as_str() {
+            if let Some(body) = ev
+                .data
+                .get("body")
+                .and_then(Value::as_str)
+                .or_else(|| (!ev.message.is_empty()).then_some(ev.message.as_str()))
+            {
                 target.message = body.to_owned();
                 target.data["body"] = json!(body);
             }
@@ -2372,7 +2427,7 @@ pub(crate) fn apply_incremental_page(
     state.initialized = true;
 }
 
-pub(crate) fn apply_older_page(
+pub fn apply_older_page(
     state: &mut CardTimelineState,
     events: Vec<Event>,
     has_more_before: bool,
@@ -2392,7 +2447,7 @@ pub(crate) fn apply_older_page(
     state.loading_older = false;
 }
 
-pub(crate) fn apply_around_page(
+pub fn apply_around_page(
     state: &mut CardTimelineState,
     events: Vec<Event>,
     has_more_before: bool,
@@ -2410,7 +2465,6 @@ pub(crate) fn apply_around_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    mod submission_rpc;
 
     #[test]
     fn workspace_dismiss_closes_only_card_and_new_card_when_unblocked() {
@@ -2480,369 +2534,6 @@ mod tests {
         );
         core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
         let _ = core.commit();
-    }
-
-    #[test]
-    fn card_timeline_pagination_incremental_refresh_and_optimistic_comment_overlay() {
-        let ev = |seq: u64, id: &str, kind: &str, msg: &str, data: Value| Event {
-            id: id.into(),
-            sequence: seq,
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            kind: kind.into(),
-            actor: "user".into(),
-            message: msg.into(),
-            data,
-            created_at: seq.saturating_mul(1000),
-        };
-
-        let mut writes = submission::CommittedWrites::default();
-        let mut state = CardTimelineState::default();
-
-        // 1. Initial tail load returns sequences 10..=12 with older history available.
-        apply_tail_page(
-            &mut state,
-            vec![
-                ev(
-                    10,
-                    "e10",
-                    "comment.created",
-                    "Ten",
-                    json!({"body": "Ten", "revision": 1}),
-                ),
-                ev(11, "e11", "stage.changed", "Moved", json!({})),
-                ev(
-                    12,
-                    "e12",
-                    "comment.created",
-                    "Twelve",
-                    json!({"body": "Twelve", "revision": 1}),
-                ),
-            ],
-            12,
-            true,
-            Some(10),
-            &mut writes,
-            "c1",
-        );
-        assert!(state.initialized);
-        assert!(state.has_more_before);
-        assert_eq!(state.oldest_seq, Some(10));
-        assert_eq!(state.highwater, 12);
-        assert_eq!(state.events.len(), 3);
-
-        // 2. Optimistic comment.add overlays immediately before incremental refresh arrives.
-        let optimistic_comment = ev(
-            13,
-            "e13",
-            "comment.created",
-            "Optimistic",
-            json!({"body": "Optimistic", "revision": 1}),
-        );
-        writes.record(
-            "comment.add",
-            &serde_json::to_value(&optimistic_comment).unwrap(),
-            "local",
-        );
-        writes.overlay_card_events("c1", &mut state.events);
-        assert_eq!(state.events.len(), 4);
-        assert_eq!(state.events[3].message, "Optimistic");
-
-        // 3. Incremental refresh brings authoritative e13 plus a comment.updated for e10
-        //    and a comment.deleted for e12.
-        apply_incremental_page(
-            &mut state,
-            vec![
-                optimistic_comment,
-                ev(
-                    14,
-                    "e14",
-                    "comment.updated",
-                    "Comment updated",
-                    json!({"comment_id": "e10", "body": "Ten edited", "revision": 2, "edited_at": 14000}),
-                ),
-                ev(
-                    15,
-                    "e15",
-                    "comment.deleted",
-                    "Comment deleted",
-                    json!({"comment_id": "e12", "revision": 2, "deleted_at": 15000}),
-                ),
-            ],
-            15,
-            &mut writes,
-            "c1",
-        );
-        assert_eq!(state.highwater, 15);
-        assert_eq!(
-            state.events.iter().find(|e| e.id == "e10").unwrap().message,
-            "Ten edited"
-        );
-        assert_eq!(
-            state.events.iter().find(|e| e.id == "e12").unwrap().kind,
-            "comment.deleted"
-        );
-
-        // 4. "Load older activity" prepends sequences 1..=2 and clears has_more_before.
-        apply_older_page(
-            &mut state,
-            vec![
-                ev(1, "e1", "card.created", "Created", json!({})),
-                ev(
-                    2,
-                    "e2",
-                    "comment.created",
-                    "Early",
-                    json!({"body": "Early"}),
-                ),
-            ],
-            false,
-            Some(1),
-            &mut writes,
-            "c1",
-        );
-        assert!(!state.has_more_before);
-        assert_eq!(state.oldest_seq, Some(1));
-        assert_eq!(state.events.first().unwrap().sequence, 1);
-        assert_eq!(state.events.last().unwrap().sequence, 15);
-    }
-
-    #[test]
-    fn pending_synthetic_events_do_not_advance_timeline_highwater() {
-        let mut state = CardTimelineState::default();
-        let mut writes = submission::CommittedWrites::default();
-        let ev = |seq: u64, id: &str, kind: &str, msg: &str, data: Value| Event {
-            id: id.into(),
-            sequence: seq,
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            kind: kind.into(),
-            actor: "human".into(),
-            created_at: seq.saturating_mul(1000),
-            message: msg.into(),
-            data,
-        };
-        apply_tail_page(
-            &mut state,
-            vec![
-                ev(5, "e5", "card.created", "Created", json!({})),
-                ev(
-                    u64::MAX,
-                    "pending-c1",
-                    "comment.created",
-                    "Offline comment",
-                    json!({"body": "Offline comment", "pending": true}),
-                ),
-            ],
-            5,
-            false,
-            Some(5),
-            &mut writes,
-            "c1",
-        );
-        assert_eq!(state.highwater, 5);
-        assert_eq!(state.events.len(), 2);
-
-        apply_incremental_page(
-            &mut state,
-            vec![ev(
-                6,
-                "pending-c1",
-                "comment.created",
-                "Offline comment",
-                json!({"body": "Offline comment"}),
-            )],
-            6,
-            &mut writes,
-            "c1",
-        );
-        assert_eq!(state.highwater, 6);
-        assert_eq!(
-            state
-                .events
-                .iter()
-                .find(|e| e.id == "pending-c1")
-                .unwrap()
-                .sequence,
-            6
-        );
-    }
-
-    #[test]
-    fn accept_runtime_state_updates_runtime_slice_without_bumping_workspace_index() {
-        let runtime = nsh_core::element::Runtime::default();
-        let _entered = runtime.enter();
-        let (_owner, ()) = nsh_core::element::create_root(|| {
-            let ui = Ui::new();
-            let mut snap = Snapshot::default();
-            snap.projects.push(
-                serde_json::from_value(json!({
-                    "id": "p1",
-                    "name": "Canban",
-                    "directory": "/tmp/p1",
-                    "workflow": Workflow::default(),
-                    "created_at": 1
-                }))
-                .unwrap(),
-            );
-            let card: Card = serde_json::from_value(json!({
-                "id": "c1",
-                "project_id": "p1",
-                "number": 1,
-                "title": "Card 1",
-                "body": "",
-                "stage": "develop",
-                "revision": 1,
-                "created_at": 1
-            }))
-            .unwrap();
-            snap.cards.push(card.clone());
-            snap.host_summaries.insert(
-                "local".into(),
-                HostSummary {
-                    id: "local".into(),
-                    name: "This Mac".into(),
-                    is_local: true,
-                    transport_label: "Local socket".into(),
-                    endpoint_label: "/tmp/app.sock".into(),
-                    ssh_target: None,
-                    server_id: None,
-                    connection: HostConnectionState::Offline {
-                        error: "n/a".into(),
-                        cached_at: None,
-                    },
-                    active_agents: 0,
-                    max_agents: 4,
-                    project_count: 1,
-                    reconnect_count: 0,
-                    last_synced_at: None,
-                    pending_mutations: 0,
-                    sync_conflicts: 0,
-                },
-            );
-            ui.accept_snapshot(snap);
-
-            let initial_gen = ui.index.with(|idx| idx.generation);
-            let initial_tile = crate::components::card_tile::CardTileModel::build(ui, card.clone());
-
-            // 1. Fresh working agent + context + reclaim updates runtime slices and host active count,
-            //    keeping `SnapshotIndex::generation` unchanged.
-            let mut agent_entry: TerminalEntry = serde_json::from_value(json!({
-                "id": "c1:developer",
-                "conversation_id": "c1:developer",
-                "number": 1,
-                "created_at": 1_750_000_000_000u64,
-                "agent": {
-                    "project_id": "p1",
-                    "card_id": "c1",
-                    "number": 1,
-                    "stage": "develop",
-                    "trigger": "interactive",
-                    "profile": { "id": "developer", "enabled": true, "identity": true },
-                    "instruction": "Work",
-                    "state": "running",
-                    "core_id": "core-1",
-                    "terminal": "pty-1",
-                    "connection_state": "connected",
-                    "observed": { "state": "live", "turn": 1, "status": { "state": "working" } },
-                    "lifecycle": { "observed_at": canban_types::now() },
-                    "started_at": 1_750_000_000_000u64,
-                    "updated_at": 100
-                }
-            }))
-            .unwrap();
-            let applied = ui.accept_runtime_state(RuntimeState {
-                terminals: vec![agent_entry.clone()],
-                terminal_contexts: vec![TerminalContext {
-                    terminal_id: "c1:developer".into(),
-                    core_id: "core-1".into(),
-                    terminal: "pty-1".into(),
-                    cwd: Some("/tmp/p1".into()),
-                    project_id: Some("p1".into()),
-                    card_id: Some("c1".into()),
-                    ..Default::default()
-                }],
-                reclaim_status: vec![TerminalReclaimStatus {
-                    terminal_id: "c1:developer".into(),
-                    paused: true,
-                    reclaiming_soon: false,
-                    auto_reclaiming: false,
-                    interactive_followup: false,
-                    deadline_at: None,
-                }],
-                host_active_agents: BTreeMap::from([("local".into(), 1)]),
-                ..Default::default()
-            });
-            assert!(applied);
-            assert_eq!(ui.index.with(|idx| idx.generation), initial_gen);
-            assert_eq!(
-                ui.snapshot
-                    .with(|s| s.host_summaries["local"].active_agents),
-                1
-            );
-
-            let working_tile = crate::components::card_tile::CardTileModel::build(ui, card.clone());
-            assert_ne!(working_tile, initial_tile);
-
-            // 2. Subsequent `observed_at` + context churn while agent remains `working` keeps
-            //    `CardTileModel` equal so Board tiles do not rebuild.
-            agent_entry.agent.as_mut().unwrap().lifecycle.observed_at =
-                Some(canban_types::now() + 1_000);
-            assert!(ui.accept_runtime_state(RuntimeState {
-                terminals: vec![agent_entry.clone()],
-                terminal_contexts: vec![TerminalContext {
-                    terminal_id: "c1:developer".into(),
-                    core_id: "core-1".into(),
-                    terminal: "pty-1".into(),
-                    cwd: Some("/tmp/p1".into()),
-                    project_id: Some("p1".into()),
-                    card_id: Some("c1".into()),
-                    additions: 14,
-                    ..Default::default()
-                }],
-                host_active_agents: BTreeMap::from([("local".into(), 1)]),
-                ..Default::default()
-            }));
-            assert_eq!(
-                crate::components::card_tile::CardTileModel::build(ui, card),
-                working_tile
-            );
-
-            // 3. Blocked agent wait reminder is reconciled alongside `sound_items`.
-            agent_entry.agent.as_mut().unwrap().observed =
-                Some(json!({ "state": "live", "turn": 1, "status": { "state": "blocked" } }));
-            agent_entry.agent.as_mut().unwrap().lifecycle.waiting = Some(RuntimeWait {
-                id: "w-runtime-1".into(),
-                kind: "permission".into(),
-                title: "Allow".into(),
-                message: "Run test".into(),
-                since: 55,
-            });
-            assert!(ui.accept_runtime_state(RuntimeState {
-                terminals: vec![agent_entry],
-                ..Default::default()
-            }));
-            assert!(
-                ui.reminders
-                    .with(|r| r.iter().any(|x| x.id == "wait:w-runtime-1"))
-            );
-            assert!(
-                ui.sound_items
-                    .with(|ids| ids.iter().any(|id| id == "wait:w-runtime-1"))
-            );
-
-            // 4. Unknown Card reference triggers `false` so caller escalates to full `app.state`.
-            assert!(!ui.accept_runtime_state(RuntimeState {
-                terminals: vec![serde_json::from_value(json!({
-                    "id": "unknown-card-term",
-                    "number": 2,
-                    "origin_card_id": "missing-card",
-                    "created_at": 1
-                }))
-                .unwrap()],
-                ..Default::default()
-            }));
-        });
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3370,64 +3061,5 @@ mod tests {
             "Found direct tracked ui.snapshot / ui.runtime_clock reads inside dynamic(...) blocks:\n{}",
             all_violations.join("\n")
         );
-    }
-
-    #[test]
-    fn apply_hosts_bumps_connect_epoch_only_on_remote_reconnect() {
-        let rt = nsh_core::element::Runtime::default();
-        let _entered = rt.enter();
-        let ui = Ui::new();
-        let mk_remote = |connected: bool, rtt_ms: u64, reconnect_count: u32| HostSummary {
-            id: "devpc".into(),
-            name: "devpc".into(),
-            is_local: false,
-            transport_label: "TCP".into(),
-            endpoint_label: "100.64.0.2:7680".into(),
-            ssh_target: None,
-            server_id: None,
-            connection: if connected {
-                HostConnectionState::Connected {
-                    rtt_ms,
-                    api_version: canban_updater::DESKTOP_API,
-                    version: "1".into(),
-                    platform: "linux".into(),
-                }
-            } else {
-                HostConnectionState::Offline {
-                    error: "network lost".into(),
-                    cached_at: None,
-                }
-            },
-            active_agents: 0,
-            max_agents: 4,
-            project_count: 1,
-            reconnect_count,
-            last_synced_at: None,
-            pending_mutations: 0,
-            sync_conflicts: 0,
-        };
-
-        // First Connected appearance bumps epoch to 1.
-        ui.apply_hosts(vec![mk_remote(true, 10, 0)]);
-        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 1);
-
-        // Routine RTT / summary tick while staying Connected at same reconnect_count does not bump.
-        ui.apply_hosts(vec![mk_remote(true, 25, 0)]);
-        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 1);
-
-        // Going Offline does not bump.
-        ui.apply_hosts(vec![mk_remote(false, 25, 1)]);
-        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 1);
-
-        // Coming back Connected bumps epoch to 2.
-        ui.apply_hosts(vec![mk_remote(true, 12, 1)]);
-        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 2);
-
-        // Reconnect completing within a single poll tick (reconnect_count 1 -> 2) bumps epoch to 3.
-        ui.apply_hosts(vec![mk_remote(true, 14, 2)]);
-        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 3);
-
-        // Local host epoch always stays 0.
-        assert_eq!(crate::terminals::host_connect_epoch(ui, "local"), 0);
     }
 }

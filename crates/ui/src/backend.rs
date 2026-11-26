@@ -27,6 +27,24 @@ pub enum BackendEvent {
 }
 
 impl BackendEvent {
+    pub fn from_client_event(ev: canban_client::ClientEvent) -> Self {
+        match ev {
+            canban_client::ClientEvent::Host { host_id, event } => Self::Host { host_id, event },
+            canban_client::ClientEvent::UpdateChanged { host_id, state } => {
+                Self::UpdateChanged { host_id, state }
+            }
+            canban_client::ClientEvent::UtilitiesChanged { host_id, state } => {
+                Self::UtilitiesChanged { host_id, state }
+            }
+            canban_client::ClientEvent::UsageChanged { host_id, state } => {
+                Self::UsageChanged { host_id, state }
+            }
+            canban_client::ClientEvent::HerdrInstall { host_id, state } => {
+                Self::HerdrInstall { host_id, state }
+            }
+        }
+    }
+
     pub fn local(event: AppEvent) -> Self {
         Self::Host {
             host_id: "local".into(),
@@ -609,23 +627,8 @@ impl UiBackend for ClientBackend {
     }
 
     fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<BackendEvent> {
-        self.client.subscribe_mapped(|ev| match ev {
-            canban_client::ClientEvent::Host { host_id, event } => {
-                BackendEvent::Host { host_id, event }
-            }
-            canban_client::ClientEvent::UpdateChanged { host_id, state } => {
-                BackendEvent::UpdateChanged { host_id, state }
-            }
-            canban_client::ClientEvent::UtilitiesChanged { host_id, state } => {
-                BackendEvent::UtilitiesChanged { host_id, state }
-            }
-            canban_client::ClientEvent::UsageChanged { host_id, state } => {
-                BackendEvent::UsageChanged { host_id, state }
-            }
-            canban_client::ClientEvent::HerdrInstall { host_id, state } => {
-                BackendEvent::HerdrInstall { host_id, state }
-            }
-        })
+        self.client
+            .subscribe_mapped(BackendEvent::from_client_event)
     }
 
     fn home_for(&self, host_id: &str) -> String {

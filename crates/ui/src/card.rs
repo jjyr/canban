@@ -4,7 +4,7 @@ pub(crate) mod changes;
 mod composer;
 mod details;
 mod header;
-mod quick_merge;
+pub mod quick_merge;
 pub(crate) mod resolve;
 mod task;
 pub mod terminal;

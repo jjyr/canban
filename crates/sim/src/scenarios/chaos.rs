@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const SECONDARY_CLIENT: &str = "ui-client-2";
-const NUM_CHAOS_OP_KINDS: usize = 39;
+const NUM_CHAOS_OP_KINDS: usize = 40;
 
 const CHAOS_WORKFLOW_YAML: &str = r#"schema: 12
 id: chaos-flow
@@ -532,6 +532,7 @@ impl ChaosProfile {
                 weights[27] += 14; // WorktreeDeliveryOp (deliver + @merger + conflicts)
                 weights[30] += 10; // StorageFault (Busy/IoError)
                 weights[38] += 4; // DualWriteFailpoint
+                weights[39] = 1; // ResolveReopenCard rare in delivery profile
                 weights[3] = 1; // ArchiveCard rare
             }
             ChaosSubProfile::WorkflowAndSchedule => {
@@ -549,10 +550,12 @@ impl ChaosProfile {
                 weights[27] += 6; // WorktreeDeliveryOp (when enabled)
                 weights[30] += 4; // StorageFault
                 weights[33] += 8; // WorkflowHotUpdate (workflow.apply)
+                weights[39] += 2; // ResolveReopenCard
             }
             ChaosSubProfile::AuthMultiClientBlackhole => {
                 weights[0] += 4; // CreateCard
                 weights[1] += 4; // UpdateCard
+                weights[2] += 3; // MoveCard (ranked + stage)
                 weights[4] += 3; // AddComment
                 weights[10] += 4; // SaveGlobalEnv
                 weights[19] += 8; // NetworkFault (partitions/oneway/hold/loss)
@@ -562,9 +565,11 @@ impl ChaosProfile {
                 weights[28] += 10; // AuthRevokeRecover (invite/pair/revoke/re-pair)
                 weights[31] += 8; // HalfOpenBlackhole (>keepalive)
                 weights[38] += 4; // DualWriteFailpoint (FP#1/FP#5)
+                weights[39] += 4; // ResolveReopenCard
             }
             ChaosSubProfile::SessionsMentionReclaimClock => {
                 weights[0] += 4; // CreateCard
+                weights[2] += 3; // MoveCard (ranked + stage)
                 weights[4] += 4; // AddComment
                 weights[8] += 4; // CreateShellTerminal
                 weights[9] += 4; // EndShellTerminal
@@ -577,10 +582,12 @@ impl ChaosProfile {
                 weights[30] += 4; // StorageFault
                 weights[32] += 14; // AgentSessionOp (agent.open/@mention/reply/interrupt/end/adopt)
                 weights[38] += 5; // DualWriteFailpoint (FP#1/FP#2)
+                weights[39] += 3; // ResolveReopenCard
             }
             ChaosSubProfile::BundleGitHubPartition => {
                 weights[0] += 4; // CreateCard
                 weights[1] += 3; // UpdateCard
+                weights[2] += 3; // MoveCard (ranked + stage)
                 weights[4] += 4; // AddComment (drives subscription deliveries)
                 weights[17] += 10; // GitHubUpsertAndSync
                 weights[19] += 8; // NetworkFault (partitions)
@@ -590,10 +597,12 @@ impl ChaosProfile {
                 weights[36] += 8; // SubscriptionOp (subscription.* + event.list)
                 weights[37] += 8; // ProjectBundleOp (project.export / project.import)
                 weights[38] += 4; // DualWriteFailpoint (FP#3/FP#5)
+                weights[39] += 3; // ResolveReopenCard
             }
             ChaosSubProfile::FullMix => {
                 weights[0] += 3; // CreateCard
                 weights[1] += 3; // UpdateCard
+                weights[2] += 3; // MoveCard (ranked + stage)
                 weights[4] += 2; // AddComment
                 weights[11] += 3; // StartWorkflow
                 weights[14] += 3; // ReportExecution
@@ -615,6 +624,7 @@ impl ChaosProfile {
                 weights[36] += 2; // SubscriptionOp
                 weights[37] += 2; // ProjectBundleOp
                 weights[38] += 3; // DualWriteFailpoint
+                weights[39] += 3; // ResolveReopenCard
             }
         }
 
@@ -756,6 +766,8 @@ pub enum ChaosOp {
     MoveCard {
         card_pick: usize,
         stage_idx: usize,
+        rank_mode: u8,
+        before_pick: usize,
     },
     ArchiveCard {
         card_pick: usize,
@@ -943,6 +955,13 @@ pub enum ChaosOp {
         card_pick: usize,
         tag: u32,
     },
+    /// Card manual resolution & reopening (`card.resolve` / `card.reopen`) exercising UI
+    /// CommittedWrites overlay and column resolved-partition ordering.
+    ResolveReopenCard {
+        card_pick: usize,
+        resolve: bool,
+        tag: u32,
+    },
 }
 
 /// Result of deterministic shrinking for a failing Chaos seed.
@@ -986,6 +1005,8 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
             2 => ChaosOp::MoveCard {
                 card_pick: rng.random_range(0..64),
                 stage_idx: rng.random_range(0..3),
+                rank_mode: rng.random_range(0..3),
+                before_pick: rng.random_range(0..64),
             },
             3 => ChaosOp::ArchiveCard {
                 card_pick: rng.random_range(0..64),
@@ -1170,10 +1191,15 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
                 kind: rng.random_range(0..3),
                 tag,
             },
-            _ => ChaosOp::DualWriteFailpoint {
+            38 => ChaosOp::DualWriteFailpoint {
                 kind: rng.random_range(0..5),
                 host_idx: rng.random_range(0..16),
                 card_pick: rng.random_range(0..64),
+                tag,
+            },
+            _ => ChaosOp::ResolveReopenCard {
+                card_pick: rng.random_range(0..64),
+                resolve: rng.random_bool(0.55),
                 tag,
             },
         };
@@ -1262,6 +1288,9 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "resolve the existing pr delivery",
                 "resolved cards do not",
                 "resolved cards cannot",
+                "cannot be reopened",
+                "drop target changed",
+                "placed before itself",
                 "review is stale",
                 "merge unavailable",
                 "no commits",
@@ -1706,15 +1735,19 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             for sub in 0..seed_count {
                 let c = world.client_call(
                     "card.create",
-                    json!({
-                        "project_id": pid,
-                        "title": format!("Seed Card {idx}-{sub}"),
-                        "body": "initial",
-                    }),
+                    canban_ui::with_ui_projection(
+                        "card.create",
+                        json!({
+                            "project_id": pid,
+                            "title": format!("Seed Card {idx}-{sub}"),
+                            "body": "initial",
+                        }),
+                    ),
                     Some(pid),
                 )?;
                 let cid = c["id"].as_str().unwrap().to_owned();
                 oracle.observe_write_receipt(PRIMARY_CLIENT, host, &c)?;
+                oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.create", host, &c);
                 oracle.record_committed_card(
                     server_key(host),
                     &cid,
@@ -1758,12 +1791,15 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         "card.create",
                         world.client_call(
                             "card.create",
-                            json!({
-                                "project_id": pid,
-                                "title": card_title,
-                                "body": format!("seed-{seed}-tag-{tag}"),
-                                "request_key": rkey,
-                            }),
+                            canban_ui::with_ui_projection(
+                                "card.create",
+                                json!({
+                                    "project_id": pid,
+                                    "title": card_title,
+                                    "body": format!("seed-{seed}-tag-{tag}"),
+                                    "request_key": rkey,
+                                }),
+                            ),
                             Some(pid),
                         ),
                     )? && let Some(cid) = res["id"].as_str()
@@ -1773,6 +1809,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         let offline_q = is_offline_queued(&res);
                         if !offline_q {
                             oracle.observe_write_receipt(PRIMARY_CLIENT, host, &res)?;
+                            oracle.record_ui_write_receipt(
+                                PRIMARY_CLIENT,
+                                "card.create",
+                                host,
+                                &res,
+                            );
                         }
                         let confirmed = if let Some(srv_card) = world
                             .server(srv_name)
@@ -1814,39 +1856,101 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             "card.update",
                             world.client_call(
                                 "card.update",
-                                json!({
-                                    "card_id": cid,
-                                    "revision": rev,
-                                    "title": format!("Updated #{tag}"),
-                                    "body": format!("body-{tag}"),
-                                }),
+                                canban_ui::with_ui_projection(
+                                    "card.update",
+                                    json!({
+                                        "card_id": cid,
+                                        "revision": rev,
+                                        "title": format!("Updated #{tag}"),
+                                        "body": format!("body-{tag}"),
+                                    }),
+                                ),
                                 Some(&pid),
                             ),
                         )? && !is_offline_queued(&res)
                         {
                             oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res)?;
+                            oracle.record_ui_write_receipt(
+                                PRIMARY_CLIENT,
+                                "card.update",
+                                &host,
+                                &res,
+                            );
                         }
                     }
                 }
                 ChaosOp::MoveCard {
                     card_pick,
                     stage_idx,
+                    rank_mode,
+                    before_pick,
                 } => {
                     if let Some((host, pid, cid)) =
                         pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
                     {
-                        let rev = lookup_card_rev(world, &cid);
-                        let stage = stages[*stage_idx % stages.len()];
+                        let merged_snap = world.client_merged_snapshot()?;
+                        let cur_card = merged_snap.cards.iter().find(|c| c.id == cid);
+                        let rev = cur_card.map(|c| c.revision).unwrap_or(1);
+                        let cur_stage = cur_card
+                            .map(|c| c.stage.as_str())
+                            .unwrap_or("backlog")
+                            .to_owned();
+                        let mode = *rank_mode % 3;
+                        let target_stage = if mode == 2 {
+                            cur_stage.as_str()
+                        } else {
+                            stages[*stage_idx % stages.len()]
+                        };
+                        let mut params = json!({
+                            "card_id": cid,
+                            "revision": rev,
+                            "stage": target_stage,
+                        });
+                        let mut ranked_target: Option<Option<String>> = None;
+                        if mode != 0 {
+                            let mut peers: Vec<&canban_types::Card> = merged_snap
+                                .cards
+                                .iter()
+                                .filter(|c| {
+                                    c.active()
+                                        && !c.resolved()
+                                        && c.project_id == pid
+                                        && c.stage == target_stage
+                                        && c.id != cid
+                                })
+                                .collect();
+                            peers.sort_by(|a, b| a.board_cmp(b));
+                            let before_id =
+                                if peers.is_empty() || (mode == 2 && before_pick % 3 == 0) {
+                                    None
+                                } else {
+                                    Some(peers[*before_pick % peers.len()].id.clone())
+                                };
+                            params["before_card_id"] = match &before_id {
+                                Some(id) => json!(id),
+                                None => Value::Null,
+                            };
+                            ranked_target = Some(before_id);
+                        }
                         if let Some(res) = check_expected_chaos_err(
                             "card.move",
                             world.client_call(
                                 "card.move",
-                                json!({ "card_id": cid, "revision": rev, "stage": stage }),
+                                canban_ui::with_ui_projection("card.move", params),
                                 Some(&pid),
                             ),
                         )? && !is_offline_queued(&res)
                         {
                             oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res)?;
+                            oracle.record_ui_write_receipt(
+                                PRIMARY_CLIENT,
+                                "card.move",
+                                &host,
+                                &res,
+                            );
+                            if ranked_target.is_some() {
+                                world.hit("chaos.ranked_card_move");
+                            }
                         }
                     }
                 }
@@ -1879,7 +1983,10 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 "card.archive",
                                 world.client_call(
                                     "card.archive",
-                                    json!({ "card_id": cid, "revision": rev }),
+                                    canban_ui::with_ui_projection(
+                                        "card.archive",
+                                        json!({ "card_id": cid, "revision": rev, "view": "full" }),
+                                    ),
                                     Some(&pid),
                                 ),
                             )?;
@@ -1887,6 +1994,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 && !is_offline_queued(res)
                             {
                                 oracle.observe_write_receipt(PRIMARY_CLIENT, &host, res)?;
+                                oracle.record_ui_write_receipt(
+                                    PRIMARY_CLIENT,
+                                    "card.archive",
+                                    &host,
+                                    res,
+                                );
                             }
                             let archived_ok = archive_res.is_some();
                             let server_archived = world
@@ -1905,16 +2018,25 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
                     {
                         let body = format!("chaos-comment-{tag}");
-                        if check_expected_chaos_err(
+                        if let Some(res) = check_expected_chaos_err(
                             "comment.add",
                             world.client_call(
                                 "comment.add",
-                                json!({ "card_id": cid, "body": body }),
+                                canban_ui::with_ui_projection(
+                                    "comment.add",
+                                    json!({ "card_id": cid, "body": body }),
+                                ),
                                 Some(&pid),
                             ),
-                        )?
-                        .is_some()
-                        {
+                        )? {
+                            if !is_offline_queued(&res) {
+                                oracle.record_ui_write_receipt(
+                                    PRIMARY_CLIENT,
+                                    "comment.add",
+                                    &host,
+                                    &res,
+                                );
+                            }
                             let srv_name = server_key(&host);
                             let raw_cid = strip_host_id(&cid);
                             if world
@@ -1949,15 +2071,44 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 ChaosOp::ReadTimeline { card_pick } => {
                     if let Some((_host, pid, cid)) =
                         pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
-                    {
-                        let _ = check_expected_chaos_err(
+                        && let Some(val) = check_expected_chaos_err(
                             "timeline.list",
                             world.client_call(
                                 "timeline.list",
-                                json!({ "card_id": cid, "tail": true, "limit": 30, "view": "full" }),
+                                canban_ui::with_ui_projection(
+                                    "timeline.list",
+                                    json!({ "card_id": cid, "tail": true, "limit": 30 }),
+                                ),
                                 Some(&pid),
                             ),
-                        )?;
+                        )?
+                    {
+                        let parsed = canban_ui::presenter::parse_timeline_page(&val);
+                        let mut tl_state = canban_ui::presenter::CardTimelineState::default();
+                        let writes = oracle
+                            .shadow_ui_writes
+                            .entry(PRIMARY_CLIENT.to_owned())
+                            .or_default();
+                        canban_ui::presenter::apply_tail_page(
+                            &mut tl_state,
+                            parsed.events,
+                            parsed.highwater,
+                            parsed.has_more_before,
+                            parsed.oldest_sequence,
+                            writes,
+                            &cid,
+                        );
+                        ensure!(
+                            tl_state.initialized
+                                && tl_state.highwater < u64::MAX
+                                && tl_state
+                                    .events
+                                    .windows(2)
+                                    .all(|w| w[0].sequence <= w[1].sequence),
+                            "UI CardTimelineState invariant failed on {cid}: highwater={} len={}",
+                            tl_state.highwater,
+                            tl_state.events.len()
+                        );
                     }
                 }
                 ChaosOp::OpenAndCheckCard { card_pick } => {
@@ -1993,6 +2144,14 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         ),
                     )? && let Some(tid) = res["id"].as_str()
                     {
+                        if !is_offline_queued(&res) {
+                            oracle.record_ui_write_receipt(
+                                PRIMARY_CLIENT,
+                                "terminal.create",
+                                host,
+                                &res,
+                            );
+                        }
                         let tid = tid.to_owned();
                         if world
                             .client_merged_snapshot()?
@@ -2051,7 +2210,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         let expected_plain = EnvEntryMeta::Plain {
                             value: format!("val-{tag}"),
                         };
-                        if check_expected_chaos_err(
+                        if let Some(res) = check_expected_chaos_err(
                             "env.save",
                             world.client_call(
                                 "env.save",
@@ -2062,20 +2221,28 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 }),
                                 None,
                             ),
-                        )?
-                        .is_some()
-                            && world
+                        )? {
+                            if !is_offline_queued(&res) {
+                                oracle.record_ui_write_receipt(
+                                    PRIMARY_CLIENT,
+                                    "env.save",
+                                    "local",
+                                    &res,
+                                );
+                            }
+                            if world
                                 .server("local-server")
                                 .and_then(|s| s.snapshot().ok())
                                 .is_some_and(|snap| {
                                     snap.global_env.get("CHAOS_PLAIN") == Some(&expected_plain)
                                 })
-                        {
-                            oracle.record_committed_env(
-                                "local-server",
-                                "CHAOS_PLAIN",
-                                expected_plain,
-                            );
+                            {
+                                oracle.record_committed_env(
+                                    "local-server",
+                                    "CHAOS_PLAIN",
+                                    expected_plain,
+                                );
+                            }
                         }
                         let _ = check_expected_chaos_err(
                             "env.sync",
@@ -2671,10 +2838,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                 ChaosOp::BounceClient { second_client } => {
                     if *second_client && profile.enable_multi_client {
                         world.crash_client_named(SECONDARY_CLIENT)?;
+                        oracle.reset_ui_shadow_client(SECONDARY_CLIENT);
                         world.advance(Duration::from_millis(120))?;
                         world.bounce_client_named(SECONDARY_CLIENT)?;
                     } else {
                         world.crash_client()?;
+                        oracle.reset_ui_shadow_client(PRIMARY_CLIENT);
                         world.advance(Duration::from_millis(120))?;
                         world.bounce_client()?;
                         if auth_revoked {
@@ -2973,21 +3142,27 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 let h1 = world.client_spawn_on(
                                     PRIMARY_CLIENT,
                                     "card.create",
-                                    json!({
-                                        "project_id": target_pid,
-                                        "title": format!("Race C1 #{tag}"),
-                                        "body": format!("c1-{seed}-{tag}"),
-                                    }),
+                                    canban_ui::with_ui_projection(
+                                        "card.create",
+                                        json!({
+                                            "project_id": target_pid,
+                                            "title": format!("Race C1 #{tag}"),
+                                            "body": format!("c1-{seed}-{tag}"),
+                                        }),
+                                    ),
                                     Some(&target_pid),
                                 )?;
                                 let h2 = world.client_spawn_on(
                                     SECONDARY_CLIENT,
                                     "card.create",
-                                    json!({
-                                        "project_id": target_pid,
-                                        "title": format!("Race C2 #{tag}"),
-                                        "body": format!("c2-{seed}-{tag}"),
-                                    }),
+                                    canban_ui::with_ui_projection(
+                                        "card.create",
+                                        json!({
+                                            "project_id": target_pid,
+                                            "title": format!("Race C2 #{tag}"),
+                                            "body": format!("c2-{seed}-{tag}"),
+                                        }),
+                                    ),
                                     Some(&target_pid),
                                 )?;
                                 world.advance(Duration::from_millis(20))?;
@@ -3011,6 +3186,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 &target_host,
                                                 &res,
                                             )?;
+                                            oracle.record_ui_write_receipt(
+                                                creator,
+                                                "card.create",
+                                                &target_host,
+                                                &res,
+                                            );
                                         }
                                         let raw_cid = strip_host_id(cid);
                                         let confirmed = if let Some(srv_card) = world
@@ -3066,13 +3247,13 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 let h1 = world.client_spawn_on(
                                     PRIMARY_CLIENT,
                                     "card.update",
-                                    p1,
+                                    canban_ui::with_ui_projection("card.update", p1),
                                     Some(&pid),
                                 )?;
                                 let h2 = world.client_spawn_on(
                                     SECONDARY_CLIENT,
                                     "card.update",
-                                    p2,
+                                    canban_ui::with_ui_projection("card.update", p2),
                                     Some(&pid),
                                 )?;
                                 world.advance(Duration::from_millis(20))?;
@@ -3082,6 +3263,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 )? && !is_offline_queued(&res1)
                                 {
                                     oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res1)?;
+                                    oracle.record_ui_write_receipt(
+                                        PRIMARY_CLIENT,
+                                        "card.update",
+                                        &host,
+                                        &res1,
+                                    );
                                 }
                                 if let Some(res2) = check_expected_chaos_err(
                                     "race.c2.card.update",
@@ -3089,6 +3276,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 )? && !is_offline_queued(&res2)
                                 {
                                     oracle.observe_write_receipt(SECONDARY_CLIENT, &host, &res2)?;
+                                    oracle.record_ui_write_receipt(
+                                        SECONDARY_CLIENT,
+                                        "card.update",
+                                        &host,
+                                        &res2,
+                                    );
                                 }
                                 world.hit("chaos.multi_client_race");
                             }
@@ -3102,13 +3295,19 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 let h1 = world.client_spawn_on(
                                     PRIMARY_CLIENT,
                                     "card.move",
-                                    json!({ "card_id": cid, "revision": rev1, "stage": s1 }),
+                                    canban_ui::with_ui_projection(
+                                        "card.move",
+                                        json!({ "card_id": cid, "revision": rev1, "stage": s1 }),
+                                    ),
                                     Some(&pid),
                                 )?;
                                 let h2 = world.client_spawn_on(
                                     SECONDARY_CLIENT,
                                     "card.move",
-                                    json!({ "card_id": cid, "revision": rev2, "stage": s2 }),
+                                    canban_ui::with_ui_projection(
+                                        "card.move",
+                                        json!({ "card_id": cid, "revision": rev2, "stage": s2 }),
+                                    ),
                                     Some(&pid),
                                 )?;
                                 world.advance(Duration::from_millis(20))?;
@@ -3118,6 +3317,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 )? && !is_offline_queued(&res1)
                                 {
                                     oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res1)?;
+                                    oracle.record_ui_write_receipt(
+                                        PRIMARY_CLIENT,
+                                        "card.move",
+                                        &host,
+                                        &res1,
+                                    );
                                 }
                                 if let Some(res2) = check_expected_chaos_err(
                                     "race.c2.card.move",
@@ -3125,6 +3330,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 )? && !is_offline_queued(&res2)
                                 {
                                     oracle.observe_write_receipt(SECONDARY_CLIENT, &host, &res2)?;
+                                    oracle.record_ui_write_receipt(
+                                        SECONDARY_CLIENT,
+                                        "card.move",
+                                        &host,
+                                        &res2,
+                                    );
                                 }
                                 world.hit("chaos.multi_client_race");
                             }
@@ -3269,14 +3480,22 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.schedule_ops");
                             }
                             1 => {
-                                let _ = check_expected_chaos_err(
+                                if let Some(res) = check_expected_chaos_err(
                                     "schedule.toggle",
                                     world.client_call(
                                         "schedule.toggle",
                                         json!({ "schedule_id": sid, "enabled": *enable }),
                                         Some(&wf_pid),
                                     ),
-                                )?;
+                                )? && !is_offline_queued(&res)
+                                {
+                                    oracle.record_ui_write_receipt(
+                                        PRIMARY_CLIENT,
+                                        "schedule.toggle",
+                                        &wf_host,
+                                        &res,
+                                    );
+                                }
                                 world.hit("chaos.schedule_ops");
                             }
                             2 => {
@@ -3609,18 +3828,34 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         tag.is_multiple_of(3)
                                     };
                                     let rev = lookup_card_rev(world, cid);
-                                    let _ = check_expected_chaos_err(
+                                    if let Some(res) = check_expected_chaos_err(
                                         "card.hold_auto_merge",
                                         world.client_call(
                                             "card.hold_auto_merge",
-                                            json!({
-                                                "card_id": cid,
-                                                "revision": rev,
-                                                "hold": desired_hold,
-                                            }),
+                                            canban_ui::with_ui_projection(
+                                                "card.hold_auto_merge",
+                                                json!({
+                                                    "card_id": cid,
+                                                    "revision": rev,
+                                                    "hold": desired_hold,
+                                                }),
+                                            ),
                                             Some(pid),
                                         ),
-                                    )?;
+                                    )? && !is_offline_queued(&res)
+                                    {
+                                        oracle.observe_write_receipt(
+                                            PRIMARY_CLIENT,
+                                            &wf_host,
+                                            &res,
+                                        )?;
+                                        oracle.record_ui_write_receipt(
+                                            PRIMARY_CLIENT,
+                                            "card.hold_auto_merge",
+                                            &wf_host,
+                                            &res,
+                                        );
+                                    }
                                     world.hit("chaos.worktree_delivery_ops");
                                 }
                             }
@@ -3902,11 +4137,14 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         let body = format!("sf-comment-{seed}-{tag}");
                                         (
                                             "comment.add",
-                                            json!({
-                                                "card_id": q_cid,
-                                                "body": body,
-                                                "request_key": req_key,
-                                            }),
+                                            canban_ui::with_ui_projection(
+                                                "comment.add",
+                                                json!({
+                                                    "card_id": q_cid,
+                                                    "body": body,
+                                                    "request_key": req_key,
+                                                }),
+                                            ),
                                             json!({
                                                 "card_id": raw_cid,
                                                 "body": body,
@@ -3936,12 +4174,15 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     }
                                     _ => (
                                         "card.create",
-                                        json!({
-                                            "project_id": pid,
-                                            "title": sf_card_title,
-                                            "body": format!("sf-rollback-{seed}-{tag}"),
-                                            "request_key": req_key,
-                                        }),
+                                        canban_ui::with_ui_projection(
+                                            "card.create",
+                                            json!({
+                                                "project_id": pid,
+                                                "title": sf_card_title,
+                                                "body": format!("sf-rollback-{seed}-{tag}"),
+                                                "request_key": req_key,
+                                            }),
+                                        ),
                                         json!({
                                             "project_id": raw_pid,
                                             "title": sf_card_title,
@@ -4024,6 +4265,12 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                     &host,
                                                     &val,
                                                 )?;
+                                                oracle.record_ui_write_receipt(
+                                                    PRIMARY_CLIENT,
+                                                    "card.create",
+                                                    &host,
+                                                    &val,
+                                                );
                                             }
                                             oracle.record_request_key_attempt_with_marker(
                                                 &srv_name,
@@ -4065,6 +4312,14 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                         } else if method == "comment.add"
                                             && let Some((raw_cid, body)) = comment_meta
                                         {
+                                            if via_client && acked {
+                                                oracle.record_ui_write_receipt(
+                                                    PRIMARY_CLIENT,
+                                                    "comment.add",
+                                                    &host,
+                                                    &val,
+                                                );
+                                            }
                                             oracle.record_request_key_attempt_with_marker(
                                                 &srv_name,
                                                 &req_key,
@@ -5729,6 +5984,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                                 fp.stats_for(FP_OUTBOX_MID_WRITE_TRUNCATE).fired
                                                     > before_fired;
                                             // Bounce primary client to quarantine torn `.outbox.json`.
+                                            oracle.reset_ui_shadow_client(PRIMARY_CLIENT);
                                             world.bounce_client()?;
                                             if auth_revoked {
                                                 oracle.auth_failed_baselines.remove(&(
@@ -5752,11 +6008,98 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         }
                     }
                 }
+                ChaosOp::ResolveReopenCard {
+                    card_pick,
+                    resolve,
+                    tag,
+                } => {
+                    let merged_snap = world.client_merged_snapshot()?;
+                    let candidates: Vec<(String, String, String, u64, bool)> = cards
+                        .iter()
+                        .filter(|c| c.shared && !archived_cards.contains(&c.cid))
+                        .filter_map(|tc| {
+                            let c = merged_snap.cards.iter().find(|sc| sc.id == tc.cid)?;
+                            if !c.active() || c.merged() {
+                                return None;
+                            }
+                            Some((
+                                tc.host.clone(),
+                                tc.pid.clone(),
+                                tc.cid.clone(),
+                                c.revision,
+                                c.resolved(),
+                            ))
+                        })
+                        .collect();
+                    let preferred: Vec<_> = candidates
+                        .iter()
+                        .filter(|(_, _, _, _, is_res)| *is_res != *resolve)
+                        .collect();
+                    let chosen = if !preferred.is_empty() {
+                        Some(preferred[*card_pick % preferred.len()])
+                    } else if !candidates.is_empty() {
+                        Some(&candidates[*card_pick % candidates.len()])
+                    } else {
+                        None
+                    };
+                    if let Some((host, pid, cid, rev, is_resolved)) = chosen {
+                        let (method, params) = if *is_resolved {
+                            (
+                                "card.reopen",
+                                canban_ui::with_ui_projection(
+                                    "card.reopen",
+                                    json!({
+                                        "card_id": cid,
+                                        "revision": rev,
+                                    }),
+                                ),
+                            )
+                        } else {
+                            (
+                                "card.resolve",
+                                canban_ui::with_ui_projection(
+                                    "card.resolve",
+                                    json!({
+                                        "card_id": cid,
+                                        "revision": rev,
+                                        "reason": format!("chaos resolve #{tag}"),
+                                    }),
+                                ),
+                            )
+                        };
+                        if let Some(res) = check_expected_chaos_err(
+                            method,
+                            world.client_call(method, params, Some(pid)),
+                        )? && !is_offline_queued(&res)
+                        {
+                            oracle.observe_write_receipt(PRIMARY_CLIENT, host, &res)?;
+                            oracle.record_ui_write_receipt(PRIMARY_CLIENT, method, host, &res);
+                            world.hit("chaos.card_resolve_reopen");
+                        }
+                    }
+                }
             }
 
-            // Advance a small virtual tick, observe any real delivery batches, and check
-            // step invariants after EVERY SINGLE OP!
+            // Advance a small virtual tick, observe any real delivery batches, classify real client
+            // event batches through `canban_ui`, and check step invariants after EVERY SINGLE OP!
             world.advance(Duration::from_millis(80))?;
+            for cname in world.client_names() {
+                let raw_evs = world.drain_client_events_named(&cname);
+                if !raw_evs.is_empty() {
+                    let backend_evs: Vec<canban_ui::backend::BackendEvent> = raw_evs
+                        .into_iter()
+                        .map(canban_ui::backend::BackendEvent::from_client_event)
+                        .collect();
+                    let runtime_only = canban_ui::is_runtime_only_event_batch(&backend_evs);
+                    let plan = canban_ui::plan_backend_events(backend_evs, true);
+                    if runtime_only && !plan.host_events.is_empty() {
+                        ensure!(
+                            plan.refresh_action == canban_ui::BackendRefreshAction::Runtime,
+                            "[{cname}] runtime-only event batch did not plan Runtime refresh: {plan:?}"
+                        );
+                    }
+                }
+            }
             if profile.enable_worktree_delivery {
                 observe_delivery_batches(
                     world,

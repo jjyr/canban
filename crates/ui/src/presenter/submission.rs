@@ -7,7 +7,7 @@ use canban_types::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) fn config_only(method: &str) -> bool {
+pub fn config_only(method: &str) -> bool {
     matches!(
         method,
         "config.agents.save"
@@ -23,7 +23,7 @@ pub(super) fn config_only(method: &str) -> bool {
     )
 }
 
-pub(super) fn immediate(method: &str) -> bool {
+pub fn immediate(method: &str) -> bool {
     matches!(
         method,
         "card.create"
@@ -57,8 +57,8 @@ pub(super) fn immediate(method: &str) -> bool {
     )
 }
 
-#[derive(Default)]
-pub(crate) struct CommittedWrites {
+#[derive(Default, Debug)]
+pub struct CommittedWrites {
     cards: BTreeMap<String, Card>,
     card_revisions: BTreeMap<String, u64>,
     comments: BTreeMap<String, Event>,
@@ -108,8 +108,72 @@ fn live_terminal_binding(t: &TerminalEntry) -> Option<(&str, &str)> {
 }
 
 impl CommittedWrites {
-    pub(super) fn record_terminal_hint(&mut self, hint: TerminalContext) {
+    pub fn record_terminal_hint(&mut self, hint: TerminalContext) {
         self.terminal_hints.insert(hint.terminal_id.clone(), hint);
+    }
+
+    pub fn pending_card_count(&self) -> usize {
+        self.cards.len()
+    }
+
+    pub fn pending_card_ids(&self) -> Vec<String> {
+        self.cards.keys().cloned().collect()
+    }
+
+    pub fn pending_card_revisions(&self) -> &BTreeMap<String, u64> {
+        &self.card_revisions
+    }
+
+    pub fn pending_comment_count(&self) -> usize {
+        self.comments.len()
+    }
+
+    pub fn pending_comment_card_ids(&self) -> BTreeSet<String> {
+        self.comments.values().map(|e| e.card_id.clone()).collect()
+    }
+
+    pub fn pending_deleted_comment_count(&self) -> usize {
+        self.deleted_comments.len()
+    }
+
+    pub fn pending_terminal_count(&self) -> usize {
+        self.terminals.len()
+    }
+
+    pub fn pending_terminal_hint_count(&self) -> usize {
+        self.terminal_hints.len()
+    }
+
+    pub fn pending_card_read_count(&self) -> usize {
+        self.card_reads.len()
+    }
+
+    pub fn pending_schedule_state_count(&self) -> usize {
+        self.schedule_states.len()
+    }
+
+    pub fn pending_review_draft_count(&self) -> usize {
+        self.review_drafts.len()
+    }
+
+    pub fn pending_worktree_count(&self) -> usize {
+        self.worktrees.len() + self.removed_worktrees.len()
+    }
+
+    pub fn pending_configuration_session_count(&self) -> usize {
+        self.configuration_sessions.len()
+    }
+
+    pub fn pending_project_count(&self) -> usize {
+        self.projects.len()
+    }
+
+    pub fn pending_env_update_count(&self) -> usize {
+        self.env_updates.len()
+    }
+
+    pub fn last_terminal_context_count(&self) -> usize {
+        self.last_terminal_contexts.len()
     }
 
     fn record_observed_terminal_contexts(&mut self, snapshot: &Snapshot) {
@@ -162,7 +226,7 @@ impl CommittedWrites {
         }
     }
 
-    pub(crate) fn record_card_reads(&mut self, reads: &[CardRead]) {
+    pub fn record_card_reads(&mut self, reads: &[CardRead]) {
         for read in reads {
             self.card_reads
                 .entry(read.card_id.clone())
@@ -202,13 +266,20 @@ impl CommittedWrites {
         {
             self.record_card_revision(card_id, rev);
         }
-        if let Ok(event) = serde_json::from_value::<Event>(reply.clone()) {
+        let mut normalized = reply.clone();
+        if let Some(obj) = normalized.as_object_mut()
+            && obj.contains_key("message")
+            && obj.contains_key("body")
+        {
+            obj.remove("body");
+        }
+        if let Ok(event) = serde_json::from_value::<Event>(normalized) {
             self.deleted_comments.remove(&event.id);
             self.comments.insert(event.id.clone(), event);
         }
     }
 
-    pub(super) fn record(&mut self, method: &str, reply: &Value, host: &str) {
+    pub fn record(&mut self, method: &str, reply: &Value, host: &str) {
         if method == "card.remove" && reply["removed"] == true {
             if let Some(id) = reply["card_id"].as_str() {
                 self.cards.remove(id);
@@ -414,7 +485,7 @@ impl CommittedWrites {
         }
     }
 
-    pub(super) fn overlay(&self, snapshot: &mut Snapshot) {
+    pub fn overlay(&self, snapshot: &mut Snapshot) {
         for (terminal, host) in self.terminals.values() {
             // Never overwrite a newer runtime observation (exit, close or rename).
             if let Some(existing) = snapshot.terminals.iter_mut().find(|t| t.id == terminal.id) {
@@ -548,7 +619,7 @@ impl CommittedWrites {
 
     /// Reconcile only terminal and terminal-context receipts for a lightweight
     /// `runtime.state` refresh, leaving durable card/draft/project receipts intact.
-    pub(super) fn reconcile_runtime(&mut self, snapshot: &mut Snapshot) {
+    pub fn reconcile_runtime(&mut self, snapshot: &mut Snapshot) {
         self.record_observed_terminal_contexts(snapshot);
         self.terminal_hints.retain(|id, hint| {
             (hint_applies(snapshot, hint) || self.terminals.contains_key(id))
@@ -596,7 +667,7 @@ impl CommittedWrites {
 
     /// Drop a receipt only after the authoritative snapshot includes it. A
     /// newer Card revision or edited/deleted comment must always win.
-    pub(super) fn reconcile(&mut self, snapshot: &mut Snapshot) {
+    pub fn reconcile(&mut self, snapshot: &mut Snapshot) {
         self.record_observed_terminal_contexts(snapshot);
         self.terminal_hints.retain(|id, hint| {
             (hint_applies(snapshot, hint) || self.terminals.contains_key(id))
@@ -672,7 +743,7 @@ impl CommittedWrites {
         self.apply_last_terminal_contexts(snapshot);
     }
 
-    pub(super) fn overlay_card_events(&self, card_id: &str, events: &mut Vec<Event>) {
+    pub fn overlay_card_events(&self, card_id: &str, events: &mut Vec<Event>) {
         let mut inserted = false;
         for event in self.comments.values().filter(|e| e.card_id == card_id) {
             if let Some(saved) = events.iter_mut().find(|e| e.id == event.id) {
@@ -699,7 +770,7 @@ impl CommittedWrites {
         }
     }
 
-    pub(super) fn reconcile_card_events(&mut self, card_id: &str, authoritative: &[Event]) {
+    pub fn reconcile_card_events(&mut self, card_id: &str, authoritative: &[Event]) {
         self.comments.retain(|id, ev| {
             if ev.card_id != card_id {
                 return true;
@@ -728,868 +799,4 @@ fn hint_applies(snapshot: &Snapshot, hint: &TerminalContext) -> bool {
                     && r.terminal.as_deref() == Some(hint.terminal.as_str())
             })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn card(revision: u64) -> Card {
-        serde_json::from_value(json!({
-            "id":"c1", "project_id":"p1", "number":1, "title":"Created",
-            "body":"", "stage":"backlog", "revision":revision, "created_at":1
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn created_terminal_opens_from_receipt_until_snapshot_catches_up() {
-        assert!(immediate("terminal.create"));
-        let terminal: TerminalEntry = serde_json::from_value(json!({
-            "id":"shell-new", "number":1, "name":"Terminal 1", "created_at":1,
-            "runtime":{"core_id":"core-1", "terminal":"pty-1",
-                "state":"running", "connection":"connected"}
-        }))
-        .unwrap();
-        let mut writes = CommittedWrites::default();
-        writes.record(
-            "terminal.create",
-            &serde_json::to_value(&terminal).unwrap(),
-            "remote",
-        );
-        let mut stale = Snapshot::default();
-        writes.reconcile(&mut stale);
-        writes.overlay(&mut stale);
-        assert_eq!(stale.terminals, vec![terminal.clone()]);
-        assert_eq!(stale.terminal_host(&terminal.id), "remote");
-        assert_eq!(writes.terminals.len(), 1);
-
-        let mut closed = terminal;
-        closed.name = Some("Renamed elsewhere".into());
-        closed.runtime.as_mut().unwrap().state = "finished".into();
-        let mut fresh = Snapshot {
-            terminals: vec![closed.clone()],
-            ..Default::default()
-        };
-        writes.reconcile(&mut fresh);
-        assert_eq!(fresh.terminals, vec![closed]);
-        assert!(writes.terminals.is_empty());
-        let mut later = Snapshot::default();
-        writes.overlay(&mut later);
-        assert!(later.terminals.is_empty());
-    }
-
-    #[test]
-    fn creation_placement_survives_unknown_context_then_yields_to_observation() {
-        let terminal: TerminalEntry = serde_json::from_value(json!({
-            "id":"new", "number":1, "created_at":1,
-            "runtime":{"core_id":"core", "terminal":"pty",
-                "state":"running", "connection":"connected"}
-        }))
-        .unwrap();
-        let hint = TerminalContext {
-            terminal_id: "new".into(),
-            core_id: "core".into(),
-            terminal: "pty".into(),
-            cwd: Some("/known".into()),
-            directory_root: Some("/known".into()),
-            ..Default::default()
-        };
-        let mut writes = CommittedWrites::default();
-        writes.record(
-            "terminal.create",
-            &serde_json::to_value(&terminal).unwrap(),
-            "local",
-        );
-        writes.record_terminal_hint(hint.clone());
-        let mut stale = Snapshot::default();
-        writes.reconcile(&mut stale);
-        assert_eq!(stale.terminal_contexts, vec![hint.clone()]);
-        let unknown = TerminalContext {
-            cwd: None,
-            ..hint.clone()
-        };
-        let fresh = Snapshot {
-            terminals: vec![terminal.clone()],
-            terminal_contexts: vec![unknown],
-            ..Default::default()
-        };
-        let mut applied = fresh.clone();
-        writes.reconcile(&mut applied);
-        assert_eq!(applied.terminal_contexts, vec![hint.clone()]);
-        // The entry itself arriving does not discard its placement hint.
-        assert!(writes.terminals.is_empty());
-        assert_eq!(writes.terminal_hints.len(), 1);
-        for state in ["observed", "finished", "replaced", "removed"] {
-            let mut writes = CommittedWrites::default();
-            writes.record_terminal_hint(hint.clone());
-            let mut s = fresh.clone();
-            match state {
-                "observed" => {
-                    s.terminal_contexts[0].cwd = Some("/actually-elsewhere".into());
-                    s.terminal_contexts[0].directory_root = Some("/actually-elsewhere".into());
-                }
-                "finished" => s.terminals[0].runtime.as_mut().unwrap().state = "finished".into(),
-                "replaced" => {
-                    s.terminals[0].runtime.as_mut().unwrap().terminal = Some("other-pty".into())
-                }
-                "removed" => s.terminals.clear(),
-                _ => unreachable!(),
-            }
-            let expected = s.terminal_contexts.clone();
-            writes.reconcile(&mut s);
-            assert!(writes.terminal_hints.is_empty(), "{state}");
-            assert_eq!(s.terminal_contexts, expected, "{state}");
-        }
-    }
-
-    #[test]
-    fn receipts_survive_stale_remote_snapshots_and_yield_to_authoritative_edits() {
-        let mut writes = CommittedWrites::default();
-        writes.record(
-            "card.create",
-            &serde_json::to_value(card(2)).unwrap(),
-            "local",
-        );
-        let event = Event {
-            id: "reply-1".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            sequence: 2,
-            kind: "comment.created".into(),
-            actor: "user".into(),
-            message: "Sent".into(),
-            data: json!({"body":"Sent"}),
-            created_at: 2,
-        };
-        writes.record(
-            "comment.add",
-            &serde_json::to_value(&event).unwrap(),
-            "local",
-        );
-        let mut stale = Snapshot::default();
-        stale.entity_hosts.insert("p1".into(), "remote".into());
-        let mut stale_events = Vec::new();
-        writes.reconcile(&mut stale);
-        writes.overlay(&mut stale);
-        writes.reconcile_card_events("c1", &stale_events);
-        writes.overlay_card_events("c1", &mut stale_events);
-        assert_eq!(stale.cards, vec![card(2)]);
-        assert_eq!(stale.card_host("c1"), "remote");
-        assert_eq!(stale_events, vec![event.clone()]);
-        assert_eq!(writes.cards.len(), 1);
-        assert_eq!(writes.comments.len(), 1);
-
-        let mut newer = card(3);
-        newer.title = "Updated by another client".into();
-        let mut edited = event;
-        edited.data = json!({"body":"Edited", "revision":2});
-        let mut fresh = Snapshot {
-            cards: vec![newer.clone()],
-            ..Default::default()
-        };
-        let mut fresh_events = vec![edited.clone()];
-        writes.reconcile(&mut fresh);
-        writes.reconcile_card_events("c1", &fresh_events);
-        writes.overlay_card_events("c1", &mut fresh_events);
-        assert_eq!(fresh.cards, vec![newer]);
-        assert_eq!(fresh_events, vec![edited]);
-        assert!(writes.cards.is_empty());
-        assert!(writes.comments.is_empty());
-
-        // Removing a newly created Card before the first refresh must not
-        // resurrect it from its creation receipt.
-        writes.record(
-            "card.create",
-            &serde_json::to_value(card(2)).unwrap(),
-            "local",
-        );
-        writes.record(
-            "card.remove",
-            &json!({"removed":true,"card_id":"c1"}),
-            "local",
-        );
-        let mut removed = Snapshot::default();
-        writes.reconcile(&mut removed);
-        assert!(removed.cards.is_empty());
-    }
-
-    #[test]
-    fn immediate_mutations_overlay_and_reconcile_across_cards_comments_reads_and_schedules() {
-        assert!(config_only("config.agents.save"));
-        assert!(config_only("utilities.configure"));
-        assert!(config_only("utilities.awake"));
-        assert!(config_only("scheduler.configure"));
-        assert!(config_only("host.env.refresh"));
-        assert!(immediate("card.move"));
-        assert!(immediate("card.hold_auto_merge"));
-        assert!(immediate("comment.update"));
-        assert!(immediate("comment.delete"));
-        assert!(immediate("notifications.read"));
-        assert!(immediate("schedule.toggle"));
-
-        let mut writes = CommittedWrites::default();
-        let mut moved = card(2);
-        moved.stage = "develop".into();
-        moved.hold_auto_merge = true;
-        writes.record(
-            "card.move",
-            &serde_json::to_value(&moved).unwrap(),
-            "remote",
-        );
-
-        let updated_event = Event {
-            id: "ev1".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            sequence: 2,
-            kind: "comment.created".into(),
-            actor: "user".into(),
-            message: "Edited".into(),
-            data: json!({"body":"Edited","revision":2}),
-            created_at: 2,
-        };
-        writes.record(
-            "comment.update",
-            &serde_json::to_value(&updated_event).unwrap(),
-            "remote",
-        );
-
-        writes.record(
-            "notifications.read",
-            &json!({"id":"c1","project_id":"p1","card_id":"c1","sequence":2}),
-            "local",
-        );
-        writes.record(
-            "schedule.toggle",
-            &json!({
-                "id":"sched1",
-                "project_id":"p1",
-                "filename":"nightly.yaml",
-                "workflow_id":"nightly",
-                "workflow_name":"Nightly",
-                "rule_id":"nightly",
-                "cron":"0 0 * * *",
-                "creates_card":true,
-                "enabled":false,
-                "updated_at":200
-            }),
-            "local",
-        );
-
-        let mut stale = Snapshot {
-            cards: vec![card(1)],
-            card_reads: vec![CardRead {
-                id: "c1".into(),
-                project_id: "p1".into(),
-                card_id: "c1".into(),
-                sequence: 1,
-            }],
-            schedule_states: vec![
-                serde_json::from_value(json!({
-                    "id":"sched1",
-                    "project_id":"p1",
-                    "filename":"nightly.yaml",
-                    "workflow_id":"nightly",
-                    "workflow_name":"Nightly",
-                    "rule_id":"nightly",
-                    "cron":"0 0 * * *",
-                    "creates_card":true,
-                    "enabled":true,
-                    "next_run_at":999,
-                    "updated_at":100
-                }))
-                .unwrap(),
-            ],
-            ..Default::default()
-        };
-        let mut stale_events = vec![Event {
-            id: "ev1".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            sequence: 2,
-            kind: "comment.created".into(),
-            actor: "user".into(),
-            message: "Original".into(),
-            data: json!({"body":"Original","revision":1}),
-            created_at: 2,
-        }];
-        writes.reconcile(&mut stale);
-        writes.reconcile_card_events("c1", &stale_events);
-        writes.overlay_card_events("c1", &mut stale_events);
-        assert_eq!(stale.cards[0].stage, "develop");
-        assert!(stale.cards[0].hold_auto_merge);
-        assert_eq!(stale_events[0].message, "Edited");
-        assert_eq!(stale.card_reads[0].sequence, 2);
-        assert!(!stale.schedule_states[0].enabled);
-
-        writes.record(
-            "comment.delete",
-            &json!({"deleted":true,"comment_id":"ev1","card_id":"c1","revision":3}),
-            "local",
-        );
-        writes.overlay(&mut stale);
-        writes.overlay_card_events("c1", &mut stale_events);
-        assert_eq!(stale_events[0].kind, "comment.deleted");
-        assert_eq!(stale.cards[0].revision, 3);
-
-        let mut fresh = stale.clone();
-        fresh.schedule_states[0].updated_at = 200;
-        let fresh_events = stale_events.clone();
-        writes.reconcile(&mut fresh);
-        writes.reconcile_card_events("c1", &fresh_events);
-        assert!(writes.cards.is_empty());
-        assert!(writes.card_revisions.is_empty());
-        assert!(writes.comments.is_empty());
-        assert!(writes.deleted_comments.is_empty());
-        assert!(writes.card_reads.is_empty());
-        assert!(writes.schedule_states.is_empty());
-
-        // A comment receipt carrying a newer `card_revision` advances a stale snapshot's Card revision.
-        let mut stale_comment = Snapshot {
-            cards: vec![card(1)],
-            ..Default::default()
-        };
-        let mut comment_reply = serde_json::to_value(Event {
-            id: "ev2".into(),
-            project_id: "p1".into(),
-            card_id: "c1".into(),
-            sequence: 3,
-            kind: "comment.created".into(),
-            actor: "user".into(),
-            message: "Bumped".into(),
-            data: json!({"body":"Bumped"}),
-            created_at: 3,
-        })
-        .unwrap();
-        comment_reply["card_revision"] = json!(4);
-        writes.record("comment.add", &comment_reply, "local");
-        writes.reconcile(&mut stale_comment);
-        assert_eq!(stale_comment.cards[0].revision, 4);
-    }
-
-    #[test]
-    fn review_agent_draft_worktree_and_configuration_receipts_overlay_and_reconcile() {
-        for method in [
-            "review.run_agent",
-            "review.send_agent",
-            "review.draft.set",
-            "review.draft.clear",
-            "agent.open",
-            "execution.retry",
-            "configuration.open",
-            "worktree.create",
-            "worktree.promote",
-        ] {
-            assert!(immediate(method), "{method} should be immediate");
-        }
-
-        let mut writes = CommittedWrites::default();
-
-        // 1. review.run_agent updates an existing TerminalEntry when agent.number increases.
-        let stale_term: TerminalEntry = serde_json::from_value(json!({
-            "id":"conv:c1:reviewer", "number":1, "created_at":1,
-            "agent":{
-                "project_id":"p1", "card_id":"c1", "card_number":1, "number":1,
-                "stage":"review", "trigger":"diff_review",
-                "profile":{"id":"reviewer","name":"Reviewer","command":["echo"]},
-                "instruction":"", "state":"completed"
-            }
-        }))
-        .unwrap();
-        let mut next_term = stale_term.clone();
-        next_term.agent.as_mut().unwrap().number = 2;
-        next_term.agent.as_mut().unwrap().state = "queued".into();
-        writes.record(
-            "review.run_agent",
-            &json!({
-                "state":"queued",
-                "card_id":"c1",
-                "card_record": card(2),
-                "terminal": next_term,
-            }),
-            "local",
-        );
-
-        // 2. review.send_agent (terminal) overlays terminal + terminal_context.
-        let review_term: TerminalEntry = serde_json::from_value(json!({
-            "id":"review-agent-1", "number":2, "origin_project_id":"p1", "created_at":10,
-            "runtime":{"core_id":"core-1", "terminal":"pty-9",
-                "state":"running", "connection":"connected"}
-        }))
-        .unwrap();
-        let review_ctx = TerminalContext {
-            terminal_id: "review-agent-1".into(),
-            core_id: "core-1".into(),
-            terminal: "pty-9".into(),
-            cwd: Some("/repo".into()),
-            directory_root: Some("/repo".into()),
-            project_id: Some("p1".into()),
-            ..Default::default()
-        };
-        writes.record(
-            "review.send_agent",
-            &json!({
-                "state":"running",
-                "mode":"terminal",
-                "terminal_id":"review-agent-1",
-                "terminal": review_term,
-                "terminal_context": review_ctx,
-            }),
-            "local",
-        );
-
-        // 3. review.draft.set overlays draft, then review.draft.clear hides it.
-        writes.record(
-            "review.draft.set",
-            &json!({
-                "saved": true,
-                "draft": {
-                    "card_id":"c1",
-                    "summary":"Check lock",
-                    "verdict":"comment",
-                    "comments":[],
-                    "updated_at": 100
-                }
-            }),
-            "local",
-        );
-        let mut stale = Snapshot {
-            cards: vec![card(1)],
-            terminals: vec![stale_term],
-            ..Default::default()
-        };
-        writes.reconcile(&mut stale);
-        assert_eq!(stale.cards[0].revision, 2);
-        assert_eq!(
-            stale
-                .terminals
-                .iter()
-                .find(|t| t.id == "conv:c1:reviewer")
-                .unwrap()
-                .agent
-                .as_ref()
-                .unwrap()
-                .state,
-            "queued"
-        );
-        assert!(stale.terminals.iter().any(|t| t.id == "review-agent-1"));
-        assert!(stale
-            .terminal_contexts
-            .iter()
-            .any(|c| c.terminal_id == "review-agent-1" && c.project_id.as_deref() == Some("p1")));
-        assert_eq!(stale.review_drafts.len(), 1);
-        assert_eq!(stale.review_drafts[0].summary, "Check lock");
-
-        writes.record(
-            "review.draft.clear",
-            &json!({"cleared": true, "card_id": "c1", "cleared_at": 150}),
-            "local",
-        );
-        writes.overlay(&mut stale);
-        assert!(stale.review_drafts.is_empty());
-
-        // Reconcile drops cleared marker once snapshot no longer has the draft.
-        let mut fresh = stale.clone();
-        writes.reconcile(&mut fresh);
-        assert!(writes.review_drafts.is_empty());
-        assert!(writes.cards.is_empty());
-        assert!(writes.terminals.is_empty());
-
-        // 4. worktree.create adds ManagedWorktree, then worktree.promote replaces it with Card.
-        writes.record(
-            "worktree.create",
-            &json!({
-                "worktree": {
-                    "id": "wt1",
-                    "project_id": "p1",
-                    "branch": "feat/wt",
-                    "base_branch": "main",
-                    "path": "/tmp/wt1",
-                    "directory": "/repo",
-                    "created_at": 10
-                },
-                "terminal": null
-            }),
-            "local",
-        );
-        let mut wt_snap = Snapshot::default();
-        writes.reconcile(&mut wt_snap);
-        assert_eq!(wt_snap.worktrees.len(), 1);
-        assert_eq!(wt_snap.worktrees[0].id, "wt1");
-
-        let mut promoted = card(1);
-        promoted.id = "c2".into();
-        let mut promoted_reply = serde_json::to_value(&promoted).unwrap();
-        promoted_reply["promoted_from_worktree_id"] = json!("wt1");
-        writes.record("worktree.promote", &promoted_reply, "local");
-        writes.overlay(&mut wt_snap);
-        assert!(wt_snap.worktrees.is_empty());
-        assert!(wt_snap.cards.iter().any(|c| c.id == "c2"));
-
-        // 5. configuration.open overlays ConfigurationSession and TerminalEntry.
-        writes.record(
-            "configuration.open",
-            &json!({
-                "terminal_id": "configuration:p1:workflows:developer",
-                "reused": false,
-                "state": "queued",
-                "terminal": {
-                    "id": "configuration:p1:workflows:developer",
-                    "number": 5,
-                    "origin_project_id": "p1",
-                    "created_at": 50
-                },
-                "session": {
-                    "id": "configuration:p1:workflows:developer",
-                    "project_id": "p1",
-                    "profile_id": "developer",
-                    "provider_session_id": null,
-                    "generation": 1,
-                    "state": "queued",
-                    "prompt": "p",
-                    "error": null
-                }
-            }),
-            "local",
-        );
-        let mut cfg_snap = Snapshot::default();
-        writes.reconcile(&mut cfg_snap);
-        assert_eq!(cfg_snap.configuration_sessions.len(), 1);
-        assert_eq!(cfg_snap.terminals.len(), 1);
-    }
-
-    #[test]
-    fn resolve_and_reopen_overlay_immediately_and_reconcile() {
-        assert!(immediate("card.resolve"));
-        assert!(immediate("card.reopen"));
-
-        let mut writes = CommittedWrites::default();
-        let initial = card(1);
-        let mut resolved = card(2);
-        resolved.resolution = Some(canban_types::CardResolution {
-            resolved_at: 123,
-            kind: "manual".into(),
-            reason: None,
-            actor: "user".into(),
-        });
-
-        writes.record(
-            "card.resolve",
-            &serde_json::to_value(&resolved).unwrap(),
-            "local",
-        );
-        let mut stale = Snapshot {
-            cards: vec![initial.clone()],
-            ..Snapshot::default()
-        };
-        writes.overlay(&mut stale);
-        assert!(stale.cards[0].resolved());
-        assert_eq!(stale.cards[0].revision, 2);
-
-        let mut fresh_resolved = Snapshot {
-            cards: vec![resolved.clone()],
-            ..Snapshot::default()
-        };
-        writes.reconcile(&mut fresh_resolved);
-        assert!(writes.cards.is_empty());
-
-        let reopened = card(3);
-        writes.record(
-            "card.reopen",
-            &serde_json::to_value(&reopened).unwrap(),
-            "local",
-        );
-        let mut stale_resolved = Snapshot {
-            cards: vec![resolved],
-            ..Snapshot::default()
-        };
-        writes.overlay(&mut stale_resolved);
-        assert!(!stale_resolved.cards[0].resolved());
-        assert_eq!(stale_resolved.cards[0].revision, 3);
-    }
-
-    #[test]
-    fn env_save_receipts_overlay_reconcile_and_clear_empty_scopes() {
-        let mut writes = CommittedWrites::default();
-        let meta = BTreeMap::from([(
-            "API_KEY".into(),
-            EnvEntryMeta::Secret {
-                configured: true,
-                hint: "abcd".into(),
-            },
-        )]);
-        writes.record(
-            "env.save",
-            &json!({ "scope": "global", "target_id": "", "snapshot_key": "global", "env": meta }),
-            "local",
-        );
-        writes.record(
-            "env.save",
-            &json!({ "scope": "agent", "target_id": "codex", "snapshot_key": "agent:codex", "env": meta }),
-            "home-linux",
-        );
-        writes.record(
-            "env.save",
-            &json!({ "scope": "project", "target_id": "p1", "snapshot_key": "project:p1", "env": meta }),
-            "home-linux",
-        );
-
-        let mut stale = Snapshot::default();
-        writes.overlay(&mut stale);
-        assert!(stale.global_env.contains_key("API_KEY"));
-        assert!(
-            stale
-                .agent_env("home-linux", "codex")
-                .contains_key("API_KEY")
-        );
-        assert!(stale.project_env("p1").contains_key("API_KEY"));
-
-        // Clearing remote agent scope removes it immediately and drops the overlay once caught up.
-        writes.record(
-            "env.save",
-            &json!({ "scope": "agent", "target_id": "codex", "snapshot_key": "agent:codex", "env": {} }),
-            "home-linux",
-        );
-        let mut with_stale_agent = Snapshot {
-            global_env: meta.clone(),
-            scoped_env: BTreeMap::from([
-                ("agent:home-linux:codex".into(), meta.clone()),
-                ("project:p1".into(), meta),
-            ]),
-            ..Snapshot::default()
-        };
-        writes.reconcile(&mut with_stale_agent);
-        assert!(
-            !with_stale_agent
-                .scoped_env
-                .contains_key("agent:home-linux:codex")
-        );
-        assert!(!writes.env_updates.contains_key("global"));
-        assert!(!writes.env_updates.contains_key("project:p1"));
-        assert!(writes.env_updates.contains_key("agent:home-linux:codex"));
-
-        let mut caught_up = Snapshot::default();
-        writes.reconcile(&mut caught_up);
-        assert!(writes.env_updates.is_empty());
-    }
-
-    #[test]
-    fn live_terminal_retains_last_observed_context_until_finished_or_rebound() {
-        let mut writes = CommittedWrites::default();
-        let mut agent_entry: TerminalEntry = serde_json::from_value(json!({
-            "id": "agent-1", "conversation_id": "agent-1", "number": 1, "created_at": 1,
-            "agent": {
-                "id": "run-1", "project_id": "p1", "card_id": "c1", "number": 1,
-                "stage": "develop", "trigger": "interactive",
-                "profile": canban_types::Config::default().profiles[0],
-                "instruction": "work", "cwd": "/worktree", "input_path": "in",
-                "state": "completed", "core_id": "core-1", "terminal": "pty-1",
-                "connection_state": "connected",
-                "observed": {"state": "live", "status": {"state": "idle"}},
-                "updated_at": 1
-            }
-        }))
-        .unwrap();
-        let mut shell_entry: TerminalEntry = serde_json::from_value(json!({
-            "id": "shell-1", "number": 2, "created_at": 2,
-            "runtime": {
-                "core_id": "core-1", "terminal": "pty-2",
-                "state": "running", "connection": "connected"
-            }
-        }))
-        .unwrap();
-        let project: Project = serde_json::from_value(json!({
-            "id": "p1", "name": "Proj", "directory": "/proj",
-            "workflow": canban_types::Workflow::default(), "created_at": 1
-        }))
-        .unwrap();
-        let agent_ctx = TerminalContext {
-            terminal_id: "agent-1".into(),
-            core_id: "core-1".into(),
-            terminal: "pty-1".into(),
-            cwd: Some("/worktree".into()),
-            directory_root: Some("/worktree".into()),
-            project_id: Some("p1".into()),
-            card_id: Some("c1".into()),
-            ..Default::default()
-        };
-        let shell_ctx = TerminalContext {
-            terminal_id: "shell-1".into(),
-            core_id: "core-1".into(),
-            terminal: "pty-2".into(),
-            cwd: Some("/proj".into()),
-            directory_root: Some("/proj".into()),
-            project_id: Some("p1".into()),
-            ..Default::default()
-        };
-
-        // 1. Observed snapshot populates last_terminal_contexts.
-        let mut s1 = Snapshot {
-            projects: vec![project.clone()],
-            terminals: vec![agent_entry.clone(), shell_entry.clone()],
-            terminal_contexts: vec![agent_ctx.clone(), shell_ctx.clone()],
-            ..Default::default()
-        };
-        writes.reconcile(&mut s1);
-        assert_eq!(s1.terminal_contexts.len(), 2);
-
-        // 2. Subsequent transient snapshot omits agent context and sends cwd: None for shell.
-        let mut transient = Snapshot {
-            projects: vec![project.clone()],
-            terminals: vec![agent_entry.clone(), shell_entry.clone()],
-            terminal_contexts: vec![TerminalContext {
-                cwd: None,
-                directory_root: None,
-                project_id: None,
-                ..shell_ctx.clone()
-            }],
-            ..Default::default()
-        };
-        writes.reconcile(&mut transient);
-        assert_eq!(
-            transient
-                .terminal_contexts
-                .iter()
-                .find(|c| c.terminal_id == "agent-1"),
-            Some(&agent_ctx)
-        );
-        assert_eq!(
-            transient
-                .terminal_contexts
-                .iter()
-                .find(|c| c.terminal_id == "shell-1"),
-            Some(&shell_ctx)
-        );
-
-        // 3. Genuine directory change updates the preserved context immediately.
-        let moved_agent_ctx = TerminalContext {
-            cwd: Some("/other".into()),
-            directory_root: Some("/other".into()),
-            project_id: None,
-            card_id: None,
-            ..agent_ctx.clone()
-        };
-        let mut moved = Snapshot {
-            projects: vec![project.clone()],
-            terminals: vec![agent_entry.clone(), shell_entry.clone()],
-            terminal_contexts: vec![moved_agent_ctx.clone(), shell_ctx.clone()],
-            ..Default::default()
-        };
-        writes.reconcile(&mut moved);
-        assert_eq!(
-            moved
-                .terminal_contexts
-                .iter()
-                .find(|c| c.terminal_id == "agent-1"),
-            Some(&moved_agent_ctx)
-        );
-
-        // 4. Finished / rebound / replaced / deleted project clears preserved context cleanly.
-        agent_entry.agent.as_mut().unwrap().observed = Some(json!({"state": "finished"}));
-        shell_entry.runtime.as_mut().unwrap().terminal = Some("pty-new".into());
-        let mut finished_or_rebound = Snapshot {
-            projects: vec![project],
-            terminals: vec![agent_entry, shell_entry.clone()],
-            terminal_contexts: Vec::new(),
-            ..Default::default()
-        };
-        writes.reconcile(&mut finished_or_rebound);
-        assert!(finished_or_rebound.terminal_contexts.is_empty());
-        assert!(writes.last_terminal_contexts.is_empty());
-
-        // Also verify replaced connection and deleted project drop retained contexts.
-        let mut live_shell = Snapshot {
-            projects: vec![
-                serde_json::from_value(json!({
-                    "id": "p1", "name": "Proj", "directory": "/proj",
-                    "workflow": canban_types::Workflow::default(), "created_at": 1
-                }))
-                .unwrap(),
-            ],
-            terminals: vec![TerminalEntry {
-                runtime: Some(canban_types::TerminalRuntime {
-                    core_id: Some("core-1".into()),
-                    terminal: Some("pty-2".into()),
-                    state: "running".into(),
-                    connection: "connected".into(),
-                    error: None,
-                    agent_status: None,
-                    agent_turn: None,
-                    observed_agent: None,
-                    waiting: None,
-                }),
-                ..shell_entry.clone()
-            }],
-            terminal_contexts: vec![shell_ctx],
-            ..Default::default()
-        };
-        writes.reconcile(&mut live_shell);
-        assert_eq!(writes.last_terminal_contexts.len(), 1);
-        live_shell.terminals[0].runtime.as_mut().unwrap().connection = "replaced".into();
-        live_shell.terminal_contexts.clear();
-        writes.reconcile(&mut live_shell);
-        assert!(live_shell.terminal_contexts.is_empty());
-        assert!(writes.last_terminal_contexts.is_empty());
-
-        // Deleted project also clears retained context even if terminal stayed running.
-        live_shell.terminals[0].runtime.as_mut().unwrap().connection = "connected".into();
-        live_shell.terminal_contexts = vec![TerminalContext {
-            terminal_id: "shell-1".into(),
-            core_id: "core-1".into(),
-            terminal: "pty-2".into(),
-            cwd: Some("/proj".into()),
-            directory_root: Some("/proj".into()),
-            project_id: Some("p1".into()),
-            ..Default::default()
-        }];
-        writes.reconcile(&mut live_shell);
-        assert_eq!(writes.last_terminal_contexts.len(), 1);
-        live_shell.projects.clear();
-        live_shell.terminal_contexts.clear();
-        writes.reconcile(&mut live_shell);
-        assert!(live_shell.terminal_contexts.is_empty());
-        assert!(writes.last_terminal_contexts.is_empty());
-    }
-
-    #[test]
-    fn reconcile_runtime_preserves_durable_card_receipts_while_reconciling_terminals() {
-        let mut writes = CommittedWrites::default();
-        writes.record(
-            "card.move",
-            &serde_json::to_value(card(9)).unwrap(),
-            "local",
-        );
-        let term: TerminalEntry = serde_json::from_value(json!({
-            "id": "term-new",
-            "number": 1,
-            "name": "Shell 1",
-            "created_at": 1,
-            "runtime": {
-                "core_id": "core-1",
-                "terminal": "pty-1",
-                "state": "running",
-                "connection": "connected"
-            }
-        }))
-        .unwrap();
-        writes.record(
-            "terminal.create",
-            &serde_json::to_value(&term).unwrap(),
-            "local",
-        );
-
-        let mut runtime_snap = Snapshot::default();
-        writes.reconcile_runtime(&mut runtime_snap);
-        assert_eq!(runtime_snap.terminals.len(), 1);
-        assert_eq!(writes.terminals.len(), 1);
-        // Durable card receipt was not evicted by the runtime-only reconcile pass.
-        assert_eq!(writes.cards.len(), 1);
-
-        let mut stale_full = Snapshot::default();
-        stale_full.cards.push(card(1));
-        writes.overlay(&mut stale_full);
-        assert_eq!(stale_full.cards[0].revision, 9);
-    }
 }

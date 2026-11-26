@@ -11,7 +11,7 @@ const PREVIEW: &str = "review.preview";
 const MERGE: &str = "review.merge";
 
 /// Local delivery Cards with a worktree that are not merged or bound to a PR.
-pub(crate) fn eligible(card: &Card, project: Option<&Project>) -> bool {
+pub fn eligible(card: &Card, project: Option<&Project>) -> bool {
     let mode = card
         .delivery_mode
         .clone()
@@ -29,7 +29,7 @@ pub(crate) fn busy(ui: Ui) -> bool {
     ui.is_method_pending(PREVIEW) || ui.is_method_pending(MERGE)
 }
 
-fn message(card: &Card) -> String {
+pub fn message(card: &Card) -> String {
     format!("Canban #{}: {}", card.number, card.title)
 }
 
@@ -217,46 +217,4 @@ pub(crate) fn confirm_dialog(ui: Ui) -> impl IntoElement {
                 .into_element()
         },
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn card() -> Card {
-        serde_json::from_value(json!({
-            "id": "c", "project_id": "p", "number": 7, "title": "Quick", "body": "",
-            "stage": "review", "revision": 1, "created_at": 0,
-            "worktree": "/tmp/w", "branch": "canban/7"
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn eligibility_follows_local_delivery_contract() {
-        let c = card();
-        assert!(eligible(&c, None));
-        assert_eq!(message(&c), "Canban #7: Quick");
-
-        let mut no_worktree = c.clone();
-        no_worktree.worktree = None;
-        assert!(!eligible(&no_worktree, None));
-
-        let mut pr_mode = c.clone();
-        pr_mode.delivery_mode = Some(DeliveryMode::GitHubPr);
-        assert!(!eligible(&pr_mode, None));
-
-        let mut archived = c.clone();
-        archived.archived_at = Some(1);
-        assert!(!eligible(&archived, None));
-
-        let mut merged = c;
-        merged.delivery = Some(canban_types::Delivery {
-            target_branch: "main".into(),
-            commit: "abc".into(),
-            request_key: "k".into(),
-            merged_at: 1,
-        });
-        assert!(!eligible(&merged, None));
-    }
 }

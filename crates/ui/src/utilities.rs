@@ -71,11 +71,21 @@ pub fn init(ui: Ui) {
         }
     });
 }
+pub fn should_apply_utilities_push(
+    pending_methods: &std::collections::BTreeSet<&'static str>,
+) -> bool {
+    !pending_methods.contains("utilities.configure") && !pending_methods.contains("utilities.awake")
+}
+
+pub fn should_apply_usage_push(active_host: &str, event_host: &str) -> bool {
+    active_host == event_host
+}
+
 pub(crate) fn apply_push(ui: Ui, v: Value) {
     if ui
         .pending_methods
         .try_get()
-        .is_some_and(|s| s.contains("utilities.configure") || s.contains("utilities.awake"))
+        .is_some_and(|s| !should_apply_utilities_push(&s))
     {
         return;
     }
@@ -87,7 +97,7 @@ pub(crate) fn apply_usage_push(ui: Ui, host_id: &str, mut v: Value) {
     if ui.snapshot_ready.try_get().is_none() {
         return;
     }
-    if untracked(|| host(ui)) != host_id {
+    if !should_apply_usage_push(&untracked(|| host(ui)), host_id) {
         return;
     }
     v["host_id"] = json!(host_id);
