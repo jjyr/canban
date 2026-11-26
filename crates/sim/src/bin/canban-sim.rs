@@ -842,6 +842,37 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "oracle.at_most_once_checked",
     "oracle.auth_failed_zero_dials_checked",
     "oracle.committed_merge_batch_checked",
+    // Phase 1A: backend DST migrations
+    "sched_contention.failpoint_subsites_complete",
+    "card_automation.rank_move_compaction",
+    "card_automation.resolve_reopen_auto_archive",
+    "env_sync.secret_masking_and_warm_pty",
+    "workflow_faults.external_secret_stripping",
+    "sessions.two_phase_adopt_and_cwd_rename",
+    "herdr.foreground_push_and_reminders",
+    "delivery.manual_deliver_gc_and_target_advanced",
+    "transport_auth.legacy_token_and_polling_fallback",
+    // Phase 1B: Shadow UI Projection Oracles & presenter pagination/event batch
+    "oracle.ui_committed_writes_checked",
+    "oracle.ui_index_checked",
+    "oracle.ui_overview_checked",
+    "oracle.ui_quick_merge_checked",
+    "oracle.column_ranks_ordered_checked",
+    "client_pages.ui_presenter_pagination_checked",
+    "client_pages.ui_event_batch_checked",
+    // Phase 2A: core RPC, schedule, workflow & configuration session migrations
+    "review_events.comments_notes_tags",
+    "review_events.git_client_rpcs",
+    "bundle.project_crud_and_onboarding",
+    "schedules_budget.crud_and_artifact_read",
+    "schedules_budget.backlog_and_workflow_edges",
+    "sessions.configuration_sessions",
+    // Phase 2B: GitHub browse/CI/intake & insights/overview/activity migrations
+    "github.browse_and_references",
+    "github.ci_fast_fail_and_cardless_issue",
+    "github.intake_suppression_and_closure",
+    "client_pages.insights_and_activity",
+    "herdr.overview_saved_output_and_activity_rules",
 ];
 
 const SCHEDULER_CONTENTION_REQUIRED_COVERAGE: &[&str] = &[
@@ -849,6 +880,7 @@ const SCHEDULER_CONTENTION_REQUIRED_COVERAGE: &[&str] = &[
     "sched_contention.single_card_collision",
     "sched_contention.mixed_pty_reclaim",
     "sched_contention.all_five_failpoints",
+    "sched_contention.failpoint_subsites_complete",
     "sched_contention.natural_quiesce",
     "transport.local_framed_rpc",
     "oracle.read_your_writes_checked",
@@ -866,6 +898,7 @@ const TRANSPORT_AUTH_REQUIRED_COVERAGE: &[&str] = &[
     "auth.tailscale_ephemeral_enc",
     "auth.client_tailscale_autoseal",
     "auth.api_mismatch",
+    "transport_auth.legacy_token_and_polling_fallback",
     "oracle.auth_failed_zero_dials_checked",
 ];
 
@@ -883,6 +916,11 @@ const CHAOS_RANDOM_REQUIRED_COVERAGE: &[&str] = &[
     "oracle.read_your_writes_checked",
     "oracle.at_most_once_checked",
     "oracle.auth_failed_zero_dials_checked",
+    "oracle.ui_committed_writes_checked",
+    "oracle.ui_index_checked",
+    "oracle.ui_overview_checked",
+    "oracle.ui_quick_merge_checked",
+    "oracle.column_ranks_ordered_checked",
     "transport.local_framed_rpc",
     "world.quiesce_natural",
     "chaos.profile.desktop",
@@ -906,6 +944,8 @@ const CHAOS_RANDOM_REQUIRED_COVERAGE: &[&str] = &[
     "chaos.failpoint_herdr_terminal_run",
     "chaos.auth_revoke_recover",
     "chaos.project_archive_restore",
+    "chaos.card_resolve_reopen",
+    "chaos.ranked_card_move",
     "chaos.natural_quiesce_recovered",
 ];
 
@@ -2201,8 +2241,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            80,
-            "full suite coverage gate must require 80 properties"
+            107,
+            "full suite coverage gate must require 107 properties"
         );
         assert_eq!(
             unique.len(),
@@ -2250,8 +2290,8 @@ mod tests {
         let chaos_unique: BTreeSet<&str> = chaos_all.iter().copied().collect();
         assert_eq!(
             chaos_all.len(),
-            34,
-            "chaos random coverage gate must require 34 properties"
+            41,
+            "chaos random coverage gate must require 41 properties"
         );
         assert_eq!(
             chaos_unique.len(),
@@ -2267,8 +2307,8 @@ mod tests {
         let chaos_24_unique: BTreeSet<&str> = chaos_24_all.iter().copied().collect();
         assert_eq!(
             chaos_24_all.len(),
-            40,
-            "chaos 24-seed coverage gate must require 40 properties"
+            47,
+            "chaos 24-seed coverage gate must require 47 properties"
         );
         assert_eq!(
             chaos_24_unique.len(),
@@ -2320,8 +2360,8 @@ mod tests {
         let corpus_path = resolve_corpus_path(Path::new(DEFAULT_CORPUS_FILE));
         let entries = load_replay_file(&corpus_path, 40).expect("load corpus/regressions.txt");
         assert!(
-            entries.len() >= 12,
-            "expected at least 12 corpus regression entries, got {}",
+            entries.len() >= 14,
+            "expected at least 14 corpus regression entries, got {}",
             entries.len()
         );
         for (seed, ops) in [
@@ -2337,6 +2377,8 @@ mod tests {
             (7_914_532_405_096_322_517, 60),
             (5_215_407_837_432_958_784, 60),
             (17_295_058_876_053_817_750, 60),
+            (1_983_678_568_783_011_277, 60),
+            (18_325_773_721_672_025_168, 60),
         ] {
             assert!(
                 entries

@@ -12,6 +12,20 @@ use std::collections::{BTreeMap, BTreeSet};
 /// within one drain pass before deferring the remaining `Queued` op to a subsequent drain.
 pub const MAX_REVISION_REBUILDS_PER_DRAIN: u32 = 3;
 
+/// Returns true when a server rejection indicates an offline `card.move` targeted a
+/// `before_card_id` peer that has since moved columns, been resolved, or been archived.
+pub fn is_drop_target_changed_error(msg: &str) -> bool {
+    msg.contains("Drop target changed")
+}
+
+/// Returns true when a non-connection replay error requires fetching a fresh host snapshot
+/// before deciding whether to rebuild, retry, or fail the mutation.
+pub fn needs_snapshot_refresh_on_error(msg: &str) -> bool {
+    msg.contains("revision_conflict")
+        || msg.contains("request_key_conflict")
+        || is_drop_target_changed_error(msg)
+}
+
 /// Host RPC + snapshot transport used by [`drain`].
 pub trait Transport {
     fn call(&self, method: &str, params: Value) -> Result<Value>;
@@ -120,6 +134,22 @@ fn prepare_params(op: &Mutation, snapshot: &Snapshot) -> PrepareResult {
             }
             let mut p = strip_host_and_force(op.params.clone());
             p["revision"] = json!(server.revision);
+            // If an offline ranked move referenced a `before_card_id` peer that is no longer
+            // an active, unresolved card in the target column, fall back to appending to the
+            // column rather than permanently failing the stage move.
+            if let Some(before_id) = p.get("before_card_id").and_then(Value::as_str) {
+                let target_peer_valid = snapshot.cards.iter().any(|c| {
+                    c.id == before_id
+                        && c.project_id == server.project_id
+                        && c.active()
+                        && !c.resolved()
+                        && c.stage == target
+                        && c.id != server.id
+                });
+                if !target_peer_valid && let Some(obj) = p.as_object_mut() {
+                    obj.remove("before_card_id");
+                }
+            }
             PrepareResult::Send(p)
         }
         MutationKind::ResolveCard => {
@@ -371,23 +401,31 @@ pub fn finish_step(
             let msg = format!("{err:#}");
             if is_conn_err {
                 outbox.ops[pos].state = MutationState::Queued;
-                // A `revision_conflict` proves the server rejected our stale revision without
-                // committing `request_key`, so when the follow-up `app.state` refresh fails with
-                // a transport error we must NOT preserve the stale `sent_params` across reconnect;
-                // let the next drain re-classify against the fresh post-reconnect snapshot.
-                outbox.ops[pos].retry_same_params = !msg.contains("revision_conflict");
+                // A `revision_conflict` or `Drop target changed` proves the server rejected our
+                // stale request without committing `request_key`, so when the follow-up `app.state`
+                // refresh fails with a transport error we must NOT preserve the stale `sent_params`
+                // across reconnect; let the next drain re-classify against the fresh snapshot.
+                let stale_uncommitted = msg.contains("revision_conflict")
+                    || (outbox.ops[pos].kind == MutationKind::MoveCard
+                        && is_drop_target_changed_error(&msg));
+                outbox.ops[pos].retry_same_params = !stale_uncommitted;
                 let _ = outbox.save();
                 report.aborted_by_connection = true;
                 return FinishOutcome::StopConnection;
             }
             if let Some(fresh) = refreshed_snapshot {
                 *snapshot = fresh;
-                if msg.contains("revision_conflict") {
-                    // A `revision_conflict` proves the server never committed `request_key`
-                    // (even when `was_retry_same_params` was true after a transport drop), so
-                    // refreshing and re-classifying via three-way merge is safe and required.
+                let stale_drop_target = outbox.ops[pos].kind == MutationKind::MoveCard
+                    && is_drop_target_changed_error(&msg);
+                if msg.contains("revision_conflict") || stale_drop_target {
+                    // A `revision_conflict` or `Drop target changed` proves the server never
+                    // committed `request_key` (even when `was_retry_same_params` was true after a
+                    // transport drop), so refreshing and re-classifying / rebuilding is safe.
                     let _ = was_retry_same_params;
                     outbox.ops[pos].retry_same_params = false;
+                    if stale_drop_target && let Some(obj) = outbox.ops[pos].params.as_object_mut() {
+                        obj.remove("before_card_id");
+                    }
                     if allow_revision_rebuild {
                         outbox.ops[pos].state = MutationState::Queued;
                         let _ = outbox.save();
@@ -470,8 +508,7 @@ pub fn drain(
             Err(err) => {
                 let mut conn = transport.is_connection_error(err);
                 let msg = format!("{err:#}");
-                let need_refresh = !conn
-                    && (msg.contains("revision_conflict") || msg.contains("request_key_conflict"));
+                let need_refresh = !conn && needs_snapshot_refresh_on_error(&msg);
                 let snap = if need_refresh {
                     match transport.refresh_snapshot() {
                         Ok(s) => Some(s),

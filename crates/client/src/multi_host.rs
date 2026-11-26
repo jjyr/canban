@@ -20,7 +20,7 @@ use canban_sync::{
     outbox::{Mutation, MutationKind, MutationState, UpdateBase},
     replay::{
         DrainReport, FinishOutcome, MAX_REVISION_REBUILDS_PER_DRAIN, StepAction, finish_step,
-        prepare_next_step,
+        is_drop_target_changed_error, needs_snapshot_refresh_on_error, prepare_next_step,
     },
 };
 use canban_terminal::{RemotePtyTransport, session::PtyTransport};
@@ -4496,10 +4496,8 @@ impl MultiHostClient {
                     let mut conn = is_connection_error(err);
                     let mut transient_storage = !conn && is_transient_storage_error(err);
                     let msg = format!("{err:#}");
-                    let need_refresh = !conn
-                        && !transient_storage
-                        && (msg.contains("revision_conflict")
-                            || msg.contains("request_key_conflict"));
+                    let need_refresh =
+                        !conn && !transient_storage && needs_snapshot_refresh_on_error(&msg);
                     let snap = if need_refresh {
                         match client.call_async("app.state", &json!({})).await {
                             Ok(v) => {
@@ -4545,7 +4543,9 @@ impl MultiHostClient {
                             outbox.ops[pos].card_id.clone()
                         };
                         outbox.ops[pos].state = MutationState::Queued;
-                        outbox.ops[pos].retry_same_params = !err_msg.contains("revision_conflict");
+                        outbox.ops[pos].retry_same_params = !err_msg.contains("revision_conflict")
+                            && !(outbox.ops[pos].kind == MutationKind::MoveCard
+                                && is_drop_target_changed_error(&err_msg));
                         let attempts = outbox.ops[pos].attempts;
                         let _ = outbox.save();
                         blocked.insert(block_key);

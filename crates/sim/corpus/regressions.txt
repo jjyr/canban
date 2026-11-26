@@ -15,3 +15,5 @@ chaos 15097008142518856235 60 # card.adopt on resolved card validation error
 chaos 7914532405096322517 60  # Bug #17: Out-of-order app.state overwriting newer merged_snapshot rev 3 -> 2
 chaos 5215407837432958784 60  # Bug #17: Concurrent refresh regressing merged_snapshot rev 3 -> 2
 chaos 17295058876053817750 60 # Bug #18 + Archive/Restore RYW race (push refresh retry + archive epoch)
+chaos 1983678568783011277 60 # Cardless ScheduledRun blocked->working slot-release accounting vs max_agents
+chaos 18325773721672025168 60 # Offline ranked card.move with stale before_card_id failing with Drop target changed

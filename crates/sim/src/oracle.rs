@@ -110,6 +110,11 @@ pub struct InvariantOracle {
     /// re-admission on the same `TerminalEntry` (`promote_pending` / `continue_assignment`) is
     /// still strictly checked against `max_agents`.
     pub slot_released_terminals: BTreeSet<(String, String, u32)>,
+    /// Cardless `(host_name, scheduled_run_id)` runs observed in a slot-releasing `"blocked"`
+    /// state. Mirrors `slot_released_terminals` for cardless `ScheduledRun`s (`!creates_card`),
+    /// which release their admission slot while `"blocked"` and conservatively recount if Herdr
+    /// later reports `"working"` again.
+    pub slot_released_scheduled_runs: BTreeSet<(String, String)>,
     /// Observed `(norm_host, raw_card_id) -> raw_project_id` index so `clear_committed_project`
     /// and mid-step archive-epoch transitions can identify every card belonging to an archived
     /// project even if it was only observed via client snapshots.
@@ -1717,6 +1722,37 @@ impl InvariantOracle {
                 } else if matches!(a.state.as_str(), "completed" | "backlog")
                     || self.slot_released_terminals.contains(&key)
                 {
+                    slot_released_recounted += 1;
+                }
+            }
+            for r in &srv_snap.scheduled_runs {
+                if r.creates_card {
+                    continue;
+                }
+                let key = (host_name.clone(), r.id.clone());
+                let finished = matches!(
+                    r.state.as_str(),
+                    "completed" | "failed" | "cancelled" | "skipped"
+                );
+                if finished || r.terminal_id.is_none() {
+                    self.slot_released_scheduled_runs.remove(&key);
+                    continue;
+                }
+                let runtime_blocked = r
+                    .terminal_id
+                    .as_deref()
+                    .and_then(|tid| srv_snap.terminals.iter().find(|t| t.id == tid))
+                    .and_then(|t| t.runtime.as_ref())
+                    .and_then(|rt| rt.agent_status.as_deref())
+                    == Some("blocked");
+                if r.state == "blocked" || runtime_blocked {
+                    self.slot_released_scheduled_runs.insert(key.clone());
+                }
+                let counts_as_active = matches!(
+                    r.state.as_str(),
+                    "starting" | "unknown" | "running" | "working"
+                );
+                if counts_as_active && self.slot_released_scheduled_runs.contains(&key) {
                     slot_released_recounted += 1;
                 }
             }
