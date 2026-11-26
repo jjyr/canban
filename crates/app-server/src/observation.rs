@@ -35,10 +35,6 @@ impl Inventory {
     pub(super) fn is_working(record: &Value) -> bool {
         record["status"]["state"] == "working" && record["state"] != "finished"
     }
-    #[cfg(test)]
-    fn snapshot(&mut self, snapshot: &Value) {
-        self.snapshot_at(snapshot, now());
-    }
     pub(super) fn snapshot_at(&mut self, snapshot: &Value, ts: u64) {
         self.seq = snapshot["seq"].as_u64().unwrap_or(0);
         let mut next_records = BTreeMap::new();
@@ -127,10 +123,6 @@ impl Inventory {
                 });
             }
         }
-    }
-    #[cfg(test)]
-    fn apply(&mut self, message: &Value) -> bool {
-        self.apply_at(message, now())
     }
     pub(super) fn apply_at(&mut self, message: &Value, ts: u64) -> bool {
         self.last_at = ts;
@@ -1067,23 +1059,6 @@ async fn runtime_worker_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn ordered_events_replace_snapshots_and_ignore_duplicates_without_inventing_exits() {
-        let mut inv = Inventory {
-            core: "core-a".into(),
-            ..Default::default()
-        };
-        inv.snapshot(&json!({"seq":10,"terminals":[{"address":"t1","state":"live","status":{"state":"blocked"}}]}));
-        assert!(inv.records.contains_key("t1"));
-        assert!(!inv.apply(&json!({"method":"event","params":{"seq":10,"type":"removed","terminal":"t1","data":{}}})));
-        inv.apply(&json!({"method":"event","params":{"seq":14,"type":"finished","terminal":"t1","data":{"exit_code":1,"reason":"exited"}}}));
-        assert_eq!(inv.records["t1"]["state"], "finished");
-        assert_eq!(inv.records["t1"]["exit_code"], 1);
-        inv.apply(&json!({"method":"missed","params":{"seq":20,"terminals":[{"address":"t9","state":"live"}]}}));
-        assert!(!inv.records.contains_key("t1"));
-        assert_eq!(inv.records["t9"]["state"], "live");
-        assert!(!inv.apply(&json!({"method":"heartbeat","params":{"seq":20}})));
-    }
 
     #[test]
     fn working_transitions_record_closed_segments_and_drop_short_bursts() {

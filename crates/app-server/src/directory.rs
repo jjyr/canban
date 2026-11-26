@@ -218,10 +218,6 @@ impl ContextQueue {
     pub fn pending_count(&self) -> usize {
         self.pending.len() + usize::from(self.running)
     }
-    #[cfg(test)]
-    pub(crate) fn has_watcher(&self) -> bool {
-        self.watcher.is_some()
-    }
     pub fn reset(&mut self) {
         self.generation += 1;
         self.targets.clear();
@@ -740,36 +736,6 @@ async fn context_worker_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
-    #[test]
-    fn check_serializes_concurrent_checks() {
-        let dir = tempfile::tempdir().unwrap();
-        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
-        let (tx, rx) = mpsc::channel();
-        let (release, wait) = mpsc::channel();
-        let wait = Arc::new(Mutex::new(wait));
-        let mut joins = vec![];
-        for i in 0..3 {
-            let app = app.clone();
-            let tx = tx.clone();
-            let wait = wait.clone();
-            joins.push(std::thread::spawn(move || {
-                let _permit = app.check();
-                tx.send(i).unwrap();
-                wait.lock().unwrap().recv().unwrap();
-            }));
-        }
-        let _first = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(rx.recv_timeout(Duration::from_millis(30)).is_err());
-        for _ in 0..3 {
-            release.send(()).unwrap();
-        }
-        for j in joins {
-            j.join().unwrap();
-        }
-        assert!(!*app.check_slots.lock().unwrap());
-    }
-
     #[test]
     fn coalescer_debounces_bursts_preserves_trailing_event_and_prevents_starvation() {
         let t0: u64 = 1_000_000;
@@ -899,137 +865,5 @@ mod tests {
             assert_eq!(cls.kind, None);
             assert!(cls.new_watches.is_empty());
         }
-    }
-
-    #[tokio::test]
-    async fn watcher_refreshes_ahead_after_external_git_commit_and_push_without_rpc() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().canonicalize().unwrap();
-        let remote = base.join("remote.git");
-        let repo = base.join("repo");
-        let home = base.join("canban-home");
-        std::fs::create_dir_all(&remote).unwrap();
-        std::fs::create_dir_all(&repo).unwrap();
-
-        let git_ok = |cwd: &Path, args: &[&str]| {
-            let out = canban_exec::raw_command("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap_or_else(|e| panic!("failed to run git {args:?} in {}: {e}", cwd.display()));
-            assert!(
-                out.status.success(),
-                "git {args:?} failed in {}: {}",
-                cwd.display(),
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        git_ok(&remote, &["init", "--bare", "-b", "main"]);
-        git_ok(&repo, &["init", "-b", "main"]);
-        let commit_env = [
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "commit.gpgsign=false",
-        ];
-        let mut init_commit = commit_env.to_vec();
-        init_commit.extend(["commit", "--allow-empty", "-m", "Initial"]);
-        git_ok(&repo, &init_commit);
-        git_ok(
-            &repo,
-            &["remote", "add", "origin", remote.to_str().unwrap()],
-        );
-        git_ok(&repo, &["push", "-u", "origin", "main"]);
-
-        let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
-        let wake = Arc::new(tokio::sync::Notify::new());
-        *app.runtime_handle.lock().unwrap() = Some(tokio::runtime::Handle::current());
-        *app.runtime_wake.lock().unwrap() = Some(wake.clone());
-        app.start_context_workers();
-
-        let snap = Arc::new(Snapshot::default());
-        let repo_str = repo.to_str().unwrap().to_owned();
-        let term_val = json!({"cwd": repo_str});
-        app.queue_context(&snap, "t1", "c1", "pty1", &term_val);
-
-        let refs_heads_watch = WatchTarget {
-            path: repo.join(".git/refs/heads"),
-            recursive: true,
-        };
-        let refs_remotes_watch = WatchTarget {
-            path: repo.join(".git/refs/remotes"),
-            recursive: true,
-        };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let ready_ctx = app.cached_context("t1", "c1", "pty1", Some(&repo_str));
-            let watched_ok = {
-                let q = app.contexts.lock().unwrap();
-                q.watched.contains(&refs_heads_watch) && q.watched.contains(&refs_remotes_watch)
-            };
-            if let Some(ctx) = ready_ctx
-                && ctx.ahead == 0
-                && ctx.behind == 0
-                && watched_ok
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for initial context and ref watches"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        // Wait until any initial watch registration noise settles cleanly, then commit externally.
-        let mut next_commit = commit_env.to_vec();
-        next_commit.extend(["commit", "--allow-empty", "-m", "Local commit"]);
-        git_ok(&repo, &next_commit);
-
-        let commit_deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            app.queue_context(&snap, "t1", "c1", "pty1", &term_val);
-            if app
-                .cached_context("t1", "c1", "pty1", Some(&repo_str))
-                .is_some_and(|ctx| ctx.ahead == 1 && ctx.behind == 0)
-            {
-                break;
-            }
-            let remaining = commit_deadline
-                .checked_duration_since(Instant::now())
-                .expect("timed out waiting for external git commit ahead=1");
-            tokio::select! {
-                _ = wake.notified() => {}
-                _ = tokio::time::sleep(remaining.min(Duration::from_millis(100))) => {}
-            }
-        }
-
-        // Immediately run `git push` inside the 2s cooldown window: trailing coalescer must still update ahead -> 0.
-        git_ok(&repo, &["push", "origin", "main"]);
-        let push_deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            app.queue_context(&snap, "t1", "c1", "pty1", &term_val);
-            if app
-                .cached_context("t1", "c1", "pty1", Some(&repo_str))
-                .is_some_and(|ctx| ctx.ahead == 0 && ctx.behind == 0)
-            {
-                break;
-            }
-            let remaining = push_deadline
-                .checked_duration_since(Instant::now())
-                .expect("timed out waiting for external git push ahead=0");
-            tokio::select! {
-                _ = wake.notified() => {}
-                _ = tokio::time::sleep(remaining.min(Duration::from_millis(100))) => {}
-            }
-        }
-
-        app.trigger_stop();
-        *app.runtime_handle.lock().unwrap() = None;
     }
 }

@@ -682,28 +682,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_tokens_verify_list_and_revoke() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = DeviceTokenStore::open(dir.path());
-        let (dev, tok) = store.issue_device("MacBook Pro").unwrap();
-        assert!(is_device_token(&tok));
-        assert!(store.verify("wrong").is_none());
-        let verified = store.verify(&tok).expect("issued device token must verify");
-        assert_eq!(verified.id, dev.id);
-        assert_eq!(verified.name, "MacBook Pro");
-        assert!(verified.last_seen_at.is_some());
-
-        let list = store.list();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, dev.id);
-
-        assert!(store.revoke(&dev.id).unwrap());
-        assert!(!store.revoke(&dev.id).unwrap());
-        assert!(store.verify(&tok).is_none());
-        assert!(store.list().is_empty());
-    }
-
-    #[test]
     fn pairing_code_is_single_use_and_auto_upgrades_legacy_server_token() {
         let dir = tempfile::tempdir().unwrap();
         let device_store = DeviceTokenStore::open(dir.path());

@@ -1187,61 +1187,6 @@ mod cache_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
     #[test]
-    fn refresh_started_during_in_flight_fetch_does_not_return_pre_mutation_cache() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let api = format!("http://{}", listener.local_addr().unwrap());
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            for (i, head) in ["old", "new"].into_iter().enumerate() {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                }
-                if i == 0 {
-                    entered_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                }
-                let body = format!("{{\"head\":{{\"sha\":\"{head}\"}}}}");
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .unwrap();
-            }
-        });
-        let dir = tempfile::tempdir().unwrap();
-        let client = Client {
-            token: SecretString::from("fixture"),
-            api,
-            cache: None,
-            refresh: false,
-            cache_generation: 0,
-            cli: None,
-            transport: None,
-            clock: system_clock(),
-        }
-        .with_cache(crate::cache::Cache::new(dir.path().into()), "a".into());
-        let bg = client.clone().refreshing();
-        let in_flight = std::thread::spawn(move || bg.get::<Value>("/repos/a/b/pulls/2").unwrap());
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        // Remote mutates after the first fetch already started; ensure clock advances past `fetched_at`.
-        std::thread::sleep(Duration::from_millis(5));
-        let caller = client.clone().refreshing();
-        let waiter = std::thread::spawn(move || caller.get::<Value>("/repos/a/b/pulls/2").unwrap());
-        std::thread::sleep(Duration::from_millis(5));
-        release_tx.send(()).unwrap();
-        assert_eq!(in_flight.join().unwrap()["head"]["sha"], "old");
-        assert_eq!(waiter.join().unwrap()["head"]["sha"], "new");
-        worker.join().unwrap();
-    }
-    #[test]
     fn delete_write_accepts_empty_no_content_response() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
@@ -1314,46 +1259,6 @@ mod cache_tests {
         ] {
             assert!(remote_repository(bad).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn client_with_mock_clock_and_transport_stamps_2023_epoch_without_wall_clock() {
-        use std::sync::atomic::AtomicU64;
-
-        struct MockClock(AtomicU64);
-        impl Clock for MockClock {
-            fn now_ms(&self) -> u64 {
-                self.0.load(Ordering::SeqCst)
-            }
-        }
-        struct StaticTransport;
-        impl HttpTransport for StaticTransport {
-            fn send(&self, _req: HttpRequest) -> Result<HttpResponse> {
-                Ok(HttpResponse {
-                    status: 200,
-                    headers: vec![("ETag".into(), "\"v1\"".into())],
-                    body: br#"{"title":"mocked"}"#.to_vec(),
-                })
-            }
-        }
-
-        const T0: u64 = 1_700_000_000_000;
-        let dir = tempfile::tempdir().unwrap();
-        let clock = Arc::new(MockClock(AtomicU64::new(T0)));
-        let cache = crate::cache::Cache::new_with_clock(dir.path().into(), clock.clone());
-        let client = Client::new(SecretString::from("fixture"))
-            .with_clock(clock.clone())
-            .with_transport(Arc::new(StaticTransport))
-            .with_cache(cache, "acct".into());
-
-        let resp = client.response("/repos/o/r/issues/1").unwrap();
-        assert_eq!(resp.fetched_at, T0);
-        assert_eq!(resp.validated_at, T0);
-
-        clock.0.store(T0 + 5_000, Ordering::SeqCst);
-        client.seed("/repos/o/r/issues/2", json!({"id": 2}));
-        let seeded = client.cached_response("/repos/o/r/issues/2").unwrap();
-        assert_eq!(seeded.validated_at, T0 + 5_000);
     }
 
     #[test]

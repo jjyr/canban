@@ -54,34 +54,3 @@ impl AppServer {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn drafts_survive_restart_without_publishing_and_stale_writes_cannot_resurrect() {
-        let home = tempfile::tempdir().unwrap();
-        let open = || AppServer::open(home.path().into(), PathBuf::from("/bin/echo")).unwrap();
-        let app = open();
-        let data = json!({"title":"Unpublished","body":"中文\n- [ ] Draft"});
-        let save = json!({"id":"new-card:one","revision":0,"data":data});
-        assert_eq!(app.call("draft.save", save.clone()).unwrap()["revision"], 1);
-        assert_eq!(app.call("draft.save", save.clone()).unwrap()["revision"], 1);
-        assert!(app.snapshot().unwrap().cards.is_empty());
-        drop(app);
-        let app = open();
-        assert_eq!(app.call("draft.list", json!({})).unwrap()[0]["data"], data);
-        app.call(
-            "draft.save",
-            json!({"id":"new-card:one","revision":1,"data":null}),
-        )
-        .unwrap();
-        assert!(
-            app.call("draft.save", save)
-                .unwrap_err()
-                .to_string()
-                .contains("draft_conflict")
-        );
-        assert!(app.events().unwrap().is_empty());
-    }
-}

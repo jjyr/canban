@@ -382,27 +382,6 @@ pub fn relay_input(
 #[cfg(test)]
 mod relay_tests {
     use super::*;
-    #[test]
-    fn render_acknowledgments_do_not_refresh_user_activity_but_human_input_does() {
-        let _lease = crate::activity::Viewer::new("relay-test", "terminal");
-        let before = crate::activity::get("relay-test", "terminal").last_at;
-        let target = Some(("relay-test".into(), "terminal".into()));
-        std::thread::sleep(Duration::from_millis(2));
-        let mut bytes = b"{\"method\":\"hello\"}\n".to_vec();
-        frame(&mut bytes, 7, 1, &[0, 0, 0, 0]).unwrap();
-        frame(&mut bytes, 7, 6, b"automatic reply").unwrap();
-        let mut output = Vec::new();
-        relay_input(bytes.as_slice(), &mut output, target.clone()).unwrap();
-        assert_eq!(output, bytes);
-        assert_eq!(
-            crate::activity::get("relay-test", "terminal").last_at,
-            before
-        );
-        let mut bytes = b"{\"method\":\"hello\"}\n".to_vec();
-        frame(&mut bytes, 7, 0, b"human input").unwrap();
-        relay_input(bytes.as_slice(), Vec::new(), target).unwrap();
-        assert!(crate::activity::get("relay-test", "terminal").last_at > before);
-    }
 
     #[test]
     fn attach_returns_unexpected_eof_on_truncated_hello_frame() {

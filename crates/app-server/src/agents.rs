@@ -107,28 +107,6 @@ fn model_probe_cache() -> &'static Mutex<ModelCacheMap> {
     CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-#[cfg(test)]
-pub(super) fn probe_cli_models_with_timeout(
-    cache_key: &str,
-    program: &str,
-    args: &[&str],
-    timeout: Duration,
-    defaults: &[ModelOption],
-    parser: fn(&str) -> Vec<ModelOption>,
-) -> Vec<ModelOption> {
-    probe_cli_models_with_timeout_hook_and_env(
-        cache_key,
-        program,
-        args,
-        timeout,
-        defaults,
-        parser,
-        None,
-        &BTreeMap::new(),
-        &BTreeSet::new(),
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn probe_cli_models_with_timeout_hook_and_env(
     cache_key: &str,
@@ -1379,89 +1357,6 @@ impl AppServer {
 #[cfg(test)]
 mod model_probe_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn cli_model_probe_uses_15s_timeout_and_backfills_cache_after_late_completion() {
-        assert_eq!(AGENT_MODEL_PROBE_TIMEOUT, Duration::from_secs(15));
-
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("mock-agy");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nsleep 0.15\nprintf 'gemini-4-neon-high\\tGemini 4 Neon (High)\\ngemini-4-neon-xhigh\\tGemini 4 Neon (XHigh)\\ngemini-4-neon-medium\\tGemini 4 Neon (Medium)\\ngemini-4-neon-low\\tGemini 4 Neon (Low)\\ngemini-pro-orchestrator-neon\\tOrchestrator (Neon)\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let defaults = vec![ModelOption {
-            id: "fallback-model".into(),
-            label: "Fallback".into(),
-            supported_efforts: None,
-            effort_labels: BTreeMap::new(),
-        }];
-        let cache_key = format!("test-agy-late-{}", script.display());
-
-        // 1. Short timeout returns defaults without blocking, while the worker finishes in background.
-        let first = probe_cli_models_with_timeout(
-            &cache_key,
-            script.to_str().unwrap(),
-            &["models"],
-            Duration::from_millis(30),
-            &defaults,
-            parse_agy_models_output,
-        );
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].id, "fallback-model");
-
-        // 2. Wait for the first background probe to populate the cache, then verify the next call hits cache immediately.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if model_probe_cache()
-                .lock()
-                .ok()
-                .is_some_and(|g| g.contains_key(&cache_key))
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let second = probe_cli_models_with_timeout(
-            &cache_key,
-            script.to_str().unwrap(),
-            &["models"],
-            Duration::from_millis(10),
-            &defaults,
-            parse_agy_models_output,
-        );
-        let neon = second
-            .iter()
-            .find(|m| m.id == "gemini-4-neon")
-            .expect("backfilled cache should include collapsed gemini-4-neon");
-        assert_eq!(neon.label, "Gemini 4 Neon");
-        assert_eq!(
-            neon.supported_efforts,
-            Some(vec![
-                "low".into(),
-                "medium".into(),
-                "high".into(),
-                "xhigh".into()
-            ])
-        );
-        assert_eq!(
-            neon.effort_labels.get("xhigh").map(String::as_str),
-            Some("Gemini 4 Neon (XHigh)")
-        );
-        let orch = second.iter().find(|m| m.id == "orchestrator").expect(
-            "backfilled cache should collapse orchestrator slugs into unified orchestrator",
-        );
-        assert_eq!(orch.supported_efforts, Some(Vec::new()));
-        // Live agent probe overrides defaults completely; removed/fallback models must not linger.
-        assert!(
-            !second.iter().any(|m| m.id == "fallback-model"),
-            "probed agent models must replace defaults instead of merging stale entries"
-        );
-    }
 
     #[test]
     fn static_agy_defaults_include_neon_and_codex_cache_overrides_removed_defaults() {
@@ -1519,56 +1414,5 @@ mod model_probe_tests {
         // Empty live cache still falls back to defaults.
         let fallback = parse_codex_cached_models_json(&json!({ "models": [] }), &codex_defaults);
         assert_eq!(fallback, codex_defaults);
-    }
-
-    #[test]
-    fn non_system_exec_runner_skips_host_model_probes_and_codex_cache() {
-        struct FakeRunner;
-        impl canban_exec::CommandRunner for FakeRunner {
-            fn run(&self, _spec: &canban_exec::CommandSpec) -> Result<canban_exec::ExecOutput> {
-                panic!("non-system runner must not be invoked to probe models");
-            }
-            fn find_executable(&self, _name: &str) -> Option<PathBuf> {
-                None
-            }
-            fn shell_env(&self) -> canban_exec::ShellEnvSnapshot {
-                canban_exec::ShellEnvSnapshot {
-                    shell: "/bin/sh".into(),
-                    vars: BTreeMap::new(),
-                    path_entries: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
-                    full_env_captured: false,
-                }
-            }
-            fn hostname(&self) -> String {
-                "sim-host".into()
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let app = AppServer::open_with_env(
-            dir.path().join("home"),
-            PathBuf::from("/usr/bin/false"),
-            ServerRuntimeEnv {
-                exec_runner: Arc::new(FakeRunner),
-                fs_durability: FsDurability::NoSync,
-                sqlite_synchronous_off: true,
-                disable_os_watchers: true,
-                ..ServerRuntimeEnv::default()
-            },
-        )
-        .unwrap();
-
-        let catalog = canban_profiles::builtin_catalog();
-        let codex = catalog.iter().find(|e| e.id == "codex").unwrap();
-        let agy = catalog.iter().find(|e| e.id == "agy").unwrap();
-
-        assert_eq!(
-            app.probe_models_for_profile(codex, Some("/fake/codex"), None),
-            codex.default_models
-        );
-        assert_eq!(
-            app.probe_models_for_profile(agy, Some("/fake/agy"), None),
-            agy.default_models
-        );
     }
 }

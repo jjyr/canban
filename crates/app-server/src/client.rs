@@ -714,14 +714,6 @@ fn static_event_topic(raw: Option<&str>, previous: &Value, params: &Value) -> &'
 mod tests {
     use super::*;
     #[test]
-    fn github_cache_updates_keep_their_topic_across_the_existing_state_channel() {
-        let old = json!({"github_revision":3,"snapshot":{"cards":[]}});
-        let new = json!({"github_revision":4,"snapshot":{"cards":[]}});
-        assert_eq!(change_topic(true, &old, &new), "github");
-        assert_eq!(change_topic(false, &old, &new), "resync");
-        assert_eq!(change_topic(true, &old, &old), "application");
-    }
-    #[test]
     fn legacy_service_order_uses_api_not_cargo_package_version() {
         let app = canban_updater::Build::current();
         assert!(

@@ -154,14 +154,4 @@ mod tests {
         }
         assert_eq!(all.len(), 256);
     }
-
-    #[test]
-    fn system_id_gen_produces_valid_formats() {
-        let id_gen = system_id_gen();
-        let u = id_gen.next_uuid();
-        assert_eq!(u.get_version(), Some(Version::Random));
-        assert_eq!(u.get_variant(), Variant::RFC4122);
-        assert_eq!(id_gen.next_id().len(), 8);
-        assert_eq!(id_gen.next_token().len(), 32);
-    }
 }

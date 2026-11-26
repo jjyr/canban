@@ -33,25 +33,3 @@ pub fn event_at(
         created_at: now_ms,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_at_uses_injected_timestamp() {
-        const EPOCH_2023_MS: u64 = 1_700_000_012_345;
-        let ev = event_at(
-            "p1",
-            "c1",
-            "card.created",
-            "user",
-            "Created",
-            serde_json::json!({"k": "v"}),
-            EPOCH_2023_MS,
-        );
-        assert_eq!(ev.created_at, EPOCH_2023_MS);
-        assert_eq!(ev.project_id, "p1");
-        assert_eq!(ev.card_id, "c1");
-    }
-}

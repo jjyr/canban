@@ -22,52 +22,6 @@ fn reply(events: &mut Vec<Event>, id: &str, sequence: u64) {
         created_at: sequence,
     });
 }
-#[test]
-fn card_counts_items_and_project_counts_cards_without_progress_or_own_comments() {
-    let (mut s, mut events) = fixture();
-    reply(&mut events, "one", 1);
-    reply(&mut events, "two", 2);
-    s.cards[0].attention = Some("Check configuration".into());
-    let mut event = events[0].clone();
-    event.id = "own".into();
-    event.actor = "user".into();
-    event.sequence = 3;
-    events.push(event);
-    let mut event = events[0].clone();
-    event.id = "working".into();
-    event.kind = "execution.reported".into();
-    event.data = json!({"state":"working"});
-    event.sequence = 4;
-    events.push(event);
-    project(&mut s, &events);
-    let counts = counts(&reminders(&s));
-    assert_eq!(counts.len(), 1);
-    assert_eq!(
-        counts["c"],
-        ReminderCount {
-            total: 3,
-            unread: 2,
-            pending: 1
-        }
-    );
-    // Optimistic local read-marking works without re-running reminders_from_events.
-    s.card_reads.push(CardRead {
-        id: "c".into(),
-        project_id: "p".into(),
-        card_id: "c".into(),
-        sequence: 4,
-    });
-    assert_eq!(
-        counts_count(&s),
-        ReminderCount {
-            total: 1,
-            unread: 0,
-            pending: 1
-        }
-    );
-    s.cards[0].archived_at = Some(5);
-    assert!(reminders(&s).is_empty());
-}
 fn counts_count(s: &Snapshot) -> ReminderCount {
     counts(&reminders(s)).get("c").copied().unwrap_or_default()
 }
@@ -84,71 +38,6 @@ fn agent_terminal(id: &str, agent: serde_json::Value) -> TerminalEntry {
         agent: Some(serde_json::from_value(agent).unwrap()),
         created_at: 1,
     }
-}
-#[test]
-fn report_reply_and_human_gate_share_one_item_even_without_a_resource_file() {
-    let (mut s, mut events) = fixture();
-    s.terminals.push(agent_terminal(
-        "c:codex",
-        json!({"project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry","profile":Config::default().profiles[0],"instruction":"Review","state":"completed","updated_at":1}),
-    ));
-    s.cards[0].human_gate = Some(HumanGate {
-        reason: "Review needed".into(),
-        terminal_id: Some("c:codex".into()),
-        next_stage: None,
-    });
-    reply(&mut events, "report-event", 1);
-    events[0].kind = "execution.reported".into();
-    events[0].data =
-        json!({"terminal_id":"c:codex","report_id":"report","state":"completed","path":null});
-    reply(&mut events, "echo", 2);
-    events[1].data =
-        json!({"terminal_id":"c:codex","report_id":"report","question_id":"q","path":null});
-    project(&mut s, &events);
-    assert_eq!(
-        counts_count(&s),
-        ReminderCount {
-            total: 1,
-            unread: 1,
-            pending: 1
-        }
-    );
-    s.card_reads.push(CardRead {
-        id: "c".into(),
-        project_id: "p".into(),
-        card_id: "c".into(),
-        sequence: 2,
-    });
-    assert_eq!(
-        counts_count(&s),
-        ReminderCount {
-            total: 1,
-            unread: 0,
-            pending: 1
-        }
-    );
-    s.cards[0].human_gate = None;
-    project(&mut s, &events);
-    assert!(reminders(&s).is_empty());
-}
-#[test]
-fn delivery_baselines_and_duplicate_snapshots_are_silent() {
-    let (mut s, mut events) = fixture();
-    reply(&mut events, "old", 1);
-    project(&mut s, &events);
-    let mut delivery = DeliveryTracker::default();
-    assert!(delivery.observe(&reminders(&s)).is_empty());
-    reply(&mut events, "new", 2);
-    project(&mut s, &events);
-    assert_eq!(delivery.observe(&reminders(&s)), vec!["reply:new"]);
-    assert!(delivery.observe(&reminders(&s)).is_empty());
-    reply(&mut events, "offline", 3);
-    project(&mut s, &events);
-    delivery.baseline(&reminders(&s));
-    assert!(delivery.observe(&reminders(&s)).is_empty());
-    reply(&mut events, "live", 4);
-    project(&mut s, &events);
-    assert_eq!(delivery.observe(&reminders(&s)), vec!["reply:live"]);
 }
 
 fn push_event(

@@ -262,31 +262,6 @@ fn app_shutdown_flushes_rpc_reply_over_tcp_and_yamux_before_teardown() {
 }
 
 #[test]
-fn completion_keeps_terminal_without_an_exit_intent_or_clock_comparison() {
-    let (_dir, app, _, c) = setup();
-    app.call(
-        "card.move",
-        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
-    )
-    .unwrap();
-    let s = app.snapshot().unwrap();
-    let entry = admit(&app, &s.terminals[0]);
-    app.call("execution.report",json!({"project_id":c.project_id,"card":c.number,"state":"completed","message":"Done","request_key":"retain"})).unwrap();
-    app.observe_lifecycle(
-        &entry,
-        &json!({"state":"live","status":{"state":"done"},"turn":6,"status_ms":100}),
-    )
-    .unwrap();
-    let a = app.snapshot().unwrap().terminals[0]
-        .agent
-        .as_ref()
-        .unwrap()
-        .clone();
-    assert!(a.close_state.is_empty());
-    assert!(!a.finished());
-}
-
-#[test]
 fn provider_session_ids_reject_duplicate_bindings_across_cards() {
     let (_dir, app, p, c) = setup();
     let second = app

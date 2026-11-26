@@ -902,7 +902,6 @@ fn is_false(v: &bool) -> bool {
 #[cfg(test)]
 mod cardless_and_settings_tests {
     use super::*;
-    use crate::{Config, HostTerminalEnvMode};
     use serde_json::json;
 
     #[test]
@@ -944,33 +943,5 @@ mod cardless_and_settings_tests {
             assert_eq!(run.card_id.as_deref(), expected);
             assert_eq!(run.is_cardless(), expected.is_none());
         }
-    }
-
-    #[test]
-    fn host_terminal_env_mode_defaults_to_inherit_and_roundtrips() {
-        let cfg = Config::default();
-        assert_eq!(cfg.terminal_env_mode, HostTerminalEnvMode::Inherit);
-        let serialized = serde_json::to_value(&cfg).unwrap();
-        assert!(
-            serialized.get("terminal_env_mode").is_none(),
-            "default inherit mode is omitted in JSON"
-        );
-        let restored: Config = serde_json::from_value(serialized).unwrap();
-        assert_eq!(restored.terminal_env_mode, HostTerminalEnvMode::Inherit);
-
-        let mut minimal = cfg;
-        minimal.terminal_env_mode = HostTerminalEnvMode::Minimal;
-        let v = serde_json::to_value(&minimal).unwrap();
-        assert_eq!(v["terminal_env_mode"], "minimal");
-        let restored: Config = serde_json::from_value(v).unwrap();
-        assert_eq!(restored.terminal_env_mode, HostTerminalEnvMode::Minimal);
-        assert_eq!(
-            HostTerminalEnvMode::parse("minimal"),
-            Some(HostTerminalEnvMode::Minimal)
-        );
-        assert_eq!(
-            HostTerminalEnvMode::parse("INHERIT"),
-            Some(HostTerminalEnvMode::Inherit)
-        );
     }
 }

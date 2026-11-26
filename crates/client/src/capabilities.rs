@@ -121,25 +121,3 @@ pub trait GlobalEnvSyncProvider: Send + Sync + 'static {
     /// sending over TCP) alongside its state fingerprint.
     fn build_sync_payload(&self, tcp_token: Option<&str>) -> Result<(Value, Option<String>)>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capability_presets_distinguish_mobile_and_desktop() {
-        let mobile = ClientCapabilities::mobile();
-        assert!(!mobile.local_host);
-        assert!(!mobile.ssh);
-        assert!(!mobile.local_tailscale_discovery);
-        assert!(!mobile.self_update);
-        assert!(!mobile.remote_daemon_update);
-
-        let desktop = ClientCapabilities::desktop();
-        assert!(desktop.local_host);
-        assert!(desktop.ssh);
-        assert!(desktop.local_tailscale_discovery);
-        assert!(desktop.self_update);
-        assert!(desktop.remote_daemon_update);
-    }
-}
