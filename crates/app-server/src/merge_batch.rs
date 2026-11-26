@@ -1186,6 +1186,7 @@ impl AppServer {
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         };
         let launch_res = self.launch_herdr_with_env(crate::env::HerdrLaunchRequest {
             profile: Some(&profile),
@@ -1457,6 +1458,7 @@ impl AppServer {
                     agent_turn: None,
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 });
             }
             entry = current.clone();
@@ -1931,6 +1933,7 @@ impl AppServer {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             });
             db.save(item)?;
         }

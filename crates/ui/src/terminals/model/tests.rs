@@ -295,6 +295,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 0,
@@ -352,6 +353,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 0,
@@ -608,6 +610,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 2,
@@ -630,6 +633,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 3,
@@ -652,6 +656,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 4,
@@ -720,6 +725,7 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 2,
@@ -742,6 +748,7 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 3,
@@ -792,6 +799,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             agent_turn: Some(3),
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 2,
@@ -814,6 +822,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             agent_turn: Some(0),
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 3,
@@ -923,6 +932,7 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
             created_at: 2,
@@ -1081,6 +1091,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
             created_at: 10,
@@ -1103,6 +1114,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
             created_at: 11,
@@ -1135,6 +1147,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_turn: Some(1),
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
             created_at: 12,
@@ -1272,6 +1285,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                     agent_turn: Some(2),
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 }),
                 agent: None,
                 created_at: 13,
@@ -1336,6 +1350,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                     agent_turn: None,
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 }),
                 agent: None,
                 created_at: 21,
@@ -1358,6 +1373,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                     agent_turn: None,
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 }),
                 agent: None,
                 created_at: 22,
@@ -1507,6 +1523,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
             created_at: num,
@@ -1789,6 +1806,7 @@ fn in_page_new_terminal_inherits_managed_and_external_worktree_scopes_even_when_
                     agent_turn: None,
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 }),
                 agent: None,
             });
@@ -1967,6 +1985,7 @@ fn merge_batch_terminal_uses_its_actual_checkout_and_git_summary() {
             agent_turn: Some(1),
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 2,
@@ -2022,6 +2041,7 @@ fn manual_shell_observed_agent_exposes_icon_only_without_changing_title_or_close
             agent_turn: None,
             observed_agent: Some("agy".into()),
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 10,
@@ -2547,6 +2567,7 @@ fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
         created_at: 2,
@@ -2680,6 +2701,7 @@ fn natural_terminal_exit_preserves_last_worktree_for_fallback_selection() {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
         };
@@ -2789,6 +2811,7 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
     });
@@ -2820,6 +2843,7 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
     });
@@ -2926,6 +2950,7 @@ fn git_sync_target_hints_and_summary_cover_registered_checkouts_and_states() {
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
     };
@@ -3072,5 +3097,172 @@ fn git_sync_target_hints_and_summary_cover_registered_checkouts_and_states() {
             "main"
         ),
         "main is already up to date"
+    );
+}
+
+#[test]
+fn plain_shell_command_status_uses_unified_marks_and_agent_layer_overrides() {
+    use canban_types::{HerdrStatus, ShellCommand};
+    use canban_ui_kit::tokens::{DANGER, MUTED, SUCCESS};
+
+    let mut s = fixture();
+    let push_shell = |s: &mut Snapshot,
+                      id: &str,
+                      num: u64,
+                      cmd: Option<ShellCommand>,
+                      observed_agent: Option<&str>,
+                      agent_status: Option<&str>| {
+        s.terminals.push(TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: Some(format!("Terminal {num}")),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: agent_status.map(str::to_owned),
+                agent_turn: None,
+                observed_agent: observed_agent.map(str::to_owned),
+                waiting: None,
+                command: cmd,
+            }),
+            agent: None,
+            created_at: num,
+        });
+    };
+
+    push_shell(&mut s, "sh-idle", 10, None, None, None);
+    push_shell(
+        &mut s,
+        "sh-run",
+        11,
+        Some(ShellCommand {
+            label: "cargo".into(),
+            exit_code: None,
+        }),
+        None,
+        None,
+    );
+    push_shell(
+        &mut s,
+        "sh-ok",
+        12,
+        Some(ShellCommand {
+            label: "git".into(),
+            exit_code: Some(0),
+        }),
+        None,
+        None,
+    );
+    push_shell(
+        &mut s,
+        "sh-fail",
+        13,
+        Some(ShellCommand {
+            label: "cargo".into(),
+            exit_code: Some(1),
+        }),
+        None,
+        None,
+    );
+    push_shell(
+        &mut s,
+        "sh-int",
+        14,
+        Some(ShellCommand {
+            label: "sleep".into(),
+            exit_code: Some(130),
+        }),
+        None,
+        None,
+    );
+    push_shell(
+        &mut s,
+        "sh-agent",
+        15,
+        Some(ShellCommand {
+            label: "agy".into(),
+            exit_code: None,
+        }),
+        Some("agy"),
+        Some("working"),
+    );
+
+    let entries = crate::terminals::entries(&s);
+    let find = |id: &str| entries.iter().find(|e| e.saved.id == id).unwrap();
+
+    let e_idle = find("sh-idle");
+    assert_eq!(e_idle.herdr_status(), HerdrStatus::PlainShell);
+    assert_eq!(crate::terminals::labels::status_mark_kind(e_idle), None);
+    assert_eq!(crate::terminals::labels::sidebar_status_spec(e_idle), None);
+    assert!(!crate::terminals::labels::has_status_mark(e_idle));
+    assert_eq!(e_idle.display_status(), "Open");
+
+    let e_run = find("sh-run");
+    assert_eq!(
+        crate::terminals::labels::status_mark_kind(e_run),
+        Some(crate::terminals::labels::StatusMarkKind::CommandRunning)
+    );
+    assert_eq!(
+        crate::terminals::labels::sidebar_status_spec(e_run),
+        Some(("cargo".into(), MUTED))
+    );
+    assert!(crate::terminals::labels::has_status_mark(e_run));
+    assert_eq!(e_run.close_confirm_reason(&s), None);
+    assert_eq!(e_run.display_status(), "Running cargo");
+
+    let e_ok = find("sh-ok");
+    assert_eq!(
+        crate::terminals::labels::status_mark_kind(e_ok),
+        Some(crate::terminals::labels::StatusMarkKind::DoneCheck)
+    );
+    assert_eq!(
+        crate::terminals::labels::sidebar_status_spec(e_ok),
+        Some(("".into(), SUCCESS))
+    );
+    assert!(crate::terminals::labels::has_status_mark(e_ok));
+    assert_eq!(
+        e_ok.display_status(),
+        "Last command succeeded (exit 0) — git"
+    );
+
+    let e_fail = find("sh-fail");
+    assert_eq!(
+        crate::terminals::labels::status_mark_kind(e_fail),
+        Some(crate::terminals::labels::StatusMarkKind::ErrorTriangle)
+    );
+    assert_eq!(
+        crate::terminals::labels::sidebar_status_spec(e_fail),
+        Some(("exit 1".into(), DANGER))
+    );
+    assert_eq!(
+        e_fail.display_status(),
+        "Last command failed (exit 1) — cargo"
+    );
+
+    let e_int = find("sh-int");
+    assert_eq!(
+        crate::terminals::labels::status_mark_kind(e_int),
+        Some(crate::terminals::labels::StatusMarkKind::ErrorTriangle)
+    );
+    assert_eq!(
+        crate::terminals::labels::sidebar_status_spec(e_int),
+        Some(("exit 130".into(), DANGER))
+    );
+    assert_eq!(
+        e_int.display_status(),
+        "Last command failed (exit 130) — sleep"
+    );
+
+    let e_agent = find("sh-agent");
+    assert_eq!(
+        crate::terminals::labels::status_mark_kind(e_agent),
+        Some(crate::terminals::labels::StatusMarkKind::LiveWorking)
     );
 }

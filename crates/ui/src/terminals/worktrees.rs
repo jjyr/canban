@@ -643,6 +643,7 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
         };
         let ctx = canban_types::TerminalContext {

@@ -516,6 +516,7 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             });
             db.save(&t)
         })
@@ -571,6 +572,7 @@ fn configuration_open_uses_configured_default_agent_and_auto_fresh_fallback() {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             });
             db.save(&t)
         })
@@ -694,6 +696,7 @@ fn stale_configuration_observation_never_overwrites_newly_queued_generation() {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             });
             db.save(&t)
         })
@@ -2101,7 +2104,7 @@ for line in sys.stdin:
   if os.path.exists(base+'/done') and not os.path.exists(base+'/finished'):
    t['status']={'state':'done'}
   r={'terminals':[t]} if m=='terminal.list' else t
- elif m in ['terminal.kill','terminal.interrupt']:
+ elif m in ['terminal.kill','terminal.interrupt','terminal.keys']:
   with open(base+'/controls','a') as f:f.write(m+'\n')
   if m=='terminal.kill':open(base+'/finished','w').close()
   r={'sent':True}

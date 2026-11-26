@@ -132,6 +132,7 @@ for line in sys.stdin:
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
         agent: None,
     };

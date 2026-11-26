@@ -55,6 +55,7 @@ struct State {
     sent_inputs: Vec<RecordedSend>,
     killed_terminals: Vec<String>,
     interrupted_terminals: Vec<String>,
+    sent_keys: Vec<(String, Vec<String>)>,
     /// Optional scripted next error for `terminal.send` (e.g. `status_mismatch` or `blocked`).
     next_send_errors: VecDeque<String>,
     /// Optional scripted next error for `terminal.read`.
@@ -115,6 +116,7 @@ impl SimHerdr {
                 sent_inputs: Vec::new(),
                 killed_terminals: Vec::new(),
                 interrupted_terminals: Vec::new(),
+                sent_keys: Vec::new(),
                 next_send_errors: VecDeque::new(),
                 next_read_errors: VecDeque::new(),
                 next_kill_errors: VecDeque::new(),
@@ -822,6 +824,10 @@ impl SimHerdr {
         self.state.lock().unwrap().interrupted_terminals.clone()
     }
 
+    pub fn sent_keys(&self) -> Vec<(String, Vec<String>)> {
+        self.state.lock().unwrap().sent_keys.clone()
+    }
+
     pub fn terminal_addresses(&self) -> Vec<String> {
         self.state
             .lock()
@@ -1197,6 +1203,25 @@ impl HerdrBackend for SimHerdr {
                     );
                 }
                 Ok(json!({ "killed": true }))
+            }
+            "terminal.keys" => {
+                crate::trace::record_coverage_hit("herdr.terminal.keys");
+                let addr = params["terminal"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Herdr terminal.keys: Missing terminal"))?;
+                if !st.terminals.contains_key(addr) {
+                    bail!("Herdr terminal.keys: Terminal {addr} not found");
+                }
+                let keys: Vec<String> = params["keys"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                st.sent_keys.push((addr.to_owned(), keys));
+                Ok(json!({ "status": null, "turn": 0 }))
             }
             other => bail!("SimHerdr unsupported method: {other}"),
         }

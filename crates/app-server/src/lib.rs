@@ -1809,6 +1809,7 @@ mod runtime;
 mod schedules;
 mod scripts;
 mod sessions;
+mod shell_integration;
 mod terminals;
 mod worktrees;
 

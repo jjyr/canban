@@ -647,7 +647,7 @@ fn row(ui: Ui, id: String, model: Memo<Option<TerminalRowModel>>) -> impl IntoEl
     let is_managed = computed(move || model.with(|m| m.as_ref().is_some_and(|r| r.managed)));
     let host_badge =
         computed(move || model.with(|m| m.as_ref().and_then(|r| r.host_badge.clone())));
-    let status = computed(move || model.with(|m| m.as_ref().and_then(|r| r.status)));
+    let status = computed(move || model.with(|m| m.as_ref().and_then(|r| r.status.clone())));
     let hint =
         computed(move || model.with(|m| m.as_ref().map(|r| r.hint.clone()).unwrap_or_default()));
     let close_label = computed(move || {

@@ -21,6 +21,10 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
+## Plain Terminal Command Status (2026-11-26)
+
+Card #176 adds a layered command status projection (`TerminalRuntime.command: Option<ShellCommand>`) for plain interactive shells (`zsh`, `bash >= 4.4`, `fish`) via `$CANBAN_HOME/shell-integration/v1/` namespaced OSC 7501 (`id=canban-shell`), unified status symbols (`status_dot(ACCENT)` while running, `Check` for `exit 0` until the next command, `TriangleAlert` + `exit N` for non-zero exits) overridden whenever an AI agent is active, and `terminal.keys` (`["ctrl+c"]`) routing for plain-shell `terminal.interrupt`, advancing `DESKTOP_API` to **92** (SQLite schema unchanged). See [Dedicated Terminal workspace](terminal-workspace.md).
+
 ## Tailscale WhoIs Auto-Auth & On-Demand Tailnet Discovery (2026-11-24)
 
 Commit `42782a4` advances `DESKTOP_API` to **86** and adds zero-code same-account Tailscale authentication plus on-demand Tailnet discovery across `canban-types`, `canban-transport`, `canban-app-server`, `canban-client`, desktop `Settings → Hosts` / `Connect a Machine`, and the mobile onboarding / `Settings` UI:

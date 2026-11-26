@@ -16,8 +16,9 @@ for line in sys.stdin:
   cwd=open(base+'/cwd').read() if os.path.exists(base+'/cwd') else (launches[-1]['cwd'] if launches else base)
   t={'address':'t1','cwd':launches[-1]['cwd'] if launches else base,'foreground':{'cwd':cwd},'state':'finished' if os.path.exists(base+'/finished') else 'live'}
   r={'terminals':[t]} if m=='terminal.list' else t
- elif m in ['terminal.kill','terminal.interrupt']:
+ elif m in ['terminal.kill','terminal.interrupt','terminal.keys']:
   with open(base+'/controls','a') as f:f.write(m+'\n')
+  with open(base+'/controls.json','a') as f:f.write(json.dumps({'method':m,'params':args})+'\n')
   if m=='terminal.kill':open(base+'/finished','w').close()
   r={'sent':True}
  print(json.dumps({'jsonrpc':'2.0','id':p['id'],'result':r}),flush=True)
@@ -68,6 +69,43 @@ fn terminal_creation_context_and_default_rename_do_not_read_unrelated_history() 
     assert_eq!(renamed["name"], "Terminal 2");
 }
 
+#[test]
+fn plain_shell_interrupt_uses_ctrl_c_keys_while_active_agent_uses_terminal_interrupt() {
+    let (dir, app, p, _) = setup();
+    core(&app, dir.path());
+    let shell_item = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let shell_id = shell_item["id"].as_str().unwrap();
+    app.call(
+        "terminal.interrupt",
+        json!({"terminal_id": shell_id, "request_key": "intr-shell"}),
+    )
+    .unwrap();
+
+    let agent_item = app
+        .call(
+            "terminal.create",
+            json!({"project_id": p.id, "agent": true}),
+        )
+        .unwrap();
+    let agent_id = agent_item["id"].as_str().unwrap();
+    app.call(
+        "terminal.interrupt",
+        json!({"terminal_id": agent_id, "request_key": "intr-agent"}),
+    )
+    .unwrap();
+
+    let controls: Vec<Value> = std::fs::read_to_string(dir.path().join("controls.json"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(controls.len(), 2);
+    assert_eq!(controls[0]["method"], "terminal.keys");
+    assert_eq!(controls[0]["params"]["keys"], json!(["ctrl+c"]));
+    assert_eq!(controls[1]["method"], "terminal.interrupt");
+}
 #[test]
 fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
     fn reopen(home: PathBuf) -> Arc<AppServer> {
@@ -1040,6 +1078,7 @@ fn close_unknown_configuration_session_cancels_and_finishes() {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             });
             db.save(&item)
         })

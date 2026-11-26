@@ -1752,6 +1752,16 @@ pub fn friendly_agent_engine(engine: &str) -> String {
         other => other.into(),
     }
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellCommand {
+    /// Program name only (first word, basename, <= 32 chars); never full argv.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// `None` while running; `Some(code)` once exited back to the shell prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TerminalRuntime {
     pub core_id: Option<String>,
@@ -1767,6 +1777,8 @@ pub struct TerminalRuntime {
     pub observed_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<RuntimeWait>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<ShellCommand>,
 }
 
 /// Unified Herdr runtime state across Card Role Agents, Ephemeral CLI Agents,
@@ -1926,6 +1938,15 @@ impl TerminalEntry {
             return None;
         }
         r.waiting.as_ref()
+    }
+
+    /// Last or currently running foreground shell command, surfaced only when no
+    /// AI agent layer overrides the terminal (`HerdrStatus::PlainShell`).
+    pub fn shell_command(&self) -> Option<&ShellCommand> {
+        if self.agent.is_some() || self.herdr_status() != HerdrStatus::PlainShell {
+            return None;
+        }
+        self.runtime.as_ref()?.command.as_ref()
     }
 
     /// Unified real-time Herdr status across all terminal types.
@@ -2514,6 +2535,7 @@ mod tests {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
             created_at: 1,
@@ -2658,6 +2680,77 @@ mod tests {
             }),
         };
         assert!(blank_orch.is_empty());
+    }
+
+    #[test]
+    fn shell_command_is_visible_only_for_connected_plain_shell() {
+        let base_runtime = |state: &str, connection: &str| TerminalRuntime {
+            core_id: Some("c1".into()),
+            terminal: Some("t1".into()),
+            state: state.into(),
+            connection: connection.into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+            command: Some(ShellCommand {
+                label: "cargo".into(),
+                exit_code: None,
+            }),
+        };
+        let make_entry = |rt: TerminalRuntime| TerminalEntry {
+            id: "shell-1".into(),
+            conversation_id: None,
+            number: 1,
+            name: None,
+            origin_project_id: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(rt),
+            agent: None,
+            created_at: 1,
+        };
+
+        let running = make_entry(base_runtime("running", "connected"));
+        assert_eq!(
+            running.shell_command(),
+            Some(&ShellCommand {
+                label: "cargo".into(),
+                exit_code: None,
+            })
+        );
+
+        let mut exited_rt = base_runtime("running", "connected");
+        exited_rt.command = Some(ShellCommand {
+            label: "cargo".into(),
+            exit_code: Some(101),
+        });
+        let exited = make_entry(exited_rt);
+        assert_eq!(
+            exited.shell_command(),
+            Some(&ShellCommand {
+                label: "cargo".into(),
+                exit_code: Some(101),
+            })
+        );
+
+        // Agent layer overrides command layer when observed_agent is active.
+        let mut agent_rt = base_runtime("running", "connected");
+        agent_rt.observed_agent = Some("codex".into());
+        agent_rt.agent_status = Some("working".into());
+        let observed_agent = make_entry(agent_rt);
+        assert_eq!(observed_agent.herdr_status(), HerdrStatus::Working);
+        assert_eq!(observed_agent.shell_command(), None);
+
+        // Disconnected and finished terminals hide shell command status.
+        let disconnected = make_entry(base_runtime("running", "unavailable"));
+        assert_eq!(disconnected.herdr_status(), HerdrStatus::Disconnected);
+        assert_eq!(disconnected.shell_command(), None);
+
+        let finished = make_entry(base_runtime("finished", "connected"));
+        assert_eq!(finished.herdr_status(), HerdrStatus::Ended);
+        assert_eq!(finished.shell_command(), None);
     }
 }
 

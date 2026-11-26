@@ -3950,6 +3950,7 @@ fn project_delete_removes_canban_data_and_preserves_user_repo_and_worktrees() {
                     agent_turn: None,
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 }),
                 agent: None,
                 created_at: 1,

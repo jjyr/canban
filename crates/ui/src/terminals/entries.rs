@@ -184,7 +184,27 @@ impl Entry {
             return reason;
         }
         match self.herdr_status() {
-            HerdrStatus::PlainShell => "Open".into(),
+            HerdrStatus::PlainShell => match self.saved.shell_command() {
+                Some(cmd) => {
+                    let suffix = if cmd.label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", cmd.label)
+                    };
+                    match cmd.exit_code {
+                        None => {
+                            if cmd.label.is_empty() {
+                                "Running".into()
+                            } else {
+                                format!("Running {}", cmd.label)
+                            }
+                        }
+                        Some(0) => format!("Last command succeeded (exit 0){suffix}"),
+                        Some(code) => format!("Last command failed (exit {code}){suffix}"),
+                    }
+                }
+                None => "Open".into(),
+            },
             HerdrStatus::Queued => "Queued".into(),
             HerdrStatus::Starting => "Starting".into(),
             HerdrStatus::Working => "Working".into(),

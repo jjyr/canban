@@ -669,6 +669,7 @@ fn gallery_create_entry(ui: Ui, params: serde_json::Value) -> String {
             agent_turn: None,
             observed_agent: None,
             waiting: None,
+            command: None,
         }),
     };
     let host = params["host_id"].as_str().unwrap_or("local");

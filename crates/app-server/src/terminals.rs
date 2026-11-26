@@ -4,6 +4,57 @@ use super::*;
 pub(super) const DEFAULT_LAUNCH_TERMINAL_COLS: u16 = 120;
 pub(super) const DEFAULT_LAUNCH_TERMINAL_ROWS: u16 = 36;
 
+fn sanitize_command_label(raw: &str) -> String {
+    raw.trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(32)
+        .collect()
+}
+
+pub(super) fn shell_command_from_record(
+    value: &Value,
+    previous: Option<&ShellCommand>,
+) -> Option<ShellCommand> {
+    let rec = value
+        .get("records")
+        .and_then(|r| r.get("canban-shell"))
+        .filter(|v| v.is_object())?;
+    let state = rec.get("state").and_then(Value::as_str)?;
+    let record_label = rec
+        .get("title")
+        .and_then(Value::as_str)
+        .map(sanitize_command_label)
+        .filter(|s| !s.is_empty());
+    let prev_label = previous
+        .map(|p| sanitize_command_label(&p.label))
+        .filter(|s| !s.is_empty());
+    match state {
+        "working" | "running" => Some(ShellCommand {
+            label: record_label.unwrap_or_default(),
+            exit_code: None,
+        }),
+        "done" => Some(ShellCommand {
+            label: record_label.or(prev_label).unwrap_or_default(),
+            exit_code: Some(0),
+        }),
+        "error" => {
+            let code = rec
+                .get("msg")
+                .and_then(Value::as_str)
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .unwrap_or(1);
+            Some(ShellCommand {
+                label: record_label.or(prev_label).unwrap_or_default(),
+                exit_code: Some(code),
+            })
+        }
+        _ => None,
+    }
+}
+
 impl AppServer {
     pub(super) fn parse_terminal_size(value: &Value) -> Option<canban_herdr::TerminalSize> {
         let cols = u16::try_from(value.get("cols")?.as_u64()?).ok()?;
@@ -113,6 +164,7 @@ impl AppServer {
                         agent_turn: None,
                         observed_agent: None,
                         waiting: None,
+                        command: None,
                     });
                     db.save(&item)?;
                 }
@@ -923,6 +975,7 @@ impl AppServer {
                     agent_turn: None,
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 }),
                 agent: None,
             };
@@ -1102,6 +1155,14 @@ impl AppServer {
                     argv.iter()
                         .map(|v| Ok(v.as_str().context("Invalid command")?.to_owned()))
                         .collect::<Result<Vec<_>>>()?
+                } else if self.exec_runner.is_system()
+                    && let Ok(dir) = crate::shell_integration::install(&self.home)
+                    && let user_zdotdir = std::env::var("ZDOTDIR").ok()
+                    && let Some((hook_argv, hook_env)) =
+                        crate::shell_integration::plan(&shell, &dir, user_zdotdir.as_deref())
+                {
+                    env.extend(hook_env);
+                    hook_argv
                 } else {
                     vec![shell, "-l".into()]
                 }
@@ -1271,6 +1332,7 @@ impl AppServer {
             self.verified_core_id()? == *core,
             "Original Herdr core is unavailable"
         );
+        let is_plain_shell = !item.has_active_agent();
         let method = if end {
             "terminal.end"
         } else {
@@ -1284,14 +1346,19 @@ impl AppServer {
         if !send {
             return Ok(saved);
         }
-        let result = match client.call(
-            if end {
-                "terminal.kill"
-            } else {
-                "terminal.interrupt"
-            },
-            json!({"terminal":terminal}),
-        ) {
+        let (rpc_method, rpc_params) = if end {
+            ("terminal.kill", json!({"terminal": terminal}))
+        } else if is_plain_shell {
+            // Once a plain shell emits namespaced OSC 7501 (`reported: true`), Herdr's
+            // `terminal.interrupt` sends Esc instead of Ctrl+C; send `ctrl+c` directly.
+            (
+                "terminal.keys",
+                json!({"terminal": terminal, "keys": ["ctrl+c"]}),
+            )
+        } else {
+            ("terminal.interrupt", json!({"terminal": terminal}))
+        };
+        let result = match client.call(rpc_method, rpc_params) {
             Ok(value) => json!({"state":"sent","result":value}),
             Err(e) => {
                 json!({"state":"unknown","message":format!("{e:#}; inspect before retrying")})
@@ -1438,7 +1505,10 @@ impl AppServer {
                             runtime.agent_turn = None;
                             runtime.observed_agent = None;
                             runtime.waiting = None;
+                            runtime.command = None;
                         } else {
+                            runtime.command =
+                                shell_command_from_record(v, runtime.command.as_ref());
                             let observed_agent =
                                 canban_profiles::identify_herdr_agent(v).map(str::to_owned);
                             runtime.observed_agent = observed_agent.clone();
@@ -1489,6 +1559,7 @@ impl AppServer {
                         runtime.connection = "replaced".into();
                         runtime.observed_agent = None;
                         runtime.waiting = None;
+                        runtime.command = None;
                         runtime.error = Some(
                             "Original Core identity changed; this terminal was not replaced".into(),
                         );
@@ -1497,6 +1568,7 @@ impl AppServer {
                         runtime.connection = "unavailable".into();
                         runtime.observed_agent = None;
                         runtime.waiting = None;
+                        runtime.command = None;
                         runtime.error = Some(format!("{e:#}"));
                     }
                     _ if runtime.state != "finished" => {
@@ -1507,6 +1579,7 @@ impl AppServer {
                             runtime.connection = "unavailable".into();
                             runtime.observed_agent = None;
                             runtime.waiting = None;
+                            runtime.command = None;
                         }
                     }
                     _ => {}
@@ -1696,6 +1769,7 @@ mod tests {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
         };
@@ -1848,6 +1922,7 @@ mod tests {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             }),
             agent: None,
             created_at,
@@ -1913,6 +1988,207 @@ mod tests {
         assert_eq!(
             rev_before, rev_after,
             "observe_terminals must not emit spurious terminals event when contexts match"
+        );
+    }
+
+    #[test]
+    fn shell_command_from_record_parses_states_codes_and_label_carryover() {
+        assert_eq!(shell_command_from_record(&json!({}), None), None);
+
+        let working = json!({
+            "records": {
+                "canban-shell": {
+                    "state": "working",
+                    "app": "shell",
+                    "title": "/usr/local/bin/cargo_very_long_binary_name_exceeding_32"
+                }
+            }
+        });
+        let running = shell_command_from_record(&working, None).unwrap();
+        assert_eq!(running.exit_code, None);
+        assert_eq!(running.label, "cargo_very_long_binary_name_exce");
+
+        let done = json!({
+            "records": {
+                "canban-shell": {
+                    "state": "done",
+                    "app": "shell",
+                    "msg": "0"
+                }
+            }
+        });
+        let succeeded = shell_command_from_record(&done, Some(&running)).unwrap();
+        assert_eq!(
+            succeeded,
+            ShellCommand {
+                label: "cargo_very_long_binary_name_exce".into(),
+                exit_code: Some(0),
+            }
+        );
+
+        let err_num = json!({
+            "records": {
+                "canban-shell": {
+                    "state": "error",
+                    "app": "shell",
+                    "msg": "130"
+                }
+            }
+        });
+        assert_eq!(
+            shell_command_from_record(&err_num, Some(&running)),
+            Some(ShellCommand {
+                label: "cargo_very_long_binary_name_exce".into(),
+                exit_code: Some(130),
+            })
+        );
+
+        let err_bad = json!({
+            "records": {
+                "canban-shell": {
+                    "state": "error",
+                    "app": "shell",
+                    "msg": "not-a-number"
+                }
+            }
+        });
+        assert_eq!(
+            shell_command_from_record(&err_bad, None),
+            Some(ShellCommand {
+                label: String::new(),
+                exit_code: Some(1),
+            })
+        );
+    }
+
+    #[test]
+    fn observe_terminals_tracks_shell_command_layer_and_agent_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        app.observer_running.store(true, Ordering::SeqCst);
+        let entry = TerminalEntry {
+            id: "shell-cmd".into(),
+            conversation_id: None,
+            number: 1,
+            name: Some("Terminal 1".into()),
+            origin_project_id: None,
+            origin_card_id: None,
+            agent_engine: None,
+            created_at: now().saturating_sub(10_000),
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core-1".into()),
+                terminal: Some("t1".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+                command: None,
+            }),
+            agent: None,
+        };
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| db.save(&entry))
+            .unwrap();
+
+        // 1. Plain shell starts running `cargo` -> command Running("cargo"), no agent layer.
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.core = "core-1".into();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "records": {"canban-shell": {"state": "working", "app": "shell", "title": "cargo"}},
+                    "foreground": {"pid": 100, "name": "cargo", "argv": ["cargo", "test"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        let t = app.snapshot().unwrap().terminals[0].clone();
+        assert_eq!(t.herdr_status(), HerdrStatus::PlainShell);
+        assert_eq!(
+            t.shell_command(),
+            Some(&ShellCommand {
+                label: "cargo".into(),
+                exit_code: None,
+            })
+        );
+
+        // 2. Command exits with code 2 -> Exited(2) with label carried over.
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "records": {"canban-shell": {"state": "error", "app": "shell", "msg": "2"}},
+                    "foreground": {"pid": 99, "name": "zsh", "argv": ["/bin/zsh", "-l"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        let t = app.snapshot().unwrap().terminals[0].clone();
+        assert_eq!(
+            t.shell_command(),
+            Some(&ShellCommand {
+                label: "cargo".into(),
+                exit_code: Some(2),
+            })
+        );
+
+        // 3. User launches `codex` -> agent layer overrides shell_command(), herdr_status is Working.
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "status": {"state": "working", "app": "codex"},
+                    "records": {"canban-shell": {"state": "working", "app": "shell", "title": "codex"}},
+                    "foreground": {"pid": 101, "name": "codex", "argv": ["codex"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        let t = app.snapshot().unwrap().terminals[0].clone();
+        assert_eq!(t.herdr_status(), HerdrStatus::Working);
+        assert_eq!(t.shell_command(), None);
+
+        // 4. Agent exits with status 1 back to zsh -> shell_command() surfaces Exited(1).
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "status": {"state": "done", "app": "codex"},
+                    "records": {"canban-shell": {"state": "error", "app": "shell", "msg": "1"}},
+                    "foreground": {"pid": 99, "name": "zsh", "argv": ["/bin/zsh", "-l"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        let t = app.snapshot().unwrap().terminals[0].clone();
+        assert_eq!(t.herdr_status(), HerdrStatus::PlainShell);
+        assert_eq!(
+            t.shell_command(),
+            Some(&ShellCommand {
+                label: "codex".into(),
+                exit_code: Some(1),
+            })
         );
     }
 }

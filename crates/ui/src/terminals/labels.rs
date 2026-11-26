@@ -1,5 +1,6 @@
 //! Shared Terminal presentation: sidebar metadata and compact tab labels.
 use super::*;
+use std::borrow::Cow;
 
 /// Leading icon for a Terminal sidebar row: Agent brand mark when present,
 /// `Icon::Agent` for managed sessions without a brand mark, otherwise `Icon::Terminal`.
@@ -94,6 +95,7 @@ pub struct GroupStatusSummary {
 }
 
 /// Aggregates terminal counts and highest-priority runtime signals for collapsed Project/Worktree headers.
+/// Plain-shell command status deliberately does not feed collapsed-group summaries, ⌘I, or sounds.
 pub fn group_status_summary<'a>(
     entries: impl IntoIterator<Item = &'a Entry>,
 ) -> GroupStatusSummary {
@@ -265,6 +267,7 @@ pub fn sidebar_hint(e: &Entry, machine: &str, idle_minutes: u64) -> String {
 pub(crate) enum StatusMarkKind {
     Clock,
     LiveWorking,
+    CommandRunning,
     MutedDot,
     BlockedShield,
     BlockedHelp,
@@ -279,7 +282,15 @@ pub(crate) fn status_mark_kind(e: &Entry) -> Option<StatusMarkKind> {
         return Some(StatusMarkKind::Clock);
     }
     match e.herdr_status() {
-        HerdrStatus::PlainShell | HerdrStatus::Ended => None,
+        HerdrStatus::Ended => None,
+        HerdrStatus::PlainShell => match e.saved.shell_command() {
+            Some(cmd) => match cmd.exit_code {
+                None => Some(StatusMarkKind::CommandRunning),
+                Some(0) => Some(StatusMarkKind::DoneCheck),
+                Some(_) => Some(StatusMarkKind::ErrorTriangle),
+            },
+            None => None,
+        },
         HerdrStatus::Working => Some(StatusMarkKind::LiveWorking),
         HerdrStatus::Starting | HerdrStatus::Queued | HerdrStatus::Closing => {
             Some(StatusMarkKind::MutedDot)
@@ -316,6 +327,7 @@ pub(crate) fn render_status_mark(kind: StatusMarkKind) -> AnyElement {
             .flex_shrink_0()
             .into_element(),
         StatusMarkKind::LiveWorking => live_dot(ACCENT).into_element(),
+        StatusMarkKind::CommandRunning => status_dot(ACCENT).into_element(),
         StatusMarkKind::MutedDot => view()
             .w(px(6.))
             .h(px(6.))
@@ -357,46 +369,61 @@ pub fn status_mark(e: &Entry) -> Option<AnyElement> {
     status_mark_kind(e).map(render_status_mark)
 }
 
-pub(crate) fn sidebar_status_spec(e: &Entry) -> Option<(&'static str, ThemeColor)> {
+pub(crate) fn sidebar_status_spec(e: &Entry) -> Option<(Cow<'static, str>, ThemeColor)> {
     use canban_types::HerdrStatus;
-    let (word, color) = if e.is_auto_reclaiming() {
-        ("Auto-reclaiming…", MUTED)
+    let (word, color): (Cow<'static, str>, ThemeColor) = if e.is_auto_reclaiming() {
+        (Cow::Borrowed("Auto-reclaiming…"), MUTED)
     } else if e.is_reclaiming_soon() {
-        ("Reclaiming soon", MUTED)
+        (Cow::Borrowed("Reclaiming soon"), MUTED)
     } else {
         let st = e.herdr_status();
         match st {
-            HerdrStatus::PlainShell | HerdrStatus::Ended => return None,
-            HerdrStatus::Working => ("Working", ACCENT),
-            HerdrStatus::Starting => ("Starting", MUTED),
-            HerdrStatus::Queued => ("Queued", MUTED),
-            HerdrStatus::Closing => ("Closing", MUTED),
-            HerdrStatus::Blocked => ("Blocked", ATTENTION),
+            HerdrStatus::Ended => return None,
+            HerdrStatus::PlainShell => {
+                let cmd = e.saved.shell_command()?;
+                match cmd.exit_code {
+                    None => {
+                        let text = if cmd.label.is_empty() {
+                            Cow::Borrowed("Running")
+                        } else {
+                            Cow::Owned(cmd.label.clone())
+                        };
+                        (text, MUTED)
+                    }
+                    Some(0) => (Cow::Borrowed(""), SUCCESS),
+                    Some(code) => (Cow::Owned(format!("exit {code}")), DANGER),
+                }
+            }
+            HerdrStatus::Working => (Cow::Borrowed("Working"), ACCENT),
+            HerdrStatus::Starting => (Cow::Borrowed("Starting"), MUTED),
+            HerdrStatus::Queued => (Cow::Borrowed("Queued"), MUTED),
+            HerdrStatus::Closing => (Cow::Borrowed("Closing"), MUTED),
+            HerdrStatus::Blocked => (Cow::Borrowed("Blocked"), ATTENTION),
             HerdrStatus::Done => {
                 if e.needs_attention() {
-                    ("Needs you", ATTENTION)
+                    (Cow::Borrowed("Needs you"), ATTENTION)
                 } else {
-                    ("Done", SUCCESS)
+                    (Cow::Borrowed("Done"), SUCCESS)
                 }
             }
             HerdrStatus::Idle => {
                 if e.needs_attention() {
-                    ("Needs you", ATTENTION)
+                    (Cow::Borrowed("Needs you"), ATTENTION)
                 } else {
-                    ("Idle", MUTED)
+                    (Cow::Borrowed("Idle"), MUTED)
                 }
             }
-            HerdrStatus::Error => ("Error", DANGER),
-            HerdrStatus::Disconnected => ("Offline", DANGER),
+            HerdrStatus::Error => (Cow::Borrowed("Error"), DANGER),
+            HerdrStatus::Disconnected => (Cow::Borrowed("Offline"), DANGER),
         }
     };
     Some((word, color))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SidebarStatus {
     pub mark: Option<StatusMarkKind>,
-    pub word: &'static str,
+    pub word: Cow<'static, str>,
     pub color: ThemeColor,
     pub show_word: bool,
 }
@@ -415,9 +442,9 @@ pub(crate) fn render_sidebar_status(status: SidebarStatus) -> AnyElement {
     if let Some(mark) = status.mark {
         group = group.child(render_status_mark(mark));
     }
-    if status.show_word {
+    if status.show_word && !status.word.is_empty() {
         group = group.child(
-            text(status.word)
+            text(status.word.into_owned())
                 .text_size(px(11.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(status.color)
@@ -449,13 +476,7 @@ pub fn tab_label_text(e: &Entry, show_card_number: bool) -> String {
 }
 
 pub fn has_status_mark(e: &Entry) -> bool {
-    use canban_types::HerdrStatus;
-    e.is_auto_reclaiming()
-        || e.is_reclaiming_soon()
-        || !matches!(
-            e.herdr_status(),
-            HerdrStatus::PlainShell | HerdrStatus::Ended
-        )
+    status_mark_kind(e).is_some()
 }
 
 pub fn tab_width(e: &Entry, show_card_number: bool) -> f32 {

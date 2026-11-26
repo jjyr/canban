@@ -1936,7 +1936,9 @@ pub fn run(seed: u64) -> Result<u64> {
                 "card.archive deleted worktree still occupied by unrelated independent terminal!"
             );
 
-            // Manual `terminal.interrupt` idempotency + Core identity fence rejecting `terminal.end` without bumping card rev!
+            // Manual plain-shell `terminal.interrupt` idempotency (routes to `terminal.keys` `["ctrl+c"]`)
+            // + Core identity fence rejecting `terminal.end` without bumping card rev!
+            let keys_before = herdr_b.sent_keys().len();
             let intr_before = herdr_b.interrupted_terminals().len();
             let intr_args = json!({
                 "terminal_id": ind_tid,
@@ -1944,9 +1946,17 @@ pub fn run(seed: u64) -> Result<u64> {
             });
             let _ = world.server_call("remote-b", "terminal.interrupt", intr_args.clone())?;
             let _ = world.server_call("remote-b", "terminal.interrupt", intr_args)?;
+            let keys_after = herdr_b.sent_keys();
             ensure!(
-                herdr_b.interrupted_terminals().len() == intr_before + 1,
-                "Idempotent terminal.interrupt must send exactly 1 physical interrupt"
+                keys_after.len() == keys_before + 1
+                    && keys_after.last() == Some(&(ind_addr.clone(), vec!["ctrl+c".to_owned()]))
+                    && herdr_b.interrupted_terminals().len() == intr_before,
+                "Idempotent plain-shell terminal.interrupt must send exactly 1 ctrl+c via terminal.keys (got keys={:?}, interrupts={})",
+                &keys_after[keys_before..],
+                herdr_b
+                    .interrupted_terminals()
+                    .len()
+                    .saturating_sub(intr_before),
             );
             let card_rev_before_fence = world
                 .server("remote-b")

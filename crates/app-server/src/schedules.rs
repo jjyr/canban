@@ -492,6 +492,7 @@ pub(super) fn fire_schedule(
                     agent_turn: None,
                     observed_agent: None,
                     waiting: None,
+                    command: None,
                 }),
                 agent: None,
             };
@@ -667,6 +668,7 @@ impl AppServer {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             });
             db.save(item)?;
         }
@@ -1588,6 +1590,7 @@ impl AppServer {
                                     agent_turn: None,
                                     observed_agent: None,
                                     waiting: None,
+                                    command: None,
                                 }),
                                 agent: None,
                             };
@@ -1819,6 +1822,7 @@ impl AppServer {
                 agent_turn: None,
                 observed_agent: None,
                 waiting: None,
+                command: None,
             });
             db.save(&entry)
         })?;

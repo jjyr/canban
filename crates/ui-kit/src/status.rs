@@ -189,20 +189,24 @@ pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl Into
         .rounded(px(RADIUS))
         .child(text(message).text_size(px(BODY_SIZE)).text_color(color))
 }
+/// Static 8px semantic status dot (used for running shell commands and as the
+/// base layer of [`live_dot`]).
+pub fn status_dot(color: ThemeColor) -> View {
+    const SIZE: f32 = 8.0;
+    view()
+        .flex_shrink_0()
+        .w(px(SIZE))
+        .h(px(SIZE))
+        .rounded(px(SIZE / 2.))
+        .bg(color)
+        .pointer_events(PointerEvents::None)
+}
+
 /// Looping "work in progress" mark: a steady dot with a ping halo. Reduced
 /// motion keeps the steady dot so the state stays visible without movement.
 pub fn live_dot(color: ThemeColor) -> View {
     const SIZE: f32 = 8.0;
-    let dot = || {
-        view()
-            .absolute()
-            .top(px(0.))
-            .left(px(0.))
-            .w(px(SIZE))
-            .h(px(SIZE))
-            .rounded(px(SIZE / 2.))
-            .bg(color)
-    };
+    let dot = || status_dot(color).absolute().top(px(0.)).left(px(0.));
     let mark = view()
         .relative()
         .flex_shrink_0()
