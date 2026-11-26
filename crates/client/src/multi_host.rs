@@ -531,7 +531,17 @@ fn build_update_base(params: &Value, snap: &Snapshot, card_id: &str) -> UpdateBa
     } else {
         None
     };
-    UpdateBase { title, body }
+    let (has_assignee, assignee) = if params.get("assignee").is_some() {
+        (true, card.and_then(|c| c.assignee.clone()))
+    } else {
+        (false, None)
+    };
+    UpdateBase {
+        title,
+        body,
+        has_assignee,
+        assignee,
+    }
 }
 
 fn parse_refreshed_snapshot(state_val: &Value, host_id: &str) -> Option<Snapshot> {

@@ -138,7 +138,7 @@ with query/fragment/subpaths open the browser, preserving their exact target.
 Other HTTP(S) destinations open the browser. Code literals remain literal. See [reference behavior and
 native acceptance](card-editor.md#readers-previews-and-navigation).
 
-Desktop comments always send an explicit `mentions` array (including `[]`); legacy clients omitting the field keep the server's existing parser. An asynchronous send clears only the submitted draft, preserving newer text/recipients and failed submissions. No CLI interface change is required.
+Desktop comments always send an explicit `mentions` array (including `[]`). When a Card has an `assignee` and the comment does not explicitly address another Agent, the composer pre-populates `@<assignee> (assigned) ×` so replies sync automatically without repeated `@mentions` (clicking `×` suppresses the assignee for that draft only; typing `@other` automatically excludes `assignee` so only `@other` receives the comment). Clients omitting `mentions` use the same explicit-`@`-first parser on the server before falling back to `card.assignee` on human comments. When a Card has no live terminals, the Card header Terminal toggle (`⌘J`) directly opens or resumes the assigned Agent's interactive session (`agent.open`), while active sessions (such as `@reviewer` in Review) take priority when already live. An asynchronous send clears only the submitted draft, preserving newer text/recipients and failed submissions.
 
 Send completes on the write acknowledgement and projects the returned comment
 into Activity immediately. It does not wait for a full workspace/host refresh.

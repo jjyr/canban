@@ -41,6 +41,7 @@ pub fn classify_remote_mutation(method: &str, params: &Value) -> QueueDecision {
                         | "revision"
                         | "title"
                         | "body"
+                        | "assignee"
                         | "view"
                         | "fields"
                         | "request_key"

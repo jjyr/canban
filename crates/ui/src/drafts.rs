@@ -27,6 +27,8 @@ pub struct Draft {
     pub instructions: String,
     pub title: String,
     pub body: String,
+    #[serde(default)]
+    pub assignee: Option<String>,
     pub comment: String,
     #[serde(skip)]
     pub comment_error: String,
@@ -62,6 +64,7 @@ impl Draft {
                 || !self.body.is_empty()
                 || !self.instructions.is_empty()
                 || !self.recipients.is_empty()
+                || self.assignee.is_some()
                 || self.selected_issue.is_some()
         } else {
             key.starts_with("card:")

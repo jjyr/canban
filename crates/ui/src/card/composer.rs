@@ -48,9 +48,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         }
         let body = comment.get_untracked();
         let current_draft = draft.get_untracked();
-        let mentions = crate::profiles::active_recipients(
+        let assignee = ui.current_card().and_then(|c| c.assignee);
+        let mentions = crate::profiles::active_recipients_with_assignee(
             &[&body],
             &current_draft.recipients,
+            assignee.as_deref(),
             &current_draft.suppressed_recipients,
             &ui.profiles.get_untracked(),
         );
@@ -164,15 +166,20 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             move || !reference_error.get().is_empty(),
             move || notice(move || reference_error.get(), Tone::Attention),
         ))
-        .child(crate::editor::recipient_chips(
+        .child(crate::editor::recipient_chips_with_assignee(
             ui,
             vec![comment],
             move || draft.with(|d| d.recipients.clone()),
+            move || ui.current_card().and_then(|c| c.assignee),
             move || draft.with(|d| d.suppressed_recipients.clone()),
             move |id, still_in_prose| {
+                let is_assignee = ui
+                    .current_card()
+                    .and_then(|c| c.assignee)
+                    .is_some_and(|a| a == id);
                 draft.update(|d| {
                     d.recipients.retain(|p| p != &id);
-                    if still_in_prose && !d.suppressed_recipients.contains(&id) {
+                    if (still_in_prose || is_assignee) && !d.suppressed_recipients.contains(&id) {
                         d.suppressed_recipients.push(id);
                     }
                 });

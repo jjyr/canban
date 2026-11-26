@@ -110,7 +110,10 @@ pub fn is_default_merge_strategy(v: &MergeStrategy) -> bool {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowStep {
     Agent {
-        profile: Option<String>,
+        #[serde(default, alias = "profile", skip_serializing_if = "Option::is_none")]
+        default_agent: Option<String>,
+        #[serde(default, rename = "override", skip_serializing_if = "Option::is_none")]
+        override_agent: Option<String>,
         instruction: String,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         env: BTreeMap<String, String>,
@@ -207,6 +210,17 @@ impl WorkflowStep {
             | Self::Deliver { next, .. }
             | Self::Admit { next, .. }
             | Self::Notify { next, .. } => next.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn agent_fallback_profile(&self) -> Option<&str> {
+        match self {
+            Self::Agent {
+                override_agent,
+                default_agent,
+                ..
+            } => override_agent.as_deref().or(default_agent.as_deref()),
             _ => None,
         }
     }

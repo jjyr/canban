@@ -904,6 +904,7 @@ dependencies = [
  "canban-context",
  "canban-kanban",
  "canban-notifications",
+ "canban-scheduler",
  "canban-storage",
  "canban-timeline",
  "canban-types",

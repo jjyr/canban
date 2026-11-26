@@ -664,13 +664,13 @@ pub fn template(kind: &str) -> Option<Step> {
             "agent:plan",
             "Plan task",
             "agent",
-            vec![("profile", json!("developer"))],
+            vec![("default_agent", json!("developer"))],
         ),
         "review" => (
             "agent:review",
             "Review",
             "agent",
-            vec![("profile", json!("reviewer"))],
+            vec![("override", json!("reviewer"))],
         ),
         "approval" => (
             "approval",

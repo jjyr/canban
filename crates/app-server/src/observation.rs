@@ -24,7 +24,7 @@ pub(super) struct ClosedAgentWork {
 pub(super) struct Inventory {
     pub core: String,
     pub records: BTreeMap<String, Value>,
-    pub working: std::collections::HashMap<String, OpenAgentWork>,
+    pub working: BTreeMap<String, OpenAgentWork>,
     pub closed_work: Vec<ClosedAgentWork>,
     pub last_at: u64,
     pub generation: u64,
@@ -45,8 +45,8 @@ impl Inventory {
                 next_records.insert(address.to_owned(), v);
             }
         }
-        let mut next_working = std::collections::HashMap::new();
-        for (addr, mut open) in self.working.drain() {
+        let mut next_working = BTreeMap::new();
+        for (addr, mut open) in std::mem::take(&mut self.working) {
             if open.core == self.core
                 && let Some(rec) = next_records.get(&addr)
                 && Self::is_working(rec)
@@ -112,7 +112,7 @@ impl Inventory {
         }
     }
     pub(super) fn close_all_working(&mut self, ts: u64) {
-        for (addr, open) in self.working.drain() {
+        for (addr, open) in std::mem::take(&mut self.working) {
             if ts.saturating_sub(open.since) >= MIN_AGENT_WORK_MS {
                 self.closed_work.push(ClosedAgentWork {
                     core: open.core,

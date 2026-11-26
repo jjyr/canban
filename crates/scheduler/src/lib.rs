@@ -42,6 +42,30 @@ pub fn select_for_stage_in_project(
 ) -> Result<Profile> {
     select_in_project(config, project, explicit.or(stage_profile))
 }
+/// Resolve an `Agent` workflow step using mutually exclusive `override` or `default_agent`
+/// semantics: `override` ignores `card_assignee`; otherwise an enabled `card_assignee` runs
+/// first and falls back to `default_agent` -> `config.default_agent`.
+pub fn select_for_agent_step(
+    config: &Config,
+    project: Option<&Project>,
+    card_assignee: Option<&str>,
+    default_agent: Option<&str>,
+    override_agent: Option<&str>,
+) -> Result<Profile> {
+    if let Some(forced) = override_agent.map(str::trim).filter(|s| !s.is_empty()) {
+        return select_in_project(config, project, Some(forced));
+    }
+    if let Some(assignee) = card_assignee.map(str::trim).filter(|s| !s.is_empty())
+        && config
+            .profiles
+            .iter()
+            .any(|p| p.id == assignee && p.enabled)
+    {
+        return select_in_project(config, project, Some(assignee));
+    }
+    let fallback = default_agent.map(str::trim).filter(|s| !s.is_empty());
+    select_in_project(config, project, fallback)
+}
 #[allow(clippy::too_many_arguments)]
 pub fn agent_run(
     project: &str,

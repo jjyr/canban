@@ -455,10 +455,9 @@ pub(super) fn fire_schedule(
             .as_deref()
             .and_then(|sid| rev.definition.steps.get(sid));
         let starts_with_agent = matches!(start_step_def, Some(WorkflowStep::Agent { .. }));
-        let step_prof = match start_step_def {
-            Some(WorkflowStep::Agent { profile, .. }) => profile.clone(),
-            _ => None,
-        };
+        let step_prof = start_step_def
+            .and_then(WorkflowStep::agent_fallback_profile)
+            .map(str::to_owned);
         let selected_profile = if starts_with_agent {
             Some(canban_scheduler::select_in_project(
                 config,
@@ -1542,12 +1541,12 @@ impl AppServer {
                         return Ok(());
                     }
                 }
-                WorkflowStep::Agent {
-                    profile: step_prof,
+                step @ WorkflowStep::Agent {
                     instruction,
                     env: step_env,
                     ..
                 } => {
+                    let step_prof = step.agent_fallback_profile().map(str::to_owned);
                     // Lazy admission: if this run started as a `script` without a TerminalEntry,
                     // allocate the TerminalEntry now and verify `scheduler.max_agents` capacity.
                     if run.terminal_id.is_none() {

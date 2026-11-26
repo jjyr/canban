@@ -12,6 +12,7 @@ const CARD_FIELDS: &[&str] = &[
     "revision",
     "created_at",
     "created_by",
+    "assignee",
     "content",
     "source_trust",
     "schedule_source",

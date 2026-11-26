@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const SECONDARY_CLIENT: &str = "ui-client-2";
-const NUM_CHAOS_OP_KINDS: usize = 40;
+const NUM_CHAOS_OP_KINDS: usize = 42;
 
 const CHAOS_WORKFLOW_YAML: &str = r#"schema: 12
 id: chaos-flow
@@ -962,6 +962,15 @@ pub enum ChaosOp {
         resolve: bool,
         tag: u32,
     },
+    /// Assign an agent profile to an active Card (`card.update { assignee }`).
+    AssignCard {
+        card_pick: usize,
+        profile_idx: usize,
+    },
+    /// Clear the assigned agent profile on an active Card (`card.update { assignee: null }`).
+    UnassignCard {
+        card_pick: usize,
+    },
 }
 
 /// Result of deterministic shrinking for a failing Chaos seed.
@@ -1197,10 +1206,17 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
                 card_pick: rng.random_range(0..64),
                 tag,
             },
-            _ => ChaosOp::ResolveReopenCard {
+            39 => ChaosOp::ResolveReopenCard {
                 card_pick: rng.random_range(0..64),
                 resolve: rng.random_bool(0.55),
                 tag,
+            },
+            40 => ChaosOp::AssignCard {
+                card_pick: rng.random_range(0..64),
+                profile_idx: rng.random_range(0..3),
+            },
+            _ => ChaosOp::UnassignCard {
+                card_pick: rng.random_range(0..64),
             },
         };
         ops.push(op);
@@ -2017,15 +2033,28 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     if let Some((host, pid, cid)) =
                         pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
                     {
-                        let body = format!("chaos-comment-{tag}");
+                        let (body, params) = match *tag % 5 {
+                            0 => {
+                                let b = format!("@reviewer chaos-comment-{tag}");
+                                (b.clone(), json!({ "card_id": cid, "body": b }))
+                            }
+                            1 => {
+                                let b = format!("chaos-comment-suppressed-{tag}");
+                                (
+                                    b.clone(),
+                                    json!({ "card_id": cid, "body": b, "mentions": [] }),
+                                )
+                            }
+                            _ => {
+                                let b = format!("chaos-comment-{tag}");
+                                (b.clone(), json!({ "card_id": cid, "body": b }))
+                            }
+                        };
                         if let Some(res) = check_expected_chaos_err(
                             "comment.add",
                             world.client_call(
                                 "comment.add",
-                                canban_ui::with_ui_projection(
-                                    "comment.add",
-                                    json!({ "card_id": cid, "body": body }),
-                                ),
+                                canban_ui::with_ui_projection("comment.add", params),
                                 Some(&pid),
                             ),
                         )? {
@@ -6075,6 +6104,73 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             oracle.observe_write_receipt(PRIMARY_CLIENT, host, &res)?;
                             oracle.record_ui_write_receipt(PRIMARY_CLIENT, method, host, &res);
                             world.hit("chaos.card_resolve_reopen");
+                        }
+                    }
+                }
+                ChaosOp::AssignCard {
+                    card_pick,
+                    profile_idx,
+                } => {
+                    if let Some((host, pid, cid)) =
+                        pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
+                    {
+                        let rev = lookup_card_rev(world, &cid);
+                        let profs = ["developer", "codex", "reviewer"];
+                        let assignee = profs[*profile_idx % profs.len()];
+                        if let Some(res) = check_expected_chaos_err(
+                            "card.update",
+                            world.client_call(
+                                "card.update",
+                                canban_ui::with_ui_projection(
+                                    "card.update",
+                                    json!({
+                                        "card_id": cid,
+                                        "revision": rev,
+                                        "assignee": assignee,
+                                    }),
+                                ),
+                                Some(&pid),
+                            ),
+                        )? && !is_offline_queued(&res)
+                        {
+                            oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res)?;
+                            oracle.record_ui_write_receipt(
+                                PRIMARY_CLIENT,
+                                "card.update",
+                                &host,
+                                &res,
+                            );
+                        }
+                    }
+                }
+                ChaosOp::UnassignCard { card_pick } => {
+                    if let Some((host, pid, cid)) =
+                        pick_active_card(world, PRIMARY_CLIENT, &cards, &archived_cards, *card_pick)
+                    {
+                        let rev = lookup_card_rev(world, &cid);
+                        if let Some(res) = check_expected_chaos_err(
+                            "card.update",
+                            world.client_call(
+                                "card.update",
+                                canban_ui::with_ui_projection(
+                                    "card.update",
+                                    json!({
+                                        "card_id": cid,
+                                        "revision": rev,
+                                        "assignee": Value::Null,
+                                    }),
+                                ),
+                                Some(&pid),
+                            ),
+                        )? && !is_offline_queued(&res)
+                        {
+                            oracle.observe_write_receipt(PRIMARY_CLIENT, &host, &res)?;
+                            oracle.record_ui_write_receipt(
+                                PRIMARY_CLIENT,
+                                "card.update",
+                                &host,
+                                &res,
+                            );
                         }
                     }
                 }

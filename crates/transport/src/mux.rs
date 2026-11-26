@@ -4,7 +4,6 @@
 use anyhow::Result;
 use futures_util::task::AtomicWaker;
 use std::{
-    collections::HashMap,
     future::poll_fn,
     io,
     pin::Pin,
@@ -65,7 +64,7 @@ type StreamWakers = (Arc<AtomicWaker>, Arc<AtomicWaker>);
 struct CloseSignal {
     closed: AtomicBool,
     next_id: AtomicU64,
-    streams: Mutex<HashMap<u64, StreamWakers>>,
+    streams: Mutex<std::collections::BTreeMap<u64, StreamWakers>>,
 }
 
 impl CloseSignal {
@@ -73,7 +72,7 @@ impl CloseSignal {
         Self {
             closed: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
-            streams: Mutex::new(HashMap::new()),
+            streams: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -103,7 +102,7 @@ impl CloseSignal {
         std::sync::atomic::fence(Ordering::SeqCst);
         let wakers: Vec<_> = {
             let mut guard = self.streams.lock().unwrap();
-            guard.drain().map(|(_, pair)| pair).collect()
+            std::mem::take(&mut *guard).into_values().collect()
         };
         for (read_waker, write_waker) in wakers {
             read_waker.wake();

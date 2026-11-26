@@ -503,9 +503,23 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
     let pr_pill = pr_view
         .as_ref()
         .and_then(|info| crate::components::pr_status::pill(ui, info, true));
+    let assignee_badge = card.assignee.as_deref().and_then(|aid| {
+        (!running.iter().any(|r| r.profile_id == aid)).then(|| {
+            let (provider_icon, provider_name) = ui
+                .profiles
+                .with(|ps| {
+                    ps.iter()
+                        .find(|p| p.id == aid)
+                        .map(crate::profiles::provider)
+                })
+                .unwrap_or((Icon::Agent, "Agent".into()));
+            (aid.to_owned(), provider_icon, provider_name)
+        })
+    });
     if !chips.is_empty()
         || !running.is_empty()
         || !ephemeral_agents.is_empty()
+        || assignee_badge.is_some()
         || branch.is_some()
         || pr_pill.is_some()
         || replies > 0
@@ -575,6 +589,26 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                 .key(pill_key)
                 .into_element()
         }));
+        if let Some((profile_id, provider_icon, provider_name)) = assignee_badge {
+            let tip =
+                format!("Assigned to @{profile_id} ({provider_name}) — replies sync automatically");
+            pills.push(
+                view()
+                    .key(format!("assignee:{profile_id}"))
+                    .h(px(20.))
+                    .px_1p5()
+                    .flex_shrink_0()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .rounded(px(999.))
+                    .bg(INSET)
+                    .tooltip(hint_tooltip(tip))
+                    .child(icon_tinted(provider_icon, MUTED).w(px(11.)).h(px(11.)))
+                    .child(muted(format!("@{profile_id}")).text_size(px(11.)))
+                    .into_element(),
+            );
+        }
         tile = tile.child(
             view()
                 .key("footer")

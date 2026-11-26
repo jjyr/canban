@@ -135,6 +135,29 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
                 ),
             });
         }
+        for prof in ui.profiles.get().into_iter().filter(|p| p.enabled) {
+            let assigned = card.assignee.as_deref() == Some(prof.id.as_str());
+            dynamic_cmds.push(DynamicCommand {
+                id: format!("cmd:assign-card:{}", prof.id),
+                title: format!("Assign Card #{} to @{}", card.number, prof.id),
+                detail: if assigned {
+                    "Currently assigned".into()
+                } else {
+                    format!("{} · Auto-sync replies", project.name)
+                },
+                icon: Icon::Agent,
+                keywords: format!("assign agent @{} #{}", prof.id, card.number),
+            });
+        }
+        if let Some(cur) = card.assignee.as_deref() {
+            dynamic_cmds.push(DynamicCommand {
+                id: "cmd:unassign-card".into(),
+                title: format!("Unassign @{cur} from Card #{}", card.number),
+                detail: format!("{} · Clear Assignee", project.name),
+                icon: Icon::Agent,
+                keywords: format!("unassign clear remove agent @{cur} #{}", card.number),
+            });
+        }
         for stage in &project.workflow.stages {
             if stage.id != card.stage {
                 dynamic_cmds.push(DynamicCommand {

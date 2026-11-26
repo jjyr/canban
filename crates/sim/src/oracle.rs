@@ -4,7 +4,7 @@ use crate::world::SimWorld;
 use anyhow::{Context, Result, bail, ensure};
 use canban_types::{
     Card, DeliveryMode, EnvEntryMeta, ExecutionTrigger, HostConnectionState, HostSummary,
-    HumanGate, Snapshot, SyncItemState, WorkflowRun,
+    HumanGate, Snapshot, SyncItemState, TerminalEntry, WorkflowRun, WorkflowStep,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -1843,7 +1843,8 @@ impl InvariantOracle {
             let snap = server.snapshot()?;
             let cards_by_id: BTreeMap<&str, &Card> =
                 snap.cards.iter().map(|c| (c.id.as_str(), c)).collect();
-            let term_ids: BTreeSet<&str> = snap.terminals.iter().map(|t| t.id.as_str()).collect();
+            let terms_by_id: BTreeMap<&str, &TerminalEntry> =
+                snap.terminals.iter().map(|t| (t.id.as_str(), t)).collect();
             let mut active_runs_per_card: BTreeMap<&str, &WorkflowRun> = BTreeMap::new();
 
             for run in &snap.workflow_runs {
@@ -1902,11 +1903,28 @@ impl InvariantOracle {
                 if run.state == "waiting_agent"
                     && let Some(tid) = run.terminal_id.as_deref()
                 {
-                    ensure!(
-                        term_ids.contains(tid),
-                        "[{host_name}] waiting_agent WorkflowRun {} references missing terminal_id {tid}",
-                        run.id
-                    );
+                    let term = terms_by_id.get(tid).copied().with_context(|| {
+                        format!(
+                            "[{host_name}] waiting_agent WorkflowRun {} references missing terminal_id {tid}",
+                            run.id
+                        )
+                    })?;
+                    if let Some(WorkflowStep::Agent {
+                        override_agent: Some(ov),
+                        ..
+                    }) = run
+                        .step
+                        .as_deref()
+                        .and_then(|s| run.definition.steps.get(s))
+                        && let Some(agent) = term.agent.as_ref()
+                    {
+                        ensure!(
+                            agent.profile.id == *ov,
+                            "[{host_name}] WorkflowRun {} waiting_agent on override=@{ov} step bound terminal {tid} with profile={:?}",
+                            run.id,
+                            agent.profile.id
+                        );
+                    }
                 }
             }
 
@@ -3611,6 +3629,7 @@ fn assert_host_converged(
             mc.title == sc.title
                 && mc.body == sc.body
                 && mc.stage == sc.stage
+                && mc.assignee == sc.assignee
                 && mc.revision == sc.revision
                 && mc.archived_at == sc.archived_at
                 && mc.removed_at == sc.removed_at
@@ -3621,9 +3640,10 @@ fn assert_host_converged(
                 && mc.pull_request == sc.pull_request
                 && mc.board_order == sc.board_order
                 && mc.hold_auto_merge == sc.hold_auto_merge,
-            "[{host_id}] Card {raw_id} diverged at quiescence:\n  server: title={:?} stage={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?} order={:?} hold={}\n  client: title={:?} stage={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?} order={:?} hold={}",
+            "[{host_id}] Card {raw_id} diverged at quiescence:\n  server: title={:?} stage={:?} assignee={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?} order={:?} hold={}\n  client: title={:?} stage={:?} assignee={:?} rev={} archived={:?} res={:?} attn={:?} gate={:?} delivery={:?} pr={:?} order={:?} hold={}",
             sc.title,
             sc.stage,
+            sc.assignee,
             sc.revision,
             sc.archived_at,
             sc.resolution,
@@ -3635,6 +3655,7 @@ fn assert_host_converged(
             sc.hold_auto_merge,
             mc.title,
             mc.stage,
+            mc.assignee,
             mc.revision,
             mc.archived_at,
             mc.resolution,
@@ -4016,6 +4037,7 @@ pub fn canonical_state_digest(world: &SimWorld) -> u64 {
             mix_str(&mut h, &c.title);
             mix_str(&mut h, &c.body);
             mix_str(&mut h, &c.stage);
+            mix_str(&mut h, c.assignee.as_deref().unwrap_or(""));
             mix_u64(&mut h, c.revision);
             mix_u64(&mut h, u64::from(c.archived_at.is_some()));
             mix_u64(&mut h, u64::from(c.removed_at.is_some()));

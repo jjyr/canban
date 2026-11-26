@@ -63,8 +63,18 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
                 .iter()
                 .any(|h| h["step"] == *id && h["event"] == "completed");
         let kind = match step {
-            WorkflowStep::Agent { profile, .. } => {
-                format!("Agent · @{}", profile.as_deref().unwrap_or("default"))
+            WorkflowStep::Agent {
+                default_agent,
+                override_agent,
+                ..
+            } => {
+                if let Some(p) = override_agent.as_deref() {
+                    format!("Agent · @{p} (override)")
+                } else if let Some(p) = default_agent.as_deref() {
+                    format!("Agent · @{p} (or Assignee)")
+                } else {
+                    "Agent · Assignee / Default".into()
+                }
             }
             WorkflowStep::Script { run, shell, .. } => {
                 let sh = shell

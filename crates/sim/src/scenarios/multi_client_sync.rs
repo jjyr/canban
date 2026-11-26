@@ -281,14 +281,128 @@ pub fn run(seed: u64) -> Result<u64> {
         })?;
         world.hit("multi_client.client_bounce_dirty_outbox");
 
+        // 6. Offline `assignee` 3-way disjoint merge (`title` on Client 2 + `assignee` on Client 1)
+        //    and concurrent `assignee` conflict + `UseMine` resolution!
+        let assign_c = world.client_call_on(
+            "ui-client",
+            "card.create",
+            json!({
+                "project_id": pid,
+                "title": "Assignee Merge Base",
+                "body": "Initial body",
+            }),
+            Some(&pid),
+        )?;
+        let assign_cid = assign_c["id"].as_str().unwrap().to_owned();
+        let assign_base_rev = assign_c["revision"].as_u64().unwrap();
+        world.wait_until(15_000, |w| {
+            let s2 = w.client_merged_snapshot_on("ui-client-2")?;
+            Ok(s2
+                .cards
+                .iter()
+                .any(|c| c.id == assign_cid && c.revision == assign_base_rev))
+        })?;
+
+        world.partition("ui-client-2", "remote-a");
+        world.advance(Duration::from_millis(120))?;
+        let _ = world.client_call_on(
+            "ui-client",
+            "card.update",
+            json!({
+                "card_id": assign_cid,
+                "revision": assign_base_rev,
+                "assignee": "developer",
+            }),
+            Some(&pid),
+        )?;
+        let _ = world.client_call_on(
+            "ui-client-2",
+            "card.update",
+            json!({
+                "card_id": assign_cid,
+                "revision": assign_base_rev,
+                "title": "Assignee Merge Title",
+            }),
+            Some(&pid),
+        )?;
+        world.repair("ui-client-2", "remote-a");
+        world.quiesce_natural(25_000)?;
+        for client_name in ["ui-client", "ui-client-2"] {
+            let snap = world.client_merged_snapshot_on(client_name)?;
+            let c = snap.cards.iter().find(|c| c.id == assign_cid).unwrap();
+            ensure!(
+                c.title == "Assignee Merge Title" && c.assignee.as_deref() == Some("developer"),
+                "Client {client_name} disjoint title+assignee auto-merge failed: {c:?}"
+            );
+        }
+
+        // Now force competing offline `assignee` edits at the same base revision and resolve via UseMine.
+        let assign_rev2 = world
+            .client_merged_snapshot_on("ui-client")?
+            .cards
+            .into_iter()
+            .find(|c| c.id == assign_cid)
+            .unwrap()
+            .revision;
+        world.partition("ui-client-2", "remote-a");
+        world.advance(Duration::from_millis(120))?;
+        let _ = world.client_call_on(
+            "ui-client-2",
+            "card.update",
+            json!({
+                "card_id": assign_cid,
+                "revision": assign_rev2,
+                "assignee": "reviewer",
+            }),
+            Some(&pid),
+        )?;
+        let _ = world.client_call_on(
+            "ui-client",
+            "card.update",
+            json!({
+                "card_id": assign_cid,
+                "revision": assign_rev2,
+                "assignee": "codex",
+            }),
+            Some(&pid),
+        )?;
+        world.repair("ui-client-2", "remote-a");
+        world.wait_until(20_000, |w| {
+            Ok(w.client_sync_items_on("ui-client-2")
+                .iter()
+                .any(|i| matches!(i.state, SyncItemState::Conflict)))
+        })?;
+        let assign_conflict = world
+            .client_sync_items_on("ui-client-2")
+            .into_iter()
+            .find(|i| matches!(i.state, SyncItemState::Conflict))
+            .unwrap();
+        world.client_sync_action_on(
+            "ui-client-2",
+            &assign_conflict.host_id,
+            &assign_conflict.mutation_id,
+            SyncAction::UseMine,
+        )?;
+        world.quiesce_natural(25_000)?;
+        for client_name in ["ui-client", "ui-client-2"] {
+            let snap = world.client_merged_snapshot_on(client_name)?;
+            let c = snap.cards.iter().find(|c| c.id == assign_cid).unwrap();
+            ensure!(
+                c.assignee.as_deref() == Some("reviewer"),
+                "Client {client_name} did not converge on UseMine assignee=reviewer: {:?}",
+                c.assignee
+            );
+        }
+        world.hit("assignee.offline_sync_converged");
+
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;
 
         let s1 = world.client_merged_snapshot_on("ui-client")?;
         let s2 = world.client_merged_snapshot_on("ui-client-2")?;
         ensure!(
-            s1.cards.len() == 6 && s2.cards.len() == 6,
-            "Expected 6 cards across both clients, got c1={} c2={}",
+            s1.cards.len() == 7 && s2.cards.len() == 7,
+            "Expected 7 cards across both clients, got c1={} c2={}",
             s1.cards.len(),
             s2.cards.len()
         );

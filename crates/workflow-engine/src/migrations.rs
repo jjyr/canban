@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 12;
+pub const CURRENT: u32 = 13;
 
 pub struct Migration {
     pub version: u32,
@@ -58,6 +58,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 12,
         up: v12_env_secret_expressions,
+    },
+    Migration {
+        version: 13,
+        up: v13_agent_default_and_override,
     },
 ];
 
@@ -343,6 +347,35 @@ fn v11_cardless_and_event_selectors(doc: &mut Document) -> Result<()> {
 /// Schema 12: Workflow and step `env` values support `${{ secrets.KEY }}` and `${{ vars.KEY }}`
 /// expressions resolved against Project, Agent, and Global scopes at execution time.
 fn v12_env_secret_expressions(_doc: &mut Document) -> Result<()> {
+    Ok(())
+}
+
+/// Schema 13: replace `with.profile` on `uses: agent` steps with mutually exclusive
+/// `default_agent` (allows `Card.assignee` override) and `override` (enforces fixed role).
+fn v13_agent_default_and_override(doc: &mut Document) -> Result<()> {
+    for step in &mut doc.steps {
+        if step.kind() != "agent" {
+            continue;
+        }
+        let Some(raw) = step.with.remove("profile") else {
+            continue;
+        };
+        let Some(prof) = raw.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let is_review_role = step.stage.as_deref() == Some("review")
+            || step.id.contains("review")
+            || prof == "reviewer";
+        if is_review_role {
+            step.with
+                .entry("override".to_owned())
+                .or_insert_with(|| serde_json::json!(prof));
+        } else {
+            step.with
+                .entry("default_agent".to_owned())
+                .or_insert_with(|| serde_json::json!(prof));
+        }
+    }
     Ok(())
 }
 

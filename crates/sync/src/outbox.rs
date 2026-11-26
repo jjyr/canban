@@ -46,12 +46,20 @@ impl MutationKind {
     }
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateBase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_assignee: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -295,6 +303,12 @@ impl Outbox {
                 create.params["body"] = Value::String(body.to_owned());
                 if !create.sent_params.is_null() {
                     create.sent_params["body"] = Value::String(body.to_owned());
+                }
+            }
+            if let Some(assignee) = mutation.params.get("assignee") {
+                create.params["assignee"] = assignee.clone();
+                if !create.sent_params.is_null() {
+                    create.sent_params["assignee"] = assignee.clone();
                 }
             }
             let updated = create.clone();

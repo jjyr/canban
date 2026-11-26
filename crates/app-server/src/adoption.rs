@@ -131,7 +131,9 @@ pub(super) fn bind(
             "Caller terminal is closing or finished"
         );
         let project: Project = db.get(&card.project_id)?;
-        let profile = canban_scheduler::select_in_project(config, Some(&project), requested)?;
+        let fallback_assignee = requested.or(card.assignee.as_deref());
+        let profile =
+            canban_scheduler::select_in_project(config, Some(&project), fallback_assignee)?;
         let engine = profile.command_name();
         let observed_engine = canban_profiles::identify_herdr_agent(&prepared.observed);
         ensure!(

@@ -160,20 +160,48 @@ pub fn recipient_chips(
     suppressed: impl Fn() -> Vec<String> + 'static,
     on_dismiss: impl Fn(String, bool) + 'static,
 ) -> impl IntoElement {
+    recipient_chips_with_assignee(ui, sources, explicit, || None, suppressed, on_dismiss)
+}
+
+pub fn recipient_chips_with_assignee(
+    ui: Ui,
+    sources: Vec<Signal<String>>,
+    explicit: impl Fn() -> Vec<String> + 'static,
+    assignee: impl Fn() -> Option<String> + 'static,
+    suppressed: impl Fn() -> Vec<String> + 'static,
+    on_dismiss: impl Fn(String, bool) + 'static,
+) -> impl IntoElement {
     let on_dismiss = std::rc::Rc::new(on_dismiss);
     dynamic(move || {
         let profiles = ui.profiles.get();
         let texts: Vec<String> = sources.iter().map(|s| s.get()).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let recipients =
-            crate::profiles::active_recipients(&refs, &explicit(), &suppressed(), &profiles);
+        let assigned = assignee();
+        let exp = explicit();
+        let sup = suppressed();
+        let has_explicit =
+            !crate::profiles::active_recipients(&refs, &exp, &[], &profiles).is_empty();
+        let recipients = crate::profiles::active_recipients_with_assignee(
+            &refs,
+            &exp,
+            assigned.as_deref(),
+            &sup,
+            &profiles,
+        );
         view().flex_row().flex_wrap().gap_1().children(
             recipients
                 .into_iter()
                 .map(|id| {
                     let sources = sources.clone();
                     let on_dismiss = on_dismiss.clone();
-                    action(format!("@{id} ×"), Variant::Quiet, move |_| {
+                    let is_auto_assignee =
+                        !has_explicit && assigned.as_deref() == Some(id.as_str());
+                    let chip_label = if is_auto_assignee {
+                        format!("@{id} (assigned) ×")
+                    } else {
+                        format!("@{id} ×")
+                    };
+                    action(chip_label, Variant::Quiet, move |_| {
                         let profiles = ui.profiles.get_untracked();
                         let mut still_in_prose = false;
                         for src in &sources {

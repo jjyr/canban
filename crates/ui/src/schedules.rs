@@ -1142,6 +1142,7 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
                         hold_auto_merge: false,
                         github_links: Vec::new(),
                         created_by: format!("schedule:{wf_name}"),
+                        assignee: None,
                         content: Default::default(),
                         removed_at: None,
                         pull_request: None,

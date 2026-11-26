@@ -2026,6 +2026,155 @@ pub fn run(seed: u64) -> Result<u64> {
                 && *draft_err_rx.borrow_and_update() > before_err_epoch,
             "drafts::persistence error watch must wake consumer immediately on bump"
         );
+
+        // 9. Assignee projection in Shadow UI `CommittedWrites` + `default_card_terminal` ranking.
+        {
+            let proj_card = world.client_call(
+                "card.create",
+                canban_ui::with_ui_projection(
+                    "card.create",
+                    json!({
+                        "project_id": pid_local,
+                        "title": "Shadow UI Assignee Card",
+                        "assignee": "developer",
+                    }),
+                ),
+                Some(&pid_local),
+            )?;
+            let proj_cid = proj_card["id"].as_str().unwrap().to_owned();
+            let proj_rev = proj_card["revision"].as_u64().unwrap();
+            oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.create", "local", &proj_card);
+            let mut cw = canban_ui::presenter::CommittedWrites::default();
+            cw.record("card.create", &proj_card, "local");
+            let mut base_snap = world.client_merged_snapshot()?;
+            cw.reconcile(&mut base_snap);
+            ensure!(
+                base_snap
+                    .cards
+                    .iter()
+                    .find(|c| c.id == proj_cid)
+                    .and_then(|c| c.assignee.as_deref())
+                    == Some("developer"),
+                "CommittedWrites card.create projection lost assignee=developer"
+            );
+
+            let updated_card = world.client_call(
+                "card.update",
+                canban_ui::with_ui_projection(
+                    "card.update",
+                    json!({
+                        "card_id": proj_cid,
+                        "revision": proj_rev,
+                        "assignee": "reviewer",
+                    }),
+                ),
+                Some(&pid_local),
+            )?;
+            oracle.record_ui_write_receipt(PRIMARY_CLIENT, "card.update", "local", &updated_card);
+            cw.record("card.update", &updated_card, "local");
+            cw.reconcile(&mut base_snap);
+            ensure!(
+                base_snap
+                    .cards
+                    .iter()
+                    .find(|c| c.id == proj_cid)
+                    .and_then(|c| c.assignee.as_deref())
+                    == Some("reviewer"),
+                "CommittedWrites card.update projection lost assignee=reviewer"
+            );
+
+            // `default_card_terminal` prioritizes working/running Agent (`@reviewer`) over shell & idle `@developer`.
+            let mut tab_snap = Snapshot {
+                projects: base_snap.projects.clone(),
+                cards: vec![serde_json::from_value(json!({
+                    "id": "sim-tab-card",
+                    "project_id": pid_local,
+                    "number": 900,
+                    "title": "Tab Ranking Card",
+                    "body": "",
+                    "stage": "review",
+                    "assignee": "developer",
+                    "revision": 1,
+                    "created_at": 1
+                }))?],
+                terminals: serde_json::from_value(json!([
+                    {
+                        "id": "sim-tab-shell",
+                        "number": 1,
+                        "origin_project_id": pid_local,
+                        "origin_card_id": "sim-tab-card",
+                        "runtime": { "core_id": "core", "state": "running", "connection": "connected", "terminal": "pty-s" },
+                        "created_at": 1
+                    },
+                    {
+                        "id": "sim-tab-card:developer",
+                        "conversation_id": "sim-tab-card:developer",
+                        "number": 2,
+                        "origin_project_id": pid_local,
+                        "origin_card_id": "sim-tab-card",
+                        "runtime": { "core_id": "core", "state": "finished", "connection": "disconnected" },
+                        "agent": {
+                            "id": "sim-tab-card:developer",
+                            "card_id": "sim-tab-card",
+                            "project_id": pid_local,
+                            "number": 2,
+                            "profile": { "id": "developer", "name": "Developer", "provider": "codex", "command": ["codex"] },
+                            "prompt": "dev",
+                            "state": "completed",
+                            "core_id": "core",
+                            "created_at": 2
+                        },
+                        "created_at": 2
+                    },
+                    {
+                        "id": "sim-tab-card:reviewer",
+                        "conversation_id": "sim-tab-card:reviewer",
+                        "number": 3,
+                        "origin_project_id": pid_local,
+                        "origin_card_id": "sim-tab-card",
+                        "runtime": { "core_id": "core", "state": "running", "connection": "connected", "terminal": "pty-r", "agent_status": "working" },
+                        "agent": {
+                            "id": "sim-tab-card:reviewer",
+                            "card_id": "sim-tab-card",
+                            "project_id": pid_local,
+                            "number": 3,
+                            "profile": { "id": "reviewer", "name": "Reviewer", "provider": "claude", "command": ["claude"] },
+                            "prompt": "review",
+                            "state": "running",
+                            "connection_state": "connected",
+                            "core_id": "core",
+                            "terminal": "pty-r",
+                            "created_at": 3
+                        },
+                        "created_at": 3
+                    }
+                ]))?,
+                ..Default::default()
+            };
+            ensure!(
+                canban_ui::terminals::default_card_terminal(&tab_snap, "sim-tab-card", None)
+                    .as_deref()
+                    == Some("sim-tab-card:reviewer"),
+                "Expected default_card_terminal to prefer working @reviewer over shell & idle @developer"
+            );
+            ensure!(
+                canban_ui::terminals::default_card_terminal(
+                    &tab_snap,
+                    "sim-tab-card",
+                    Some("sim-tab-shell"),
+                )
+                .as_deref()
+                    == Some("sim-tab-shell"),
+                "Expected default_card_terminal to honor still-live recent tab override"
+            );
+            // When @reviewer finishes, live shell falls ahead of non-live idle history.
+            tab_snap.terminals.pop();
+            ensure!(
+                canban_ui::terminals::default_card_terminal(&tab_snap, "sim-tab-card", None)
+                    .as_deref()
+                    == Some("sim-tab-shell")
+            );
+        }
         world.hit("client_pages.ui_event_batch_checked");
 
         // =========================================================================

@@ -639,6 +639,7 @@ pub fn start_adopted_at(
                     .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
                 let step_ref = format!("{key}:{}", run.visit);
                 if let Some(entry_ref) = adopted_terminal.take() {
+                    let entry_id = entry_ref.id.clone();
                     if let Some(agent) = &mut entry_ref.agent {
                         if matches!(
                             agent.state.as_str(),
@@ -655,8 +656,28 @@ pub fn start_adopted_at(
                             agent.lifecycle.close_reason.clear();
                             agent.lifecycle.interactive_followup = false;
                         }
+                        let comment_id = match &agent.trigger {
+                            ExecutionTrigger::Comment { comment_id } => Some(comment_id.clone()),
+                            _ => None,
+                        };
                         if agent.trigger.is_comment() {
                             agent.trigger = ExecutionTrigger::Interactive;
+                        }
+                        for mut q in db.list::<Question>()? {
+                            let matches_adopted = Some(q.comment_id.as_str())
+                                == comment_id.as_deref()
+                                || q.terminal_id.as_deref() == Some(entry_id.as_str());
+                            if q.card_id == card.id
+                                && q.profile_id == agent.profile.id
+                                && matches_adopted
+                                && matches!(
+                                    q.state.as_str(),
+                                    "pending" | "delivering" | "delivered"
+                                )
+                            {
+                                q.state = "replied".into();
+                                db.save(&q)?;
+                            }
                         }
                         agent.workflow_run_id = Some(run.id.clone());
                         agent.workflow_step = Some(step_ref);
@@ -745,12 +766,24 @@ fn drive_at<Q: QueueHandler>(
             .push(json!({"step":key,"visit":run.visit,"at":now_ms,"event":"entered"}));
         match step {
             WorkflowStep::Agent {
-                profile,
+                default_agent,
+                override_agent,
                 instruction,
                 next: continuation,
                 ..
             } => {
                 let project: Project = db.get(&card.project_id)?;
+                let profile = canban_scheduler::select_for_agent_step(
+                    config,
+                    Some(&project),
+                    card.assignee.as_deref(),
+                    default_agent.as_deref(),
+                    override_agent.as_deref(),
+                )
+                .map(|p| p.id)
+                .ok()
+                .or(override_agent)
+                .or(default_agent);
                 let rework_label = match run.inputs["rework_origin"].as_str() {
                     Some("merge_conflict") => "Merge conflict to resolve before delivery",
                     Some("script_failure") => "Workflow script failure to fix",
@@ -1780,16 +1813,14 @@ pub fn rework_conflict_at(
                 .then(|| "merger".to_owned())
         })
         .or_else(|| {
-            rework
-                .as_ref()
-                .and_then(|to| match run.definition.steps.get(to) {
-                    Some(WorkflowStep::Agent {
-                        profile: Some(p), ..
-                    }) if config.profiles.iter().any(|x| x.id == *p && x.enabled) => {
-                        Some(p.clone())
-                    }
-                    _ => None,
-                })
+            rework.as_ref().and_then(|to| {
+                run.definition
+                    .steps
+                    .get(to)
+                    .and_then(|step| step.agent_fallback_profile())
+                    .filter(|p| config.profiles.iter().any(|x| x.id == *p && x.enabled))
+                    .map(str::to_owned)
+            })
         });
     let files_summary = if files.is_empty() {
         "(inspect `git status` in the Card worktree)".to_owned()
@@ -2261,11 +2292,13 @@ pub fn drive_cardless_at(db: Db<'_>, run: &mut WorkflowRun, now_ms: u64) -> Resu
                 );
             }
             WorkflowStep::Agent {
-                profile,
+                default_agent,
+                override_agent,
                 instruction,
                 next: continuation,
                 ..
             } => {
+                let profile = override_agent.or(default_agent);
                 let rework_label = match run.inputs["rework_origin"].as_str() {
                     Some("script_failure") => "Workflow script failure to fix",
                     _ => "Feedback for this visit",

@@ -624,17 +624,7 @@ pub(super) fn initialize_new(
                     format!("delivery:{}", project.id),
                     project.workflow.workspace.clone(),
                 );
-                for step in &mut doc.steps {
-                    if step.uses == "agent"
-                        && step
-                            .with
-                            .get("profile")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|id| !profiles.iter().any(|p| p == id))
-                    {
-                        step.with.remove("profile");
-                    }
-                }
+                strip_unknown_agent_steps(&mut doc, &profiles);
                 vec![json!({"filename":"development.yaml","source":source::encode(&doc)?})]
             }
         }
@@ -643,17 +633,7 @@ pub(super) fn initialize_new(
                 format!("delivery:{}", project.id),
                 project.workflow.workspace.clone(),
             );
-            for step in &mut doc.steps {
-                if step.uses == "agent"
-                    && step
-                        .with
-                        .get("profile")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|id| !profiles.iter().any(|p| p == id))
-                {
-                    step.with.remove("profile");
-                }
-            }
+            strip_unknown_agent_steps(&mut doc, &profiles);
             vec![json!({"filename":"development.yaml","source":source::encode(&doc)?})]
         }
     };
@@ -666,6 +646,23 @@ pub(super) fn initialize_new(
         &inputs,
         now_ms,
     )
+}
+
+fn strip_unknown_agent_steps(doc: &mut source::Document, profiles: &[String]) {
+    for step in &mut doc.steps {
+        if step.uses == "agent" {
+            for key in ["default_agent", "override"] {
+                if step
+                    .with
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| !profiles.iter().any(|p| p == id))
+                {
+                    step.with.remove(key);
+                }
+            }
+        }
+    }
 }
 
 /// Migrate any active Global (`__global`) workflow sources on older schema versions to `CURRENT`

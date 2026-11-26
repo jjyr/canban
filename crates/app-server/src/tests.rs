@@ -350,7 +350,7 @@ fn legacy_registry_and_workflow_are_preserved_without_starter_role_injection() {
         !sources["sources"][0]["source"]
             .as_str()
             .unwrap()
-            .contains("profile: developer")
+            .contains("default_agent: developer")
     );
 }
 

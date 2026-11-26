@@ -29,7 +29,7 @@ steps:
     uses: complete
 "#;
 
-const WORKFLOW_YAML_V12: &str = r#"schema: 12
+const WORKFLOW_YAML_V12: &str = r#"schema: 13
 id: sim-flow
 name: Sim Automation Flow
 workspace:
@@ -48,7 +48,7 @@ steps:
   - id: plan
     uses: agent
     with:
-      profile: codex
+      default_agent: codex
       instruction: Plan the simulated task
     next: approve
   - id: approve
@@ -65,13 +65,81 @@ steps:
   - id: build
     uses: agent
     with:
-      profile: developer
+      default_agent: developer
       instruction: Build the simulated task
     next: to_review
   - id: to_review
     uses: card.move
     with:
       column: review
+    next: finish
+  - id: finish
+    uses: complete
+"#;
+
+const LEGACY_V12_ASSIGNEE_YAML: &str = r#"schema: 12
+id: v12-assignee-migrate
+name: Legacy v12 Assignee Migration
+workspace:
+  create_worktree: false
+  sync_base: false
+on:
+  develop:
+    event: card.column_entered
+    start_at: dev
+    match:
+      column: develop
+steps:
+  - id: dev
+    uses: agent
+    with:
+      profile: developer
+      instruction: Build task
+    next: review_step
+  - id: review_step
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review task
+    next: finish
+  - id: finish
+    uses: complete
+"#;
+
+const ASSIGNEE_PRECEDENCE_YAML: &str = r#"schema: 13
+id: assignee-precedence-flow
+name: Assignee Precedence Flow
+workspace:
+  create_worktree: false
+  sync_base: false
+on:
+  develop:
+    event: card.column_entered
+    start_at: build
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: check
+    match:
+      column: review
+steps:
+  - id: build
+    uses: agent
+    with:
+      default_agent: developer
+      instruction: Build with card assignee or default developer
+    next: to_review
+  - id: to_review
+    uses: card.move
+    with:
+      column: review
+    next: check
+  - id: check
+    uses: agent
+    with:
+      override: reviewer
+      instruction: Mandatory reviewer check
     next: finish
   - id: finish
     uses: complete
@@ -126,8 +194,8 @@ pub fn run(seed: u64) -> Result<u64> {
             .and_then(|s| s["source"].as_str())
             .unwrap_or("");
         ensure!(
-            migrated_yaml.contains("schema: 12"),
-            "Expected schema: 1 workflow to migrate to schema: 12 on publish, got:\n{migrated_yaml}"
+            migrated_yaml.contains("schema: 13"),
+            "Expected schema: 1 workflow to migrate to schema: 13 on publish, got:\n{migrated_yaml}"
         );
         world.hit("workflow.schema_migrated_v1_to_v12");
 
@@ -539,6 +607,302 @@ pub fn run(seed: u64) -> Result<u64> {
             "Column-entry trigger must spawn 1 run and workflow.stop must terminate it; got {c2_runs:?}"
         );
         ensure!(final_snap.projects.iter().any(|p| p.id == raw_pid));
+
+        {
+            // ---------------------------------------------------------------------
+            // Assignee & workflow (`default_agent` vs `override`) + v12->v13 + Create & Start
+            // ---------------------------------------------------------------------
+            let dir2 = world.project_dir("wf-assignee")?;
+            let proj2 = world.client_call(
+                "project.create",
+                json!({ "host_id": "remote-a", "name": "Assignee Precedence", "directory": dir2 }),
+                None,
+            )?;
+            let pid2 = proj2["id"].as_str().unwrap().to_owned();
+            let src2 = world.client_call(
+                "workflow.sources",
+                json!({ "project_id": pid2 }),
+                Some(&pid2),
+            )?;
+
+            // 1. Mutual exclusivity: reject `default_agent` + `override` specified together.
+            let invalid_dual = r#"schema: 13
+id: invalid-dual
+name: Invalid Dual Agent Step
+on:
+  start:
+    event: manual
+    start_at: bad
+steps:
+  - id: bad
+    uses: agent
+    with:
+      default_agent: developer
+      override: reviewer
+    next: finish
+  - id: finish
+    uses: complete
+"#;
+            let dual_err = world
+                .client_call(
+                    "workflow.apply",
+                    json!({
+                        "project_id": pid2,
+                        "revision": src2["revision"],
+                        "sources": [{ "filename": "bad.yaml", "source": invalid_dual }],
+                    }),
+                    Some(&pid2),
+                )
+                .expect_err("Expected workflow.apply to reject both default_agent and override");
+            ensure!(
+                format!("{dual_err:#}").contains("default_agent")
+                    && format!("{dual_err:#}").contains("override"),
+                "Unexpected dual default_agent+override error: {dual_err:#}"
+            );
+
+            // 2. Apply v12 migration fixture (`profile: developer` -> `default_agent`,
+            //    `profile: reviewer` -> `override`) alongside schema v13 precedence workflow.
+            let _ = world.client_call(
+                "workflow.apply",
+                json!({
+                    "project_id": pid2,
+                    "revision": src2["revision"],
+                    "sources": [
+                        { "filename": "v12-migrate.yaml", "source": LEGACY_V12_ASSIGNEE_YAML },
+                        { "filename": "assignee-precedence.yaml", "source": ASSIGNEE_PRECEDENCE_YAML },
+                    ],
+                }),
+                Some(&pid2),
+            )?;
+            let migrated2 = world.client_call(
+                "workflow.sources",
+                json!({ "project_id": pid2 }),
+                Some(&pid2),
+            )?;
+            let v12_yaml = migrated2["sources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|s| s["filename"] == "v12-migrate.yaml")
+                .and_then(|s| s["source"].as_str())
+                .unwrap_or("");
+            ensure!(
+                v12_yaml.contains("schema: 13")
+                    && v12_yaml.contains("default_agent: developer")
+                    && v12_yaml.contains("override: reviewer"),
+                "Expected v12->v13 migration to preserve default_agent & override, got:\n{v12_yaml}"
+            );
+
+            // Wait a moment & disable v12-migrate so only `assignee-precedence-flow` fires cleanly.
+            let _ = world.client_call(
+                "workflow.apply",
+                json!({
+                    "project_id": pid2,
+                    "revision": migrated2["revision"],
+                    "sources": [
+                        { "filename": "assignee-precedence.yaml", "source": ASSIGNEE_PRECEDENCE_YAML },
+                    ],
+                }),
+                Some(&pid2),
+            )?;
+
+            // 3. Assigned Card (`assignee: "codex"`) created directly in `develop` ("Create & Start"):
+            //    must trigger `develop` workflow ONCE running `@codex` (`default_agent: developer` defers to assignee)
+            //    and zero duplicate Backlog wakes!
+            let ca = world.client_call(
+                "card.create",
+                json!({
+                    "view": "full",
+                    "project_id": pid2,
+                    "title": "Assigned Create & Start",
+                    "body": "Implement directly in develop",
+                    "assignee": "codex",
+                    "stage": "develop",
+                }),
+                Some(&pid2),
+            )?;
+            ensure!(
+                ca["assignee"].as_str() == Some("codex") && ca["stage"].as_str() == Some("develop"),
+                "Expected Create & Start receipt with assignee=codex & stage=develop, got {ca}"
+            );
+            let raw_ca = canban_types::unqualified_entity_id(ca["id"].as_str().unwrap()).to_owned();
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_ca && a.profile.id == "codex" && a.state == "running"
+                    })
+                }))
+            })?;
+            let herdr_a = world.herdr("remote-a").unwrap();
+            let initial_ca_sends = herdr_a.sent_inputs().len();
+            world.advance(Duration::from_millis(200))?;
+            ensure!(
+                herdr_a.sent_inputs().len() == initial_ca_sends,
+                "Create & Start should not enqueue a second Backlog wake after starting develop"
+            );
+            let ca_dev_tid = world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_ca && a.profile.id == "codex")
+                })
+                .unwrap()
+                .id;
+            world.server_call(
+                "remote-a",
+                "execution.report",
+                json!({
+                    "terminal_id": ca_dev_tid,
+                    "state": "completed",
+                    "message": "Built as assigned @codex",
+                    "request_key": format!("rep-ca-dev-{seed}"),
+                }),
+            )?;
+            // Entering `review` (`override: reviewer`) MUST spawn `@reviewer`, ignoring `card.assignee = codex`!
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_ca && a.profile.id == "reviewer" && a.state == "running"
+                    })
+                }))
+            })?;
+            let ca_rev_tid = world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_ca && a.profile.id == "reviewer")
+                })
+                .unwrap()
+                .id;
+            world.server_call(
+                "remote-a",
+                "execution.report",
+                json!({
+                    "terminal_id": ca_rev_tid,
+                    "state": "completed",
+                    "message": "Reviewed as override @reviewer",
+                    "request_key": format!("rep-ca-rev-{seed}"),
+                }),
+            )?;
+            world.hit("assignee.workflow_default_agent");
+            world.hit("assignee.workflow_override_preserved");
+
+            // 4. Unassigned Card entering `develop` falls back to `default_agent: developer`.
+            let cb = world.client_call(
+                "card.create",
+                json!({
+                    "view": "full",
+                    "project_id": pid2,
+                    "title": "Unassigned Default Agent",
+                    "stage": "develop",
+                }),
+                Some(&pid2),
+            )?;
+            let raw_cb = canban_types::unqualified_entity_id(cb["id"].as_str().unwrap()).to_owned();
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_cb && a.profile.id == "developer" && a.state == "running"
+                    })
+                }))
+            })?;
+            let cb_dev_tid = world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_cb && a.profile.id == "developer")
+                })
+                .unwrap()
+                .id;
+            world.server_call(
+                "remote-a",
+                "execution.report",
+                json!({
+                    "terminal_id": cb_dev_tid,
+                    "state": "completed",
+                    "message": "Built with default developer fallback",
+                    "request_key": format!("rep-cb-dev-{seed}"),
+                }),
+            )?;
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_cb && a.profile.id == "reviewer" && a.state == "running"
+                    })
+                }))
+            })?;
+            let cb_rev_tid = world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_cb && a.profile.id == "reviewer")
+                })
+                .unwrap()
+                .id;
+            world.server_call(
+                "remote-a",
+                "execution.report",
+                json!({
+                    "terminal_id": cb_rev_tid,
+                    "state": "completed",
+                    "message": "Reviewed unassigned card",
+                    "request_key": format!("rep-cb-rev-{seed}"),
+                }),
+            )?;
+            // Finish the 4 completed Assignee-section PTYs so they release `max_agents` slots
+            // for subsequent BoardRanking & ResolveArchive phases.
+            let assignee_addrs: Vec<String> = world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .filter_map(|t| {
+                    let a = t.agent?;
+                    (a.card_id == raw_ca || a.card_id == raw_cb)
+                        .then_some(a.terminal)
+                        .flatten()
+                })
+                .collect();
+            for addr in &assignee_addrs {
+                herdr_a.finish_terminal(addr, 0, "exited");
+            }
+            world.wait_until(5_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.agent.as_ref())
+                    .filter(|a| a.card_id == raw_ca || a.card_id == raw_cb)
+                    .all(|a| a.finished()))
+            })?;
+            world.heal_and_quiesce(15_000)?;
+            oracle.check_quiescent_invariants(world)?;
+        }
 
         // =====================================================================
         // Board Ranking (`before_card_id` + rank compaction) & Durability

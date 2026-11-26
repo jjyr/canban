@@ -553,26 +553,46 @@ pub fn card_live_entries_for_ui(ui: Ui, card_id: &str) -> Vec<Entry> {
     })
 }
 
+fn pick_default_card_terminal(live: &[Entry], recent: Option<&str>) -> Option<String> {
+    if let Some(id) = recent.filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid)) {
+        return Some(id.to_owned());
+    }
+    // Prefer an actively working/waiting/blocked Agent tab (e.g., `@reviewer` running in Review)
+    // over idle or shell tabs when no recent tab is active.
+    if let Some(active_agent) = live.iter().find(|e| {
+        e.agent.is_some()
+            && !e.ended()
+            && (e.needs_attention()
+                || matches!(
+                    e.herdr_status(),
+                    canban_types::HerdrStatus::Working
+                        | canban_types::HerdrStatus::Starting
+                        | canban_types::HerdrStatus::Blocked
+                )
+                || matches!(
+                    e.status().as_str(),
+                    "queued" | "starting" | "running" | "working"
+                ))
+    }) {
+        return Some(active_agent.saved.id.clone());
+    }
+    live.first().map(|e| e.saved.id.clone())
+}
+
 /// Resolve the active Terminal/Agent tab for a Card: prefer the Card's last-selected
-/// live entry when still active, otherwise select the first active entry (`live.first()`).
+/// live entry when still active, otherwise an actively running Agent tab, else `live.first()`.
 pub fn default_card_terminal(
     snapshot: &canban_types::Snapshot,
     card_id: &str,
     recent: Option<&str>,
 ) -> Option<String> {
     let live = card_live_entries(snapshot, card_id);
-    recent
-        .filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid))
-        .map(str::to_owned)
-        .or_else(|| live.first().map(|e| e.saved.id.clone()))
+    pick_default_card_terminal(&live, recent)
 }
 
 pub fn default_card_terminal_for_ui(ui: Ui, card_id: &str, recent: Option<&str>) -> Option<String> {
     let live = card_live_entries_for_ui(ui, card_id);
-    recent
-        .filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid))
-        .map(str::to_owned)
-        .or_else(|| live.first().map(|e| e.saved.id.clone()))
+    pick_default_card_terminal(&live, recent)
 }
 
 pub(crate) fn select_card_tab(ui: Ui, card_id: &str, terminal_id: String) {
@@ -687,7 +707,71 @@ fn gallery_create_entry(ui: Ui, params: serde_json::Value) -> String {
     id
 }
 
-/// Open the Card's side-by-side terminal split directly (selecting the active tab or spawning a shell).
+/// Open or resume an interactive Agent session on a Card (defaults to `card.assignee`).
+pub fn open_card_agent(ui: Ui, card_id: &str, profile_id: Option<&str>) {
+    let Some(card) = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+    else {
+        return;
+    };
+    if card.archived_at.is_some() {
+        ui.operation_error
+            .set("Restore this Card before opening an Agent.".into());
+        return;
+    }
+    let requested = profile_id
+        .map(str::trim)
+        .map(|s| s.trim_start_matches('@'))
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| card.assignee.clone());
+    let Some(target_profile) = requested else {
+        create_in_card(ui, card.project_id, card.id, false);
+        return;
+    };
+    let source_page = ui.page.get_untracked();
+    let in_card_workspace = source_page != "terminals";
+    if in_card_workspace {
+        if source_page != "card" || ui.card.get_untracked() != card.id {
+            ui.open_card(card.id.clone());
+        }
+        ui.card_terminal_open.set(true);
+        ui.card_terminal_focused.set(true);
+    }
+    if !crate::backend::is_connected() {
+        let id = gallery_create_entry(
+            ui,
+            json!({"project_id":card.project_id,"card_id":card.id,"agent":true}),
+        );
+        if ui.page.get_untracked() == "card" && ui.card.get_untracked() == card.id {
+            select_card_tab(ui, &card.id, id);
+            ui.card_terminal_open.set(true);
+            ui.card_terminal_focused.set(true);
+        } else {
+            ui.open_terminal(id);
+        }
+        return;
+    }
+    let mut params = json!({"card_id": card.id, "profile_id": target_profile});
+    attach_launch_size(&mut params, ui, in_card_workspace);
+    let target_card = card.id;
+    dispatch_then(ui, "agent.open", params, move |v| {
+        let Some(id) = v["terminal_id"].as_str().map(str::to_owned) else {
+            return;
+        };
+        if ui.page.get_untracked() == "card" && ui.card.get_untracked() == target_card {
+            select_card_tab(ui, &target_card, id);
+            ui.card_terminal_open.set(true);
+            ui.card_terminal_focused.set(true);
+        } else if source_page == "terminals" {
+            ui.open_terminal(id);
+        }
+    });
+}
+
+/// Open the Card's side-by-side terminal split directly (selecting the active tab,
+/// opening the assigned Agent session when unassigned/idle, or spawning a shell).
 pub fn open_card_quick(ui: Ui, card_id: &str) {
     let Some(card) = ui
         .snapshot
@@ -698,7 +782,9 @@ pub fn open_card_quick(ui: Ui, card_id: &str) {
     if ui.page.get_untracked() != "card" || ui.card.get_untracked() != card.id {
         ui.open_card(card.id.clone());
     }
-    if !ui.card_tab.get_untracked().is_empty() {
+    let recent = ui.terminal_recent.with(|m| m.get(&card.id).cloned());
+    if let Some(id) = untracked(|| default_card_terminal_for_ui(ui, &card.id, recent.as_deref())) {
+        select_card_tab(ui, &card.id, id);
         ui.card_terminal_open.set(true);
         ui.card_terminal_focused.set(true);
         ui.terminal_focus.update(|v| *v += 1);
@@ -709,7 +795,11 @@ pub fn open_card_quick(ui: Ui, card_id: &str) {
             .set("Restore this Card before opening a new terminal.".into());
         return;
     }
-    create_in_card(ui, card.project_id, card.id, false);
+    if card.assignee.is_some() {
+        open_card_agent(ui, &card.id, None);
+    } else {
+        create_in_card(ui, card.project_id, card.id, false);
+    }
 }
 
 /// Spawn a new Shell Terminal (`agent == false`) or clean ephemeral CLI Agent (`agent == true`) on a Card.

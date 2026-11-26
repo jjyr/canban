@@ -94,15 +94,29 @@ fn prepare_params(op: &Mutation, snapshot: &Snapshot) -> PrepareResult {
             let force = op.params["force"] == true;
             let mine_title = op.params.get("title").and_then(Value::as_str);
             let mine_body = op.params.get("body").and_then(Value::as_str);
-            let (apply_title, apply_body) = if force {
-                (mine_title.map(str::to_owned), mine_body.map(str::to_owned))
+            let mine_assignee = op.params.get("assignee").map(Value::as_str);
+            let (apply_title, apply_body, apply_assignee) = if force {
+                (
+                    mine_title.map(str::to_owned),
+                    mine_body.map(str::to_owned),
+                    mine_assignee.map(|o| {
+                        o.map(str::trim)
+                            .map(|s| s.trim_start_matches('@'))
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                    }),
+                )
             } else {
-                match classify_card_update(&op.base, mine_title, mine_body, server) {
+                match classify_card_update(&op.base, mine_title, mine_body, mine_assignee, server) {
                     FieldMergeOutcome::NoOp => return PrepareResult::AlreadySatisfied,
                     FieldMergeOutcome::Conflict { fields, .. } => {
                         return PrepareResult::Conflict(fields);
                     }
-                    FieldMergeOutcome::Apply { title, body } => (title, body),
+                    FieldMergeOutcome::Apply {
+                        title,
+                        body,
+                        assignee,
+                    } => (title, body, assignee),
                 }
             };
             let mut p = json!({
@@ -116,6 +130,9 @@ fn prepare_params(op: &Mutation, snapshot: &Snapshot) -> PrepareResult {
             }
             if let Some(b) = apply_body {
                 p["body"] = Value::String(b);
+            }
+            if let Some(a) = apply_assignee {
+                p["assignee"] = a.map(Value::String).unwrap_or(Value::Null);
             }
             PrepareResult::Send(p)
         }
@@ -189,7 +206,15 @@ fn card_already_matches_after_key_conflict(op: &Mutation, snapshot: &Snapshot) -
                 .get("body")
                 .and_then(Value::as_str)
                 .is_none_or(|b| card.body == b);
-            title_ok && body_ok
+            let assignee_ok = op.params.get("assignee").is_none_or(|raw| {
+                let want = raw
+                    .as_str()
+                    .map(str::trim)
+                    .map(|s| s.trim_start_matches('@'))
+                    .filter(|s| !s.is_empty());
+                card.assignee.as_deref() == want
+            });
+            title_ok && body_ok && assignee_ok
         }
         MutationKind::MoveCard => op
             .params
@@ -232,6 +257,14 @@ fn upsert_card_into_snapshot(snapshot: &mut Snapshot, op: &Mutation, reply: &Val
         {
             existing.body = body.to_owned();
         }
+        if let Some(raw_assignee) = reply.get("assignee").or_else(|| op.params.get("assignee")) {
+            existing.assignee = raw_assignee
+                .as_str()
+                .map(str::trim)
+                .map(|s| s.trim_start_matches('@'))
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+        }
     } else if op.kind == MutationKind::CreateCard {
         let project_id = reply
             .get("project_id")
@@ -257,9 +290,17 @@ fn upsert_card_into_snapshot(snapshot: &mut Snapshot, op: &Mutation, reply: &Val
             .or_else(|| op.params.get("stage").and_then(Value::as_str))
             .unwrap_or("backlog")
             .to_owned();
+        let assignee = reply
+            .get("assignee")
+            .or_else(|| op.params.get("assignee"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(|s| s.trim_start_matches('@'))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let revision = reply.get("revision").and_then(Value::as_u64).unwrap_or(1);
         let number = reply.get("number").and_then(Value::as_u64).unwrap_or(0);
-        let fallback_card = json!({
+        let mut fallback_card = json!({
             "id": id,
             "project_id": project_id,
             "number": number,
@@ -270,6 +311,9 @@ fn upsert_card_into_snapshot(snapshot: &mut Snapshot, op: &Mutation, reply: &Val
             "created_at": op.created_at,
             "created_by": "user",
         });
+        if let Some(assignee) = assignee {
+            fallback_card["assignee"] = Value::String(assignee);
+        }
         if let Ok(card) = serde_json::from_value::<Card>(fallback_card) {
             snapshot.cards.push(card);
         }

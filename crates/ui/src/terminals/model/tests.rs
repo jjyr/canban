@@ -943,11 +943,11 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
         ui.page.set("board".into());
 
         // 0. Clicking the Card body (`open_card`) keeps the Terminal split collapsed (`false`),
-        // even when active terminals/agents exist, while pre-selecting the default live tab.
+        // even when active terminals/agents exist, while pre-selecting the actively running Agent tab.
         ui.open_card("c1".into());
         assert_eq!(ui.page.get_untracked(), "card");
         assert_eq!(ui.card.get_untracked(), "c1");
-        assert_eq!(ui.card_tab.get_untracked(), "c1-shell");
+        assert_eq!(ui.card_tab.get_untracked(), conv_id);
         assert!(!ui.card_terminal_open.get_untracked());
         assert!(!ui.card_terminal_focused.get_untracked());
 
@@ -1028,7 +1028,7 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
         ui.open_card_with_terminal("c1".into(), Some("ended-nonexistent-tab".into()));
         assert_eq!(ui.page.get_untracked(), "card");
         assert_eq!(ui.card.get_untracked(), "c1");
-        assert_eq!(ui.card_tab.get_untracked(), "c1-shell");
+        assert_eq!(ui.card_tab.get_untracked(), conv_id);
         assert!(ui.card_terminal_open.get_untracked());
 
         // 6. Clicking the top Card link (`#N Title`) or `Open Card` menu item inside `Terminals` (`terminal_card`)

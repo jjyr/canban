@@ -18,6 +18,7 @@ runtime = [
     "dep:canban-notifications",
     "dep:canban-kanban",
     "dep:canban-context",
+    "dep:canban-scheduler",
 ]
 
 [dependencies]
@@ -29,5 +30,6 @@ canban-timeline = { workspace = true, optional = true }
 canban-notifications = { workspace = true, optional = true }
 canban-kanban = { workspace = true, optional = true }
 canban-context = { workspace = true, optional = true }
+canban-scheduler = { workspace = true, optional = true }
 serde.workspace = true
 serde_yaml_ng = "0.10"

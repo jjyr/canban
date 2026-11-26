@@ -500,17 +500,63 @@ impl Document {
                     ),
                 );
             }
-            if kind == "agent"
-                && args
+            if kind == "agent" {
+                ensure!(
+                    !args.contains_key("profile"),
+                    "Step {} (`uses: agent`) uses `default_agent` or `override` instead of `profile`",
+                    step.id
+                );
+                let has_default = matches!(args.get("default_agent"), Some(v) if !v.is_null());
+                let has_override = matches!(args.get("override"), Some(v) if !v.is_null());
+                ensure!(
+                    !(has_default && has_override),
+                    "Step {} cannot specify both `default_agent` and `override`",
+                    step.id
+                );
+                if let Some(raw) = args.remove("default_agent") {
+                    match raw {
+                        Value::Null => {}
+                        Value::String(s) => {
+                            let t = s.trim();
+                            if !t.is_empty() {
+                                args.insert("default_agent".into(), json!(t));
+                            }
+                        }
+                        _ => bail!(
+                            "Step {} `with.default_agent` must be a string or null",
+                            step.id
+                        ),
+                    }
+                }
+                if let Some(raw) = args.remove("override") {
+                    match raw {
+                        Value::Null => {}
+                        Value::String(s) => {
+                            let t = s.trim();
+                            ensure!(
+                                !t.is_empty(),
+                                "Step {} `with.override` cannot be empty",
+                                step.id
+                            );
+                            args.insert("override".into(), json!(t));
+                        }
+                        _ => bail!("Step {} `with.override` must be a string or null", step.id),
+                    }
+                }
+                if args
                     .get("instruction")
                     .and_then(|v| v.as_str())
                     .is_none_or(|s| s.trim().is_empty())
-            {
-                let prof = args.get("profile").and_then(|v| v.as_str());
-                args.insert(
-                    "instruction".into(),
-                    json!(default_step_prompt(&step.id, prof)),
-                );
+                {
+                    let prof = args
+                        .get("override")
+                        .or_else(|| args.get("default_agent"))
+                        .and_then(|v| v.as_str());
+                    args.insert(
+                        "instruction".into(),
+                        json!(default_step_prompt(&step.id, prof)),
+                    );
+                }
             }
             let stage = stages.get(&step.id).map(String::as_str);
             let mut raw = self.raw_next(i);
@@ -849,7 +895,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                 id: "agent:develop".into(),
                 name: Some("Implement".into()),
                 uses: "agent".into(),
-                with: BTreeMap::from([("profile".into(), json!("developer"))]),
+                with: BTreeMap::from([("default_agent".into(), json!("developer"))]),
                 next: Some("move:develop".into()),
                 ..Default::default()
             },
@@ -982,7 +1028,18 @@ pub fn instantiate_collection(
             rule.selector.project_id = None;
         }
         for step in &mut doc.steps {
-            if matches!(step.kind(), "agent" | "deliver")
+            if step.kind() == "agent" {
+                for key in ["default_agent", "override", "profile"] {
+                    if step
+                        .with
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| !id.is_empty() && !profiles.iter().any(|p| p == id))
+                    {
+                        step.with.remove(key);
+                    }
+                }
+            } else if step.kind() == "deliver"
                 && step
                     .with
                     .get("profile")
@@ -1544,7 +1601,9 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
         .map(|s| {
             let prof = s
                 .with
-                .get("profile")
+                .get("override")
+                .or_else(|| s.with.get("default_agent"))
+                .or_else(|| s.with.get("profile"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("developer")
                 .to_owned();
@@ -1666,7 +1725,7 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
         if let Some(existing) = doc.steps.iter_mut().find(|s| s.id == plan_step_id) {
             existing.next = Some(after_plan);
         } else {
-            let mut with = BTreeMap::from([("profile".into(), json!(plan_profile))]);
+            let mut with = BTreeMap::from([("default_agent".into(), json!(plan_profile))]);
             if let Some(prompt) = plan_prompt {
                 with.insert("instruction".into(), json!(prompt));
             }
@@ -2320,15 +2379,24 @@ fn walk_stage_summary(
                 details.push(format!("• {gate}"));
                 cur = next.as_deref();
             }
-            WorkflowStep::Agent { profile, next, .. } => {
+            WorkflowStep::Agent {
+                default_agent,
+                override_agent,
+                next,
+                ..
+            } => {
+                let effective = override_agent.as_ref().or(default_agent.as_ref());
                 if first_agent.is_none() {
-                    first_agent = Some((step_id.to_owned(), profile.clone()));
+                    first_agent = Some((step_id.to_owned(), effective.cloned()));
                 }
-                let who = profile
-                    .as_deref()
-                    .filter(|p| !p.is_empty())
-                    .map(|p| format!("@{p}"))
-                    .unwrap_or_else(|| "default Agent".into());
+                let who = if let Some(forced) = override_agent.as_deref().filter(|p| !p.is_empty())
+                {
+                    format!("@{forced} (override)")
+                } else if let Some(def) = default_agent.as_deref().filter(|p| !p.is_empty()) {
+                    format!("@{def} (or Card Assignee)")
+                } else {
+                    "Card Assignee or default Agent".into()
+                };
                 details.push(format!("• Runs {who}"));
                 cur = next.as_deref();
             }
@@ -2758,7 +2826,9 @@ pub fn schedule_agent_profile(def: &WorkflowDefinition, rule_id: &str) -> Option
             break;
         }
         match def.steps.get(step_id)? {
-            WorkflowStep::Agent { profile, .. } => return profile.clone(),
+            step @ WorkflowStep::Agent { .. } => {
+                return step.agent_fallback_profile().map(str::to_owned);
+            }
             WorkflowStep::Script {
                 next, on_failure, ..
             } => {
@@ -2875,7 +2945,7 @@ pub fn build_scheduled_workflow_document(spec: ScheduledWorkflowSpec) -> Documen
             });
             let mut with = BTreeMap::new();
             if let Some(p) = profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                with.insert("profile".into(), json!(p));
+                with.insert("default_agent".into(), json!(p));
             }
             let inst = if instruction.trim().is_empty() {
                 "The scheduled script failed or flagged items needing review. Inspect the preceding script output and environment, resolve safe items, or report `--state blocked` to ask the user in this terminal.".to_owned()
@@ -2899,7 +2969,7 @@ pub fn build_scheduled_workflow_document(spec: ScheduledWorkflowSpec) -> Documen
             start_at = "agent:run".to_owned();
             let mut with = BTreeMap::new();
             if let Some(p) = profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                with.insert("profile".into(), json!(p));
+                with.insert("default_agent".into(), json!(p));
             }
             let inst = if instruction.trim().is_empty() {
                 "Inspect the workspace health, run relevant checks, and summarize findings in your report.".to_owned()
@@ -2931,7 +3001,7 @@ pub fn build_scheduled_workflow_document(spec: ScheduledWorkflowSpec) -> Documen
             });
             let mut with = BTreeMap::new();
             if let Some(p) = profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                with.insert("profile".into(), json!(p));
+                with.insert("default_agent".into(), json!(p));
             }
             let inst = if instruction.trim().is_empty() {
                 "Evaluate and complete this scheduled Card task, then report your outcome."

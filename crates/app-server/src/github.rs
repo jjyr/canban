@@ -439,7 +439,8 @@ impl AppServer {
                     client.issue(&source.repository, number)?
                 };
                 let comments = Vec::new();
-                self.mutate(method, &p, |db| {
+                let mut started_stage = false;
+                let res = self.mutate(method, &p, |db| {
                     ensure!(
                         self.github.generation() == account_generation,
                         "GitHub account changed; search again"
@@ -452,6 +453,7 @@ impl AppServer {
                             .is_some_and(|s| s.generation == source.generation),
                         "Project source changed; search again"
                     );
+                    let config = self.config();
                     let instructions = p["instructions"].as_str().unwrap_or("");
                     let now_ms = self.now_ms();
                     let mut card = integration::upsert_at(
@@ -462,6 +464,12 @@ impl AppServer {
                         instructions,
                         now_ms,
                     )?;
+                    if let Some(assignee) =
+                        crate::sessions::parse_assignee_param(&config, Some(&current), &p)?
+                    {
+                        card.assignee = assignee;
+                        db.save(&card)?;
+                    }
                     if let Some(note_id) = p["source_note_id"].as_str() {
                         let note: Note = db.get(note_id)?;
                         ensure!(
@@ -482,9 +490,9 @@ impl AppServer {
                             self.id_gen.as_ref(),
                         )?;
                     }
-                    crate::sessions::queue_card_mentions(
+                    started_stage = self.finalize_card_creation_in_tx(
                         db,
-                        &self.config(),
+                        &config,
                         &mut card,
                         &current,
                         &p,
@@ -492,7 +500,12 @@ impl AppServer {
                         now_ms,
                     )?;
                     Ok(serde_json::to_value(card)?)
-                })
+                })?;
+                if started_stage {
+                    self.request_deliveries();
+                    self.request_scripts();
+                }
+                Ok(res)
             }
             "github.sync.request" => {
                 self.queue_github_sync(strp(&p, "project_id")?, true)?;

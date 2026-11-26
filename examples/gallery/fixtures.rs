@@ -858,7 +858,7 @@ pub fn workspace() -> canban_types::Snapshot {
             }),
             _ => None,
         };
-        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,resolution,created_at:now()});
+        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),assignee:if i==1{Some("developer".into())}else{None},content:Default::default(),removed_at:None,pull_request,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,resolution,created_at:now()});
     }
     s.cards.push(Card {
         schedule_source: None,
@@ -866,6 +866,7 @@ pub fn workspace() -> canban_types::Snapshot {
         hold_auto_merge: false,
         github_links: vec![],
         created_by: "Gallery".into(),
+        assignee: None,
         content: Default::default(),
         removed_at: None,
         pull_request: None,
@@ -4102,6 +4103,7 @@ steps:
         hold_auto_merge: false,
         github_links: Vec::new(),
         created_by: "schedule:Weekday QA Smoke Card".into(),
+        assignee: None,
         content: Default::default(),
         removed_at: None,
         pull_request: None,

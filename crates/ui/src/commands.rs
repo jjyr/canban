@@ -1667,6 +1667,21 @@ pub fn execute(ui: Ui, id: &str) {
             crate::review::open_compare(ui);
             crate::review::select_git_pair(ui, "HEAD", "UNCOMMITTED");
         }
+        _ if id.starts_with("assign-card:") => {
+            let prof = &id["assign-card:".len()..];
+            if let Some(c) = ui.current_card().filter(|c| c.active()) {
+                crate::presenter::assign_card(ui, &c.id, Some(prof));
+            } else {
+                ui.notify("Select an active Card first");
+            }
+        }
+        "unassign-card" => {
+            if let Some(c) = ui.current_card().filter(|c| c.active()) {
+                crate::presenter::assign_card(ui, &c.id, None);
+            } else {
+                ui.notify("Select an active Card first");
+            }
+        }
         _ => {}
     }
 }

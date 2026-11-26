@@ -618,6 +618,20 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                 !draft.get().title.trim().is_empty()
             }
     });
+    let start_after_create = stored(false);
+    let start_stage_for_target = computed(move || {
+        let pid = target.get();
+        ui.snapshot.with(|s| {
+            s.projects.iter().find(|p| p.id == pid).and_then(|p| {
+                p.workflow
+                    .stages
+                    .iter()
+                    .find(|st| st.id == "develop")
+                    .or_else(|| p.workflow.stages.get(1))
+                    .map(|st| (st.id.clone(), st.name.clone()))
+            })
+        })
+    });
     let instructions_suppressed = signal(Vec::<String>::new());
     // Button, command help and keyboard all dispatch the same scoped form intent.
     let seen_submit = stored(ui.card_submit.get_untracked());
@@ -629,29 +643,50 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             || ui.quick_open.get_untracked()
             || !can_create.get_untracked()
         {
+            start_after_create.replace(false);
             return;
         }
         let d = draft.get_untracked();
         let is_github = kind.get_untracked() != "local";
         let submit_project = target.get_untracked();
         let profiles = ui.profiles.get_untracked();
+        let start_stage = start_after_create
+            .replace(false)
+            .then(|| start_stage_for_target.get_untracked().map(|(id, _)| id))
+            .flatten();
         let mut params = if is_github {
-            let mentions = crate::profiles::active_recipients(
-                &[&d.instructions],
-                &[],
-                &instructions_suppressed.get_untracked(),
-                &profiles,
-            );
+            let mentions = if start_stage.is_some() {
+                Vec::new()
+            } else {
+                crate::profiles::active_recipients_with_assignee(
+                    &[&d.instructions],
+                    &[],
+                    d.assignee.as_deref(),
+                    &instructions_suppressed.get_untracked(),
+                    &profiles,
+                )
+            };
             json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions,"kind":kind.get_untracked(),"mentions":mentions})
         } else {
-            let mentions = crate::profiles::active_recipients(
-                &[&d.title, &d.body],
-                &d.recipients,
-                &d.suppressed_recipients,
-                &profiles,
-            );
+            let mentions = if start_stage.is_some() {
+                Vec::new()
+            } else {
+                crate::profiles::active_recipients_with_assignee(
+                    &[&d.title, &d.body],
+                    &d.recipients,
+                    d.assignee.as_deref(),
+                    &d.suppressed_recipients,
+                    &profiles,
+                )
+            };
             json!({"project_id":submit_project,"title":d.title,"body":d.body,"mentions":mentions})
         };
+        if let Some(assignee) = d.assignee.as_deref() {
+            params["assignee"] = json!(assignee);
+        }
+        if let Some(stage_id) = start_stage {
+            params["stage"] = json!(stage_id);
+        }
         params["request_key"] = json!(format!(
             "{}:{}",
             submit_key,
@@ -674,6 +709,9 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                             ui.drafts
                                 .with(|m| m.get(&key).cloned().unwrap_or(d.clone()))
                         });
+                        if latest.assignee == d.assignee {
+                            latest.assignee = None;
+                        }
                         if is_github {
                             if latest.instructions == d.instructions {
                                 latest.instructions.clear();
@@ -733,11 +771,14 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         let profiles = ui.profiles.get();
         let t = local_title.get();
         let b = local.get();
+        let assigned = draft.with(|d| d.assignee.clone());
         let cur = draft.with_untracked(|d| d.suppressed_recipients.clone());
         if cur.is_empty() {
             return;
         }
-        let present = crate::profiles::active_recipients(&[&t, &b], &[], &[], &profiles);
+        let assigned_slice: Vec<String> = assigned.into_iter().collect();
+        let present =
+            crate::profiles::active_recipients(&[&t, &b], &assigned_slice, &[], &profiles);
         let next: Vec<String> = cur.into_iter().filter(|id| present.contains(id)).collect();
         if next != draft.with_untracked(|d| d.suppressed_recipients.clone()) {
             draft.update(|d| d.suppressed_recipients = next);
@@ -746,11 +787,13 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     effect(move || {
         let profiles = ui.profiles.get();
         let text = instructions.get();
+        let assigned = draft.with(|d| d.assignee.clone());
         let cur = instructions_suppressed.get_untracked();
         if cur.is_empty() {
             return;
         }
-        let present = crate::profiles::active_recipients(&[&text], &[], &[], &profiles);
+        let assigned_slice: Vec<String> = assigned.into_iter().collect();
+        let present = crate::profiles::active_recipients(&[&text], &assigned_slice, &[], &profiles);
         let next: Vec<String> = cur.into_iter().filter(|id| present.contains(id)).collect();
         if next != instructions_suppressed.get_untracked() {
             instructions_suppressed.set(next);
@@ -847,23 +890,144 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                     .p_3()
                     .gap_3()
                     .child(
-                        action(
-                            move || {
-                                format!(
-                                    "Project: {} ▾",
-                                    ui.snapshot.with(|s| s
-                                        .projects
-                                        .iter()
-                                        .find(|p| p.id == target.get())
-                                        .map(|p| p.name.clone())
-                                        .unwrap_or_else(|| "Choose Project".into()))
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                action(
+                                    move || {
+                                        format!(
+                                            "Project: {} ▾",
+                                            ui.snapshot.with(|s| s
+                                                .projects
+                                                .iter()
+                                                .find(|p| p.id == target.get())
+                                                .map(|p| p.name.clone())
+                                                .unwrap_or_else(|| "Choose Project".into()))
+                                        )
+                                    },
+                                    Variant::Secondary,
+                                    move |_| crate::utilities::open(ui, "card-project"),
                                 )
-                            },
-                            Variant::Secondary,
-                            move |_| crate::utilities::open(ui, "card-project"),
-                        )
-                        .self_start()
-                        .accessibility_label(|| Some("Choose target Project".into())),
+                                .accessibility_label(|| Some("Choose target Project".into())),
+                            )
+                            .child(dynamic(move || {
+                                let profs = ui
+                                    .profiles
+                                    .get()
+                                    .into_iter()
+                                    .filter(|p| p.enabled)
+                                    .collect::<Vec<_>>();
+                                if profs.is_empty() {
+                                    return view().into_element();
+                                }
+                                let proj = ui.snapshot.with_untracked(|s| {
+                                    let pid = target.get_untracked();
+                                    s.projects.iter().find(|p| p.id == pid).cloned()
+                                });
+                                let cur = draft.with(|d| d.assignee.clone());
+                                let mut row = view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(muted("Assignee").text_size(px(12.)));
+                                let mut seg = view().flex_row().flex_wrap().gap_1();
+                                seg = seg.child(compact_segment(
+                                    "None",
+                                    None,
+                                    {
+                                        let cur = cur.clone();
+                                        move || cur.is_none()
+                                    },
+                                    move |_| draft.update(|d| d.assignee = None),
+                                ));
+                                let inline_count = 5usize;
+                                for prof in profs.iter().take(inline_count) {
+                                    let (mark, _, _) =
+                                        crate::profiles::effective_provider(prof, proj.as_ref());
+                                    let pid = prof.id.clone();
+                                    let sel = pid.clone();
+                                    let is_selected = cur.as_deref() == Some(sel.as_str());
+                                    seg = seg.child(compact_segment(
+                                        format!("@{pid}"),
+                                        Some(mark),
+                                        move || is_selected,
+                                        move |_| {
+                                            let next = pid.clone();
+                                            let retain = pid.clone();
+                                            draft.update(|d| {
+                                                d.assignee = Some(next);
+                                                d.suppressed_recipients.retain(|x| x != &retain);
+                                            });
+                                            instructions_suppressed
+                                                .update(|list| list.retain(|x| x != &retain));
+                                        },
+                                    ));
+                                }
+                                if profs.len() > inline_count {
+                                    let more_anchor = element_ref();
+                                    let overflow = profs[inline_count..].to_vec();
+                                    let overflow_label = cur
+                                        .as_deref()
+                                        .filter(|id| overflow.iter().any(|p| p.id == *id))
+                                        .map(|id| format!("@{id} ▾"))
+                                        .unwrap_or_else(|| "More ▾".to_owned());
+                                    let cur_for_menu = cur;
+                                    seg = seg.child(view().element_ref(&more_anchor).child(
+                                        action(overflow_label, Variant::Quiet, move |_| {
+                                            use nsh_core::element::desktop::MenuItem;
+                                            let overflow = overflow.clone();
+                                            let cur = cur_for_menu.clone();
+                                            ui.spawn(async move {
+                                                let Some(bounds) = more_anchor.measure().await
+                                                else {
+                                                    return;
+                                                };
+                                                let items: Vec<MenuItem> = overflow
+                                                    .into_iter()
+                                                    .map(|p| {
+                                                        let pid = p.id;
+                                                        let set_pid = pid.clone();
+                                                        let checked =
+                                                            cur.as_deref() == Some(pid.as_str());
+                                                        MenuItem::new(format!("@{pid}"))
+                                                            .checked(checked)
+                                                            .on_select(move || {
+                                                                let next = set_pid.clone();
+                                                                let retain = set_pid.clone();
+                                                                draft.update(|d| {
+                                                                    d.assignee = Some(next);
+                                                                    d.suppressed_recipients
+                                                                        .retain(|x| x != &retain);
+                                                                });
+                                                                instructions_suppressed.update(
+                                                                    |list| {
+                                                                        list.retain(|x| {
+                                                                            x != &retain
+                                                                        });
+                                                                    },
+                                                                );
+                                                            })
+                                                    })
+                                                    .collect();
+                                                nsh_core::element::desktop::popup_menu_at(
+                                                    items,
+                                                    point(
+                                                        bounds.page.x,
+                                                        bounds.page.y + bounds.frame.size.height,
+                                                    ),
+                                                )
+                                                .await;
+                                            });
+                                        }),
+                                    ));
+                                }
+                                row = row.child(seg);
+                                row.into_element()
+                            })),
                     )
                     .child(
                         segmented()
@@ -903,24 +1067,29 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                 move || {
                                     let profiles = ui.profiles.get();
                                     let d = draft.get();
-                                    !crate::profiles::active_recipients(
+                                    !crate::profiles::active_recipients_with_assignee(
                                         &[&d.title, &d.body],
                                         &d.recipients,
+                                        d.assignee.as_deref(),
                                         &d.suppressed_recipients,
                                         &profiles,
                                     )
                                     .is_empty()
                                 },
                                 move || {
-                                    crate::editor::recipient_chips(
+                                    crate::editor::recipient_chips_with_assignee(
                                         ui,
                                         vec![local_title, local],
                                         move || draft.with(|d| d.recipients.clone()),
+                                        move || draft.with(|d| d.assignee.clone()),
                                         move || draft.with(|d| d.suppressed_recipients.clone()),
                                         move |id, still_in_prose| {
+                                            let is_assignee =
+                                                draft.get_untracked().assignee.as_deref()
+                                                    == Some(id.as_str());
                                             draft.update(|d| {
                                                 d.recipients.retain(|p| p != &id);
-                                                if still_in_prose
+                                                if (still_in_prose || is_assignee)
                                                     && !d.suppressed_recipients.contains(&id)
                                                 {
                                                     d.suppressed_recipients.push(id);
@@ -1044,22 +1213,28 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                 move || {
                                     let profiles = ui.profiles.get();
                                     let text = instructions.get();
-                                    !crate::profiles::active_recipients(
+                                    let assigned = draft.with(|d| d.assignee.clone());
+                                    !crate::profiles::active_recipients_with_assignee(
                                         &[&text],
                                         &[],
+                                        assigned.as_deref(),
                                         &instructions_suppressed.get(),
                                         &profiles,
                                     )
                                     .is_empty()
                                 },
                                 move || {
-                                    crate::editor::recipient_chips(
+                                    crate::editor::recipient_chips_with_assignee(
                                         ui,
                                         vec![instructions],
                                         Vec::new,
+                                        move || draft.with(|d| d.assignee.clone()),
                                         move || instructions_suppressed.get(),
                                         move |id, still_in_prose| {
-                                            if still_in_prose {
+                                            let is_assignee =
+                                                draft.get_untracked().assignee.as_deref()
+                                                    == Some(id.as_str());
+                                            if still_in_prose || is_assignee {
                                                 instructions_suppressed.update(|list| {
                                                     if !list.contains(&id) {
                                                         list.push(id);
@@ -1090,9 +1265,27 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                     drafts::remove(ui, &key);
                     ui.navigate("board");
                 }))
+                .child(when(
+                    move || start_stage_for_target.get().is_some(),
+                    move || {
+                        compact_action(
+                            move || match start_stage_for_target.get() {
+                                Some((_, name)) => format!("Create & Start ({name})"),
+                                None => "Create & Start".to_owned(),
+                            },
+                            Variant::Secondary,
+                            move |_| {
+                                start_after_create.replace(true);
+                                ui.card_submit.update(|n| *n += 1);
+                            },
+                        )
+                        .disabled(move || !can_create.get())
+                    },
+                ))
                 .child(
                     compact_action("Create", Variant::Primary, move |_| {
-                        ui.card_submit.update(|n| *n += 1)
+                        start_after_create.replace(false);
+                        ui.card_submit.update(|n| *n += 1);
                     })
                     .disabled(move || !can_create.get()),
                 ),

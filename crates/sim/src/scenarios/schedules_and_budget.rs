@@ -1678,7 +1678,7 @@ workspace:
 
         // YAML bytes preservation, validation error, `StorageFaultKind::IoError` atomic rollback,
         // `revision_conflict`, multi-rule event queue capturing rev 1, condition->notify, & non-rollback!
-        let raw_custom = "# Preserve this comment\nschema: 12\nid: raw_source\nname: Test YAML\non:\n  start:\n    event: manual\n    start_at: gate\nsteps:\n  - id: gate\n    uses: approval\n    with:\n      title: Inspect YAML\n";
+        let raw_custom = "# Preserve this comment\nschema: 13\nid: raw_source\nname: Test YAML\non:\n  start:\n    event: manual\n    start_at: gate\nsteps:\n  - id: gate\n    uses: approval\n    with:\n      title: Inspect YAML\n";
         let col0 = world.server_call(
             "remote-a",
             "workflow.sources",

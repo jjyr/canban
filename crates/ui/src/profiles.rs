@@ -29,6 +29,30 @@ pub fn active_recipients(
     ids
 }
 
+/// Resolve recipients while respecting explicit-`@` exclusion for `assignee`:
+/// when any Agent is explicitly addressed in `sources` or `explicit`, ONLY those
+/// explicit recipients receive the message (do not CC `assignee`). Otherwise, an
+/// enabled `assignee` is included unless listed in `suppressed`.
+pub fn active_recipients_with_assignee(
+    sources: &[&str],
+    explicit: &[String],
+    assignee: Option<&str>,
+    suppressed: &[String],
+    profiles: &[Profile],
+) -> Vec<String> {
+    let base = active_recipients(sources, explicit, &[], profiles);
+    if !base.is_empty() {
+        return active_recipients(sources, explicit, suppressed, profiles);
+    }
+    if let Some(aid) = assignee
+        && profiles.iter().any(|p| p.enabled && p.id == aid)
+        && !suppressed.iter().any(|s| s == aid)
+    {
+        return vec![aid.to_owned()];
+    }
+    Vec::new()
+}
+
 pub fn registry(profiles: Signal<Vec<Profile>>) -> SectionGroup {
     settings_section(
         "Agent profiles",

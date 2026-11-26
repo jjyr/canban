@@ -704,10 +704,19 @@ impl AppServer {
                 for step in rev.definition.steps.values() {
                     match step {
                         WorkflowStep::Agent {
-                            profile: Some(prof),
+                            default_agent,
+                            override_agent,
                             ..
+                        } => {
+                            for prof in [override_agent.as_deref(), default_agent.as_deref()]
+                                .into_iter()
+                                .flatten()
+                                .filter(|s| !s.trim().is_empty())
+                            {
+                                required_profiles_set.insert(prof.to_owned());
+                            }
                         }
-                        | WorkflowStep::Deliver {
+                        WorkflowStep::Deliver {
                             profile: Some(prof),
                             ..
                         } if !prof.trim().is_empty() => {

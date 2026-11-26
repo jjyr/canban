@@ -45,11 +45,18 @@ fn ordered_steps(definition: &WorkflowDefinition, root: Option<&str>) -> Vec<Str
 
 fn step_badge_label(id: &str, step: &WorkflowStep) -> String {
     match step {
-        WorkflowStep::Agent { profile, .. } => {
+        step @ WorkflowStep::Agent {
+            override_agent,
+            default_agent,
+            ..
+        } => {
             let role = id.strip_prefix("agent:").unwrap_or(id);
-            if let Some(p) = profile {
+            if let Some(p) = override_agent.as_deref() {
+                format!("{role} (@{p} · override)")
+            } else if let Some(p) = default_agent.as_deref() {
                 format!("{role} (@{p})")
             } else {
+                let _ = step;
                 role.to_owned()
             }
         }

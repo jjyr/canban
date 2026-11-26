@@ -51,6 +51,7 @@ struct StepModel {
     /// "If …" / "Otherwise" when this card starts a condition branch.
     branch: Option<String>,
     pills: Vec<String>,
+    agent_override: bool,
     profile: String,
     instruction: String,
     default_prompt: bool,
@@ -194,7 +195,19 @@ fn step_model(
         .get(&step.id)
         .cloned()
         .unwrap_or_else(|| step.id.clone());
-    let profile = with_str(step, "profile").unwrap_or("").to_owned();
+    let kind = step.kind();
+    let (agent_override, profile) = if kind == "agent" {
+        if let Some(forced) = with_str(step, "override") {
+            (true, forced.to_owned())
+        } else {
+            let def = with_str(step, "default_agent")
+                .or_else(|| with_str(step, "profile"))
+                .unwrap_or("");
+            (false, def.to_owned())
+        }
+    } else {
+        (false, with_str(step, "profile").unwrap_or("").to_owned())
+    };
     let raw_instruction = with_str(step, "instruction").unwrap_or("");
     let is_default = is_default_step_prompt(&step.id, Some(&profile), raw_instruction);
     let instruction = if is_default {
@@ -246,7 +259,6 @@ fn step_model(
                 .unwrap_or_else(|| v.to_string()))
             .unwrap_or_default()
     );
-    let kind = step.kind();
     let script_run = step.script_run().unwrap_or("").to_owned();
     let script_shell = step
         .shell
@@ -280,18 +292,17 @@ fn step_model(
     let (icon, tint, badge, summary) = match kind {
         "agent" => {
             let custom = !is_default;
+            let who = if agent_override {
+                format!("@{profile} · override")
+            } else if profile.is_empty() {
+                "Assignee / Default".to_owned()
+            } else {
+                format!("Assignee / @{profile}")
+            };
             (
                 Icon::Agent,
                 Tint::Accent,
-                format!(
-                    "@{}{}",
-                    if profile.is_empty() {
-                        "default"
-                    } else {
-                        &profile
-                    },
-                    if custom { " · custom" } else { "" }
-                ),
+                format!("{who}{}", if custom { " · custom" } else { "" }),
                 instruction
                     .lines()
                     .map(str::trim)
@@ -459,6 +470,7 @@ fn step_model(
         pills,
         default_prompt: is_default,
         profile,
+        agent_override,
         instruction,
         strategy,
         sync_upstream,
@@ -1692,6 +1704,7 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                 let proj = ui.current_project();
                 profiles
                     .into_iter()
+                    .filter(|prof| prof.enabled)
                     .map(|prof| {
                         let (mark, _, _) =
                             crate::profiles::effective_provider(&prof, proj.as_ref());
@@ -1702,21 +1715,111 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
             form = form
                 .child(dynamic(move || {
                     let profiles = agent_profiles.get();
+                    let is_override = node.with(|n| n.agent_override);
+                    let mode_pid_def = pid.clone();
+                    let mode_pid_ovr = pid.clone();
+                    let first_prof = profiles
+                        .first()
+                        .map(|(id, _)| id.clone())
+                        .unwrap_or_else(|| "developer".into());
+                    let mode_row = segmented()
+                        .child(segment(
+                            "Default (Assignee first)",
+                            None,
+                            move || node.with(|n| !n.agent_override),
+                            move |_| {
+                                let cur_prof = node.with_untracked(|n| n.profile.clone());
+                                let step_id = mode_pid_def.clone();
+                                ctx.edit(move |d| {
+                                    stages::set_step_with(d, &step_id, "override", None)?;
+                                    let val = (!cur_prof.is_empty()).then(|| json!(cur_prof));
+                                    stages::set_step_with(d, &step_id, "default_agent", val)
+                                });
+                            },
+                        ))
+                        .child(segment(
+                            "Override (Fixed)",
+                            None,
+                            move || node.with(|n| n.agent_override),
+                            move |_| {
+                                let cur_prof = node.with_untracked(|n| n.profile.clone());
+                                let fallback = first_prof.clone();
+                                let step_id = mode_pid_ovr.clone();
+                                ctx.edit(move |d| {
+                                    stages::set_step_with(d, &step_id, "default_agent", None)?;
+                                    let chosen = if cur_prof.is_empty() {
+                                        fallback
+                                    } else {
+                                        cur_prof
+                                    };
+                                    stages::set_step_with(
+                                        d,
+                                        &step_id,
+                                        "override",
+                                        Some(json!(chosen)),
+                                    )
+                                });
+                            },
+                        ));
                     let mut seg = view().flex_row().flex_wrap().gap_1();
+                    if !is_override {
+                        let step_id = pid.clone();
+                        seg = seg.child(compact_segment(
+                            "Global default",
+                            Some(Icon::Agent),
+                            move || node.with(|n| !n.agent_override && n.profile.is_empty()),
+                            move |_| {
+                                let step_id = step_id.clone();
+                                ctx.edit(move |d| {
+                                    stages::set_step_with(d, &step_id, "override", None)?;
+                                    stages::set_step_with(d, &step_id, "default_agent", None)
+                                });
+                            },
+                        ));
+                    }
                     for (prof_id, mark) in profiles {
                         let (sel, chosen) = (prof_id.clone(), prof_id.clone());
-                        let pid = pid.clone();
+                        let step_id = pid.clone();
                         seg = seg.child(compact_segment(
                             format!("@{prof_id}"),
                             Some(mark),
                             move || node.with(|n| n.profile == sel),
-                            move |_| ctx.set_with(&pid, "profile", Some(json!(chosen.clone()))),
+                            move |_| {
+                                let step_id = step_id.clone();
+                                let chosen = chosen.clone();
+                                ctx.edit(move |d| {
+                                    if is_override {
+                                        stages::set_step_with(d, &step_id, "default_agent", None)?;
+                                        stages::set_step_with(
+                                            d,
+                                            &step_id,
+                                            "override",
+                                            Some(json!(chosen)),
+                                        )
+                                    } else {
+                                        stages::set_step_with(d, &step_id, "override", None)?;
+                                        stages::set_step_with(
+                                            d,
+                                            &step_id,
+                                            "default_agent",
+                                            Some(json!(chosen)),
+                                        )
+                                    }
+                                });
+                            },
                         ));
                     }
+                    let caption = if is_override {
+                        "Always runs this Agent, ignoring Card Assignee."
+                    } else {
+                        "Uses Card Assignee first; falls back to this Agent when unassigned."
+                    };
                     view()
                         .gap_1()
-                        .child(muted("Agent").text_size(px(12.)))
+                        .child(muted("Agent mode").text_size(px(12.)))
+                        .child(mode_row)
                         .child(seg)
+                        .child(muted(caption).text_size(px(11.)))
                 }))
                 .child(
                     view().p_2().rounded(px(RADIUS)).bg(INSET).child(
@@ -2248,14 +2351,13 @@ fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
                     .gap_3()
                     .child(icon(Icon::Agent))
                     .child(heading(format!("Prompt · {}", model.title)))
-                    .child(badge(format!(
-                        "@{}",
-                        if model.profile.is_empty() {
-                            "default"
-                        } else {
-                            &model.profile
-                        }
-                    )))
+                    .child(badge(if model.agent_override {
+                        format!("@{} · override", model.profile)
+                    } else if model.profile.is_empty() {
+                        "Assignee / Default".to_owned()
+                    } else {
+                        format!("Assignee / @{}", model.profile)
+                    }))
                     .child(view().flex_1())
                     .child(chrome_button(
                         Icon::Close,

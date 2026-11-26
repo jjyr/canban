@@ -36,7 +36,7 @@ delete keys named `body` or `message` from arbitrary results.
 | --- | --- | --- |
 | `card.list` | `{items,next_cursor}`; each item has `id,number,title,stage,revision` | `fields`, `view: "full"`; always paginated |
 | `card.get`, `card.show` | `id,number,title,stage,revision` | `fields`, `view: "full"` |
-| `card.create`, `card.update`, `card.move`, `card.restore`, `card.context.update`, `card.hold_auto_merge` | `accepted,id,number,stage,revision` and request key when supplied | `fields` adds selected business data; `view: "full"` returns the business object |
+| `card.create`, `card.update`, `card.move`, `card.restore`, `card.context.update`, `card.hold_auto_merge` | `accepted,id,number,stage,revision` and request key when supplied (optional `assignee` and `stage` supported on `card.create`; `card.update` binds `assignee` without waking) | `fields` adds selected business data; `view: "full"` returns the business object |
 | `card.adopt` | `accepted,adopted,id,number,stage,revision,workflow_run_id` and request key | `view: "full"` includes Card/workflow/workspace details |
 | `comment.add`, `comment.update` | `accepted,id,card_id,sequence,card_revision` and request key | `fields`, `view: "full"`; text only in `body` |
 | `timeline.list` | `{events,next_cursor,last_sequence,highwater}`; event identity, sequence, kind, actor, timestamp and comment body | `fields`, `view: "full"`; non-comment payloads are opt-in |

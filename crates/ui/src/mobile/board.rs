@@ -132,6 +132,8 @@ fn mobile_card_row(
             Tone::Info
         };
         top_chips.push(live_status(badge.provider_name.clone(), tone).into_element());
+    } else if let Some(aid) = card.assignee.as_deref() {
+        top_chips.push(status(format!("@{aid}"), Tone::Neutral).into_element());
     }
     if review_running {
         top_chips.push(live_status("Reviewing", Tone::Info).into_element());

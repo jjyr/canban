@@ -8,6 +8,7 @@ pub enum FieldMergeOutcome {
     Apply {
         title: Option<String>,
         body: Option<String>,
+        assignee: Option<Option<String>>,
     },
     NoOp,
     Conflict {
@@ -15,6 +16,12 @@ pub enum FieldMergeOutcome {
         mine: BTreeMap<String, String>,
         server: BTreeMap<String, String>,
     },
+}
+
+fn normalize_assignee(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim)
+        .map(|s| s.trim_start_matches('@'))
+        .filter(|s| !s.is_empty())
 }
 
 /// Classify a queued `card.update` against the latest authoritative server `Card`.
@@ -27,10 +34,12 @@ pub fn classify_card_update(
     base: &UpdateBase,
     mine_title: Option<&str>,
     mine_body: Option<&str>,
+    mine_assignee: Option<Option<&str>>,
     server: &Card,
 ) -> FieldMergeOutcome {
     let mut apply_title = None;
     let mut apply_body = None;
+    let mut apply_assignee = None;
     let mut conflict_fields = Vec::new();
     let mut mine_map = BTreeMap::new();
     let mut server_map = BTreeMap::new();
@@ -65,6 +74,28 @@ pub fn classify_card_update(
         }
     }
 
+    if let Some(raw_assignee) = mine_assignee {
+        let mine_norm = normalize_assignee(raw_assignee);
+        let base_norm = normalize_assignee(base.assignee.as_deref());
+        let srv_norm = normalize_assignee(server.assignee.as_deref());
+        let unchanged_from_base = base.has_assignee && base_norm == mine_norm;
+        if !unchanged_from_base && srv_norm != mine_norm {
+            if base.has_assignee && base_norm == srv_norm {
+                apply_assignee = Some(mine_norm.map(str::to_owned));
+            } else {
+                conflict_fields.push("assignee".into());
+                mine_map.insert(
+                    "assignee".into(),
+                    mine_norm.unwrap_or("(unassigned)").to_owned(),
+                );
+                server_map.insert(
+                    "assignee".into(),
+                    srv_norm.unwrap_or("(unassigned)").to_owned(),
+                );
+            }
+        }
+    }
+
     if !conflict_fields.is_empty() {
         return FieldMergeOutcome::Conflict {
             fields: conflict_fields,
@@ -72,12 +103,13 @@ pub fn classify_card_update(
             server: server_map,
         };
     }
-    if apply_title.is_none() && apply_body.is_none() {
+    if apply_title.is_none() && apply_body.is_none() && apply_assignee.is_none() {
         FieldMergeOutcome::NoOp
     } else {
         FieldMergeOutcome::Apply {
             title: apply_title,
             body: apply_body,
+            assignee: apply_assignee,
         }
     }
 }
@@ -98,13 +130,27 @@ pub fn conflict_details(
         fields = f.clone();
     }
     for field in &fields {
-        if let Some(val) = op.params.get(field).and_then(|v| v.as_str()) {
+        if field == "assignee" {
+            if let Some(raw) = op.params.get("assignee") {
+                let label = raw
+                    .as_str()
+                    .and_then(|s| normalize_assignee(Some(s)))
+                    .unwrap_or("(unassigned)");
+                mine.insert(field.clone(), label.to_owned());
+            }
+        } else if let Some(val) = op.params.get(field).and_then(|v| v.as_str()) {
             mine.insert(field.clone(), val.to_owned());
         }
         if let Some(card) = server {
             let s_val = match field.as_str() {
                 "title" => Some(card.title.clone()),
                 "body" => Some(card.body.clone()),
+                "assignee" => Some(
+                    card.assignee
+                        .as_deref()
+                        .unwrap_or("(unassigned)")
+                        .to_owned(),
+                ),
                 _ => None,
             };
             if let Some(s) = s_val {

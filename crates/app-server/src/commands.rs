@@ -821,71 +821,82 @@ impl AppServer {
                     .unwrap_or(tag);
                 Ok(json!({"project_id": project.id, "tag": canonical, "tags": project.tags}))
             }),
-            "card.create" => self.mutate(method, &p, |db| {
-                ensure!(
-                    p.get("tags").is_none(),
-                    "Routing tags are no longer supported; use a workflow Profile or @profile"
-                );
-                let project: Project =
-                    db.get(&super::resolve_project_id(db, strp(&p, "project_id")?)?)?;
-                let explicit_id = p
-                    .get("id")
-                    .filter(|v| !v.is_null())
-                    .map(|v| v.as_str().context("Card id must be a string"))
-                    .transpose()?;
-                let now_ms = self.now_ms();
-                let generated_id = explicit_id.is_none().then(|| self.next_id());
-                let mut c = canban_kanban::create_with_id_at(
-                    db,
-                    &project,
-                    strp(&p, "title")?,
-                    p["body"].as_str().unwrap_or(""),
-                    "user",
-                    explicit_id.or(generated_id.as_deref()),
-                    now_ms,
-                )?;
-                c.created_by = if self.github_transport.is_some() {
-                    self.github.status().login
-                } else {
-                    self.github
-                        .status()
-                        .login
-                        .or_else(|| self.github_cli.login())
-                }
-                .unwrap_or_else(|| "Local".into());
-                db.save(&c)?;
-                if let Some(note_id) = p["source_note_id"].as_str() {
-                    let note: Note = db.get(note_id)?;
+            "card.create" => {
+                let mut started_stage = false;
+                let res = self.mutate(method, &p, |db| {
                     ensure!(
-                        note.project_id == project.id,
-                        "Source Note belongs to a different Project"
+                        p.get("tags").is_none(),
+                        "Routing tags are no longer supported; use a workflow Profile or @profile"
                     );
-                    c.context_notes = Some(vec![note.id.clone()]);
-                    db.save(&c)?;
-                    crate::notes::relate_card(
+                    let project: Project =
+                        db.get(&super::resolve_project_id(db, strp(&p, "project_id")?)?)?;
+                    let explicit_id = p
+                        .get("id")
+                        .filter(|v| !v.is_null())
+                        .map(|v| v.as_str().context("Card id must be a string"))
+                        .transpose()?;
+                    let now_ms = self.now_ms();
+                    let generated_id = explicit_id.is_none().then(|| self.next_id());
+                    let mut c = canban_kanban::create_with_id_at(
                         db,
-                        &note.id,
-                        &c,
-                        true,
+                        &project,
+                        strp(&p, "title")?,
+                        p["body"].as_str().unwrap_or(""),
+                        "user",
+                        explicit_id.or(generated_id.as_deref()),
                         now_ms,
-                        self.id_gen.as_ref(),
                     )?;
-                } else {
+                    c.created_by = if self.github_transport.is_some() {
+                        self.github.status().login
+                    } else {
+                        self.github
+                            .status()
+                            .login
+                            .or_else(|| self.github_cli.login())
+                    }
+                    .unwrap_or_else(|| "Local".into());
+                    if let Some(assignee) =
+                        crate::sessions::parse_assignee_param(&config, Some(&project), &p)?
+                    {
+                        c.assignee = assignee;
+                    }
                     db.save(&c)?;
+                    if let Some(note_id) = p["source_note_id"].as_str() {
+                        let note: Note = db.get(note_id)?;
+                        ensure!(
+                            note.project_id == project.id,
+                            "Source Note belongs to a different Project"
+                        );
+                        c.context_notes = Some(vec![note.id.clone()]);
+                        db.save(&c)?;
+                        crate::notes::relate_card(
+                            db,
+                            &note.id,
+                            &c,
+                            true,
+                            now_ms,
+                            self.id_gen.as_ref(),
+                        )?;
+                    }
+                    let title_text = c.title.clone();
+                    let body_text = c.body.clone();
+                    started_stage = self.finalize_card_creation_in_tx(
+                        db,
+                        &config,
+                        &mut c,
+                        &project,
+                        &p,
+                        &[&title_text, &body_text],
+                        now_ms,
+                    )?;
+                    Ok(serde_json::to_value(c)?)
+                })?;
+                if started_stage {
+                    self.request_deliveries();
+                    self.request_scripts();
                 }
-                let title_text = c.title.clone();
-                let body_text = c.body.clone();
-                crate::sessions::queue_card_mentions(
-                    db,
-                    &config,
-                    &mut c,
-                    &project,
-                    &p,
-                    &[&title_text, &body_text],
-                    now_ms,
-                )?;
-                Ok(serde_json::to_value(c)?)
-            }),
+                Ok(res)
+            }
             "card.update" => {
                 let mut emit_card = p["card_id"].as_str().map(str::to_owned);
                 let res = self.mutate(method, &p, |db| {
@@ -944,8 +955,25 @@ impl AppServer {
                     if let Some(mode) = p.get("delivery_mode") {
                         c.delivery_mode = serde_json::from_value(mode.clone())?;
                     }
+                    if p.get("assignee").is_some() {
+                        let project: Project = db.get(&c.project_id)?;
+                        if let Some(assignee) =
+                            crate::sessions::parse_assignee_param(&config, Some(&project), &p)?
+                        {
+                            c.assignee = assignee;
+                        }
+                    }
                     c.revision += 1;
                     let now_ms = self.now_ms();
+                    let changed_fields: Vec<&str> = [
+                        (c.title != before.title).then_some("title"),
+                        (c.body != before.body).then_some("body"),
+                        (c.assignee != before.assignee).then_some("assignee"),
+                        (c.delivery_mode != before.delivery_mode).then_some("delivery_mode"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
                     log(
                         db,
                         &c,
@@ -953,7 +981,7 @@ impl AppServer {
                         &actor,
                         "Card updated",
                         active_entry.as_ref().map(|t| t.id.clone()),
-                        json!({"title":c.title,"body":c.body,"changed_fields": ([if c.title!=before.title {Some("title")}else{None},if c.body!=before.body {Some("body")}else{None}].into_iter().flatten().collect::<Vec<_>>()),"before_revision":before.revision,"after_revision":c.revision}),
+                        json!({"title":c.title,"body":c.body,"assignee":c.assignee,"changed_fields":changed_fields,"before_revision":before.revision,"after_revision":c.revision}),
                         now_ms,
                     )?;
                     db.save(&c)?;
@@ -1029,8 +1057,20 @@ impl AppServer {
                         .and_then(|t| t.agent.as_ref())
                         .map(|a| a.profile.id.clone())
                         .or_else(|| requested_prof.map(str::to_owned))
+                        .or_else(|| c.assignee.clone())
                         .unwrap_or_else(|| config.default_agent.clone());
                     let live_id = live_entry.as_ref().map(|t| t.id.clone());
+                    let backfilled_assignee = if c.assignee.is_none()
+                        && config
+                            .profiles
+                            .iter()
+                            .any(|a| a.id == profile_label && a.enabled)
+                    {
+                        c.assignee = Some(profile_label.clone());
+                        true
+                    } else {
+                        false
+                    };
 
                     let cancel_other_pending = |db: Db<'_>| -> Result<()> {
                         for mut pending in db.list::<TerminalEntry>()? {
@@ -1079,6 +1119,10 @@ impl AppServer {
                                 existing.updated_at = now_ms;
                                 db.save(&existing)?;
                             }
+                            if backfilled_assignee {
+                                c.revision += 1;
+                                db.save(&c)?;
+                            }
                             return Ok(json!({
                                 "card": c,
                                 "workflow_run": existing,
@@ -1110,6 +1154,9 @@ impl AppServer {
                             None,
                             now_ms,
                         )?;
+                        if backfilled_assignee {
+                            c.revision += 1;
+                        }
                         db.save(&c)?;
                         return Ok(json!({
                             "card": c,
@@ -1422,17 +1469,22 @@ impl AppServer {
                 let stage = canban_workflow_engine::stage(&project.workflow, &c.stage)?;
                 let mut mentions = strings(&p, "mentions");
                 // Explicit recipients distinguish addressing an Agent from discussing its name.
-                // Older CLI clients without the field retain their text-mention behavior.
+                // When `mentions` is omitted, explicit `@profile` mentions take precedence;
+                // only fall back to `card.assignee` for human comments without explicit `@mentions`.
+                let is_agent_caller =
+                    p.get("execution").is_some_and(|v| !v.is_null()) || p["agent"] == true;
                 if p.get("mentions").is_none() {
-                    for word in body.split_whitespace() {
-                        if let Some(name) = word.strip_prefix('@') {
-                            let name = name.trim_end_matches(|ch: char| {
-                                !ch.is_alphanumeric() && ch != '-' && ch != '_'
-                            });
-                            if config.profiles.iter().any(|a| a.id == name && a.enabled) {
-                                mentions.push(name.into());
-                            }
+                    for name in canban_profiles::addressed(body, &config.profiles) {
+                        if !mentions.contains(&name) {
+                            mentions.push(name);
                         }
+                    }
+                    if mentions.is_empty()
+                        && !is_agent_caller
+                        && let Some(assignee) = c.assignee.as_deref()
+                        && config.profiles.iter().any(|a| a.id == assignee && a.enabled)
+                    {
+                        mentions.push(assignee.to_owned());
                     }
                 }
                 mentions.sort();
@@ -1990,5 +2042,59 @@ impl AppServer {
             "card.reopen" => self.reopen_card_action(&p),
             _ => bail!("Unknown operation: {method}"),
         }
+    }
+
+    /// Finalizes `card.create` / `github.issue.add`: optionally transitions to `stage`
+    /// (`Create & Start` via standard `card.stage_changed` workflow dispatch) or wakes initial mentions/assignee.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Transaction-scoped creation context, project, params, prose sources, and clock"
+    )]
+    pub(crate) fn finalize_card_creation_in_tx(
+        &self,
+        db: Db<'_>,
+        config: &Config,
+        c: &mut Card,
+        project: &Project,
+        p: &Value,
+        prose_sources: &[&str],
+        now_ms: u64,
+    ) -> Result<bool> {
+        let requested_stage = p["stage"].as_str().map(str::trim).filter(|s| !s.is_empty());
+        if let Some(target) = requested_stage {
+            canban_workflow_engine::stage(&project.workflow, target)?;
+            if target != c.stage {
+                ensure!(c.active(), "Restore the Card before starting workflow");
+                ensure!(!c.resolved(), "Resolved Cards cannot enter development");
+                ensure!(
+                    c.human_gate.is_none(),
+                    "Human review must be approved by the user before moving this Card"
+                );
+                let from = c.stage.clone();
+                c.stage = target.to_owned();
+                c.board_order = None;
+                canban_kanban::order::place(db, c, None)?;
+                c.revision += 1;
+                db.save(c)?;
+                let mut ev = canban_timeline::event_at(
+                    &c.project_id,
+                    &c.id,
+                    "card.stage_changed",
+                    "user",
+                    &format!("{from} → {target}"),
+                    json!({
+                        "from": from,
+                        "to": target,
+                        "before_card_id": Value::Null,
+                    }),
+                    now_ms,
+                );
+                ev.id = self.next_id();
+                db.append(ev)?;
+                return Ok(true);
+            }
+        }
+        crate::sessions::queue_card_mentions(db, config, c, project, p, prose_sources, now_ms)?;
+        Ok(false)
     }
 }

@@ -177,14 +177,22 @@ pub fn validate_definition(
         }
         match step {
             WorkflowStep::Agent {
-                profile,
+                default_agent,
+                override_agent,
                 instruction,
                 env,
                 ..
             } => {
                 ensure!(!instruction.trim().is_empty(), "Empty instruction at {id}");
+                ensure!(
+                    !(default_agent.is_some() && override_agent.is_some()),
+                    "Step {id} cannot specify both `default_agent` and `override`"
+                );
                 validate_env_map(env, &format!("step {id}"))?;
-                if let Some(profile) = profile {
+                for profile in [default_agent.as_ref(), override_agent.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
                     ensure!(
                         profiles.contains(profile),
                         "Unknown agent @{profile} at {id}"

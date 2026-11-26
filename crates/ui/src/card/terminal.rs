@@ -53,7 +53,11 @@ pub fn toggle(ui: Ui) {
             .set("Restore this Card before opening a new terminal.".into());
         return;
     }
-    crate::terminals::create_in_card(ui, card.project_id, card.id, false);
+    if card.assignee.is_some() {
+        crate::terminals::open_card_agent(ui, &card.id, None);
+    } else {
+        crate::terminals::create_in_card(ui, card.project_id, card.id, false);
+    }
 }
 
 pub fn pop_out(ui: Ui) {
@@ -349,27 +353,92 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                         .flex_row()
                         .items_center()
                         .gap_0p5()
-                        .child(chrome_button_disabled(
-                            Icon::Plus,
-                            format!(
-                                "New terminal · {}",
-                                crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
-                            ),
-                            move || {
-                                ui.pending.get()
-                                    || ui.current_card().is_none_or(|c| c.archived_at.is_some())
-                            },
-                            move |_| {
-                                if let Some(c) = ui.current_card() {
-                                    crate::terminals::create_in_card(
-                                        ui,
-                                        c.project_id,
-                                        c.id,
-                                        false,
-                                    );
-                                }
-                            },
-                        ))
+                        .child({
+                            let plus_anchor = element_ref();
+                            view().element_ref(&plus_anchor).child(
+                                chrome_button_disabled(
+                                    Icon::Plus,
+                                    format!(
+                                        "New terminal or open assigned Agent · {}",
+                                        crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
+                                    ),
+                                    move || {
+                                        ui.pending.get()
+                                            || ui
+                                                .current_card()
+                                                .is_none_or(|c| c.archived_at.is_some())
+                                    },
+                                    move |_| {
+                                        let Some(c) = ui.current_card() else {
+                                            return;
+                                        };
+                                        let live = card_live_entries_for_ui(ui, &c.id);
+                                        let missing_assignee = c.assignee.as_deref().filter(|aid| {
+                                            !live.iter().any(|e| e.profile() == Some(*aid))
+                                        });
+                                        let Some(aid) = missing_assignee.map(str::to_owned) else {
+                                            crate::terminals::create_in_card(
+                                                ui,
+                                                c.project_id,
+                                                c.id,
+                                                false,
+                                            );
+                                            return;
+                                        };
+                                        use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                                        let cid_agent = c.id.clone();
+                                        let cid_shell = c.id.clone();
+                                        let pid_shell = c.project_id.clone();
+                                        let cid_eph = c.id;
+                                        let pid_eph = c.project_id;
+                                        let aid_label = aid.clone();
+                                        ui.spawn(async move {
+                                            let Some(bounds) = plus_anchor.measure().await else {
+                                                return;
+                                            };
+                                            let items = vec![
+                                                MenuItem::new(format!("Open @{aid_label}"))
+                                                    .on_select(move || {
+                                                        crate::terminals::open_card_agent(
+                                                            ui,
+                                                            &cid_agent,
+                                                            Some(&aid),
+                                                        )
+                                                    }),
+                                                MenuItem::new("New Shell Terminal").on_select(
+                                                    move || {
+                                                        crate::terminals::create_in_card(
+                                                            ui,
+                                                            pid_shell.clone(),
+                                                            cid_shell.clone(),
+                                                            false,
+                                                        )
+                                                    },
+                                                ),
+                                                MenuItem::new("New Ephemeral Agent").on_select(
+                                                    move || {
+                                                        crate::terminals::create_in_card(
+                                                            ui,
+                                                            pid_eph.clone(),
+                                                            cid_eph.clone(),
+                                                            true,
+                                                        )
+                                                    },
+                                                ),
+                                            ];
+                                            popup_menu_at(
+                                                items,
+                                                point(
+                                                    bounds.page.x,
+                                                    bounds.page.y + bounds.frame.size.height,
+                                                ),
+                                            )
+                                            .await;
+                                        });
+                                    },
+                                ),
+                            )
+                        })
                         .child(dynamic(move || {
                             let Some(terminal_id) = interruptible_id.get() else {
                                 return view().into_element();

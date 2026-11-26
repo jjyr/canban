@@ -548,12 +548,18 @@ enum CardCmd {
         #[arg(long, env = "CANBAN_PROJECT")]
         project: Option<String>,
     },
-    /// Update the current Card's title and/or Markdown body.
+    /// Update the current Card's title, Markdown body, and/or Agent assignee.
     Update {
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Assign an enabled Agent Profile ID (Card replies sync automatically).
+        #[arg(long, conflicts_with = "unassign")]
+        assignee: Option<String>,
+        /// Clear the Card's assigned Agent Profile.
+        #[arg(long, conflicts_with = "assignee")]
+        unassign: bool,
         #[arg(long, env = "CANBAN_CARD")]
         card: u64,
         #[arg(long, env = "CANBAN_PROJECT")]
@@ -1108,13 +1114,15 @@ fn run() -> Result<()> {
             CardCmd::Update {
                 title,
                 file,
+                assignee,
+                unassign,
                 card,
                 project,
                 request_key,
             } => {
                 anyhow::ensure!(
-                    title.is_some() || file.is_some(),
-                    "Supply --title and/or --file to update the Card"
+                    title.is_some() || file.is_some() || assignee.is_some() || unassign,
+                    "Supply --title, --file, --assignee, or --unassign to update the Card"
                 );
                 let mut params = card_scope(Some(card), project);
                 params["agent"] = json!(true);
@@ -1126,6 +1134,11 @@ fn run() -> Result<()> {
                 }
                 if let Some(f) = file {
                     params["body"] = json!(input_body(Some(f))?);
+                }
+                if let Some(a) = assignee {
+                    params["assignee"] = json!(a);
+                } else if unassign {
+                    params["assignee"] = Value::Null;
                 }
                 ("card.update".into(), params)
             }

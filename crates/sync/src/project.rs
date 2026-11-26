@@ -19,6 +19,14 @@ fn next_backlog_board_order(snapshot: &Snapshot, project_id: &str) -> i64 {
         .map_or(0, |max| max.saturating_add(1024))
 }
 
+fn parse_offline_assignee(raw: &Value) -> Option<String> {
+    raw.as_str()
+        .map(str::trim)
+        .map(|s| s.trim_start_matches('@'))
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 fn build_offline_card(op: &Mutation, snapshot: &Snapshot) -> Result<Card> {
     let project_id = op.params["project_id"]
         .as_str()
@@ -30,6 +38,15 @@ fn build_offline_card(op: &Mutation, snapshot: &Snapshot) -> Result<Card> {
         .trim()
         .to_owned();
     let body = op.params["body"].as_str().unwrap_or("").to_owned();
+    let stage = op
+        .params
+        .get("stage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("backlog")
+        .to_owned();
+    let assignee = op.params.get("assignee").and_then(parse_offline_assignee);
     let order = next_backlog_board_order(snapshot, &project_id);
     Ok(Card {
         schedule_source: None,
@@ -37,6 +54,7 @@ fn build_offline_card(op: &Mutation, snapshot: &Snapshot) -> Result<Card> {
         hold_auto_merge: false,
         github_links: Vec::new(),
         created_by: "Local".into(),
+        assignee,
         content: CardContent::Local,
         removed_at: None,
         pull_request: None,
@@ -51,7 +69,7 @@ fn build_offline_card(op: &Mutation, snapshot: &Snapshot) -> Result<Card> {
         title,
         body,
         context_notes: None,
-        stage: "backlog".into(),
+        stage,
         revision: 0,
         attention: None,
         archived_at: None,
@@ -89,6 +107,9 @@ fn apply_one(snapshot: &mut Snapshot, host_id: &str, op: &Mutation) {
                 }
                 if let Some(b) = op.params.get("body").and_then(Value::as_str) {
                     card.body = b.to_owned();
+                }
+                if let Some(raw) = op.params.get("assignee") {
+                    card.assignee = parse_offline_assignee(raw);
                 }
             }
         }
@@ -326,6 +347,7 @@ mod tests {
             hold_auto_merge: false,
             github_links: Vec::new(),
             created_by: String::new(),
+            assignee: None,
             content: CardContent::Local,
             removed_at: None,
             pull_request: None,

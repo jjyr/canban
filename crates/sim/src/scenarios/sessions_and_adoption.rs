@@ -49,7 +49,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-const ADOPT_FLOW_YAML: &str = r#"schema: 12
+const ADOPT_FLOW_YAML: &str = r#"schema: 13
 id: sessions-adopt-flow
 name: Sessions Adoption Flow
 workspace:
@@ -65,7 +65,7 @@ steps:
   - id: work
     uses: agent
     with:
-      profile: codex
+      default_agent: codex
       instruction: Complete adopted interactive session
     next: finish
   - id: finish
@@ -703,8 +703,9 @@ pub fn run(seed: u64) -> Result<u64> {
         let adopted = world.client_call("card.adopt", adopt_params.clone(), Some(&pid))?;
         ensure!(
             adopted["adopted"].as_bool() == Some(true)
-                && adopted["card"]["stage"].as_str() == Some("develop"),
-            "card.adopt failed: {adopted}"
+                && adopted["card"]["stage"].as_str() == Some("develop")
+                && adopted["card"]["assignee"].as_str() == Some(adopt_profile),
+            "card.adopt failed or did not backfill assignee={adopt_profile}: {adopted}"
         );
         // Idempotent replay with identical request_key returns identical receipt and spawns no extra PTY.
         let adopted_replay = world.client_call("card.adopt", adopt_params, Some(&pid))?;
@@ -859,6 +860,351 @@ pub fn run(seed: u64) -> Result<u64> {
             );
         }
         world.hit("sessions.execution_retried");
+        oracle.check_step_invariants(world)?;
+
+        // ---------------------------------------------------------------------
+        // Part C2 — Card Assignee Lifecycle: `card.create` wake, `card.update` bind-only,
+        //           `comment.add` auto-sync vs explicit `@mention` exclusion vs `mentions: []`,
+        //           `agent.open` fallback, and `card.adopt` non-overwrite preservation
+        // ---------------------------------------------------------------------
+        // 1. `card.create` with `assignee = primary_profile` wakes `primary_profile` once.
+        let card_e = world.client_call(
+            "card.create",
+            json!({
+                "view": "full",
+                "project_id": pid,
+                "title": format!("Assignee Lifecycle Card {seed}"),
+                "body": format!("Assigned lifecycle body seed={seed}"),
+                "assignee": primary_profile,
+                "request_key": format!("create-e-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        ensure!(
+            card_e["assignee"].as_str() == Some(primary_profile),
+            "Expected card.create receipt assignee={primary_profile}, got {card_e}"
+        );
+        let cid_e = card_e["id"].as_str().unwrap().to_owned();
+        let raw_cid_e = unqualified_entity_id(&cid_e).to_owned();
+        let mut rev_e = card_e["revision"].as_u64().unwrap_or(1);
+        oracle.record_committed_card("remote-a", &raw_cid_e, &raw_pid, rev_e);
+        let tid_e_primary = Conversation::key(&raw_cid_e, primary_profile);
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.questions.iter().any(|q| {
+                q.card_id == raw_cid_e && q.profile_id == primary_profile && q.state == "delivered"
+            }) && snap
+                .terminals
+                .iter()
+                .any(|t| t.id == tid_e_primary && t.agent.as_ref().is_some_and(|a| !a.finished())))
+        })?;
+        // Reply & settle primary question so we isolate subsequent assignee tests cleanly.
+        let q_e0 = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .questions
+            .into_iter()
+            .find(|q| q.card_id == raw_cid_e && q.profile_id == primary_profile)
+            .unwrap()
+            .id;
+        let _ = world.client_call(
+            "agent.reply",
+            json!({
+                "card_id": cid_e,
+                "question_id": q_e0,
+                "body": "Initial assigned brief ack",
+                "request_key": format!("reply-e0-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        world.hit("assignee.create_wake");
+
+        // 2. `card.update` reassigning `assignee -> adopt_profile` is bind-only (must NOT wake/spawn `adopt_profile`).
+        let tid_e_adopt = Conversation::key(&raw_cid_e, adopt_profile);
+        let q_tid_e_adopt = qualify_host_id("remote-a", &tid_e_adopt);
+        let q_count_before_rebind = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .questions
+            .iter()
+            .filter(|q| q.card_id == raw_cid_e)
+            .count();
+        let upd_e = world.client_call(
+            "card.update",
+            json!({
+                "view": "full",
+                "card_id": cid_e,
+                "revision": rev_e,
+                "assignee": adopt_profile,
+                "request_key": format!("rebind-e-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        ensure!(
+            upd_e["assignee"].as_str() == Some(adopt_profile),
+            "Expected card.update assignee={adopt_profile}, got {upd_e}"
+        );
+        rev_e = upd_e["revision"].as_u64().unwrap_or(rev_e + 1);
+        oracle.record_committed_card("remote-a", &raw_cid_e, &raw_pid, rev_e);
+        world.advance(std::time::Duration::from_millis(250))?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            ensure!(
+                !snap.terminals.iter().any(|t| t.id == tid_e_adopt),
+                "card.update bind-only must NOT spawn {adopt_profile} terminal immediately"
+            );
+            ensure!(
+                snap.questions
+                    .iter()
+                    .filter(|q| q.card_id == raw_cid_e)
+                    .count()
+                    == q_count_before_rebind,
+                "card.update bind-only must NOT enqueue a wakeup Question"
+            );
+        }
+        world.hit("assignee.update_bind_only");
+
+        // 3. Plain `comment.add` (no `@`) auto-syncs ONLY to `card.assignee` (`adopt_profile`), spawning & delivering `Question`.
+        let auto_body_1 = format!("Plain follow-up for current assignee seed={seed}");
+        let _ = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e,
+                "body": auto_body_1,
+                "request_key": format!("auto-sync-1-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        oracle.record_committed_comment("remote-a", &raw_cid_e, auto_body_1.clone());
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.questions.iter().any(|q| {
+                q.card_id == raw_cid_e
+                    && q.profile_id == adopt_profile
+                    && q.body == auto_body_1
+                    && q.state == "delivered"
+            }))
+        })?;
+        // End `adopt_profile` PTY and verify a second plain comment resumes/wakes `adopt_profile` cleanly.
+        let _ = world.client_call(
+            "agent.end",
+            json!({
+                "terminal_id": q_tid_e_adopt,
+                "request_key": format!("end-e-adopt-1-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .terminals
+                .iter()
+                .any(|t| t.id == tid_e_adopt && t.agent.as_ref().is_some_and(|a| a.finished())))
+        })?;
+        let auto_body_2 = format!("Second plain comment after idle close seed={seed}");
+        let _ = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e,
+                "body": auto_body_2,
+                "request_key": format!("auto-sync-2-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        oracle.record_committed_comment("remote-a", &raw_cid_e, auto_body_2.clone());
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.questions.iter().any(|q| {
+                q.card_id == raw_cid_e
+                    && q.profile_id == adopt_profile
+                    && q.body == auto_body_2
+                    && q.state == "delivered"
+            }))
+        })?;
+        world.hit("assignee.comment_auto_sync");
+
+        // 4. Explicit `@<other>` mention (`primary_profile`) sends ONLY to `primary_profile` and NEVER CC's `adopt_profile`.
+        let adopt_q_before_explicit = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .questions
+            .iter()
+            .filter(|q| q.card_id == raw_cid_e && q.profile_id == adopt_profile)
+            .count();
+        let explicit_body =
+            format!("@{primary_profile} please check security edge case seed={seed}");
+        let _ = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e,
+                "body": explicit_body,
+                "request_key": format!("explicit-other-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        oracle.record_committed_comment("remote-a", &raw_cid_e, explicit_body.clone());
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.questions.iter().any(|q| {
+                q.card_id == raw_cid_e
+                    && q.profile_id == primary_profile
+                    && q.body == explicit_body
+                    && q.state == "delivered"
+            }))
+        })?;
+        let adopt_q_after_explicit = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .questions
+            .iter()
+            .filter(|q| q.card_id == raw_cid_e && q.profile_id == adopt_profile)
+            .count();
+        ensure!(
+            adopt_q_after_explicit == adopt_q_before_explicit,
+            "Explicit @{primary_profile} mention must NOT CC card.assignee={adopt_profile}"
+        );
+        world.hit("assignee.explicit_mention_excludes_assignee");
+
+        // 5. Composer `×` suppression (`mentions: []`) creates ZERO Questions, and subsequent plain comment resumes auto-sync.
+        let total_q_before_suppressed = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .questions
+            .iter()
+            .filter(|q| q.card_id == raw_cid_e)
+            .count();
+        let suppressed_body = format!("Human-only note with dismissed chip seed={seed}");
+        let _ = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e,
+                "body": suppressed_body,
+                "mentions": [],
+                "request_key": format!("suppressed-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        oracle.record_committed_comment("remote-a", &raw_cid_e, suppressed_body);
+        world.advance(std::time::Duration::from_millis(200))?;
+        ensure!(
+            world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .questions
+                .iter()
+                .filter(|q| q.card_id == raw_cid_e)
+                .count()
+                == total_q_before_suppressed,
+            "comment.add with mentions:[] must suppress assignee auto-sync"
+        );
+
+        // 6. `agent.open` with omitted `profile_id` opens/reuses `card.assignee` (`adopt_profile`)!
+        let fallback_open = world.client_call(
+            "agent.open",
+            json!({
+                "card_id": cid_e,
+                "request_key": format!("open-fallback-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        ensure!(
+            unqualified_entity_id(fallback_open["terminal_id"].as_str().unwrap_or(""))
+                == tid_e_adopt,
+            "agent.open without profile_id should resolve card.assignee={adopt_profile}, got {fallback_open}"
+        );
+
+        // 7. `card.adopt` with `None` already checked on `card_c`; now verify `card.adopt` on an ALREADY
+        //    assigned Card (`assignee = adopt_profile`) adopting the comment-triggered `primary_profile`
+        //    session preserves `adopt_profile` (never overwrites with `primary_profile`)
+        //    AND marks the adopted comment's `Question` `"replied"`!
+        let _ = world.client_call(
+            "agent.end",
+            json!({
+                "terminal_id": q_tid_e_adopt,
+                "request_key": format!("end-e-adopt-2-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        let (e_primary_addr, q_e_explicit_id) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let addr = snap
+                .terminals
+                .iter()
+                .find(|t| t.id == tid_e_primary)
+                .and_then(|t| t.agent.as_ref())
+                .and_then(|a| a.terminal.clone())
+                .context("card_e primary_profile terminal missing Herdr addr")?;
+            let qid = snap
+                .questions
+                .iter()
+                .find(|q| {
+                    q.card_id == raw_cid_e
+                        && q.profile_id == primary_profile
+                        && q.body == explicit_body
+                })
+                .context("explicit mention Question missing before card.adopt")?
+                .id
+                .clone();
+            (addr, qid)
+        };
+        let adopted_e = world.client_call(
+            "card.adopt",
+            json!({
+                "view": "full",
+                "card_id": cid_e,
+                "stage": "develop",
+                "profile_id": primary_profile,
+                "cwd": dir_a,
+                "runtime_terminal": e_primary_addr,
+                "runtime_session": "default",
+                "request_key": format!("adopt-e-preserve-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        ensure!(
+            adopted_e["adopted"].as_bool() == Some(true)
+                && adopted_e["card"]["assignee"].as_str() == Some(adopt_profile),
+            "card.adopt must preserve existing assignee={adopt_profile}, got {adopted_e}"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let q_explicit = snap
+                .questions
+                .iter()
+                .find(|q| q.id == q_e_explicit_id)
+                .unwrap();
+            ensure!(
+                q_explicit.state == "replied",
+                "card.adopt of comment-triggered session must mark Question replied, got {q_explicit:?}"
+            );
+        }
+        // Cleanly complete card_e's adopted execution so zero live PTYs leak before Part D.
+        let q_tid_e_primary = qualify_host_id("remote-a", &tid_e_primary);
+        let _ = world.client_call(
+            "execution.report",
+            json!({
+                "terminal_id": q_tid_e_primary,
+                "state": "completed",
+                "message": "Preserve assignee adopt done",
+                "request_key": format!("rep-adopt-e-{seed}"),
+            }),
+            Some(&pid),
+        )?;
+        herdr_a.finish_terminal(&e_primary_addr, 0, "exited");
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().all(|t| {
+                t.origin_card_id.as_deref() != Some(raw_cid_e.as_str())
+                    || t.agent.as_ref().is_none_or(|a| a.finished())
+            }))
+        })?;
+        world.hit("assignee.adopt_backfill");
         oracle.check_step_invariants(world)?;
 
         // ---------------------------------------------------------------------

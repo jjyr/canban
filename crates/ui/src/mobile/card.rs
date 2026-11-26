@@ -41,9 +41,19 @@ struct CardHeaderModel {
     human_reason: Option<String>,
     approval_run: Option<(String, u32, bool)>, // (run_id, visit, is_deliver)
     stages: Vec<(String, String)>,
+    assignee: Option<String>,
+    active: bool,
+    profiles: Vec<String>,
 }
 
 fn build_card_model(ui: Ui, card_id: &str) -> Option<CardHeaderModel> {
+    let profiles: Vec<String> = ui
+        .profiles
+        .get()
+        .into_iter()
+        .filter(|p| p.enabled)
+        .map(|p| p.id)
+        .collect();
     ui.snapshot.with(|s| {
         let card: &Card = s.cards.iter().find(|c| c.id == card_id)?;
         let host_id = s.card_host(&card.id).to_owned();
@@ -99,6 +109,9 @@ fn build_card_model(ui: Ui, card_id: &str) -> Option<CardHeaderModel> {
             human_reason,
             approval_run,
             stages,
+            assignee: card.assignee.clone(),
+            active: card.active(),
+            profiles,
         })
     })
 }
@@ -281,6 +294,10 @@ fn conversation_view(
                         let (lbl, tone) = crate::hosts::sync_chip_spec(mark);
                         status(lbl, tone)
                     });
+                    let assignee_chip = m
+                        .assignee
+                        .as_ref()
+                        .map(|a| status(format!("@{a}"), Tone::Neutral));
                     let context_body = m.body.clone();
                     let has_body = !context_body.trim().is_empty();
                     let branch_label = m.branch.clone();
@@ -319,6 +336,7 @@ fn conversation_view(
                                         .items_center()
                                         .gap_2()
                                         .child(status(stage_label, Tone::Info))
+                                        .children(assignee_chip)
                                         .children(sync_chip)
                                         .children(branch_label.map(|b| {
                                             mobile_footnote(b).font_family(MONO_FONT).truncate()
@@ -727,6 +745,33 @@ pub(crate) fn pushed_page(
             if !stage_items.is_empty() {
                 items.push(MenuItem::submenu("Move to…", stage_items).symbol("arrow.right.circle"));
             }
+            if m.active && !m.profiles.is_empty() {
+                let mut assign_items: Vec<MenuItem> = m
+                    .profiles
+                    .iter()
+                    .map(|pid| {
+                        let cid_assign = cid_m.clone();
+                        let assign_pid = pid.clone();
+                        MenuItem::new(format!("@{pid}"))
+                            .checked(m.assignee.as_deref() == Some(pid.as_str()))
+                            .on_select(move || {
+                                trigger_haptic(Haptic::Selection);
+                                assign_card(ui, &cid_assign, Some(&assign_pid));
+                            })
+                    })
+                    .collect();
+                if m.assignee.is_some() {
+                    let cid_unassign = cid_m.clone();
+                    assign_items.push(MenuItem::separator());
+                    assign_items.push(MenuItem::new("Unassign").on_select(move || {
+                        trigger_haptic(Haptic::Selection);
+                        assign_card(ui, &cid_unassign, None);
+                    }));
+                }
+                items.push(
+                    MenuItem::submenu("Assign Agent", assign_items).symbol("person.badge.key"),
+                );
+            }
             items.push(
                 MenuItem::new("Return for rework")
                     .symbol("arrow.uturn.backward")
@@ -767,6 +812,20 @@ pub(crate) fn pushed_page(
                 });
                 items.push(MenuButtonItem::submenu("Move to…", stage_items));
             }
+            if m.active && !m.profiles.is_empty() {
+                let mut assign_items: Vec<MenuButtonItem> = m
+                    .profiles
+                    .iter()
+                    .map(|pid| {
+                        MenuButtonItem::new(format!("assign:{pid}"), format!("@{pid}"))
+                            .checked(m.assignee.as_deref() == Some(pid.as_str()))
+                    })
+                    .collect();
+                if m.assignee.is_some() {
+                    assign_items.push(MenuButtonItem::new("unassign", "Unassign"));
+                }
+                items.push(MenuButtonItem::submenu("Assign Agent", assign_items));
+            }
             items.push(MenuButtonItem::new("rework", "Return for rework"));
             items.push(MenuButtonItem::new("deliver", "Deliver…"));
             if m.branch.is_some() {
@@ -787,8 +846,11 @@ pub(crate) fn pushed_page(
                     if let Some(sid) = raw.strip_prefix("stage:") {
                         move_card(ui, &cid_sel, sid);
                         state.board_stage.set(sid.to_owned());
+                    } else if let Some(pid) = raw.strip_prefix("assign:") {
+                        assign_card(ui, &cid_sel, Some(pid));
                     } else {
                         match raw {
+                            "unassign" => assign_card(ui, &cid_sel, None),
                             "rework" => state.open_sheet(MobileSheet::Rework(cid_sel.clone())),
                             "deliver" => deliver_card(ui, &cid_sel, rev, has_run),
                             "copy-branch" => {

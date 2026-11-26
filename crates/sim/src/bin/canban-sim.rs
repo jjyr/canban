@@ -873,6 +873,15 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "github.intake_suppression_and_closure",
     "client_pages.insights_and_activity",
     "herdr.overview_saved_output_and_activity_rules",
+    // Card #180: card agent assignee & workflow default_agent/override
+    "assignee.create_wake",
+    "assignee.update_bind_only",
+    "assignee.comment_auto_sync",
+    "assignee.explicit_mention_excludes_assignee",
+    "assignee.workflow_default_agent",
+    "assignee.workflow_override_preserved",
+    "assignee.adopt_backfill",
+    "assignee.offline_sync_converged",
 ];
 
 const SCHEDULER_CONTENTION_REQUIRED_COVERAGE: &[&str] = &[
@@ -2241,8 +2250,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            107,
-            "full suite coverage gate must require 107 properties"
+            115,
+            "full suite coverage gate must require 115 properties"
         );
         assert_eq!(
             unique.len(),

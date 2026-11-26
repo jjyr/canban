@@ -79,6 +79,29 @@ pub(super) fn render_card_mention_instruction(
     )
 }
 
+/// Resolve and validate an optional `assignee` RPC field (`null`/empty clears, string selects an enabled profile).
+pub(super) fn parse_assignee_param(
+    config: &Config,
+    project: Option<&Project>,
+    p: &Value,
+) -> Result<Option<Option<String>>> {
+    let Some(raw) = p.get("assignee") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(Some(None));
+    }
+    let text = raw
+        .as_str()
+        .context("assignee must be a profile ID string or null")?;
+    let trimmed = text.trim().trim_start_matches('@');
+    if trimmed.is_empty() {
+        return Ok(Some(None));
+    }
+    let profile = canban_scheduler::select_in_project(config, project, Some(trimmed))?;
+    Ok(Some(Some(profile.id)))
+}
+
 pub(super) fn queue_card_mentions(
     db: Db<'_>,
     config: &Config,
@@ -90,6 +113,8 @@ pub(super) fn queue_card_mentions(
 ) -> Result<()> {
     let mut mentions = strings(p, "mentions");
     // Explicit recipients distinguish addressing an Agent from discussing its name.
+    // When `mentions` is omitted, explicit `@profile` mentions in prose take precedence
+    // and only fall back to `card.assignee` when no Agent was explicitly addressed.
     if p.get("mentions").is_none() {
         for source in prose_sources {
             for name in canban_profiles::addressed(source, &config.profiles) {
@@ -97,6 +122,15 @@ pub(super) fn queue_card_mentions(
                     mentions.push(name);
                 }
             }
+        }
+        if mentions.is_empty()
+            && let Some(assignee) = card.assignee.as_deref()
+            && config
+                .profiles
+                .iter()
+                .any(|a| a.id == assignee && a.enabled)
+        {
+            mentions.push(assignee.to_owned());
         }
     }
     mentions.sort();
@@ -344,11 +378,16 @@ impl AppServer {
                 "Restore this Card before opening its Agent"
             );
             let project: Project = db.get(&card.project_id)?;
-            let profile = canban_scheduler::select_in_project(
-                &config,
-                Some(&project),
-                Some(strp(&p, "profile_id")?),
-            )?;
+            let requested = p["profile_id"]
+                .as_str()
+                .map(str::trim)
+                .map(|s| s.trim_start_matches('@'))
+                .filter(|s| !s.is_empty());
+            let target_profile = requested
+                .or(card.assignee.as_deref())
+                .context("profile_id is required when Card has no assignee")?;
+            let profile =
+                canban_scheduler::select_in_project(&config, Some(&project), Some(target_profile))?;
             let mut context = conversation(db, &card, &profile, self.now_ms())?;
             if let Some(expected) = p["expected_terminal_id"].as_str() {
                 let entry: TerminalEntry = db

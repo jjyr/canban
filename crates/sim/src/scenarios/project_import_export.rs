@@ -37,7 +37,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const BUNDLE_WORKFLOW_YAML: &str = r#"schema: 12
+const BUNDLE_WORKFLOW_YAML: &str = r#"schema: 13
 id: bundle-flow
 name: Exported Bundle Flow
 workspace:
@@ -71,7 +71,7 @@ steps:
   - id: work
     uses: agent
     with:
-      profile: developer
+      default_agent: developer
       instruction: Work on imported project copy
     next: gate
   - id: gate
@@ -293,6 +293,7 @@ pub fn run(seed: u64) -> Result<u64> {
                 "project_id": pid_local,
                 "title": "Backlog Feature",
                 "body": format!("backlog-seed-{seed}"),
+                "assignee": "developer",
             }),
             Some(&pid_local),
         )?;
@@ -807,6 +808,16 @@ pub fn run(seed: u64) -> Result<u64> {
                     && !archived_c3.active()
                     && archived_c3.archive.is_some(),
                 "[{host}] imported archived card c3 must remain archived with archive path: {archived_c3:?}"
+            );
+            let imported_c1 = srv_snap
+                .cards
+                .iter()
+                .find(|c| c.id == cid1_local)
+                .with_context(|| format!("[{host}] missing imported card c1 ({cid1_local})"))?;
+            ensure!(
+                imported_c1.assignee.as_deref() == Some("developer"),
+                "[{host}] imported card c1 lost assignee=developer: {:?}",
+                imported_c1.assignee
             );
         }
 

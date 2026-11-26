@@ -742,6 +742,8 @@ pub struct Card {
     pub github_links: Vec<GitHubReference>,
     #[serde(default)]
     pub created_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
     #[serde(default)]
     pub content: CardContent,
     #[serde(default)]

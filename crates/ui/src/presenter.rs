@@ -2164,6 +2164,52 @@ pub fn hold_auto_merge(ui: Ui, card_id: &str, fallback_revision: u64, hold: bool
         },
     );
 }
+pub fn assign_card(ui: Ui, card_id: &str, assignee: Option<&str>) {
+    let prev = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned());
+    let Some(prev_card) = prev else {
+        return;
+    };
+    let next_assignee = assignee
+        .map(str::trim)
+        .map(|s| s.trim_start_matches('@'))
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if !crate::backend::is_connected() {
+        ui.snapshot.update(|s| {
+            if let Some(cur) = s.cards.iter_mut().find(|x| x.id == card_id) {
+                cur.assignee = next_assignee.clone();
+                cur.revision += 1;
+            }
+        });
+        return;
+    }
+    let cid = prev_card.id.clone();
+    let rev = prev_card.revision;
+    let rollback = prev_card.clone();
+    ui.snapshot.update(|s| {
+        if let Some(cur) = s.cards.iter_mut().find(|x| x.id == cid) {
+            cur.assignee = next_assignee.clone();
+        }
+    });
+    dispatch_complete(
+        ui,
+        "card.update",
+        json!({"card_id": cid, "revision": rev, "assignee": next_assignee}),
+        move |res| {
+            if res.is_err() {
+                ui.snapshot.update(|s| {
+                    if let Some(cur) = s.cards.iter_mut().find(|x| x.id == rollback.id)
+                        && cur.revision == rollback.revision
+                    {
+                        *cur = rollback;
+                    }
+                });
+            }
+        },
+    );
+}
 pub fn load_text(ui: Ui, method: &'static str, params: Value) {
     let generation = ui.output_request.get_untracked() + 1;
     ui.output_request.set(generation);

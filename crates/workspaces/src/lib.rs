@@ -1298,6 +1298,7 @@ mod tests {
             hold_auto_merge: false,
             github_links: Vec::new(),
             created_by: String::new(),
+            assignee: None,
             content: Default::default(),
             removed_at: None,
             pull_request: None,

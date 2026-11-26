@@ -86,11 +86,50 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
     let mut insert_at = 0;
     items.insert(
         insert_at,
-        MenuItem::new("Open Card Terminal")
-            .disabled((inactive && !has_live_terminal) || ui.pending.get_untracked())
-            .on_select(move || crate::terminals::open_card_quick(ui, &terminal_card)),
+        MenuItem::new(if has_live_terminal {
+            "Open Card Terminal".to_owned()
+        } else if let Some(aid) = card.assignee.as_deref() {
+            format!("Open @{aid} Session")
+        } else {
+            "Open Card Terminal".to_owned()
+        })
+        .disabled((inactive && !has_live_terminal) || ui.pending.get_untracked())
+        .on_select(move || crate::terminals::open_card_quick(ui, &terminal_card)),
     );
     insert_at += 1;
+    if !inactive {
+        let mut assign_items: Vec<MenuItem> = ui
+            .profiles
+            .get_untracked()
+            .into_iter()
+            .filter(|p| p.enabled)
+            .map(|p| {
+                let cid = card.id.clone();
+                let pid = p.id.clone();
+                let label_id = pid.clone();
+                let checked = card.assignee.as_deref() == Some(pid.as_str());
+                MenuItem::new(format!("@{label_id}"))
+                    .checked(checked)
+                    .disabled(ui.pending.get_untracked())
+                    .on_select(move || crate::presenter::assign_card(ui, &cid, Some(&pid)))
+            })
+            .collect();
+        if card.assignee.is_some() {
+            let cid = card.id.clone();
+            if !assign_items.is_empty() {
+                assign_items.push(MenuItem::separator());
+            }
+            assign_items.push(
+                MenuItem::new("Unassign")
+                    .disabled(ui.pending.get_untracked())
+                    .on_select(move || crate::presenter::assign_card(ui, &cid, None)),
+            );
+        }
+        if !assign_items.is_empty() {
+            items.insert(insert_at, MenuItem::submenu("Assign Agent", assign_items));
+            insert_at += 1;
+        }
+    }
     if !inactive && !card.resolved() {
         let resolve_card = card.clone();
         items.insert(

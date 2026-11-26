@@ -63,11 +63,10 @@ fn deliver_config(run: &WorkflowRun, config: &Config) -> DeliverConfig {
                 rework
                     .as_ref()
                     .and_then(|to| match run.definition.steps.get(to) {
-                        Some(WorkflowStep::Agent {
-                            profile: Some(p), ..
-                        }) if config.profiles.iter().any(|x| x.id == *p && x.enabled) => {
-                            Some(p.clone())
-                        }
+                        Some(step @ WorkflowStep::Agent { .. }) => step
+                            .agent_fallback_profile()
+                            .filter(|p| config.profiles.iter().any(|x| x.id == *p && x.enabled))
+                            .map(str::to_owned),
                         _ => None,
                     })
             })
