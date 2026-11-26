@@ -187,6 +187,7 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
                                     None,
                                     FontWeight::MEDIUM,
                                     false,
+                                    None,
                                 )),
                         )
                         .child(muted(stats))

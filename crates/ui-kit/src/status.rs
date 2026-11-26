@@ -187,7 +187,12 @@ pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl Into
         .border_1()
         .border_color(border)
         .rounded(px(RADIUS))
-        .child(text(message).text_size(px(BODY_SIZE)).text_color(color))
+        .child(
+            text(message)
+                .text_size(px(BODY_SIZE))
+                .text_color(color)
+                .select_text(),
+        )
 }
 /// Static 8px semantic status dot (used for running shell commands and as the
 /// base layer of [`live_dot`]).

@@ -1063,7 +1063,6 @@ fn parse_unified_patch(patch: &str) -> Vec<ParsedDiffLine> {
 }
 
 fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
-    let _ = ui;
     let files = data.as_array().cloned().unwrap_or_default();
     if files.is_empty() {
         return view()
@@ -1103,6 +1102,7 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
                 file["previous_filename"].as_str(),
                 FontWeight::SEMIBOLD,
                 true,
+                Some(ui),
             ))
             .child(badge(file_status))
             .child(

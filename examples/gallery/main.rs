@@ -2691,6 +2691,7 @@ pub fn Gallery() -> impl IntoElement {
         Ok("review-working-tree"
             | "review-uncommitted"
             | "review-file-list"
+            | "review-copy-error"
             | "review-async"
             | "review-large-diff"
             | "review-context-expand"
@@ -2755,7 +2756,7 @@ pub fn Gallery() -> impl IntoElement {
             st.prepared_hunks.set(prepared.hunks);
             st.compare_data.set(data);
         }
-        if scene == "review-file-list" {
+        if matches!(scene.as_str(), "review-file-list" | "review-copy-error") {
             let st = ui.review_state;
             let (mut refs, compare) = fixtures::git_file_list_showcase();
             refs["commits"] = ui
@@ -2765,6 +2766,12 @@ pub fn Gallery() -> impl IntoElement {
             st.refs_data.set(refs);
             let prepared = review::cache::ReadValue::new(compare);
             review::apply_compare(ui, &prepared);
+            if scene == "review-copy-error" {
+                ui.operation_error.set(
+                    "Push rejected: remote contains work that you do not have locally (run git pull --rebase before pushing)"
+                        .into(),
+                );
+            }
         }
         if scene == "review-async" {
             let st = ui.review_state;

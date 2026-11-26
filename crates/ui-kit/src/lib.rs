@@ -48,7 +48,8 @@ pub mod section_group;
 pub use section_group::{SectionGroup, collapsible_section_group, section_group};
 pub mod chrome;
 pub use chrome::{
-    chrome_action, chrome_button, chrome_button_disabled, chrome_indicator_button, utility_button,
+    chrome_action, chrome_button, chrome_button_disabled, chrome_indicator_button,
+    copy_icon_button, utility_button,
 };
 
 pub mod segmented;

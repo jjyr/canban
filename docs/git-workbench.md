@@ -34,8 +34,9 @@ returns to its Uncommitted view rather than carrying refs from another checkout.
 The Worktree picker displays its directory and branch, with the full path on hover.
 
 Changes is a continuous file view. Clicking a file name reveals and expands its
-patch without filtering out other files. Chevron icons in Files and Changes
-share the same per-patch fold state. A collapsed patch retains its file name,
+patch without filtering out other files, and each file header exposes a
+copy-path icon button beside the selectable filename to copy the full relative
+path. Chevron icons in Files and Changes share the same per-patch fold state. A collapsed patch retains its file name,
 source group, status and change statistics. Refresh of the same query retains
 fold state; changing comparison or checkout resets it. Command Palette entries
 expose Compare, checkout selection, related Card navigation and file reveal/fold.

@@ -1004,24 +1004,49 @@ pub fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                                     .text_size(px(13.5))
                                     .line_height(px(18.))
                                     .text_color(DANGER)
+                                    .select_text()
                                     .flex_1()
                                     .min_w(px(0.)),
                             )
                             .child(
-                                press_target()
-                                    .min_h(px(36.))
-                                    .px_2p5()
-                                    .rounded(px(8.))
+                                view()
+                                    .flex_row()
                                     .items_center()
-                                    .justify_center()
-                                    .active(|s| s.opacity(0.65))
+                                    .gap_1()
+                                    .flex_shrink_0()
+                                    .child(copy_icon_button(
+                                        "Copy error message",
+                                        "Copy error",
+                                        34.,
+                                        16.,
+                                        CARD_HOVER,
+                                        Placement::Bottom,
+                                        move || {
+                                            let msg = ui.operation_error.get_untracked();
+                                            if !msg.is_empty() {
+                                                drop(set_clipboard(&msg));
+                                                ui.status.set("Copied error to clipboard".into());
+                                            }
+                                        },
+                                    ))
                                     .child(
-                                        text("Dismiss")
-                                            .text_size(px(13.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(DANGER),
-                                    )
-                                    .on_press(move |_: &()| ui.operation_error.set(String::new())),
+                                        press_target()
+                                            .min_h(px(36.))
+                                            .px_2p5()
+                                            .rounded(px(8.))
+                                            .items_center()
+                                            .justify_center()
+                                            .active(|s| s.opacity(0.65))
+                                            .child(
+                                                text("Dismiss")
+                                                    .text_size(px(13.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(DANGER),
+                                            )
+                                            .on_press(move |_: &()| {
+                                                ui.operation_error.set(String::new())
+                                            }),
+                                    ),
                             ),
                     )
             },

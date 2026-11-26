@@ -562,14 +562,37 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .child(
                             canban_ui_kit::label(move || err_text.get())
                                 .text_color(canban_ui_kit::tokens::ATTENTION)
+                                .select_text()
                                 .flex_1()
                                 .min_w(px(0.)),
                         )
-                        .child(canban_ui_kit::chrome_button(
-                            canban_ui_kit::Icon::Close,
-                            "Dismiss message",
-                            move |_| ui.operation_error.set(String::new()),
-                        ))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .flex_shrink_0()
+                                .child(canban_ui_kit::copy_icon_button(
+                                    "Copy error message",
+                                    "Copy error",
+                                    30.,
+                                    16.,
+                                    canban_ui_kit::tokens::INSET,
+                                    Placement::Top,
+                                    move || {
+                                        let msg = err_text.get_untracked();
+                                        if !msg.is_empty() {
+                                            drop(set_clipboard(&msg));
+                                            ui.status.set("Copied error to clipboard".into());
+                                        }
+                                    },
+                                ))
+                                .child(canban_ui_kit::chrome_button(
+                                    canban_ui_kit::Icon::Close,
+                                    "Dismiss message",
+                                    move |_| ui.operation_error.set(String::new()),
+                                )),
+                        )
                 },
             )
         })

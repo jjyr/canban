@@ -233,27 +233,48 @@ pub(crate) fn diff_header_path(
     previous: Option<&str>,
     font_weight: FontWeight,
     mono: bool,
+    copy_ui: Option<Ui>,
 ) -> View {
     let full_tip = file_path_tooltip(&path, previous);
+    let copy_path = path.clone();
     let mut name = label(path)
         .min_w(px(0.))
         .truncate()
         .font_weight(font_weight);
+    if copy_ui.is_some() {
+        name = name.select_text();
+    }
     if mono {
         name = name.font_family(MONO_FONT).text_size(px(12.));
     }
-    view()
+    let mut row = view()
         .flex_1()
         .min_w(px(0.))
         .flex_row()
         .items_center()
+        .gap_1()
         .child(
             view()
                 .min_w(px(0.))
                 .flex_shrink(1.)
                 .tooltip(hint_tooltip(full_tip).placement(Placement::Bottom))
                 .child(name),
-        )
+        );
+    if let Some(ui) = copy_ui
+        && !copy_path.is_empty()
+    {
+        let path_for_copy = copy_path.clone();
+        row = row.child(copy_icon_button(
+            format!("Copy file path {copy_path}"),
+            "Copy file path",
+            22.,
+            13.,
+            CARD_HOVER,
+            Placement::Bottom,
+            move || copy_text(ui, path_for_copy.clone()),
+        ));
+    }
+    row
 }
 
 pub(super) fn diff_stat_counts(stats: Option<(u64, u64)>) -> Option<View> {
@@ -1199,6 +1220,7 @@ fn render_file_card(
             ctx.file["previous_filename"].as_str(),
             FontWeight::SEMIBOLD,
             true,
+            Some(ui),
         ))
         .child(badge(f_status))
         .child(dynamic(move || {

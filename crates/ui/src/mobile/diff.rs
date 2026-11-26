@@ -412,13 +412,34 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
                                     .justify_between()
                                     .gap_2()
                                     .child(
-                                        text(file.filename.clone())
-                                            .font_family(MONO_FONT)
-                                            .text_size(px(12.5))
-                                            .text_color(TEXT)
-                                            .truncate()
+                                        view()
                                             .flex_1()
-                                            .min_w(px(0.)),
+                                            .min_w(px(0.))
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                text(file.filename.clone())
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(12.5))
+                                                    .text_color(TEXT)
+                                                    .truncate()
+                                                    .select_text()
+                                                    .min_w(px(0.))
+                                                    .flex_shrink(1.),
+                                            )
+                                            .children((!file.filename.is_empty()).then(|| {
+                                                let copy_path = file.filename.clone();
+                                                copy_icon_button(
+                                                    format!("Copy file path {}", file.filename),
+                                                    "Copy file path",
+                                                    28.,
+                                                    14.,
+                                                    CARD_HOVER,
+                                                    Placement::Bottom,
+                                                    move || copy_text(ui, copy_path.clone()),
+                                                )
+                                            })),
                                     )
                                     .child(badge(file.status)),
                             );

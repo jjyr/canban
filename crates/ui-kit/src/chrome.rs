@@ -169,3 +169,68 @@ pub fn sync_action(
                 .on_press(press),
         )
 }
+
+/// Compact icon-only copy button with tooltip, pointer cursor, and brief check confirmation.
+/// Keeps confirmation visible inline even when a floating error banner suppresses the global toast.
+pub fn copy_icon_button(
+    title: impl Into<String>,
+    tooltip_text: impl Into<String>,
+    size: f32,
+    icon_size: f32,
+    hover_bg: ThemeColor,
+    placement: Placement,
+    on_copy: impl Fn() + 'static,
+) -> View {
+    let title = title.into();
+    let idle_tip = tooltip_text.into();
+    let copied = signal(false);
+    let epoch = signal(0_u64);
+    view()
+        .flex_shrink_0()
+        .window_drag(false)
+        .tooltip(
+            hint_tooltip(move || -> SharedString {
+                if copied.get() {
+                    "Copied".into()
+                } else {
+                    idle_tip.clone().into()
+                }
+            })
+            .placement(placement),
+        )
+        .child(
+            crate::press_target()
+                .app_class(super::motion::CONTROL_TRANSITION)
+                .w(px(size))
+                .h(px(size))
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .bg(CLEAR)
+                .hover(move |s| s.bg(hover_bg))
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .accessibility_label(move || Some(title.clone().into()))
+                .on_press(move |_: &()| {
+                    on_copy();
+                    let next = epoch.get_untracked().wrapping_add(1);
+                    epoch.set(next);
+                    copied.set(true);
+                    set_timeout(std::time::Duration::from_millis(1500), move || {
+                        if epoch.try_get() == Some(next) {
+                            let _ = copied.try_set(false);
+                        }
+                    });
+                })
+                .child(dynamic(move || {
+                    if copied.get() {
+                        super::icon_tinted(Icon::Check, SUCCESS)
+                            .w(px(icon_size))
+                            .h(px(icon_size))
+                    } else {
+                        super::icon_tinted(Icon::Copy, MUTED)
+                            .w(px(icon_size))
+                            .h(px(icon_size))
+                    }
+                })),
+        )
+}
