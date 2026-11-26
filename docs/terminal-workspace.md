@@ -36,6 +36,10 @@ The Card worktree header's `⋯` and context menu contain actions only: New Term
 Open Agent, Open Card, Open in Git, and Copy Worktree Path when available. They
 omit the redundant Card title, branch and path information rows.
 
+The Terminal actions (`⋯` and tab/row context) menu starts directly with `Rename tab…`
+and `Close terminal` and omits the redundant top multi-line `hint` title item (full
+session details remain in tab and sidebar hover tooltips).
+
 ### Card worktree merge marker (2026-11-17)
 
 Card worktree headers show a compact purple `Merged` badge when the unarchived

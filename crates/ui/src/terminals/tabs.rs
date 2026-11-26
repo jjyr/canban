@@ -53,33 +53,31 @@ pub fn context_updates(ui: Ui) {
         window.set(attributes);
     });
 }
-pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
-    let Some(e) = ui
-        .terminal_entries
-        .with_untracked(|rows| rows.iter().find(|e| e.saved.id == id).cloned())
-    else {
-        return;
-    };
-    let rename = id.clone();
-    let close = id.clone();
-    let mut items = vec![
-        MenuItem::new(e.hint()).disabled(true),
-        MenuItem::separator(),
-        MenuItem::new("Rename tab…")
-            .on_select(move || ui.terminal_rename.set(Some(rename.clone()))),
-        MenuItem::new("Close terminal").on_select(move || close_entry(ui, &close)),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalMenuEntry {
+    RenameTab,
+    CloseTerminal,
+    OpenCard { card_id: String },
+    DisabledInfo(String),
+    InterruptAgent,
+    ContextAndHistory,
+    InterruptTerminal,
+    ReopenTerminal,
+}
+
+pub(crate) fn terminal_menu_entries(e: &Entry) -> Vec<TerminalMenuEntry> {
+    let mut out = vec![
+        TerminalMenuEntry::RenameTab,
+        TerminalMenuEntry::CloseTerminal,
     ];
     if let Some(card) = &e.card {
-        let card = card.id.clone();
-        let terminal = e.saved.id.clone();
-        items.push(
-            MenuItem::new("Open Card")
-                .on_select(move || ui.terminal_card(card.clone(), Some(terminal.clone()))),
-        );
+        out.push(TerminalMenuEntry::OpenCard {
+            card_id: card.id.clone(),
+        });
     }
-    items.push(
-        MenuItem::new(e.cwd().unwrap_or_else(|| "Directory unavailable".into())).disabled(true),
-    );
+    out.push(TerminalMenuEntry::DisabledInfo(
+        e.cwd().unwrap_or_else(|| "Directory unavailable".into()),
+    ));
     if let Some(branch) = e.location.as_ref().and_then(|c| c.branch.clone()) {
         let mut line = format!("Branch: {branch}");
         if let Some(loc) = &e.location {
@@ -88,7 +86,7 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
                 line.push_str(&format!(" ({})", ind.join(" · ")));
             }
         }
-        items.push(MenuItem::new(line).disabled(true));
+        out.push(TerminalMenuEntry::DisabledInfo(line));
     }
     if let Some(agent) = &e.agent {
         if agent
@@ -96,26 +94,67 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
             .is_some_and(|a| !a.finished() && a.terminal.is_some())
             && e.card.as_ref().is_some_and(|c| c.archived_at.is_none())
         {
-            let terminal_id = e.saved.id.clone();
-            items.push(MenuItem::new("Interrupt").on_select(move || {
-                dispatch(ui, "agent.interrupt", json!({"terminal_id":terminal_id}))
-            }));
+            out.push(TerminalMenuEntry::InterruptAgent);
         }
-        items.push(
-            MenuItem::new("Context and execution history").on_select(move || {
-                ui.open_terminal(id.clone());
-                ui.terminal_details.set(true);
-            }),
-        );
+        out.push(TerminalMenuEntry::ContextAndHistory);
     } else if !e.ended() && e.binding().is_some() {
-        let interrupt = e.saved.id.clone();
-        items.push(MenuItem::new("Interrupt").on_select(move || {
-            dispatch(ui, "terminal.interrupt", json!({"terminal_id":interrupt}))
-        }));
+        out.push(TerminalMenuEntry::InterruptTerminal);
     } else if e.ended() || e.inactive() {
-        let id = e.saved.id.clone();
-        items.push(MenuItem::new("Reopen terminal").on_select(move || reopen(ui, id.clone())));
+        out.push(TerminalMenuEntry::ReopenTerminal);
     }
+    out
+}
+
+pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
+    let Some(e) = ui
+        .terminal_entries
+        .with_untracked(|rows| rows.iter().find(|e| e.saved.id == id).cloned())
+    else {
+        return;
+    };
+    let items: Vec<MenuItem> = terminal_menu_entries(&e)
+        .into_iter()
+        .map(|entry| match entry {
+            TerminalMenuEntry::RenameTab => {
+                let rename = id.clone();
+                MenuItem::new("Rename tab…")
+                    .on_select(move || ui.terminal_rename.set(Some(rename.clone())))
+            }
+            TerminalMenuEntry::CloseTerminal => {
+                let close = id.clone();
+                MenuItem::new("Close terminal").on_select(move || close_entry(ui, &close))
+            }
+            TerminalMenuEntry::OpenCard { card_id } => {
+                let terminal = e.saved.id.clone();
+                MenuItem::new("Open Card")
+                    .on_select(move || ui.terminal_card(card_id.clone(), Some(terminal.clone())))
+            }
+            TerminalMenuEntry::DisabledInfo(text) => MenuItem::new(text).disabled(true),
+            TerminalMenuEntry::InterruptAgent => {
+                let terminal_id = e.saved.id.clone();
+                MenuItem::new("Interrupt").on_select(move || {
+                    dispatch(ui, "agent.interrupt", json!({"terminal_id":terminal_id}))
+                })
+            }
+            TerminalMenuEntry::ContextAndHistory => {
+                let open_id = id.clone();
+                MenuItem::new("Context and execution history").on_select(move || {
+                    ui.open_terminal(open_id.clone());
+                    ui.terminal_details.set(true);
+                })
+            }
+            TerminalMenuEntry::InterruptTerminal => {
+                let interrupt = e.saved.id.clone();
+                MenuItem::new("Interrupt").on_select(move || {
+                    dispatch(ui, "terminal.interrupt", json!({"terminal_id":interrupt}))
+                })
+            }
+            TerminalMenuEntry::ReopenTerminal => {
+                let reopen_id = e.saved.id.clone();
+                MenuItem::new("Reopen terminal").on_select(move || reopen(ui, reopen_id.clone()))
+            }
+        })
+        .collect();
     if let Some(at) = at {
         popup_menu_at(items, at).await
     } else {

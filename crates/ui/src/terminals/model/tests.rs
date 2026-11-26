@@ -6956,3 +6956,133 @@ fn natural_terminal_exit_preserves_last_worktree_for_fallback_selection() {
         "exiting wt-b must switch to sibling wt-a in the same worktree, not jump to root-1"
     );
 }
+
+#[test]
+fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
+    use crate::terminals::tabs::{TerminalMenuEntry, terminal_menu_entries};
+
+    let mut s = fixture();
+    let long_title = "非常长的任务标题 / a very long task title with important details ".repeat(6);
+    s.cards[0].title = long_title.clone();
+    let agent_id = s.terminals[0].id.clone();
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: agent_id.clone(),
+        core_id: "core".into(),
+        terminal: "t-c1".into(),
+        cwd: Some("/repo/p1-wt".into()),
+        directory_root: Some("/repo/p1-wt".into()),
+        project_id: Some("p1".into()),
+        card_id: Some("c1".into()),
+        branch: Some("canban/1".into()),
+        dirty: true,
+        ahead: 2,
+        behind: 0,
+        ..Default::default()
+    });
+    s.terminals.push(TerminalEntry {
+        id: "shell-live".into(),
+        conversation_id: None,
+        number: 10,
+        name: None,
+        origin_project_id: Some("p1".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        created_at: 2,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("core".into()),
+            terminal: Some("pty-shell-live".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+    });
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "shell-live".into(),
+        core_id: "core".into(),
+        terminal: "pty-shell-live".into(),
+        cwd: Some("/tmp/shell-live".into()),
+        directory_root: Some("/tmp/shell-live".into()),
+        project_id: Some("p1".into()),
+        ..Default::default()
+    });
+    s.terminals.push(TerminalEntry {
+        id: "shell-ended".into(),
+        conversation_id: None,
+        number: 11,
+        name: None,
+        origin_project_id: Some("p1".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        created_at: 3,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("core".into()),
+            terminal: None,
+            state: "finished".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+    });
+
+    let all = crate::terminals::entries(&s);
+    let agent_entry = all.iter().find(|e| e.saved.id == agent_id).unwrap();
+    let agent_hint = agent_entry.hint();
+    let agent_menu = terminal_menu_entries(agent_entry);
+    assert_eq!(agent_menu.first(), Some(&TerminalMenuEntry::RenameTab));
+    for item in &agent_menu {
+        if let TerminalMenuEntry::DisabledInfo(text) = item {
+            assert_ne!(text, &agent_hint);
+            assert!(!text.contains(&long_title));
+            assert!(!text.contains("Managed by Canban"));
+        }
+    }
+    assert_eq!(
+        agent_menu,
+        vec![
+            TerminalMenuEntry::RenameTab,
+            TerminalMenuEntry::CloseTerminal,
+            TerminalMenuEntry::OpenCard {
+                card_id: "c1".into(),
+            },
+            TerminalMenuEntry::DisabledInfo("/repo/p1-wt".into()),
+            TerminalMenuEntry::DisabledInfo("Branch: canban/1 (changed · ↑2)".into()),
+            TerminalMenuEntry::InterruptAgent,
+            TerminalMenuEntry::ContextAndHistory,
+        ]
+    );
+
+    let live_shell = all.iter().find(|e| e.saved.id == "shell-live").unwrap();
+    let live_menu = terminal_menu_entries(live_shell);
+    assert_eq!(live_menu.first(), Some(&TerminalMenuEntry::RenameTab));
+    assert_eq!(
+        live_menu,
+        vec![
+            TerminalMenuEntry::RenameTab,
+            TerminalMenuEntry::CloseTerminal,
+            TerminalMenuEntry::DisabledInfo("/tmp/shell-live".into()),
+            TerminalMenuEntry::InterruptTerminal,
+        ]
+    );
+
+    let ended_shell = all.iter().find(|e| e.saved.id == "shell-ended").unwrap();
+    let ended_menu = terminal_menu_entries(ended_shell);
+    assert_eq!(ended_menu.first(), Some(&TerminalMenuEntry::RenameTab));
+    assert_eq!(
+        ended_menu,
+        vec![
+            TerminalMenuEntry::RenameTab,
+            TerminalMenuEntry::CloseTerminal,
+            TerminalMenuEntry::DisabledInfo("Directory unavailable".into()),
+            TerminalMenuEntry::ReopenTerminal,
+        ]
+    );
+}
