@@ -47,6 +47,9 @@ use tokio::sync::{Notify, broadcast, mpsc, watch};
 const DEFAULT_READ_CACHE_BUDGET: u64 = 20 * 1024 * 1024;
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
 const PUSH_MAX_DEBOUNCE: Duration = Duration::from_millis(100);
+const PUSH_REFRESH_RETRY_BASE_MS: u64 = 200;
+const PUSH_REFRESH_RETRY_MAX_MS: u64 = 2_000;
+const PUSH_REFRESH_MAX_NON_STORAGE_RETRIES: u32 = 8;
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
 const API_MISMATCH_RETRY_DELAY: Duration = Duration::from_secs(30);
 const LEGACY_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -137,6 +140,7 @@ struct RemoteHostSlot {
     updating: bool,
     cached: CachedHostData,
     cache_gen: u64,
+    local_cache_gen: u64,
     home: String,
     notice: Option<String>,
     reconnect_count: u32,
@@ -200,6 +204,7 @@ impl RemoteHostSlot {
             updating: false,
             cached,
             cache_gen: 0,
+            local_cache_gen: 0,
             home: String::new(),
             notice: None,
             reconnect_count: 0,
@@ -400,6 +405,15 @@ fn transient_storage_retry_delay_ms(attempts: u32) -> u64 {
     100u64.saturating_mul(1u64 << shift).min(2_000)
 }
 
+/// Pure bounded exponential backoff (200ms..=2000ms) for push-supervisor refresh retries
+/// after transient non-connection, non-auth errors.
+fn push_refresh_retry_delay_ms(attempt: u32) -> u64 {
+    let shift = attempt.saturating_sub(1).min(4);
+    PUSH_REFRESH_RETRY_BASE_MS
+        .saturating_mul(1u64 << shift)
+        .min(PUSH_REFRESH_RETRY_MAX_MS)
+}
+
 fn auth_failed_error(host_name: &str, error: &str) -> anyhow::Error {
     let trimmed = error.trim();
     if trimmed.to_ascii_lowercase().contains("auth_failed") {
@@ -527,6 +541,135 @@ fn parse_refreshed_snapshot(state_val: &Value, host_id: &str) -> Option<Snapshot
     Some(snap)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StateCursor<'a> {
+    identity: &'a str,
+    state_instance: &'a str,
+    changes: u64,
+    state_revision: u64,
+}
+
+fn parse_state_cursor(revision: &Value) -> Option<StateCursor<'_>> {
+    let arr = revision.as_array()?;
+    if arr.len() < 4 {
+        return None;
+    }
+    let identity = arr[0].as_str().filter(|s| !s.is_empty())?;
+    let state_instance = arr[1].as_str().filter(|s| !s.is_empty())?;
+    let changes = arr[2].as_u64()?;
+    let state_revision = arr[3].as_u64()?;
+    Some(StateCursor {
+        identity,
+        state_instance,
+        changes,
+        state_revision,
+    })
+}
+
+fn cursor_changed_instance(current_revision: &Value, incoming_revision: &Value) -> bool {
+    let (Some(cur), Some(inc)) = (
+        parse_state_cursor(current_revision),
+        parse_state_cursor(incoming_revision),
+    ) else {
+        return false;
+    };
+    cur.identity != inc.identity || cur.state_instance != inc.state_instance
+}
+
+/// Returns `true` when `incoming_revision` is strictly older than `current_revision` on the
+/// same `(identity, state_instance)` (dominated in both `changes` and `state_revision`).
+fn cursor_is_strictly_older(current_revision: &Value, incoming_revision: &Value) -> bool {
+    let (Some(cur), Some(inc)) = (
+        parse_state_cursor(current_revision),
+        parse_state_cursor(incoming_revision),
+    ) else {
+        return false;
+    };
+    cur.identity == inc.identity
+        && cur.state_instance == inc.state_instance
+        && inc.changes <= cur.changes
+        && inc.state_revision <= cur.state_revision
+        && (inc.changes < cur.changes || inc.state_revision < cur.state_revision)
+}
+
+/// Returns `true` when `current_revision` already matches or strictly supersedes
+/// `target_revision` on the same server instance.
+fn cursor_already_covered_by(target_revision: &Value, current_revision: &Value) -> bool {
+    !target_revision.is_null()
+        && (*current_revision == *target_revision
+            || cursor_is_strictly_older(current_revision, target_revision))
+}
+
+fn snapshot_regresses_card_revision(current: &Snapshot, incoming: &Snapshot) -> bool {
+    if current.cards.is_empty() || incoming.cards.is_empty() {
+        return false;
+    }
+    let current_revs: std::collections::HashMap<&str, u64> = current
+        .cards
+        .iter()
+        .map(|c| (c.id.as_str(), c.revision))
+        .collect();
+    incoming.cards.iter().any(|inc| {
+        current_revs
+            .get(inc.id.as_str())
+            .is_some_and(|&cur_rev| inc.revision < cur_rev)
+    })
+}
+
+fn preserve_monotonic_card_revisions(current: &Snapshot, incoming: &mut Snapshot) {
+    if current.cards.is_empty() || incoming.cards.is_empty() {
+        return;
+    }
+    let current_cards: std::collections::HashMap<&str, &canban_types::Card> =
+        current.cards.iter().map(|c| (c.id.as_str(), c)).collect();
+    for card in &mut incoming.cards {
+        if let Some(cur) = current_cards.get(card.id.as_str())
+            && card.revision < cur.revision
+        {
+            *card = (*cur).clone();
+        }
+    }
+}
+
+/// Returns `true` when an incoming `app.state` response is stale relative to the slot's
+/// current cursor and cached snapshot on the same `(identity, state_instance)`.
+///
+/// Always returns `false` when `identity` or `state_instance` differs (server restarted or
+/// re-paired) or when either cursor is uninitialized/legacy so fresh post-restart snapshots
+/// are never rejected.
+fn is_stale_snapshot_cursor(
+    current_revision: &Value,
+    current_snapshot: &Snapshot,
+    incoming_revision: &Value,
+    incoming_snapshot: Option<&Snapshot>,
+) -> bool {
+    let (Some(cur), Some(inc)) = (
+        parse_state_cursor(current_revision),
+        parse_state_cursor(incoming_revision),
+    ) else {
+        return false;
+    };
+    if cur.identity != inc.identity || cur.state_instance != inc.state_instance {
+        return false;
+    }
+    if inc.changes < cur.changes || inc.state_revision < cur.state_revision {
+        return true;
+    }
+    if let Some(inc_snap) = incoming_snapshot
+        && snapshot_regresses_card_revision(current_snapshot, inc_snap)
+    {
+        return true;
+    }
+    false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ApplyStateOutcome {
+    emitted_topic: Option<&'static str>,
+    stale_rejected: bool,
+    needs_resync: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_state_to_slot(
     slot: &mut RemoteHostSlot,
@@ -537,11 +680,22 @@ fn apply_state_to_slot(
     preferred_topic: Option<&'static str>,
     now_ms: u64,
     fs_durability: FsDurability,
-) -> Option<&'static str> {
+) -> ApplyStateOutcome {
     let changed = state_val["changed"] == true || state_val.get("snapshot").is_some();
     let prev_marker = slot.last_marker.clone();
     let next_marker = state_marker(state_val);
     let was_connected = matches!(slot.connection, HostConnectionState::Connected { .. });
+    let incoming_snap = if changed {
+        parse_refreshed_snapshot(state_val, &slot.saved.id)
+    } else {
+        None
+    };
+    let stale = is_stale_snapshot_cursor(
+        &slot.last_marker["revision"],
+        &slot.cached.snapshot,
+        &next_marker["revision"],
+        incoming_snap.as_ref(),
+    );
 
     if let Some(sid) = state_val["server_id"]
         .as_str()
@@ -553,21 +707,24 @@ fn apply_state_to_slot(
     if let Some(home) = state_val["home"].as_str() {
         slot.home = home.to_owned();
     }
-    if let Some(notice) = state_val["notice"].as_str() {
-        slot.notice = (!notice.trim().is_empty()).then(|| notice.to_owned());
-    } else if state_val.get("notice").is_some_and(Value::is_null) {
-        slot.notice = None;
-    }
+    if !stale {
+        if let Some(notice) = state_val["notice"].as_str() {
+            slot.notice = (!notice.trim().is_empty()).then(|| notice.to_owned());
+        } else if state_val.get("notice").is_some_and(Value::is_null) {
+            slot.notice = None;
+        }
 
-    if changed {
-        if let Some(snap) = parse_refreshed_snapshot(state_val, &slot.saved.id) {
-            slot.cached.snapshot = snap;
+        if changed {
+            if let Some(snap) = incoming_snap {
+                slot.cached.snapshot = snap;
+            }
+            if let Ok(cfg) = serde_json::from_value::<Config>(state_val["config"].clone()) {
+                slot.cached.config = cfg;
+            }
+            slot.cache_gen = slot.cache_gen.wrapping_add(1);
+            slot.cached.saved_at = now_ms;
+            save_cache_with_durability(data_dir, &slot.saved.id, &slot.cached, fs_durability);
         }
-        if let Ok(cfg) = serde_json::from_value::<Config>(state_val["config"].clone()) {
-            slot.cached.config = cfg;
-        }
-        slot.cached.saved_at = now_ms;
-        save_cache_with_durability(data_dir, &slot.saved.id, &slot.cached, fs_durability);
     }
 
     if let Some(probe) = probe_val {
@@ -598,14 +755,14 @@ fn apply_state_to_slot(
     }
 
     slot.last_synced_at = Some(now_ms);
-    if !next_marker["revision"].is_null() {
+    if !stale && !next_marker["revision"].is_null() {
         slot.last_marker = next_marker.clone();
         slot.last_runtime_marker = next_marker.clone();
     }
 
-    if !was_connected || preferred_topic == Some("resync") {
+    let emitted_topic = if !was_connected || preferred_topic == Some("resync") {
         Some("resync")
-    } else if changed {
+    } else if changed && !stale {
         Some(
             if prev_marker["github_revision"] != slot.last_marker["github_revision"] {
                 "github"
@@ -617,6 +774,13 @@ fn apply_state_to_slot(
         )
     } else {
         None
+    };
+    let needs_resync =
+        stale && !cursor_is_strictly_older(&slot.last_marker["revision"], &next_marker["revision"]);
+    ApplyStateOutcome {
+        emitted_topic,
+        stale_rejected: stale,
+        needs_resync,
     }
 }
 
@@ -2713,6 +2877,7 @@ impl MultiHostClient {
                 let mut guard = self.hosts.write().unwrap();
                 if let Some(slot) = guard.get_mut(host_id) {
                     slot.cache_gen = slot.cache_gen.wrapping_add(1);
+                    slot.local_cache_gen = slot.local_cache_gen.wrapping_add(1);
                     match method {
                         "config.agents.save" | "agent.setup" => {
                             if let Ok(cfg) = serde_json::from_value::<Config>(res.clone()) {
@@ -4072,7 +4237,7 @@ impl MultiHostClient {
         preferred_topic: Option<&'static str>,
         card_id: Option<String>,
     ) -> Result<()> {
-        let (after, saved_at, before_gen) = {
+        let (after, saved_at, before_gen, before_local_gen) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(host_id)
@@ -4081,6 +4246,7 @@ impl MultiHostClient {
                 slot.last_marker.clone(),
                 slot.cached.saved_at,
                 slot.cache_gen,
+                slot.local_cache_gen,
             )
         };
         let req_after = if saved_at == 0 {
@@ -4103,10 +4269,22 @@ impl MultiHostClient {
             if slot.updating || !slot.saved.enabled {
                 return Ok(());
             }
-            if state_val["changed"] == true && slot.cache_gen != before_gen {
+            let incoming_changed =
+                state_val["changed"] == true || state_val.get("snapshot").is_some();
+            // Reject an in-flight `app.state` if a local non-cursor write (`config.agents.save`,
+            // `env.save`, or outbox write-receipt hydration) updated the cache while this RPC was
+            // in flight, or if a legacy server without a tuple cursor raced another cache write.
+            // When concurrent tuple-cursor refreshes race, defer to `apply_state_to_slot`'s
+            // cursor monotonicity check so strictly newer snapshots still apply cleanly while
+            // stale snapshots are rejected without redundant round-trips.
+            let blocked_by_local_mutation = incoming_changed
+                && (slot.local_cache_gen != before_local_gen
+                    || (slot.cache_gen != before_gen
+                        && parse_state_cursor(&state_val["revision"]).is_none()));
+            if blocked_by_local_mutation {
                 (None, None, true)
             } else {
-                let topic = apply_state_to_slot(
+                let outcome = apply_state_to_slot(
                     slot,
                     &self.config.data_dir,
                     &state_val,
@@ -4116,10 +4294,9 @@ impl MultiHostClient {
                     finished_ms,
                     self.fs_durability,
                 );
-                let entities = topic
-                    .is_some()
+                let entities = (!outcome.stale_rejected && outcome.emitted_topic.is_some())
                     .then(|| slot.cached.snapshot.entity_hosts.clone());
-                (topic, entities, false)
+                (outcome.emitted_topic, entities, outcome.needs_resync)
             }
         };
         if let Some(entities) = updated_entities {
@@ -4183,7 +4360,12 @@ impl MultiHostClient {
             {
                 *prev_rtt = rtt_ms;
             }
-            if !latest_marker["revision"].is_null() {
+            if !latest_marker["revision"].is_null()
+                && !cursor_is_strictly_older(
+                    &slot.last_runtime_marker["revision"],
+                    &latest_marker["revision"],
+                )
+            {
                 slot.last_runtime_marker = latest_marker.clone();
             }
         }
@@ -4320,7 +4502,9 @@ impl MultiHostClient {
                             || msg.contains("request_key_conflict"));
                     let snap = if need_refresh {
                         match client.call_async("app.state", &json!({})).await {
-                            Ok(v) => parse_refreshed_snapshot(&v, host_id),
+                            Ok(v) => {
+                                parse_refreshed_snapshot(&v, host_id).map(|s| (state_marker(&v), s))
+                            }
                             Err(refresh_err) => {
                                 if is_connection_error(&refresh_err) {
                                     conn = true;
@@ -4373,6 +4557,29 @@ impl MultiHostClient {
                     }
                 } else {
                     let mut snap = slot.cached.snapshot.clone();
+                    let mut refreshed_marker_to_apply: Option<Value> = None;
+                    let mut refreshed_new_instance = false;
+                    let refreshed_for_step = match refreshed {
+                        Some((refreshed_marker, refreshed_snap)) => {
+                            let stale = is_stale_snapshot_cursor(
+                                &slot.last_marker["revision"],
+                                &slot.cached.snapshot,
+                                &refreshed_marker["revision"],
+                                Some(&refreshed_snap),
+                            );
+                            if stale {
+                                Some(slot.cached.snapshot.clone())
+                            } else {
+                                refreshed_new_instance = cursor_changed_instance(
+                                    &slot.last_marker["revision"],
+                                    &refreshed_marker["revision"],
+                                );
+                                refreshed_marker_to_apply = Some(refreshed_marker);
+                                Some(refreshed_snap)
+                            }
+                        }
+                        None => None,
+                    };
                     let outcome = finish_step(
                         &mut outbox,
                         &mut snap,
@@ -4380,7 +4587,7 @@ impl MultiHostClient {
                         result,
                         was_retry_same_params,
                         is_conn_err,
-                        refreshed,
+                        refreshed_for_step,
                         allow_rebuild,
                         &mut blocked,
                         &mut report,
@@ -4389,8 +4596,20 @@ impl MultiHostClient {
                     if is_global_env_sync && sync_succeeded {
                         slot.global_env_synced_fingerprint = sync_fingerprint.clone();
                     }
+                    if !refreshed_new_instance {
+                        preserve_monotonic_card_revisions(&slot.cached.snapshot, &mut snap);
+                    }
                     snap.register_host_entities(host_id);
                     slot.cached.snapshot = snap;
+                    slot.cache_gen = slot.cache_gen.wrapping_add(1);
+                    if let Some(marker) = refreshed_marker_to_apply {
+                        if !marker["revision"].is_null() {
+                            slot.last_marker = marker.clone();
+                            slot.last_runtime_marker = marker;
+                        }
+                    } else if sync_succeeded {
+                        slot.local_cache_gen = slot.local_cache_gen.wrapping_add(1);
+                    }
                     slot.cached.saved_at = self.now_ms();
                     save_cache_with_durability(
                         &self.config.data_dir,
@@ -4713,12 +4932,84 @@ async fn local_push_supervisor(
     }
 }
 
+#[derive(Clone, Debug)]
 struct PendingRefresh {
     topic: &'static str,
     card_id: Option<String>,
     latest_marker: Value,
     deadline: tokio::time::Instant,
     max_deadline: tokio::time::Instant,
+    retry_attempts: u32,
+}
+
+impl PendingRefresh {
+    fn schedule_push(
+        pending: &mut Option<Self>,
+        topic: &'static str,
+        card_id: Option<String>,
+        marker: Value,
+        now: tokio::time::Instant,
+    ) {
+        let rev_present = !marker["revision"].is_null();
+        match pending {
+            Some(p) => {
+                p.topic = merge_push_topic(p.topic, topic);
+                if p.card_id != card_id {
+                    p.card_id = None;
+                }
+                if rev_present {
+                    p.latest_marker = marker;
+                }
+                if p.retry_attempts == 0 {
+                    p.deadline = (now + PUSH_DEBOUNCE).min(p.max_deadline);
+                }
+            }
+            None => {
+                *pending = Some(Self {
+                    topic,
+                    card_id,
+                    latest_marker: marker,
+                    deadline: now + PUSH_DEBOUNCE,
+                    max_deadline: now + PUSH_MAX_DEBOUNCE,
+                    retry_attempts: 0,
+                });
+            }
+        }
+    }
+
+    fn seed_retry(
+        topic: &'static str,
+        card_id: Option<String>,
+        latest_marker: Value,
+        err: &anyhow::Error,
+        now: tokio::time::Instant,
+    ) -> Option<Self> {
+        Self {
+            topic,
+            card_id,
+            latest_marker,
+            deadline: now,
+            max_deadline: now,
+            retry_attempts: 0,
+        }
+        .requeue_after_error(err, now)
+    }
+
+    fn requeue_after_error(
+        mut self,
+        err: &anyhow::Error,
+        now: tokio::time::Instant,
+    ) -> Option<Self> {
+        let next_attempt = self.retry_attempts.saturating_add(1);
+        if !is_transient_storage_error(err) && next_attempt > PUSH_REFRESH_MAX_NON_STORAGE_RETRIES {
+            return None;
+        }
+        let delay = Duration::from_millis(push_refresh_retry_delay_ms(next_attempt));
+        self.retry_attempts = next_attempt;
+        self.deadline = now + delay;
+        self.max_deadline = self.deadline;
+        Some(self)
+    }
 }
 
 async fn run_legacy_poll_loop(
@@ -4957,18 +5248,31 @@ async fn host_supervisor_task(
             }
         };
 
+        let mut pending: Option<PendingRefresh> = None;
+
         if handshake.changed {
             if let Some(rc) = weak_client.upgrade() {
-                let _ = rc
+                if let Err(err) = rc
                     .refresh_host_now_async(&host_id, &transport, None, None)
-                    .await;
+                    .await
+                {
+                    if is_connection_error(&err) || is_auth_error(&err) {
+                        rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
+                        continue;
+                    }
+                    pending = PendingRefresh::seed_retry(
+                        "resync",
+                        None,
+                        handshake.marker.clone(),
+                        &err,
+                        tokio::time::Instant::now(),
+                    );
+                }
                 let _ = rc.drain_outbox_async(&host_id).await;
             } else {
                 return;
             }
         }
-
-        let mut pending: Option<PendingRefresh> = None;
 
         loop {
             {
@@ -5010,7 +5314,41 @@ async fn host_supervisor_task(
                     if !still_valid {
                         break;
                     }
-                    let _ = rc.refresh_host_now_async(&host_id, &transport, None, None).await;
+                    match rc
+                        .refresh_host_now_async(&host_id, &transport, None, None)
+                        .await
+                    {
+                        Ok(()) => {
+                            if pending
+                                .as_ref()
+                                .is_some_and(|p| p.latest_marker["revision"].is_null())
+                            {
+                                pending = None;
+                            }
+                        }
+                        Err(err) if is_connection_error(&err) || is_auth_error(&err) => {
+                            rc.mark_slot_disconnected(
+                                &host_id,
+                                Some(conn_gen),
+                                err.to_string(),
+                                false,
+                            );
+                            break;
+                        }
+                        Err(err) => {
+                            let now_i = tokio::time::Instant::now();
+                            pending = match pending.take() {
+                                Some(existing) => existing.requeue_after_error(&err, now_i),
+                                None => PendingRefresh::seed_retry(
+                                    "application",
+                                    None,
+                                    Value::Null,
+                                    &err,
+                                    now_i,
+                                ),
+                            };
+                        }
+                    }
                     let _ = rc.drain_outbox_async(&host_id).await;
                 }
                 _ = async {
@@ -5037,10 +5375,12 @@ async fn host_supervisor_task(
                             && slot.client.is_some();
                         let rev = &p.latest_marker["revision"];
                         let up_to_date = p.topic != "resync"
-                            && !rev.is_null()
-                            && (slot.last_marker["revision"] == *rev
+                            && (cursor_already_covered_by(rev, &slot.last_marker["revision"])
                                 || (is_runtime_topic(p.topic)
-                                    && slot.last_runtime_marker["revision"] == *rev));
+                                    && cursor_already_covered_by(
+                                        rev,
+                                        &slot.last_runtime_marker["revision"],
+                                    )));
                         let can_runtime = is_runtime_topic(p.topic) && slot.cached.saved_at > 0;
                         (active, up_to_date, can_runtime)
                     };
@@ -5055,19 +5395,30 @@ async fn host_supervisor_task(
                             &host_id,
                             &transport,
                             p.topic,
-                            p.card_id,
+                            p.card_id.clone(),
                             &p.latest_marker,
                         )
                         .await
                     } else {
-                        rc.refresh_host_now_async(&host_id, &transport, Some(p.topic), p.card_id)
-                            .await
+                        rc.refresh_host_now_async(
+                            &host_id,
+                            &transport,
+                            Some(p.topic),
+                            p.card_id.clone(),
+                        )
+                        .await
                     };
-                    if let Err(err) = refresh_res
-                        && (is_connection_error(&err) || is_auth_error(&err))
-                    {
-                        rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
-                        break;
+                    if let Err(err) = refresh_res {
+                        if is_connection_error(&err) || is_auth_error(&err) {
+                            rc.mark_slot_disconnected(
+                                &host_id,
+                                Some(conn_gen),
+                                err.to_string(),
+                                false,
+                            );
+                            break;
+                        }
+                        pending = p.requeue_after_error(&err, tokio::time::Instant::now());
                     }
                 }
                 frame_res = stream.next_frame() => {
@@ -5087,37 +5438,26 @@ async fn host_supervisor_task(
                                 let guard = rc.hosts.read().unwrap();
                                 guard.get(&host_id).is_some_and(|s| {
                                     topic != "resync"
-                                        && !rev.is_null()
-                                        && (s.last_marker["revision"] == *rev
-                                            || (is_runtime_topic(topic)
-                                                && s.last_runtime_marker["revision"] == *rev))
+                                        && (cursor_already_covered_by(
+                                            rev,
+                                            &s.last_marker["revision"],
+                                        ) || (is_runtime_topic(topic)
+                                            && cursor_already_covered_by(
+                                                rev,
+                                                &s.last_runtime_marker["revision"],
+                                            )))
                                 })
                             };
                             if same_marker {
                                 continue;
                             }
-                            let now_i = tokio::time::Instant::now();
-                            match &mut pending {
-                                Some(p) => {
-                                    p.topic = merge_push_topic(p.topic, topic);
-                                    if p.card_id != card_id {
-                                        p.card_id = None;
-                                    }
-                                    if !rev.is_null() {
-                                        p.latest_marker = marker;
-                                    }
-                                    p.deadline = (now_i + PUSH_DEBOUNCE).min(p.max_deadline);
-                                }
-                                None => {
-                                    pending = Some(PendingRefresh {
-                                        topic,
-                                        card_id,
-                                        latest_marker: marker,
-                                        deadline: now_i + PUSH_DEBOUNCE,
-                                        max_deadline: now_i + PUSH_MAX_DEBOUNCE,
-                                    });
-                                }
-                            }
+                            PendingRefresh::schedule_push(
+                                &mut pending,
+                                topic,
+                                card_id,
+                                marker,
+                                tokio::time::Instant::now(),
+                            );
                         }
                         Ok(Some(PushFrame::UpdateChanged(state))) => {
                             rc.emit(ClientEvent::UpdateChanged { host_id: host_id.clone(), state });
@@ -8823,6 +9163,978 @@ mod tests {
         assert_eq!(perm_items.len(), 1);
         assert_eq!(perm_items[0].mutation_id, "m-perm-1");
         assert_eq!(perm_items[0].state, SyncItemState::Failed);
+
+        let _ = stop_tx.send(true);
+    }
+
+    fn make_test_snapshot_with_card(card_id: &str, title: &str, revision: u64) -> Snapshot {
+        use canban_types::Workflow;
+        let mut snap = Snapshot::default();
+        snap.projects.push(
+            serde_json::from_value(json!({
+                "id": "p-mono",
+                "name": "Mono Project",
+                "directory": "/srv/mono",
+                "workflow": Workflow::default(),
+                "created_at": 1000,
+            }))
+            .unwrap(),
+        );
+        snap.cards.push(
+            serde_json::from_value(json!({
+                "id": card_id,
+                "project_id": "p-mono",
+                "number": 1,
+                "title": title,
+                "body": "Body",
+                "stage": "backlog",
+                "revision": revision,
+                "created_at": 1000,
+            }))
+            .unwrap(),
+        );
+        snap
+    }
+
+    #[test]
+    fn snapshot_cursor_monotonicity_and_restart_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = SavedHost {
+            id: "remote-mono".into(),
+            name: "Mono Host".into(),
+            transport: HostTransport::Tcp {
+                addr: "127.0.0.1:7680".into(),
+                token: "dev_tok".into(),
+            },
+            ssh_target: None,
+            server_id: Some("srv-mono".into()),
+            enabled: true,
+            added_at: 1000,
+        };
+        let mut slot = RemoteHostSlot::from_saved(
+            saved,
+            dir.path(),
+            DEFAULT_READ_CACHE_BUDGET,
+            FsDurability::Full,
+            None,
+        );
+        assert_eq!(slot.cache_gen, 0);
+
+        // Uninitialized / malformed cursors must never block initial snapshot application.
+        let snap_rev1 = make_test_snapshot_with_card("c-1", "Rev 1", 1);
+        assert!(!is_stale_snapshot_cursor(
+            &Value::Null,
+            &slot.cached.snapshot,
+            &json!(["srv-mono", "inst-1", 1, 1, 0]),
+            Some(&snap_rev1),
+        ));
+        assert!(!is_stale_snapshot_cursor(
+            &json!(["", "inst-1", 99, 99, 0]),
+            &snap_rev1,
+            &json!(["srv-mono", "inst-1", 1, 1, 0]),
+            Some(&snap_rev1),
+        ));
+        assert!(!is_stale_snapshot_cursor(
+            &json!([0, "inst-1", 99, 99, 0]),
+            &snap_rev1,
+            &json!(["srv-mono", "inst-1", 1, 1, 0]),
+            Some(&snap_rev1),
+        ));
+
+        // 1. Apply rev 3 (cursor changes=12, state_revision=3).
+        let state_rev3 = json!({
+            "changed": true,
+            "revision": ["srv-mono", "inst-1", 12, 3, 100],
+            "github_revision": 0,
+            "server_id": "srv-mono",
+            "snapshot": make_test_snapshot_with_card("c-1", "Rev 3", 3),
+            "config": Config::default(),
+            "home": "/srv/mono",
+        });
+        let probe = json!({
+            "server_id": "srv-mono",
+            "api_version": 90,
+            "version": "test",
+            "platform": "macos",
+        });
+        let out1 = apply_state_to_slot(
+            &mut slot,
+            dir.path(),
+            &state_rev3,
+            Some(5),
+            Some(&probe),
+            None,
+            1001,
+            FsDurability::Full,
+        );
+        assert!(!out1.stale_rejected);
+        assert!(!out1.needs_resync);
+        assert_eq!(slot.cache_gen, 1);
+        assert_eq!(slot.cached.snapshot.cards[0].revision, 3);
+        assert_eq!(slot.cached.snapshot.cards[0].title, "Rev 3");
+        assert_eq!(
+            slot.last_marker["revision"],
+            json!(["srv-mono", "inst-1", 12, 3, 100])
+        );
+
+        // 2. Out-of-order older cursor on same `(identity, state_instance)` (rev 2, cursor 10/2)
+        // must be rejected without mutating snapshot, marker, or cache_gen.
+        let state_rev2_stale = json!({
+            "changed": true,
+            "revision": ["srv-mono", "inst-1", 10, 2, 90],
+            "github_revision": 0,
+            "server_id": "srv-mono",
+            "snapshot": make_test_snapshot_with_card("c-1", "Stale Rev 2", 2),
+            "config": Config::default(),
+            "home": "/srv/mono",
+        });
+        let out2 = apply_state_to_slot(
+            &mut slot,
+            dir.path(),
+            &state_rev2_stale,
+            Some(4),
+            None,
+            None,
+            1002,
+            FsDurability::Full,
+        );
+        assert!(out2.stale_rejected);
+        assert!(!out2.needs_resync);
+        assert_eq!(out2.emitted_topic, None);
+        assert_eq!(slot.cache_gen, 1);
+        assert_eq!(slot.cached.snapshot.cards[0].revision, 3);
+        assert_eq!(slot.cached.snapshot.cards[0].title, "Rev 3");
+        assert_eq!(
+            slot.last_marker["revision"],
+            json!(["srv-mono", "inst-1", 12, 3, 100])
+        );
+
+        // 3. Tied cursor (or cursor ahead of stale last_marker) that regresses card revision
+        // (e.g., after local write-receipt hydration bumped card to rev 4) must be rejected and
+        // request a resync.
+        slot.cached.snapshot.cards[0].revision = 4;
+        slot.cached.snapshot.cards[0].title = "Hydrated Rev 4".into();
+        let state_tied_regressing = json!({
+            "changed": true,
+            "revision": ["srv-mono", "inst-1", 12, 3, 100],
+            "github_revision": 0,
+            "server_id": "srv-mono",
+            "snapshot": make_test_snapshot_with_card("c-1", "Regressing Rev 3", 3),
+            "config": Config::default(),
+            "home": "/srv/mono",
+        });
+        let out3 = apply_state_to_slot(
+            &mut slot,
+            dir.path(),
+            &state_tied_regressing,
+            Some(4),
+            None,
+            None,
+            1003,
+            FsDurability::Full,
+        );
+        assert!(out3.stale_rejected);
+        assert!(out3.needs_resync);
+        assert_eq!(slot.cached.snapshot.cards[0].revision, 4);
+        assert_eq!(slot.cached.snapshot.cards[0].title, "Hydrated Rev 4");
+
+        // 4. Tied cursor with non-regressing card revision (e.g., mock server with static cursor)
+        // must still be accepted.
+        let state_tied_advancing = json!({
+            "changed": true,
+            "revision": ["srv-mono", "inst-1", 12, 3, 100],
+            "github_revision": 0,
+            "server_id": "srv-mono",
+            "snapshot": make_test_snapshot_with_card("c-1", "Rev 5", 5),
+            "config": Config::default(),
+            "home": "/srv/mono",
+        });
+        let out4 = apply_state_to_slot(
+            &mut slot,
+            dir.path(),
+            &state_tied_advancing,
+            Some(4),
+            None,
+            None,
+            1004,
+            FsDurability::Full,
+        );
+        assert!(!out4.stale_rejected);
+        assert_eq!(slot.cache_gen, 2);
+        assert_eq!(slot.cached.snapshot.cards[0].revision, 5);
+
+        // 5. Server reboot (`state_instance` changed to `inst-2`, counters reset to 1/1) MUST
+        // replace `slot.cached.snapshot` and `slot.last_marker`.
+        let state_post_reboot = json!({
+            "changed": true,
+            "revision": ["srv-mono", "inst-2", 1, 1, 0],
+            "github_revision": 0,
+            "server_id": "srv-mono",
+            "snapshot": make_test_snapshot_with_card("c-1", "Post Reboot", 1),
+            "config": Config::default(),
+            "home": "/srv/mono",
+        });
+        let out5 = apply_state_to_slot(
+            &mut slot,
+            dir.path(),
+            &state_post_reboot,
+            Some(3),
+            None,
+            None,
+            1005,
+            FsDurability::Full,
+        );
+        assert!(!out5.stale_rejected);
+        assert_eq!(slot.cache_gen, 3);
+        assert_eq!(slot.cached.snapshot.cards[0].revision, 1);
+        assert_eq!(slot.cached.snapshot.cards[0].title, "Post Reboot");
+        assert_eq!(
+            slot.last_marker["revision"],
+            json!(["srv-mono", "inst-2", 1, 1, 0])
+        );
+
+        // 6. `preserve_monotonic_card_revisions` blocks idempotent replay rev regression.
+        let current_rev3 = make_test_snapshot_with_card("c-1", "Current Rev 3", 3);
+        let mut replay_rev2 = make_test_snapshot_with_card("c-1", "Old Replay Rev 2", 2);
+        preserve_monotonic_card_revisions(&current_rev3, &mut replay_rev2);
+        assert_eq!(replay_rev2.cards[0].revision, 3);
+        assert_eq!(replay_rev2.cards[0].title, "Current Rev 3");
+    }
+
+    #[test]
+    fn push_refresh_retry_state_machine_and_backoff_bounds() {
+        assert_eq!(push_refresh_retry_delay_ms(0), 200);
+        assert_eq!(push_refresh_retry_delay_ms(1), 200);
+        assert_eq!(push_refresh_retry_delay_ms(2), 400);
+        assert_eq!(push_refresh_retry_delay_ms(3), 800);
+        assert_eq!(push_refresh_retry_delay_ms(4), 1_600);
+        assert_eq!(push_refresh_retry_delay_ms(5), 2_000);
+        assert_eq!(push_refresh_retry_delay_ms(u32::MAX), 2_000);
+
+        let t0 = tokio::time::Instant::now();
+        let mut pending: Option<PendingRefresh> = None;
+
+        // Initial push schedules debounce at +30ms (max +100ms).
+        PendingRefresh::schedule_push(
+            &mut pending,
+            "application",
+            Some("c-1".into()),
+            json!({"revision": ["srv", "i1", 2, 2, 0], "github_revision": 0}),
+            t0,
+        );
+        let p = pending.as_ref().unwrap();
+        assert_eq!(p.deadline, t0 + PUSH_DEBOUNCE);
+        assert_eq!(p.max_deadline, t0 + PUSH_MAX_DEBOUNCE);
+        assert_eq!(p.retry_attempts, 0);
+
+        // Transient SQLITE_BUSY re-queues with bounded exponential backoff and keeps retrying
+        // past the non-storage retry cap while connected.
+        let busy_err =
+            anyhow!("injected SQLITE_BUSY fault: Error code 5: The database file is locked");
+        let mut cur = pending.take().unwrap();
+        let mut now = t0 + PUSH_DEBOUNCE;
+        let expected_delays = [
+            200, 400, 800, 1_600, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000,
+        ];
+        for (idx, expected_ms) in expected_delays.iter().enumerate() {
+            cur = cur
+                .requeue_after_error(&busy_err, now)
+                .expect("transient storage error must keep re-scheduling");
+            assert_eq!(cur.retry_attempts, (idx + 1) as u32);
+            assert_eq!(cur.deadline, now + Duration::from_millis(*expected_ms));
+            now = cur.deadline;
+        }
+
+        // A newer push frame arriving during backoff merges topic/marker WITHOUT resetting the
+        // backoff deadline back to 30ms (prevents busy-spinning during a fault storm).
+        let backoff_deadline = cur.deadline;
+        let mut backed_off = Some(cur);
+        PendingRefresh::schedule_push(
+            &mut backed_off,
+            "github",
+            Some("c-2".into()),
+            json!({"revision": ["srv", "i1", 5, 5, 0], "github_revision": 1}),
+            now - Duration::from_millis(500),
+        );
+        let merged = backed_off.unwrap();
+        assert_eq!(merged.topic, "github");
+        assert_eq!(merged.card_id, None);
+        assert_eq!(
+            merged.latest_marker["revision"],
+            json!(["srv", "i1", 5, 5, 0])
+        );
+        assert_eq!(merged.deadline, backoff_deadline);
+
+        // Non-storage RPC errors also retry with bounded backoff, then cap cleanly.
+        let generic_err = anyhow!("temporary internal rpc error");
+        let mut generic = PendingRefresh::seed_retry(
+            "application",
+            None,
+            json!({"revision": ["srv", "i1", 6, 6, 0], "github_revision": 0}),
+            &generic_err,
+            t0,
+        )
+        .expect("first retry scheduled");
+        assert_eq!(generic.retry_attempts, 1);
+        for attempt in 2..=PUSH_REFRESH_MAX_NON_STORAGE_RETRIES {
+            let next_now = generic.deadline;
+            generic = generic
+                .requeue_after_error(&generic_err, next_now)
+                .expect("within non-storage retry cap");
+            assert_eq!(generic.retry_attempts, attempt);
+        }
+        let final_now = generic.deadline;
+        assert!(
+            generic
+                .requeue_after_error(&generic_err, final_now)
+                .is_none(),
+            "non-storage error must cap retries to avoid infinite loops"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_refresh_and_local_cache_gen_never_regress_snapshot() {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
+        };
+        use std::collections::VecDeque;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("srv-concurrent-mono");
+        let client_dir = dir.path().join("client-concurrent-mono");
+        std::fs::create_dir_all(&server_home).unwrap();
+        let store = Arc::new(DeviceTokenStore::open(&server_home));
+        let (_dev, token) = store.issue_device("concurrent-mono").unwrap();
+
+        struct ScriptedState {
+            revision: Value,
+            snapshot: Snapshot,
+            entered: Option<Arc<Notify>>,
+            gate: Option<Arc<Notify>>,
+        }
+
+        let scripted: Arc<Mutex<VecDeque<ScriptedState>>> = Arc::new(Mutex::new(VecDeque::new()));
+        // Initial handshake state (rev 1).
+        scripted.lock().unwrap().push_back(ScriptedState {
+            revision: json!(["srv-cmono", "inst-1", 1, 1, 0]),
+            snapshot: make_test_snapshot_with_card("c-mono", "Rev 1", 1),
+            entered: None,
+            gate: None,
+        });
+        let subscribed_notify = Arc::new(Notify::new());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home.clone(),
+            server_id: "srv-cmono".into(),
+            api_version: 90,
+            device_store: store,
+            pairing_codes: Arc::new(PairingCodeStore::open(&server_home)),
+            revocations: RevocationBus::new(),
+            active_tcp_connections: Arc::new(AtomicUsize::new(0)),
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
+        });
+
+        let scripted_ref = scripted.clone();
+        let sub_notify = subscribed_notify.clone();
+        spawn_tcp_listener(
+            &tokio::runtime::Handle::current(),
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let scripted_ref = scripted_ref.clone();
+                let sub_notify = sub_notify.clone();
+                async move {
+                    let (read_half, mut writer) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(read_half);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("app.ping") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-cmono",
+                                            "api_version": 90,
+                                            "version": "test",
+                                            "platform": "macos",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                let item = scripted_ref.lock().unwrap().pop_front();
+                                if let Some(st) = item {
+                                    if let Some(entered) = st.entered {
+                                        entered.notify_one();
+                                    }
+                                    if let Some(gate) = st.gate {
+                                        gate.notified().await;
+                                    }
+                                    let _ = write_json_line_async(
+                                        &mut writer,
+                                        &json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "result": {
+                                                "changed": true,
+                                                "revision": st.revision,
+                                                "github_revision": 0,
+                                                "server_id": "srv-cmono",
+                                                "snapshot": st.snapshot,
+                                                "config": Config::default(),
+                                                "home": "/tmp/srv-cmono",
+                                            }
+                                        }),
+                                    )
+                                    .await;
+                                } else {
+                                    let _ = write_json_line_async(
+                                        &mut writer,
+                                        &json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "result": {
+                                                "changed": false,
+                                                "revision": req["params"]["after"],
+                                                "github_revision": 0,
+                                                "server_id": "srv-cmono",
+                                            }
+                                        }),
+                                    )
+                                    .await;
+                                }
+                            }
+                            Some("app.subscribe") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "subscribed": true,
+                                            "server_id": "srv-cmono",
+                                            "api_version": 90,
+                                            "revision": ["srv-cmono", "inst-1", 1, 1, 0],
+                                            "changed": false,
+                                            "github_revision": 0,
+                                            "heartbeat_ms": 5000,
+                                        }
+                                    }),
+                                )
+                                .await;
+                                sub_notify.notify_one();
+                                let mut buf = String::new();
+                                while matches!(reader.read_line(&mut buf).await, Ok(n) if n > 0) {
+                                    buf.clear();
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        client
+            .add_host_async(SavedHost {
+                id: "host-cmono".into(),
+                name: "Concurrent Mono".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-cmono".into()),
+                enabled: true,
+                added_at: 1000,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), subscribed_notify.notified())
+            .await
+            .expect("supervisor subscribed");
+
+        let transport = {
+            let guard = client.hosts.read().unwrap();
+            guard.get("host-cmono").unwrap().client.clone().unwrap()
+        };
+
+        // 1. Out-of-order concurrent refreshes: slow refresh (rev 2) arrives AFTER fast refresh (rev 3).
+        let slow_entered = Arc::new(Notify::new());
+        let slow_gate = Arc::new(Notify::new());
+        {
+            let mut q = scripted.lock().unwrap();
+            q.push_back(ScriptedState {
+                revision: json!(["srv-cmono", "inst-1", 2, 2, 0]),
+                snapshot: make_test_snapshot_with_card("c-mono", "Stale Rev 2", 2),
+                entered: Some(slow_entered.clone()),
+                gate: Some(slow_gate.clone()),
+            });
+            q.push_back(ScriptedState {
+                revision: json!(["srv-cmono", "inst-1", 3, 3, 0]),
+                snapshot: make_test_snapshot_with_card("c-mono", "Fresh Rev 3", 3),
+                entered: None,
+                gate: None,
+            });
+        }
+        let c1 = Arc::clone(&client);
+        let t1 = Arc::clone(&transport);
+        let slow_task = tokio::spawn(async move {
+            c1.refresh_host_now_async("host-cmono", &t1, None, None)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), slow_entered.notified())
+            .await
+            .expect("slow app.state entered server");
+
+        // Fast refresh lands rev 3 while slow refresh is in flight.
+        client
+            .refresh_host_now_async("host-cmono", &transport, None, None)
+            .await
+            .unwrap();
+        let snap_after_fast = client.merged_snapshot().unwrap();
+        assert_eq!(snap_after_fast.cards[0].revision, 3);
+        assert_eq!(snap_after_fast.cards[0].title, "Fresh Rev 3");
+
+        // Release slow refresh (rev 2); must NOT regress rev 3 -> rev 2.
+        slow_gate.notify_one();
+        slow_task.await.unwrap().unwrap();
+        let snap_after_slow = client.merged_snapshot().unwrap();
+        assert_eq!(
+            snap_after_slow.cards[0].revision, 3,
+            "stale concurrent app.state must never regress revision from 3 to 2"
+        );
+        assert_eq!(snap_after_slow.cards[0].title, "Fresh Rev 3");
+
+        // 2. Reverse race: slow refresh has NEWER cursor (rev 5) and finishes AFTER fast refresh (rev 4).
+        // Must apply rev 5 cleanly instead of dropping it!
+        let newer_entered = Arc::new(Notify::new());
+        let newer_gate = Arc::new(Notify::new());
+        {
+            let mut q = scripted.lock().unwrap();
+            q.push_back(ScriptedState {
+                revision: json!(["srv-cmono", "inst-1", 5, 5, 0]),
+                snapshot: make_test_snapshot_with_card("c-mono", "Newer Rev 5", 5),
+                entered: Some(newer_entered.clone()),
+                gate: Some(newer_gate.clone()),
+            });
+            q.push_back(ScriptedState {
+                revision: json!(["srv-cmono", "inst-1", 4, 4, 0]),
+                snapshot: make_test_snapshot_with_card("c-mono", "Mid Rev 4", 4),
+                entered: None,
+                gate: None,
+            });
+        }
+        let c2 = Arc::clone(&client);
+        let t2 = Arc::clone(&transport);
+        let newer_task = tokio::spawn(async move {
+            c2.refresh_host_now_async("host-cmono", &t2, None, None)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), newer_entered.notified())
+            .await
+            .expect("newer app.state entered server");
+
+        client
+            .refresh_host_now_async("host-cmono", &transport, None, None)
+            .await
+            .unwrap();
+        assert_eq!(client.merged_snapshot().unwrap().cards[0].revision, 4);
+
+        newer_gate.notify_one();
+        newer_task.await.unwrap().unwrap();
+        assert_eq!(
+            client.merged_snapshot().unwrap().cards[0].revision,
+            5,
+            "strictly newer concurrent refresh must still apply after older refresh bumped cache_gen"
+        );
+
+        // 3. Local cache mutation (`local_cache_gen` bump, e.g. outbox hydration / env.save)
+        // blocks a concurrent pre-mutation `refresh_host_now_async` from stomping local state
+        // and wakes the supervisor to perform a clean follow-up resync.
+        let mut events_rx = client.subscribe();
+        let local_entered = Arc::new(Notify::new());
+        let local_gate = Arc::new(Notify::new());
+        let resync_entered = Arc::new(Notify::new());
+        {
+            let mut q = scripted.lock().unwrap();
+            q.push_back(ScriptedState {
+                revision: json!(["srv-cmono", "inst-1", 6, 6, 0]),
+                snapshot: make_test_snapshot_with_card("c-mono", "Pre-Local Rev 5", 5),
+                entered: Some(local_entered.clone()),
+                gate: Some(local_gate.clone()),
+            });
+            q.push_back(ScriptedState {
+                revision: json!(["srv-cmono", "inst-1", 7, 7, 0]),
+                snapshot: make_test_snapshot_with_card("c-mono", "Server Confirmed Rev 6", 6),
+                entered: Some(resync_entered.clone()),
+                gate: None,
+            });
+        }
+        let c3 = Arc::clone(&client);
+        let t3 = Arc::clone(&transport);
+        let local_race_task = tokio::spawn(async move {
+            c3.refresh_host_now_async("host-cmono", &t3, None, None)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), local_entered.notified())
+            .await
+            .expect("pre-local app.state entered server");
+
+        {
+            let mut guard = client.hosts.write().unwrap();
+            let slot = guard.get_mut("host-cmono").unwrap();
+            slot.cached.snapshot.cards[0].revision = 6;
+            slot.cached.snapshot.cards[0].title = "Hydrated Rev 6".into();
+            slot.cache_gen = slot.cache_gen.wrapping_add(1);
+            slot.local_cache_gen = slot.local_cache_gen.wrapping_add(1);
+        }
+        local_gate.notify_one();
+        local_race_task.await.unwrap().unwrap();
+        let snap_after_local = client.merged_snapshot().unwrap();
+        assert_eq!(snap_after_local.cards[0].revision, 6);
+        assert!(
+            matches!(
+                snap_after_local.cards[0].title.as_str(),
+                "Hydrated Rev 6" | "Server Confirmed Rev 6"
+            ),
+            "pre-local refresh must never regress title to Pre-Local Rev 5; got {:?}",
+            snap_after_local.cards[0].title
+        );
+
+        // Wait for the wake_host follow-up resync to finish before testing reboot replacement.
+        tokio::time::timeout(Duration::from_secs(5), resync_entered.notified())
+            .await
+            .expect("wake_host follow-up resync entered server");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if client.merged_snapshot().unwrap().cards[0].title == "Server Confirmed Rev 6" {
+                    break;
+                }
+                if events_rx.recv().await.is_none() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("wake_host follow-up resync applied");
+
+        // 4. Server reboot (`state_instance` changes to `inst-2`) MUST replace the snapshot.
+        scripted.lock().unwrap().push_back(ScriptedState {
+            revision: json!(["srv-cmono", "inst-2", 1, 1, 0]),
+            snapshot: make_test_snapshot_with_card("c-mono", "Post Reboot Rev 1", 1),
+            entered: None,
+            gate: None,
+        });
+        client
+            .refresh_host_now_async("host-cmono", &transport, None, None)
+            .await
+            .unwrap();
+        let snap_reboot = client.merged_snapshot().unwrap();
+        assert_eq!(snap_reboot.cards[0].revision, 1);
+        assert_eq!(snap_reboot.cards[0].title, "Post Reboot Rev 1");
+
+        let _ = stop_tx.send(true);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn push_supervisor_retries_transient_sqlite_busy_and_converges() {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
+        };
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::BufReader;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("srv-push-busy");
+        let client_dir = dir.path().join("client-push-busy");
+        std::fs::create_dir_all(&server_home).unwrap();
+        let store = Arc::new(DeviceTokenStore::open(&server_home));
+        let (_dev, token) = store.issue_device("push-busy-test").unwrap();
+
+        let server_snap = Arc::new(Mutex::new(make_test_snapshot_with_card(
+            "c-push",
+            "Initial Rev 1",
+            1,
+        )));
+        let server_rev = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        // Number of upcoming `app.state` calls to reject with transient SQLITE_BUSY.
+        let busy_failures_left = Arc::new(Mutex::new(0usize));
+        let busy_attempts_seen = Arc::new(AtomicUsize::new(0));
+        let attempt_notify = Arc::new(Notify::new());
+        let subscribed_notify = Arc::new(Notify::new());
+        let (push_tx, _) = broadcast::channel::<Value>(16);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home.clone(),
+            server_id: "srv-push-busy".into(),
+            api_version: 90,
+            device_store: store,
+            pairing_codes: Arc::new(PairingCodeStore::open(&server_home)),
+            revocations: RevocationBus::new(),
+            active_tcp_connections: Arc::new(AtomicUsize::new(0)),
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
+        });
+
+        let snap_ref = server_snap.clone();
+        let rev_ref = server_rev.clone();
+        let busy_left_ref = busy_failures_left.clone();
+        let busy_seen_ref = busy_attempts_seen.clone();
+        let attempt_notify_ref = attempt_notify.clone();
+        let sub_notify_ref = subscribed_notify.clone();
+        let push_tx_ref = push_tx.clone();
+        spawn_tcp_listener(
+            &tokio::runtime::Handle::current(),
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let snap_ref = snap_ref.clone();
+                let rev_ref = rev_ref.clone();
+                let busy_left_ref = busy_left_ref.clone();
+                let busy_seen_ref = busy_seen_ref.clone();
+                let attempt_notify_ref = attempt_notify_ref.clone();
+                let sub_notify_ref = sub_notify_ref.clone();
+                let push_tx_ref = push_tx_ref.clone();
+                async move {
+                    let (read_half, mut writer) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(read_half);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("app.ping") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-push-busy",
+                                            "api_version": 90,
+                                            "version": "test",
+                                            "platform": "macos",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                let should_fail = {
+                                    let mut left = busy_left_ref.lock().unwrap();
+                                    if *left > 0 {
+                                        *left -= 1;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                };
+                                if should_fail {
+                                    busy_seen_ref.fetch_add(1, Ordering::SeqCst);
+                                    attempt_notify_ref.notify_waiters();
+                                    let _ = write_json_line_async(
+                                        &mut writer,
+                                        &json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "error": {
+                                                "code": -32000,
+                                                "message": "injected SQLITE_BUSY fault: Error code 5: The database file is locked"
+                                            }
+                                        }),
+                                    )
+                                    .await;
+                                } else {
+                                    let r = rev_ref.load(Ordering::SeqCst);
+                                    let snap = snap_ref.lock().unwrap().clone();
+                                    let _ = write_json_line_async(
+                                        &mut writer,
+                                        &json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "result": {
+                                                "changed": true,
+                                                "revision": ["srv-push-busy", "i1", r, r, 0],
+                                                "github_revision": 0,
+                                                "server_id": "srv-push-busy",
+                                                "snapshot": snap,
+                                                "config": Config::default(),
+                                                "home": "/tmp/srv-push-busy",
+                                            }
+                                        }),
+                                    )
+                                    .await;
+                                }
+                            }
+                            Some("app.subscribe") => {
+                                let mut push_rx = push_tx_ref.subscribe();
+                                let r = rev_ref.load(Ordering::SeqCst);
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "subscribed": true,
+                                            "server_id": "srv-push-busy",
+                                            "api_version": 90,
+                                            "revision": ["srv-push-busy", "i1", r, r, 0],
+                                            "changed": false,
+                                            "github_revision": 0,
+                                            "heartbeat_ms": 15_000,
+                                        }
+                                    }),
+                                )
+                                .await;
+                                sub_notify_ref.notify_one();
+                                while let Ok(ev) = push_rx.recv().await {
+                                    if write_json_line_async(&mut writer, &ev).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let mut events_rx = client.subscribe();
+        client
+            .add_host_async(SavedHost {
+                id: "host-push-busy".into(),
+                name: "Push Busy Host".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-push-busy".into()),
+                enabled: true,
+                added_at: 1000,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), subscribed_notify.notified())
+            .await
+            .expect("supervisor subscribed");
+        assert_eq!(client.merged_snapshot().unwrap().cards[0].revision, 1);
+
+        // Mutate server state to rev 2 and arm 2 consecutive SQLITE_BUSY faults on `app.state`.
+        {
+            let mut s = server_snap.lock().unwrap();
+            s.cards[0].revision = 2;
+            s.cards[0].title = "Converged Rev 2".into();
+        }
+        server_rev.store(2, Ordering::SeqCst);
+        *busy_failures_left.lock().unwrap() = 2;
+
+        // Emit a SINGLE StateChanged push event. Previously, the first SQLITE_BUSY dropped
+        // the coalesced refresh permanently with zero retry.
+        push_tx
+            .send(json!({
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "topic": "application",
+                    "card_id": "c-push",
+                    "revision": ["srv-push-busy", "i1", 2, 2, 0],
+                    "github_revision": 0,
+                }
+            }))
+            .unwrap();
+
+        // Wait (under paused virtual time — zero wall-clock sleep) for the push supervisor to
+        // hit both SQLITE_BUSY errors, re-queue with backoff, and converge once the fault clears.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if client.merged_snapshot().unwrap().cards[0].revision == 2 {
+                    break;
+                }
+                match events_rx.recv().await {
+                    Some(ClientEvent::Host { host_id, .. }) if host_id == "host-push-busy" => {}
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        })
+        .await
+        .expect("push supervisor must retry transient SQLITE_BUSY and converge to rev 2");
+
+        assert_eq!(
+            busy_attempts_seen.load(Ordering::SeqCst),
+            2,
+            "expected both transient SQLITE_BUSY failures before converging"
+        );
+        let final_snap = client.merged_snapshot().unwrap();
+        assert_eq!(final_snap.cards[0].revision, 2);
+        assert_eq!(final_snap.cards[0].title, "Converged Rev 2");
+        let summary = client
+            .host_summaries()
+            .into_iter()
+            .find(|s| s.id == "host-push-busy")
+            .unwrap();
+        assert!(
+            summary.connection.is_connected(),
+            "transient SQLITE_BUSY must keep host Connected without disconnecting"
+        );
+        assert_eq!(
+            summary.reconnect_count, 0,
+            "transient SQLITE_BUSY must not force a reconnect"
+        );
 
         let _ = stop_tx.send(true);
     }
