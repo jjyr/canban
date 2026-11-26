@@ -34,6 +34,7 @@
 //!   (`storage.corrupt_outbox_recovery`).
 use crate::{
     exec::SimGitRepo,
+    herdr::RunFault,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
     world::{FsDurability, SimWorldConfig, StorageFaultKind, run_with_world},
@@ -2027,6 +2028,361 @@ pub fn run(seed: u64) -> Result<u64> {
             );
         }
         world.hit("sessions.two_phase_adopt_and_cwd_rename");
+
+        // ---------------------------------------------------------------------
+        // Part F — Configuration Sessions (`workflow.prompt`, `configuration.open`,
+        //          `configuration.bind`, `auto_fresh`, generation guard, & closing
+        //          `queued` and `unknown` configuration terminals)
+        // ---------------------------------------------------------------------
+        {
+            let cfg_dir = world.project_dir(&format!("cfg-sessions-{seed}"))?;
+            let cfg_proj = world.client_call(
+                "project.create",
+                json!({
+                    "host_id": "remote-a",
+                    "name": format!("Config Sessions {seed}"),
+                    "directory": cfg_dir,
+                }),
+                None,
+            )?;
+            let cfg_pid = cfg_proj["id"].as_str().unwrap().to_owned();
+            let raw_cfg_pid = unqualified_entity_id(&cfg_pid).to_owned();
+            let cards_before = world.server("remote-a").unwrap().snapshot()?.cards.len();
+
+            // 1. `workflow.prompt` must use English instructions with zero CJK characters.
+            let prompt_res = world.client_call(
+                "workflow.prompt",
+                json!({ "project_id": cfg_pid }),
+                Some(&cfg_pid),
+            )?;
+            let prompt_str = prompt_res["prompt"]
+                .as_str()
+                .context("workflow.prompt missing prompt")?
+                .to_owned();
+            ensure!(
+                prompt_str.contains("Workflow Configuration Assistant")
+                    && !prompt_str
+                        .chars()
+                        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+                "workflow.prompt must be English without CJK characters"
+            );
+
+            // 2. `configuration.open` project ownership, reuse (`reused: true`), `configuration.bind`,
+            //    stale generation rejection, exact history resume (`generation == 2`), & created_at refresh!
+            let open_params = json!({
+                "project_id": cfg_pid,
+                "profile_id": "codex",
+                "prompt": prompt_str,
+            });
+            let first =
+                world.client_call("configuration.open", open_params.clone(), Some(&cfg_pid))?;
+            let again =
+                world.client_call("configuration.open", open_params.clone(), Some(&cfg_pid))?;
+            let cfg_tid = unqualified_entity_id(first["terminal_id"].as_str().unwrap()).to_owned();
+            ensure!(
+                unqualified_entity_id(again["terminal_id"].as_str().unwrap()) == cfg_tid
+                    && again["reused"] == true,
+                "Second configuration.open must reuse active session: first={first} again={again}"
+            );
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == cfg_tid
+                        && t.runtime
+                            .as_ref()
+                            .is_some_and(|r| r.state == "running" && r.terminal.is_some())
+                }))
+            })?;
+            let (cfg_addr_1, gen1_created_at) = {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                ensure!(
+                    snap.cards.len() == cards_before,
+                    "configuration.open must never create a business Card"
+                );
+                let t = snap.terminals.iter().find(|t| t.id == cfg_tid).unwrap();
+                ensure!(t.agent.is_none());
+                (
+                    t.runtime.as_ref().unwrap().terminal.clone().unwrap(),
+                    t.created_at,
+                )
+            };
+            let bind_ok = world.server_call(
+                "remote-a",
+                "configuration.bind",
+                json!({
+                    "configuration_id": cfg_tid,
+                    "generation": 1,
+                    "session_id": format!("exact-cfg-history-{seed}"),
+                }),
+            )?;
+            ensure!(
+                bind_ok["bound"] == true,
+                "configuration.bind failed: {bind_ok}"
+            );
+            // Conflicting session_id on same generation rejected.
+            ensure!(
+                world
+                    .server_call(
+                        "remote-a",
+                        "configuration.bind",
+                        json!({
+                            "configuration_id": cfg_tid,
+                            "generation": 1,
+                            "session_id": "wrong-session",
+                        }),
+                    )
+                    .is_err(),
+                "Conflicting configuration.bind session_id must fail"
+            );
+
+            // Finish gen 1 PTY -> advance virtual clock -> reopen -> resumes at gen 2 with preserved history!
+            herdr_a.finish_terminal(&cfg_addr_1, 0, "exited");
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap
+                    .configuration_sessions
+                    .iter()
+                    .any(|s| s.id == cfg_tid && s.state == "finished"))
+            })?;
+            world.advance(Duration::from_millis(50))?;
+            let resumed_open =
+                world.client_call("configuration.open", open_params, Some(&cfg_pid))?;
+            ensure!(resumed_open["reused"] == false);
+            // Reject stale generation 1 bind against generation 2!
+            ensure!(
+                world
+                    .server_call(
+                        "remote-a",
+                        "configuration.bind",
+                        json!({
+                            "configuration_id": cfg_tid,
+                            "generation": 1,
+                            "session_id": "stale-gen-1",
+                        }),
+                    )
+                    .is_err(),
+                "Stale generation configuration.bind must fail"
+            );
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == cfg_tid
+                        && t.runtime.as_ref().is_some_and(|r| {
+                            r.state == "running"
+                                && r.terminal.as_deref().is_some_and(|a| a != cfg_addr_1)
+                        })
+                }))
+            })?;
+            {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let sess = snap
+                    .configuration_sessions
+                    .iter()
+                    .find(|s| s.id == cfg_tid)
+                    .unwrap();
+                let term = snap.terminals.iter().find(|t| t.id == cfg_tid).unwrap();
+                ensure!(
+                    sess.generation == 2
+                        && sess.provider_session_id.as_deref()
+                            == Some(&format!("exact-cfg-history-{seed}"))
+                        && term.created_at > gen1_created_at,
+                    "Resumed configuration session mismatch: sess={sess:?} created_at={}",
+                    term.created_at
+                );
+                let cfg_addr_2 = term.runtime.as_ref().unwrap().terminal.clone().unwrap();
+                herdr_a.finish_terminal(&cfg_addr_2, 0, "exited");
+            }
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap
+                    .configuration_sessions
+                    .iter()
+                    .any(|s| s.id == cfg_tid && s.state == "finished"))
+            })?;
+
+            // 3. Default agent (`developer`) + `auto_fresh` fallback when exact history was never bound!
+            let expected_def_key = format!("configuration:{raw_cfg_pid}:workflows:developer");
+            let def_open = world.client_call(
+                "configuration.open",
+                json!({ "project_id": cfg_pid, "auto_fresh": true }),
+                Some(&cfg_pid),
+            )?;
+            ensure!(
+                unqualified_entity_id(def_open["terminal_id"].as_str().unwrap())
+                    == expected_def_key
+                    && def_open["reused"] == false
+            );
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == expected_def_key
+                        && t.runtime
+                            .as_ref()
+                            .is_some_and(|r| r.state == "running" && r.terminal.is_some())
+                }))
+            })?;
+            let def_addr_1 = world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .into_iter()
+                .find(|t| t.id == expected_def_key)
+                .unwrap()
+                .runtime
+                .unwrap()
+                .terminal
+                .unwrap();
+            herdr_a.finish_terminal(&def_addr_1, 0, "exited");
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap
+                    .configuration_sessions
+                    .iter()
+                    .any(|s| s.id == expected_def_key && s.state == "finished"))
+            })?;
+            // Without `auto_fresh` or `fresh`, missing provider history must error!
+            ensure!(
+                world
+                    .client_call(
+                        "configuration.open",
+                        json!({ "project_id": cfg_pid }),
+                        Some(&cfg_pid),
+                    )
+                    .is_err(),
+                "Ended unbound configuration session must reject open without auto_fresh"
+            );
+            let def_restarted = world.client_call(
+                "configuration.open",
+                json!({ "project_id": cfg_pid, "auto_fresh": true }),
+                Some(&cfg_pid),
+            )?;
+            ensure!(def_restarted["reused"] == false);
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap.terminals.iter().any(|t| {
+                    t.id == expected_def_key
+                        && t.runtime.as_ref().is_some_and(|r| {
+                            r.state == "running"
+                                && r.terminal.as_deref().is_some_and(|a| a != def_addr_1)
+                        })
+                }))
+            })?;
+            {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let sess = snap
+                    .configuration_sessions
+                    .iter()
+                    .find(|s| s.id == expected_def_key)
+                    .unwrap();
+                ensure!(
+                    sess.profile_id == "developer"
+                        && sess.generation == 2
+                        && sess.provider_session_id.is_none()
+                );
+                let addr = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == expected_def_key)
+                    .unwrap()
+                    .runtime
+                    .as_ref()
+                    .unwrap()
+                    .terminal
+                    .clone()
+                    .unwrap();
+                herdr_a.finish_terminal(&addr, 0, "exited");
+            }
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap
+                    .configuration_sessions
+                    .iter()
+                    .any(|s| s.id == expected_def_key && s.state == "finished"))
+            })?;
+
+            // 4. Closing a `queued` configuration session cancels launch without creating a Card!
+            herdr_a.set_offline(true);
+            let q_open = world.client_call(
+                "configuration.open",
+                json!({ "project_id": cfg_pid, "profile_id": "planner" }),
+                Some(&cfg_pid),
+            )?;
+            let q_cfg_tid =
+                unqualified_entity_id(q_open["terminal_id"].as_str().unwrap()).to_owned();
+            let _ = world.server_call(
+                "remote-a",
+                "terminal.close",
+                json!({ "terminal_id": q_cfg_tid }),
+            )?;
+            {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let s = snap
+                    .configuration_sessions
+                    .iter()
+                    .find(|c| c.id == q_cfg_tid)
+                    .unwrap();
+                ensure!(s.state == "cancelled" && snap.cards.len() == cards_before);
+            }
+
+            // 5. Closing an `unknown` configuration session (triggered via `RunFault::FailBeforeCreate`)
+            //    cancels session & finishes terminal runtime while preserving error!
+            herdr_a.set_offline(false);
+            world.advance(Duration::from_millis(1_000))?;
+            herdr_a.inject_next_run_fault(RunFault::FailBeforeCreate(
+                "No space left on device".into(),
+            ));
+            let u_open = world.client_call(
+                "configuration.open",
+                json!({ "project_id": cfg_pid, "profile_id": "reviewer" }),
+                Some(&cfg_pid),
+            )?;
+            let u_cfg_tid =
+                unqualified_entity_id(u_open["terminal_id"].as_str().unwrap()).to_owned();
+            world.wait_until(10_000, |w| {
+                let snap = w.server("remote-a").unwrap().snapshot()?;
+                Ok(snap
+                    .configuration_sessions
+                    .iter()
+                    .any(|c| c.id == u_cfg_tid && c.state == "unknown"))
+            })?;
+            let closed_u = world.server_call(
+                "remote-a",
+                "terminal.close",
+                json!({
+                    "terminal_id": u_cfg_tid,
+                    "request_key": format!("close-unknown-cfg-{seed}"),
+                }),
+            )?;
+            ensure!(
+                closed_u == json!({ "state": "closed", "terminal_id": u_cfg_tid }),
+                "Closing unknown configuration session returned unexpected receipt: {closed_u}"
+            );
+            {
+                let snap = world.server("remote-a").unwrap().snapshot()?;
+                let s = snap
+                    .configuration_sessions
+                    .iter()
+                    .find(|c| c.id == u_cfg_tid)
+                    .unwrap();
+                let rt = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == u_cfg_tid)
+                    .and_then(|t| t.runtime.as_ref())
+                    .context("Unknown closed config terminal missing runtime")?;
+                ensure!(
+                    s.state == "cancelled"
+                        && rt.state == "finished"
+                        && rt
+                            .error
+                            .as_deref()
+                            .is_some_and(|e| e.contains("No space left on device")),
+                    "Closed unknown configuration state mismatch: sess={s:?} rt={rt:?}"
+                );
+            }
+        }
+        world.hit("sessions.configuration_sessions");
 
         // Final heal, quiesce, full invariants + SQLite integrity + canonical digest.
         world.heal_and_quiesce(20_000)?;

@@ -777,11 +777,6 @@ impl AppServer {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) fn evaluate_and_fire_due_schedules_for_test(&self) -> Result<()> {
-        self.evaluate_and_fire_due_schedules()
-    }
-
     fn evaluate_and_fire_due_schedules(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
         let now_ms = self.now_ms();

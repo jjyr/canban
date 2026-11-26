@@ -29,9 +29,12 @@ use crate::{
     world::{SimWorld, SimWorldConfig, run_with_world},
 };
 use anyhow::{Context, Result, ensure};
-use canban_types::{Card, EnvEntryMeta, unqualified_entity_id};
+use canban_types::{
+    Card, DEFAULT_WORKFLOW_TEMPLATE_ID, EnvEntryMeta, Event, Project, SyncMark, WorkflowTemplate,
+    unqualified_entity_id,
+};
 use rusqlite::{Connection, OpenFlags};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const BUNDLE_WORKFLOW_YAML: &str = r#"schema: 12
@@ -2010,8 +2013,21 @@ pub fn run(seed: u64) -> Result<u64> {
         oracle.check_step_invariants(world)?;
 
         // ---------------------------------------------------------------------
-        // (e) Fault injection: partition + offline outbox + server & client bounces
+        // (e) Fault injection: partition + offline outbox + sync projection + server & client bounces
         // ---------------------------------------------------------------------
+        let sync_proj_card = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_a,
+                "title": "Sync Projection Base",
+                "body": "Initial body",
+            }),
+            Some(&pid_a),
+        )?;
+        let sync_proj_cid = sync_proj_card["id"].as_str().unwrap().to_owned();
+        let sync_proj_base_rev = sync_proj_card["revision"].as_u64().unwrap_or(1);
+        world.heal_and_quiesce(10_000)?;
+
         world.partition("ui-client", "remote-a");
         world.advance(Duration::from_millis(120))?;
 
@@ -2025,11 +2041,92 @@ pub fn run(seed: u64) -> Result<u64> {
             Some(&pid_a),
         )?;
         let off_cid = off_card["id"].as_str().unwrap().to_owned();
-        let _ = world.client_call(
+        let off_cmt = world.client_call(
             "comment.add",
             json!({ "card_id": cid1_a, "body": "offline-comment-imported-a" }),
             Some(&pid_a),
         )?;
+        ensure!(
+            off_cmt["offline_queued"] == true,
+            "Offline comment.add must return offline_queued=true: {off_cmt}"
+        );
+        let decoded_off_ev: Event = serde_json::from_value(off_cmt)?;
+        ensure!(
+            decoded_off_ev.sequence == u64::MAX,
+            "Offline synthetic comment receipt must have sequence == u64::MAX"
+        );
+        // Exercise optimistic `canban-sync::project` across CreateCard, UpdateCard, MoveCard,
+        // ResolveCard, base-revision preservation, and `offline_resolve_preview`!
+        let _ = world.client_call(
+            "card.update",
+            json!({
+                "card_id": sync_proj_cid,
+                "revision": sync_proj_base_rev,
+                "title": "Sync Projection Updated",
+                "body": "Updated while partitioned",
+            }),
+            Some(&pid_a),
+        )?;
+        let _ = world.client_call(
+            "card.move",
+            json!({
+                "card_id": sync_proj_cid,
+                "revision": sync_proj_base_rev,
+                "stage": "develop",
+            }),
+            Some(&pid_a),
+        )?;
+        let _ = world.client_call(
+            "card.resolve",
+            json!({
+                "card_id": sync_proj_cid,
+                "revision": sync_proj_base_rev,
+                "message": "Resolved offline",
+            }),
+            Some(&pid_a),
+        )?;
+        {
+            let merged = world.client_merged_snapshot_on("ui-client")?;
+            let new_c = merged
+                .cards
+                .iter()
+                .find(|c| c.id == off_cid)
+                .context("Offline created card missing from merged snapshot")?;
+            ensure!(
+                new_c.number == 0
+                    && new_c.revision == 0
+                    && new_c.stage == "backlog"
+                    && merged.pending_sync.get(&off_cid) == Some(&SyncMark::Pending),
+                "Offline CreateCard projection mismatch: card={new_c:?} marks={:?}",
+                merged.pending_sync
+            );
+            let proj_c = merged
+                .cards
+                .iter()
+                .find(|c| c.id == sync_proj_cid)
+                .context("Offline updated/moved/resolved card missing from merged snapshot")?;
+            ensure!(
+                proj_c.title == "Sync Projection Updated"
+                    && proj_c.stage == "develop"
+                    && proj_c.resolved()
+                    && proj_c.revision == sync_proj_base_rev
+                    && merged.pending_sync.get(&sync_proj_cid) == Some(&SyncMark::Pending),
+                "Offline Update/Move/Resolve projection mismatch: {proj_c:?}"
+            );
+            let off_preview = world.client_call(
+                "card.resolve.preview",
+                json!({ "card_id": sync_proj_cid }),
+                Some(&pid_a),
+            )?;
+            ensure!(
+                off_preview["warnings"]
+                    .as_array()
+                    .is_some_and(|w| w.iter().any(|s| s.as_str().is_some_and(
+                        |m| m.contains("Offline: worktree changes could not be checked")
+                    ))),
+                "Offline card.resolve.preview missing offline warning: {off_preview}"
+            );
+        }
         ensure!(
             !world.client_sync_items().is_empty(),
             "Expected queued offline outbox mutations on partitioned remote-a imported copy"
@@ -2095,6 +2192,1009 @@ pub fn run(seed: u64) -> Result<u64> {
             "Offline remote-a card leaked onto sibling hosts!"
         );
         world.hit("bundle.fault_recovery");
+
+        // ---------------------------------------------------------------------
+        // (f) Project CRUD (`project.{update,delete,archived.delete}`), `directory.list`,
+        //     `agent.setup` / `project.agents` Onboarding, & Global Workflow Defaults
+        // ---------------------------------------------------------------------
+        // F1. `directory.list` sorted subdirs, nonexistent dir, and `"~"`
+        let ws_root = world.project_dir(&format!("dirlist-ws-{seed}"))?;
+        let ws_path = std::path::PathBuf::from(&ws_root);
+        std::fs::create_dir_all(ws_path.join("zebra"))?;
+        std::fs::create_dir_all(ws_path.join("alpha"))?;
+        std::fs::create_dir_all(ws_path.join(".hidden"))?;
+        std::fs::write(ws_path.join("README.md"), b"not a directory")?;
+        let dir_list = world.client_call(
+            "directory.list",
+            json!({ "host_id": "remote-a", "path": ws_root }),
+            None,
+        )?;
+        let dir_names: Vec<&str> = dir_list["directories"]
+            .as_array()
+            .context("directory.list missing directories")?
+            .iter()
+            .filter_map(|d| d["name"].as_str())
+            .collect();
+        ensure!(
+            dir_list["exists"] == true
+                && dir_list["home"].as_str().is_some_and(|h| !h.is_empty())
+                && dir_names == vec![".hidden", "alpha", "zebra"],
+            "directory.list sorted mismatch: {dir_list}"
+        );
+        let dir_missing = world.client_call(
+            "directory.list",
+            json!({ "host_id": "remote-a", "path": ws_path.join("not-created-yet") }),
+            None,
+        )?;
+        ensure!(
+            dir_missing["exists"] == false
+                && dir_missing["directories"] == json!([])
+                && dir_missing["home"].as_str().is_some_and(|h| !h.is_empty()),
+            "directory.list missing-path mismatch: {dir_missing}"
+        );
+        let dir_tilde = world.client_call(
+            "directory.list",
+            json!({ "host_id": "remote-a", "path": "~" }),
+            None,
+        )?;
+        ensure!(
+            dir_tilde["exists"] == true,
+            "directory.list(~) failed: {dir_tilde}"
+        );
+
+        // F2. Unknown stage profile rejected BEFORE creating Project or directory!
+        let bad_proj_dir = ws_path.join("should-not-exist");
+        ensure!(
+            world
+                .client_call(
+                    "project.create",
+                    json!({
+                        "host_id": "remote-a",
+                        "name": "Invalid Profile Project",
+                        "directory": bad_proj_dir,
+                        "workflow_yaml": "schema: 12\nid: delivery:invalid\nname: Invalid\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\nsteps:\n  - id: agent:develop\n    uses: agent\n    with:\n      profile: missing-reviewer\n      instruction: Implement\n    next: __end\n  - id: __end\n    uses: complete\n",
+                    }),
+                    None,
+                )
+                .is_err()
+                && !bad_proj_dir.exists(),
+            "Unknown stage profile must fail before creating project or directory"
+        );
+
+        // F3. `project.update`: retargets queued work, rejects stale `expected_directory`,
+        //     preserves running/resumed attempts' original directory & session, validates
+        //     `target_branch`, and never reviews an unrelated checkout!
+        let upd_dir_0 = world.project_dir(&format!("crud-upd-0-{seed}"))?;
+        let upd_dir_next = world.project_dir(&format!("crud-upd-next-{seed}"))?;
+        let upd_dir_last = world.project_dir(&format!("crud-upd-last-{seed}"))?;
+        let upd_dir_other = world.project_dir(&format!("crud-upd-other-{seed}"))?;
+        let next_canon = std::fs::canonicalize(&upd_dir_next)?
+            .to_string_lossy()
+            .into_owned();
+        let last_canon = std::fs::canonicalize(&upd_dir_last)?
+            .to_string_lossy()
+            .into_owned();
+
+        let p_upd = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-a",
+                "name": format!("Dir Retarget {seed}"),
+                "directory": upd_dir_0,
+            }),
+            None,
+        )?;
+        let pid_upd = p_upd["id"].as_str().unwrap().to_owned();
+        let raw_pid_upd = unqualified_entity_id(&pid_upd).to_owned();
+        let dev_rev_yaml = format!(
+            r#"schema: 12
+id: delivery:{raw_pid_upd}
+name: Dev & Review
+workspace:
+  create_worktree: false
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement task
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review changes
+    next: __end
+  - id: __end
+    uses: complete
+"#
+        );
+        let upd_wf_src = world.client_call(
+            "workflow.sources",
+            json!({ "project_id": pid_upd }),
+            Some(&pid_upd),
+        )?;
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid_upd,
+                "revision": upd_wf_src["revision"],
+                "sources": [{ "filename": "development.yaml", "source": dev_rev_yaml }],
+            }),
+            Some(&pid_upd),
+        )?;
+
+        // Hold Herdr offline so `c_upd1` stays queued while `project.update` retargets directory.
+        let herdr_a = world.herdr("remote-a").unwrap();
+        herdr_a.set_offline(true);
+        let c_upd1 = world.client_call(
+            "card.create",
+            json!({ "project_id": pid_upd, "title": "Queued Retarget Card" }),
+            Some(&pid_upd),
+        )?;
+        let cid_upd1 = c_upd1["id"].as_str().unwrap().to_owned();
+        let raw_cid_upd1 = unqualified_entity_id(&cid_upd1).to_owned();
+        let _ = world.client_call(
+            "card.move",
+            json!({ "card_id": cid_upd1, "revision": c_upd1["revision"], "stage": "develop" }),
+            Some(&pid_upd),
+        )?;
+        let _ = world.client_call(
+            "project.update",
+            json!({ "project_id": pid_upd, "directory": upd_dir_next }),
+            Some(&pid_upd),
+        )?;
+        herdr_a.set_offline(false);
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid_upd1 && a.state == "running" && a.terminal.is_some()
+                })
+            }))
+        })?;
+        let (upd1_tid, upd1_addr) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let entry = snap
+                .terminals
+                .iter()
+                .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid_upd1))
+                .context("upd1 terminal missing")?;
+            let run = entry.agent.as_ref().unwrap();
+            ensure!(
+                run.directory.as_deref() == Some(next_canon.as_str()) && run.cwd == next_canon,
+                "Queued work must retarget to updated directory {next_canon}, got {run:?}"
+            );
+            (entry.id.clone(), run.terminal.clone().unwrap())
+        };
+        let _ = world.server_call(
+            "remote-a",
+            "agent.bind",
+            json!({
+                "terminal_id": upd1_tid,
+                "session_id": format!("retarget-sess-{seed}"),
+            }),
+        )?;
+        herdr_a.finish_terminal(&upd1_addr, 0, "exited");
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .terminals
+                .iter()
+                .any(|t| t.id == upd1_tid && t.agent.as_ref().is_some_and(|a| a.finished())))
+        })?;
+        // Stale `expected_directory` rejected; exact `expected_directory` updates name & directory.
+        ensure!(
+            world
+                .client_call(
+                    "project.update",
+                    json!({
+                        "project_id": pid_upd,
+                        "expected_directory": "/stale-dir",
+                        "directory": upd_dir_last,
+                    }),
+                    Some(&pid_upd),
+                )
+                .is_err(),
+            "Stale expected_directory must be rejected"
+        );
+        let _ = world.client_call(
+            "project.update",
+            json!({
+                "project_id": pid_upd,
+                "expected_directory": next_canon,
+                "directory": upd_dir_last,
+                "name": format!("Renamed Project {seed}"),
+            }),
+            Some(&pid_upd),
+        )?;
+        // Validate `target_branch` invalid rejection, valid update, and empty string clear!
+        ensure!(
+            world
+                .client_call(
+                    "project.update",
+                    json!({ "project_id": pid_upd, "target_branch": "-bad" }),
+                    Some(&pid_upd),
+                )
+                .is_err()
+                && world
+                    .client_call(
+                        "project.update",
+                        json!({ "project_id": pid_upd, "target_branch": "a..b" }),
+                        Some(&pid_upd),
+                    )
+                    .is_err(),
+            "Invalid target_branch must be rejected"
+        );
+        let tb_upd: Project = serde_json::from_value(world.client_call(
+            "project.update",
+            json!({ "project_id": pid_upd, "target_branch": "release/v1" }),
+            Some(&pid_upd),
+        )?)?;
+        ensure!(tb_upd.target_branch.as_deref() == Some("release/v1"));
+        let tb_clr: Project = serde_json::from_value(world.client_call(
+            "project.update",
+            json!({ "project_id": pid_upd, "target_branch": "" }),
+            Some(&pid_upd),
+        )?)?;
+        ensure!(tb_clr.target_branch.is_none());
+
+        // Resume `upd1_tid` via `agent.open` -> retains original `next_canon` directory & session!
+        let _ = world.server_call(
+            "remote-a",
+            "agent.open",
+            json!({
+                "card_id": raw_cid_upd1,
+                "profile_id": "developer",
+                "expected_terminal_id": upd1_tid,
+            }),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == upd1_tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.state == "running" && a.terminal.is_some())
+            }))
+        })?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let a = snap
+                .terminals
+                .iter()
+                .find(|t| t.id == upd1_tid)
+                .and_then(|t| t.agent.as_ref())
+                .unwrap();
+            let card = snap.cards.iter().find(|c| c.id == raw_cid_upd1).unwrap();
+            let proj = snap.projects.iter().find(|p| p.id == raw_pid_upd).unwrap();
+            ensure!(
+                a.directory.as_deref() == Some(next_canon.as_str())
+                    && a.cwd == next_canon
+                    && a.provider_session_id.as_deref() == Some(&format!("retarget-sess-{seed}"))
+                    && card.workspace.as_ref().map(|w| w.directory.as_str())
+                        == Some(next_canon.as_str())
+                    && proj.name == format!("Renamed Project {seed}")
+                    && proj.directory == last_canon,
+                "Resumed session must not retarget directory after project.update: a={a:?}"
+            );
+            herdr_a.finish_terminal(a.terminal.as_deref().unwrap(), 0, "exited");
+        }
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .terminals
+                .iter()
+                .any(|t| t.id == upd1_tid && t.agent.as_ref().is_some_and(|a| a.finished())))
+        })?;
+
+        // Changed checkout directory after develop launch MUST NEVER launch reviewer in unrelated checkout!
+        let c_upd2 = world.client_call(
+            "card.create",
+            json!({ "project_id": pid_upd, "title": "Never Review Unrelated Checkout" }),
+            Some(&pid_upd),
+        )?;
+        let cid_upd2 = c_upd2["id"].as_str().unwrap().to_owned();
+        let raw_cid_upd2 = unqualified_entity_id(&cid_upd2).to_owned();
+        let _ = world.client_call(
+            "card.move",
+            json!({ "card_id": cid_upd2, "revision": c_upd2["revision"], "stage": "develop" }),
+            Some(&pid_upd),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid_upd2 && a.state == "running" && a.terminal.is_some()
+                })
+            }))
+        })?;
+        let (upd2_tid, upd2_addr) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let t = snap
+                .terminals
+                .iter()
+                .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid_upd2))
+                .unwrap();
+            (
+                t.id.clone(),
+                t.agent.as_ref().unwrap().terminal.clone().unwrap(),
+            )
+        };
+        let _ = world.client_call(
+            "project.update",
+            json!({ "project_id": pid_upd, "directory": upd_dir_other }),
+            Some(&pid_upd),
+        )?;
+        let herdr_count_before_review = herdr_a.terminal_addresses().len();
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": upd2_tid,
+                "state": "completed",
+                "message": "done in original dir",
+                "request_key": format!("upd2-done-{seed}"),
+            }),
+        )?;
+        herdr_a.finish_terminal(&upd2_addr, 0, "exited");
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.cards.iter().any(|c| {
+                c.id == raw_cid_upd2
+                    && c.attention
+                        .as_deref()
+                        .is_some_and(|att| att.contains("undelivered"))
+            }))
+        })?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let card2 = snap.cards.iter().find(|c| c.id == raw_cid_upd2).unwrap();
+            ensure!(
+                card2.workspace.as_ref().map(|w| w.directory.as_str()) == Some(last_canon.as_str())
+                    && herdr_a.terminal_addresses().len() == herdr_count_before_review,
+                "Reviewer must NEVER launch in unrelated changed checkout!"
+            );
+        }
+
+        // F4. `project.delete`: rejects agent execution, rejects live terminal, removes Canban
+        //     DB/drafts/preferences/metadata while leaving sibling projects & user repo files intact!
+        let del_repo = world.project_dir(&format!("crud-del-repo-{seed}"))?;
+        let del_repo_path = std::path::PathBuf::from(&del_repo);
+        std::fs::write(del_repo_path.join("README.md"), "user repo intact")?;
+        let p_del = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-a",
+                "name": format!("Delete Target {seed}"),
+                "directory": del_repo,
+            }),
+            None,
+        )?;
+        let pid_del = p_del["id"].as_str().unwrap().to_owned();
+        let raw_pid_del = unqualified_entity_id(&pid_del).to_owned();
+        let c_del = world.client_call(
+            "card.create",
+            json!({ "project_id": pid_del, "title": "Delete Target Card" }),
+            Some(&pid_del),
+        )?;
+        let cid_del = c_del["id"].as_str().unwrap().to_owned();
+        let _ = world.client_call(
+            "comment.add",
+            json!({ "card_id": cid_del, "body": "Notes on delete target" }),
+            Some(&pid_del),
+        )?;
+        let _ = world.server_call(
+            "remote-a",
+            "draft.save",
+            json!({ "id": format!("new-card:{raw_pid_del}"), "revision": 0, "data": { "title": "Unsaved" } }),
+        )?;
+        let _ = world.server_call(
+            "remote-a",
+            "utilities.configure",
+            json!({
+                "last_project": raw_pid_del,
+                "board_filter": {
+                    "account": "local",
+                    "project_id": raw_pid_del,
+                    "value": { "tags": ["alpha"] },
+                },
+            }),
+        )?;
+        let del_meta_dir = world.servers["remote-a"]
+            .home
+            .join("projects")
+            .join(&raw_pid_del);
+        std::fs::create_dir_all(&del_meta_dir)?;
+        std::fs::write(del_meta_dir.join("context.txt"), "canban metadata")?;
+        let del_live_term = world.server_call(
+            "remote-a",
+            "terminal.create",
+            json!({ "project_id": raw_pid_del, "name": "Live Blocker Shell" }),
+        )?;
+        let del_live_tid = del_live_term["id"].as_str().unwrap().to_owned();
+
+        ensure!(
+            world
+                .server_call(
+                    "remote-a",
+                    "project.delete",
+                    json!({ "project_id": raw_pid_del, "execution": { "card_id": unqualified_entity_id(&cid_del) } }),
+                )
+                .is_err(),
+            "Agent execution must not delete a Project"
+        );
+        let live_del_err = world
+            .client_call(
+                "project.delete",
+                json!({ "project_id": pid_del }),
+                Some(&pid_del),
+            )
+            .expect_err("Live terminal must block project.delete");
+        ensure!(
+            live_del_err.to_string().contains("1 live terminal"),
+            "Unexpected live terminal blocker error: {live_del_err:#}"
+        );
+        let _ = world.server_call(
+            "remote-a",
+            "terminal.close",
+            json!({ "terminal_id": del_live_tid }),
+        )?;
+        let del_receipt = world.client_call(
+            "project.delete",
+            json!({ "project_id": pid_del }),
+            Some(&pid_del),
+        )?;
+        ensure!(
+            del_receipt["deleted"] == true
+                && unqualified_entity_id(del_receipt["project_id"].as_str().unwrap_or(""))
+                    == raw_pid_del
+                && del_receipt["deleted_cards"] == 1
+                && !del_meta_dir.exists()
+                && std::fs::read_to_string(del_repo_path.join("README.md"))? == "user repo intact",
+            "project.delete receipt or cleanup mismatch: {del_receipt}"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            ensure!(
+                !snap.projects.iter().any(|p| p.id == raw_pid_del)
+                    && snap.projects.iter().any(|p| p.id == pid_local)
+                    && !snap.cards.iter().any(|c| c.project_id == raw_pid_del)
+                    && !snap
+                        .workflow_sources
+                        .iter()
+                        .any(|w| w.project_id == raw_pid_del),
+                "project.delete left orphan records or harmed sibling project"
+            );
+            let util = world.server_call("remote-a", "utilities.state", json!({}))?;
+            ensure!(util["preferences"]["last_project"].is_null());
+            let drafts = world.server_call("remote-a", "draft.list", json!({}))?;
+            ensure!(
+                drafts.as_array().is_some_and(|a| !a
+                    .iter()
+                    .any(|d| d["id"] == format!("new-card:{raw_pid_del}"))),
+                "project.delete did not remove project draft: {drafts}"
+            );
+        }
+
+        // F5. `project.archived.delete` (rejects agent context, deletes cold bundle cleanly on `remote-b`)
+        let arch_del_dir = world.project_dir(&format!("crud-arch-del-{seed}"))?;
+        let p_arch_del = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-b",
+                "name": format!("Disposable Archived {seed}"),
+                "directory": arch_del_dir,
+            }),
+            None,
+        )?;
+        let pid_arch_del = p_arch_del["id"].as_str().unwrap().to_owned();
+        let raw_pid_arch_del = unqualified_entity_id(&pid_arch_del).to_owned();
+        let _ = world.client_call(
+            "project.archive",
+            json!({ "project_id": pid_arch_del }),
+            Some(&pid_arch_del),
+        )?;
+        let arch_del_bundle = world.servers["remote-b"]
+            .home
+            .join("project-archives")
+            .join(format!("{raw_pid_arch_del}.canban.tar.zst"));
+        ensure!(arch_del_bundle.is_file());
+        let arch_del_agent_err = world
+            .server_call(
+                "remote-b",
+                "project.archived.delete",
+                json!({ "project_id": raw_pid_arch_del, "execution": { "agent": true } }),
+            )
+            .expect_err("Agent must not delete archived project bundle");
+        ensure!(
+            arch_del_agent_err
+                .to_string()
+                .contains("Deleting an archived Project requires a user action")
+                && arch_del_bundle.is_file()
+        );
+        let arch_del_res = world.client_call(
+            "project.archived.delete",
+            json!({ "host_id": "remote-b", "project_id": raw_pid_arch_del }),
+            None,
+        )?;
+        ensure!(
+            arch_del_res["deleted"] == true
+                && unqualified_entity_id(arch_del_res["project_id"].as_str().unwrap_or(""))
+                    == raw_pid_arch_del
+                && !arch_del_bundle.exists(),
+            "project.archived.delete failed: {arch_del_res}"
+        );
+        let arch_list_rb = world.client_call(
+            "project.archived.list",
+            json!({ "host_id": "remote-b" }),
+            None,
+        )?;
+        ensure!(
+            arch_list_rb["projects"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
+
+        // F6. Global Default Workflow & Project Copy (`workflow_source_project_id`, `workflow.default.{set,get,reset}`)
+        let copy_src_dir = world.project_dir(&format!("wf-copy-src-{seed}"))?;
+        let copy_p1 = world.client_call(
+            "project.create",
+            json!({ "host_id": "remote-b", "name": "WF Template Source", "directory": copy_src_dir }),
+            None,
+        )?;
+        let pid_cp1 = copy_p1["id"].as_str().unwrap().to_owned();
+        let raw_cp1 = unqualified_entity_id(&pid_cp1).to_owned();
+        let cp1_cur = world.client_call(
+            "workflow.sources",
+            json!({ "project_id": pid_cp1 }),
+            Some(&pid_cp1),
+        )?;
+        let custom_dev = format!(
+            "schema: 12\nid: delivery:{raw_cp1}\nname: Tuned Delivery\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: design\n    name: Design\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\nworkspace:\n  create_worktree: false\n  sync_base: false\n  remote: upstream\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\nsteps:\n  - id: agent:develop\n    uses: agent\n    with:\n      profile: developer\n      instruction: Custom tuned developer prompt\n    next: __end\n  - id: __end\n    uses: complete\n"
+        );
+        let helper_wf = "schema: 12\nid: helper\nname: Manual Helper\non:\n  triage:\n    event: manual\n    start_at: explain\nsteps:\n  - id: explain\n    uses: agent\n    with:\n      profile: planner\n      instruction: Explain tradeoffs\n    next: __end\n  - id: __end\n    uses: complete\n";
+        let _ = world.client_call(
+            "workflow.apply",
+            json!({
+                "project_id": pid_cp1,
+                "revision": cp1_cur["revision"],
+                "sources": [
+                    { "filename": "development.yaml", "source": custom_dev },
+                    { "filename": "helper.yaml", "source": helper_wf },
+                ],
+            }),
+            Some(&pid_cp1),
+        )?;
+        let copy_p2: Project = serde_json::from_value(world.server_call(
+            "remote-b",
+            "project.create",
+            json!({
+                "name": "Copied Project",
+                "directory": world.project_dir(&format!("wf-copy-p2-{seed}"))?,
+                "workflow_source_project_id": raw_cp1,
+            }),
+        )?)?;
+        ensure!(
+            copy_p2.workflow.stages.len() == 4 && copy_p2.workflow.workspace.remote == "upstream"
+        );
+        let copy_p3: Project = serde_json::from_value(world.server_call(
+            "remote-b",
+            "project.create",
+            json!({
+                "name": "Chained Copy",
+                "directory": world.project_dir(&format!("wf-copy-p3-{seed}"))?,
+                "workflow_mode": "project",
+                "workflow_source_project_id": copy_p2.id,
+            }),
+        )?)?;
+        let cp3_sources = world.server_call(
+            "remote-b",
+            "workflow.sources",
+            json!({ "project_id": copy_p3.id }),
+        )?;
+        ensure!(
+            cp3_sources["sources"][1]["active"]["workflow_id"] == format!("helper:{}", copy_p3.id),
+            "Chained copy must not accumulate :pid:pid suffixes: {cp3_sources}"
+        );
+        ensure!(
+            world
+                .server_call(
+                    "remote-b",
+                    "workflow.default.set",
+                    json!({ "project_id": raw_cp1, "execution": { "token": "agent" } }),
+                )
+                .is_err(),
+            "Agent execution must not overwrite global default workflow"
+        );
+        let saved_tpl: WorkflowTemplate = serde_json::from_value(world.server_call(
+            "remote-b",
+            "workflow.default.set",
+            json!({ "project_id": raw_cp1 }),
+        )?)?;
+        ensure!(saved_tpl.id == DEFAULT_WORKFLOW_TEMPLATE_ID && saved_tpl.sources.len() == 2);
+        let copy_p4: Project = serde_json::from_value(world.server_call(
+            "remote-b",
+            "project.create",
+            json!({
+                "name": "Uses Global Default",
+                "directory": world.project_dir(&format!("wf-copy-p4-{seed}"))?,
+            }),
+        )?)?;
+        ensure!(
+            copy_p4.workflow.stages.len() == 4 && copy_p4.workflow.workspace.remote == "upstream"
+        );
+        let copy_p5: Project = serde_json::from_value(world.server_call(
+            "remote-b",
+            "project.create",
+            json!({
+                "name": "Uses Builtin Explicitly",
+                "directory": world.project_dir(&format!("wf-copy-p5-{seed}"))?,
+                "workflow_mode": "builtin",
+            }),
+        )?)?;
+        ensure!(copy_p5.workflow.stages.len() == 3);
+        let wf_reset = world.server_call("remote-b", "workflow.default.reset", json!({}))?;
+        ensure!(
+            wf_reset["reset"] == true
+                && world.server_call("remote-b", "workflow.default.get", json!({}))?["template"]
+                    .is_null()
+        );
+
+        // F7. Agent Onboarding (`agent.catalog`, `agent.setup`, `config.agents.save`, `project.agents`,
+        //     disabled mention gating, custom identity, orchestrator, custom argv, & `profile: null` routing)
+        let rb_agents_path = world.servers["remote-b"].home.join("config/agents.json");
+        let rb_agents_backup = std::fs::read(&rb_agents_path)?;
+        let herdr_b = world.herdr("remote-b").unwrap();
+        herdr_b.set_offline(true);
+        // Reset `remote-b` agents.json to clean built-in presets (no SimWorld `/bin/echo` argv stub)
+        // so onboarding, engine defaults, and custom argv propagation match fresh user installs!
+        std::fs::write(
+            &rb_agents_path,
+            serde_json::to_vec_pretty(&canban_types::Config::default())?,
+        )?;
+        let _ = world.server_call("remote-b", "config.reload", json!({}))?;
+
+        let catalog = world.server_call("remote-b", "agent.catalog", json!({}))?;
+        let agents_arr = catalog["agents"].as_array().context("catalog agents")?;
+        ensure!(
+            agents_arr.len() >= 24
+                && agents_arr
+                    .iter()
+                    .any(|a| a["id"] == "agy" && a["supports_orchestrator"] == true)
+                && agents_arr
+                    .iter()
+                    .any(|a| a["id"] == "codex" && a["supports_orchestrator"] == false),
+            "agent.catalog unexpected: len={}",
+            agents_arr.len()
+        );
+        let setup_res = world.server_call(
+            "remote-b",
+            "agent.setup",
+            json!({
+                "enabled_agents": ["codex", "agy"],
+                "default_engine": "agy",
+                "default_agent": "developer",
+            }),
+        )?;
+        ensure!(
+            setup_res["onboarded"] == true && setup_res["default_agent"] == "developer",
+            "agent.setup mismatch: {setup_res}"
+        );
+        ensure!(
+            world
+                .server_call(
+                    "remote-b",
+                    "config.agents.save",
+                    json!({ "op": "delete_profile", "id": "merger" }),
+                )
+                .is_err(),
+            "Built-in @merger cannot be deleted"
+        );
+        let ob_card = world.server_call(
+            "remote-b",
+            "card.create",
+            json!({ "view": "full", "project_id": copy_p5.id, "title": "Onboarding Gating" }),
+        )?;
+        let ob_cid = ob_card["id"].as_str().unwrap().to_owned();
+        let _ = world.server_call(
+            "remote-b",
+            "comment.add",
+            json!({ "card_id": ob_cid, "body": "Hey @claude should not trigger while disabled" }),
+        )?;
+        ensure!(
+            !world
+                .server("remote-b")
+                .unwrap()
+                .snapshot()?
+                .questions
+                .iter()
+                .any(|q| q.card_id == ob_cid && q.profile_id == "claude"),
+            "Disabled @claude must not queue from prose"
+        );
+        let explicit_disabled_err = world
+            .server_call(
+                "remote-b",
+                "comment.add",
+                json!({ "card_id": ob_cid, "body": "Explicit @claude", "mentions": ["claude"] }),
+            )
+            .expect_err("Explicit disabled @claude mention must fail");
+        ensure!(explicit_disabled_err.to_string().contains("disabled"));
+
+        // Custom identity `@qa` survives re-running `agent.setup`.
+        let _ = world.server_call(
+            "remote-b",
+            "config.agents.save",
+            json!({
+                "op": "upsert_identity",
+                "id": "qa",
+                "engine": "codex",
+                "role_instruction": "Run edge-case QA checks thoroughly.",
+            }),
+        )?;
+        let _ = world.server_call(
+            "remote-b",
+            "config.agents.save",
+            json!({ "op": "set_default", "default_agent": "codex" }),
+        )?;
+        let _ = world.server_call(
+            "remote-b",
+            "agent.setup",
+            json!({ "enabled_agents": ["codex", "agy"], "default_engine": "agy" }),
+        )?;
+        {
+            let cfg = world.server("remote-b").unwrap().config();
+            ensure!(cfg.default_agent == "developer");
+            let qa = cfg
+                .profiles
+                .iter()
+                .find(|p| p.id == "qa")
+                .context("qa missing")?;
+            ensure!(qa.is_identity() && qa.enabled && qa.command()[0] == "codex");
+        }
+        // Workflow with explicit `profile: null` routes to `default_agent` (`@developer -> agy`)!
+        let null_prof_proj: Project = serde_json::from_value(world.server_call(
+            "remote-b",
+            "project.create",
+            json!({
+                "name": "NullProfileWorkflow",
+                "directory": world.project_dir(&format!("null-prof-{seed}"))?,
+                "workspace": { "create_worktree": false, "sync_base": false },
+                "workflow_yaml": "schema: 12\nid: delivery:null-prof\nname: Development\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: custom_step_name\n    match:\n      column: develop\nsteps:\n  - id: custom_step_name\n    uses: agent\n    with:\n      instruction: Run default agent.\n      profile: null\n    next: __end\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: false\n  sync_base: false\n",
+            }),
+        )?)?;
+        let null_prof_card = world.server_call(
+            "remote-b",
+            "card.create",
+            json!({ "view": "full", "project_id": null_prof_proj.id, "title": "Drag to Develop" }),
+        )?;
+        let null_prof_cid = null_prof_card["id"].as_str().unwrap().to_owned();
+        let _ = world.server_call(
+            "remote-b",
+            "card.move",
+            json!({ "view": "full", "card_id": null_prof_cid, "revision": null_prof_card["revision"], "stage": "develop" }),
+        )?;
+        {
+            let snap = world.server("remote-b").unwrap().snapshot()?;
+            let np_req = snap
+                .terminals
+                .iter()
+                .filter_map(|t| t.agent.as_ref())
+                .rfind(|a| a.card_id == null_prof_cid)
+                .context("null profile workflow request missing")?;
+            ensure!(
+                np_req.profile.id == "developer" && np_req.profile.command()[0] == "agy",
+                "profile: null must route to default_agent (@developer -> agy): {:?}",
+                np_req.profile
+            );
+        }
+
+        // `project.agents` rejects direct CLI agent & codex orchestrator, applies identity overrides!
+        ensure!(
+            world
+                .server_call(
+                    "remote-b",
+                    "project.agents",
+                    json!({
+                        "project_id": copy_p5.id,
+                        "agent_overrides": { "codex": { "model": "gpt-6.1-sol" } },
+                    }),
+                )
+                .is_err()
+                && world
+                    .server_call(
+                        "remote-b",
+                        "project.agents",
+                        json!({
+                            "project_id": copy_p5.id,
+                            "agent_overrides": { "developer": { "agent": "codex", "model": "orchestrator" } },
+                        }),
+                    )
+                    .is_err(),
+            "Direct CLI agent and codex orchestrator must be rejected in project.agents"
+        );
+        let _ = world.server_call(
+            "remote-b",
+            "project.agents",
+            json!({
+                "project_id": copy_p5.id,
+                "agent_overrides": {
+                    "developer": { "agent": "codex", "model": "gpt-5.4", "effort": "high" },
+                    "reviewer": { "model": "gemini-4-carbon-low", "effort": "low" },
+                },
+            }),
+        )?;
+        let _ = world.server_call(
+            "remote-b",
+            "comment.add",
+            json!({
+                "card_id": ob_cid,
+                "body": "@developer @reviewer check project override",
+                "mentions": ["developer", "reviewer"],
+            }),
+        )?;
+        {
+            let snap = world.server("remote-b").unwrap().snapshot()?;
+            let dev_req = snap
+                .terminals
+                .iter()
+                .filter_map(|t| t.agent.as_ref())
+                .rfind(|a| a.card_id == ob_cid && a.profile.id == "developer")
+                .context("override developer req missing")?;
+            let rev_req = snap
+                .terminals
+                .iter()
+                .filter_map(|t| t.agent.as_ref())
+                .rfind(|a| a.card_id == ob_cid && a.profile.id == "reviewer")
+                .context("override reviewer req missing")?;
+            ensure!(
+                dev_req.profile.command()[0] == "codex"
+                    && dev_req.profile.model.as_deref() == Some("gpt-5.4")
+                    && dev_req.profile.effort.as_deref() == Some("high")
+                    && rev_req.profile.command()[0] == "agy"
+                    && rev_req.profile.model.as_deref() == Some("gemini-4-carbon-low")
+                    && rev_req.profile.effort.as_deref() == Some("low"),
+                "project.agents overrides not applied: dev={:?} rev={:?}",
+                dev_req.profile,
+                rev_req.profile
+            );
+        }
+
+        // `set_profile_options`: model/effort inheritance, orchestrator mode, custom argv + reset!
+        let _ = world.server_call(
+            "remote-b",
+            "config.agents.save",
+            json!({
+                "op": "set_profile_options",
+                "id": "agy",
+                "model": "orchestrator",
+                "orchestrator": {
+                    "planner_model": "claude-opus-5-5",
+                    "planner_effort": "high",
+                    "worker_model": "gemini-4-hydrogen",
+                    "worker_effort": "medium",
+                },
+            }),
+        )?;
+        ensure!(
+            world
+                .server_call(
+                    "remote-b",
+                    "config.agents.save",
+                    json!({ "op": "set_profile_options", "id": "codex", "model": "orchestrator" }),
+                )
+                .is_err()
+                && world
+                    .server_call(
+                        "remote-b",
+                        "config.agents.save",
+                        json!({ "op": "set_profile_options", "id": "agy", "argv": [""] }),
+                    )
+                    .is_err(),
+            "Invalid orchestrator or empty argv[0] must fail"
+        );
+        let _ = world.server_call(
+            "remote-b",
+            "config.agents.save",
+            json!({
+                "op": "set_profile_options",
+                "id": "agy",
+                "argv": ["/bin/agy-modified", "--custom-flag", "{cwd}", "-i", "{prompt}"],
+            }),
+        )?;
+        {
+            let cfg = world.server("remote-b").unwrap().config();
+            let rev = cfg.profiles.iter().find(|p| p.id == "reviewer").unwrap();
+            ensure!(
+                rev.command()[0] == "/bin/agy-modified"
+                    && rev.resume_command()[0] == "/bin/agy-modified"
+                    && rev.model.as_deref() == Some("orchestrator"),
+                "agy options & custom argv must propagate to reviewer identity"
+            );
+            let cat_after_agy = world.server_call("remote-b", "agent.catalog", json!({}))?;
+            let raw_rev = cat_after_agy["raw_profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "reviewer")
+                .context("raw reviewer profile missing")?;
+            ensure!(
+                raw_rev.get("model").is_none() || raw_rev["model"].is_null(),
+                "Inherited engine model must not persist as explicit identity override: {raw_rev}"
+            );
+        }
+        let _ = world.server_call(
+            "remote-b",
+            "config.agents.save",
+            json!({ "op": "set_profile_options", "id": "agy", "argv": Value::Null }),
+        )?;
+        ensure!(
+            world
+                .server("remote-b")
+                .unwrap()
+                .config()
+                .profiles
+                .iter()
+                .find(|p| p.id == "agy")
+                .unwrap()
+                .command()[0]
+                == "agy"
+        );
+
+        // Restore `remote-b` original agents.json, close queued onboarding test terminals, & bring Herdr back online cleanly!
+        std::fs::write(&rb_agents_path, &rb_agents_backup)?;
+        let _ = world.server_call("remote-b", "config.reload", json!({}))?;
+        for tid in world
+            .server("remote-b")
+            .unwrap()
+            .snapshot()?
+            .terminals
+            .into_iter()
+            .filter(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    (a.card_id == ob_cid || a.card_id == null_prof_cid) && !a.finished()
+                })
+            })
+            .map(|t| t.id)
+        {
+            let _ = world.server_call("remote-b", "terminal.close", json!({ "terminal_id": tid }));
+        }
+        herdr_b.set_offline(false);
+        world.advance(Duration::from_millis(500))?;
+        for addr in herdr_b.terminal_addresses() {
+            if herdr_b
+                .terminal_record(&addr)
+                .is_some_and(|r| r["state"].as_str() == Some("live"))
+            {
+                herdr_b.finish_terminal(&addr, 0, "exited");
+            }
+        }
+        world.heal_and_quiesce(20_000)?;
+        world.hit("bundle.project_crud_and_onboarding");
 
         // Strict quiescent invariant verification across ALL clients and ALL 3 servers!
         oracle.check_quiescent_invariants(world)?;

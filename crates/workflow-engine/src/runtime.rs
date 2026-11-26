@@ -2593,19 +2593,27 @@ pub fn reconcile_at(db: Db<'_>, now_ms: u64) -> Result<()> {
                 } else {
                     "waiting_agent"
                 };
+                let next_error = Some(format!(
+                    "Execution {}: inspect or explicitly retry",
+                    agent.state
+                ));
+                let mut changed = run.state != next_state || run.error != next_error;
                 if next_state == "failed"
                     && run.step_is_deliver()
                     && let Some(obj) = run.inputs.as_object_mut()
                 {
-                    obj.remove("queued_at");
-                    obj.remove("queue_pause_reason");
+                    if obj.remove("queued_at").is_some() {
+                        changed = true;
+                    }
+                    if obj.remove("queue_pause_reason").is_some() {
+                        changed = true;
+                    }
                 }
-                run.state = next_state.into();
-                run.error = Some(format!(
-                    "Execution {}: inspect or explicitly retry",
-                    agent.state
-                ));
-                db.save(&run)?;
+                if changed {
+                    run.state = next_state.into();
+                    run.error = next_error;
+                    db.save(&run)?;
+                }
             } else if run.state == "failed" && (agent.state == "queued" || agent.pending.is_some())
             {
                 run.state = "waiting_agent".into();
@@ -2714,100 +2722,6 @@ mod cardless_runtime_tests {
                 "unexpected error for {name}: {msg}"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn complete_cardless_agent_clears_agent_terminal_between_consecutive_agent_steps() {
-        let (mut store, dir) = temp_store();
-        let project = seed_project(&mut store);
-        let yaml = r#"schema: 11
-id: multi:agent
-name: Multi-Agent Cardless
-on:
-  comment:
-    event: github.issue.comment_created
-    start_at: triage
-    cardless: true
-steps:
-  - id: triage
-    uses: agent
-    with:
-      profile: reviewer
-      instruction: Triage the incoming comment
-    next: respond
-  - id: respond
-    uses: agent
-    with:
-      profile: developer
-      instruction: Draft the response
-    next: done
-  - id: done
-    uses: complete
-"#;
-        let flow = crate::source::parse(yaml).unwrap().compile().unwrap();
-
-        let mut run = store
-            .write(|db| start_cardless(db, &project.id, flow.clone(), 1, "comment", None))
-            .unwrap();
-        assert_eq!(run.state, "waiting_agent");
-        assert_eq!(run.step.as_deref(), Some("triage"));
-        assert!(run.inputs.get("agent_terminal").is_none());
-
-        // Simulate `pump_cardless_agents` recording a launched terminal for step 1.
-        run.inputs["agent_terminal"] = json!({
-            "address": "local/term-1",
-            "step_id": "triage",
-            "visit": run.visit,
-            "started_at": now(),
-        });
-        store.write(|db| db.save(&run)).unwrap();
-
-        // Completing step 1 must clear `agent_terminal` so step 2 starts cleanly.
-        store
-            .write(|db| {
-                complete_cardless_agent(
-                    db,
-                    &mut run,
-                    json!({"terminal": "local/term-1", "exit_code": 0}),
-                    "completed",
-                )
-            })
-            .unwrap();
-        assert_eq!(run.state, "waiting_agent");
-        assert_eq!(run.step.as_deref(), Some("respond"));
-        assert!(
-            run.inputs.get("agent_terminal").is_none(),
-            "stale agent_terminal leaked into subsequent agent step: {:?}",
-            run.inputs
-        );
-        assert_eq!(run.inputs["pending_agent"]["profile"], "developer");
-
-        // Reload from SQLite to confirm cleared state was persisted.
-        let reloaded: WorkflowRun = store.db().get(&run.id).unwrap();
-        assert!(reloaded.inputs.get("agent_terminal").is_none());
-
-        // Simulate launching step 2 and failing it -> `agent_terminal` is also cleared.
-        run.inputs["agent_terminal"] = json!({
-            "address": "local/term-2",
-            "step_id": "respond",
-            "visit": run.visit,
-            "started_at": now(),
-        });
-        store
-            .write(|db| {
-                complete_cardless_agent(
-                    db,
-                    &mut run,
-                    json!({"terminal": "local/term-2", "exit_code": 1, "message": "failed"}),
-                    "failed",
-                )
-            })
-            .unwrap();
-        assert_eq!(run.state, "failed");
-        assert!(run.inputs.get("agent_terminal").is_none());
-        assert!(run.inputs.get("pending_agent").is_none());
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

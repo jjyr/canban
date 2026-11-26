@@ -33,7 +33,7 @@ use crate::{
     world::{SimWorld, SimWorldConfig, run_with_world},
 };
 use anyhow::{Context, Result, ensure};
-use canban_types::Card;
+use canban_types::{Card, Event, ExecutionTrigger, Note, NoteEvent};
 use canban_ui::review::model::{
     DraftScopeInput, HydrateAction, MAX_SCOPED_REVIEW_DRAFTS, PendingInlineComment,
     ReviewDraftScope, ReviewDraftSnapshot, ReviewDraftStore, normalize_checkout_path,
@@ -2080,6 +2080,1612 @@ pub fn run(seed: u64) -> Result<u64> {
             "Expected 3 completed consumer deliveries after ack, got: {final_consumer_deliv}"
         );
         world.hit("events.subscription_delivery_and_ack");
+
+        // =====================================================================
+        // PART E — Comments (`comment.{update,delete}`), Notes (`note.{write,read,revision,history,rename}`),
+        //          Tags (`tag.create`), Card-Create Mentions & Prompt Dedup, Profile Reload
+        //          Immutability, & Review Activity Warnings (persisted across `bounce_server`)
+        // =====================================================================
+        finish_all_live_herdr_terminals(world, "remote-a")?;
+        let _ = world.server_call(
+            "remote-a",
+            "scheduler.configure",
+            json!({ "max_agents": 4 }),
+        )?;
+        let cnt_dir = world.project_dir(&format!("cnt-proj-{seed}"))?;
+        let foreign_dir = world.project_dir(&format!("cnt-foreign-{seed}"))?;
+        let proj_cnt = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-a",
+                "name": format!("Comments Notes Tags {seed}"),
+                "directory": cnt_dir,
+                "workspace": { "create_worktree": false, "sync_base": false },
+            }),
+            None,
+        )?;
+        let pid_cnt = proj_cnt["id"].as_str().context("proj_cnt id")?.to_owned();
+        let raw_pid_cnt = strip_host(&pid_cnt);
+
+        let proj_foreign = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-a",
+                "name": format!("Foreign Scope {seed}"),
+                "directory": foreign_dir,
+                "workspace": { "create_worktree": false, "sync_base": false },
+            }),
+            None,
+        )?;
+        let pid_foreign = proj_foreign["id"]
+            .as_str()
+            .context("proj_foreign id")?
+            .to_owned();
+
+        // E1. Project Tags (`tag.create`: normalize, case-insensitive dedup, Unicode/CJK, invalid rejection).
+        let tag_ui = world.client_call(
+            "tag.create",
+            json!({ "project_id": pid_cnt, "tag": "#ui-kit" }),
+            Some(&pid_cnt),
+        )?;
+        ensure!(
+            tag_ui["tag"] == "ui-kit" && tag_ui["tags"] == json!(["ui-kit"]),
+            "tag.create #ui-kit mismatch: {tag_ui}"
+        );
+        let tag_dup = world.client_call(
+            "tag.create",
+            json!({ "project_id": pid_cnt, "tag": "UI-KIT" }),
+            Some(&pid_cnt),
+        )?;
+        ensure!(
+            tag_dup["tag"] == "ui-kit" && tag_dup["tags"] == json!(["ui-kit"]),
+            "tag.create case-insensitive dedup mismatch: {tag_dup}"
+        );
+        let tag_cjk = world.client_call(
+            "tag.create",
+            json!({ "project_id": pid_cnt, "tag": "#前端" }),
+            Some(&pid_cnt),
+        )?;
+        ensure!(
+            tag_cjk["tags"] == json!(["ui-kit", "前端"]),
+            "tag.create Unicode mismatch: {tag_cjk}"
+        );
+        for bad_tag in ["", "#", "18", "#42", "bad space", "bad/slash"] {
+            ensure!(
+                world
+                    .client_call(
+                        "tag.create",
+                        json!({ "project_id": pid_cnt, "tag": bad_tag }),
+                        Some(&pid_cnt),
+                    )
+                    .is_err(),
+                "Expected invalid tag {bad_tag:?} to be rejected"
+            );
+        }
+
+        // E2. Explicit comment recipients override prose scanning + `comment.update` & `comment.delete`
+        //     + card revision non-conflict!
+        let card_e1 = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_cnt,
+                "title": format!("Comment Lifecycle {seed}"),
+                "body": "Exercises comment.update, comment.delete, mentions, and non-conflict",
+            }),
+            Some(&pid_cnt),
+        )?;
+        let cid_e1 = card_e1["id"].as_str().context("E1 id")?.to_owned();
+        let raw_cid_e1 = strip_host(&cid_e1);
+        let e1_init_rev = card_e1["revision"].as_u64().unwrap_or(1);
+        oracle.record_committed_card("remote-a", &raw_cid_e1, &raw_pid_cnt, e1_init_rev);
+
+        // Hold Herdr offline briefly so queued mention questions & AgentRuns can be inspected cleanly
+        // before launch, and deleted while queued!
+        let herdr_a = world.herdr("remote-a").unwrap();
+        herdr_a.set_offline(true);
+
+        // Explicit `mentions: []` suppresses prose `@codex`.
+        let _ = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e1,
+                "body": "The UI shows Ask @codex",
+                "mentions": [],
+            }),
+            Some(&pid_cnt),
+        )?;
+        ensure!(
+            !world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .questions
+                .iter()
+                .any(|q| q.card_id == raw_cid_e1),
+            "Explicit mentions: [] must suppress prose @codex scanning"
+        );
+
+        // Explicit `mentions: ["codex"]` overrides prose `@reviewer and @codex` & does not bump card rev.
+        let cmt_1_val = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e1,
+                "body": "Compare @reviewer and @codex",
+                "mentions": ["codex"],
+            }),
+            Some(&pid_cnt),
+        )?;
+        let cmt_1_id = cmt_1_val["id"].as_str().context("cmt_1 id")?.to_owned();
+        ensure!(
+            cmt_1_val["card_revision"].as_u64() == Some(e1_init_rev),
+            "comment.add must not bump card revision: {cmt_1_val}"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let e1_qs: Vec<_> = snap
+                .questions
+                .iter()
+                .filter(|q| q.card_id == raw_cid_e1)
+                .collect();
+            ensure!(
+                e1_qs.len() == 1 && e1_qs[0].profile_id == "codex",
+                "Explicit mentions: [codex] must create exactly 1 @codex Question: {e1_qs:?}"
+            );
+        }
+
+        // `comment.update`: preserves sequence, bumps revision to 2, idempotent replay, updates
+        // existing `@codex` Question in place, adds `@reviewer` Question, rejects empty body.
+        let cmt_1_seq = cmt_1_val["sequence"].as_u64().unwrap_or(0);
+        let upd_req = json!({
+            "card_id": cid_e1,
+            "comment_id": cmt_1_id,
+            "body": format!("Refined thought for @codex and @reviewer ({seed})"),
+            "mentions": ["codex", "reviewer"],
+            "request_key": format!("cnt-edit-1-{seed}"),
+        });
+        let upd_res = world.client_call("comment.update", upd_req.clone(), Some(&pid_cnt))?;
+        let upd_replay = world.client_call("comment.update", upd_req, Some(&pid_cnt))?;
+        ensure!(
+            upd_res["id"] == cmt_1_id
+                && upd_res["sequence"] == cmt_1_seq
+                && upd_res["card_revision"].as_u64() == Some(e1_init_rev)
+                && upd_replay == upd_res,
+            "comment.update / replay mismatch: first={upd_res} replay={upd_replay}"
+        );
+        {
+            let tl = world.server_call(
+                "remote-a",
+                "timeline.list",
+                json!({ "card_id": raw_cid_e1, "limit": 50, "view": "full" }),
+            )?;
+            let edited_ev = tl["events"]
+                .as_array()
+                .and_then(|a| a.iter().find(|e| e["id"] == cmt_1_id))
+                .context("Edited comment missing from timeline")?;
+            ensure!(
+                edited_ev["sequence"] == cmt_1_seq
+                    && edited_ev["data"]["revision"] == 2
+                    && edited_ev["data"]["edited_at"].as_u64().is_some(),
+                "Edited comment timeline metadata mismatch: {edited_ev}"
+            );
+        }
+        ensure!(
+            world
+                .client_call(
+                    "comment.update",
+                    json!({ "card_id": cid_e1, "comment_id": cmt_1_id, "body": "   " }),
+                    Some(&pid_cnt),
+                )
+                .is_err(),
+            "comment.update must reject whitespace-only body"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let codex_qs: Vec<_> = snap
+                .questions
+                .iter()
+                .filter(|q| q.comment_id == cmt_1_id && q.profile_id == "codex")
+                .collect();
+            let rev_qs: Vec<_> = snap
+                .questions
+                .iter()
+                .filter(|q| q.comment_id == cmt_1_id && q.profile_id == "reviewer")
+                .collect();
+            ensure!(
+                codex_qs.len() == 1
+                    && codex_qs[0].body.contains("Refined thought")
+                    && rev_qs.len() == 1,
+                "comment.update must update @codex in-place and add @reviewer: codex={codex_qs:?} rev={rev_qs:?}"
+            );
+        }
+
+        // `comment.delete` on queued mention comment: tombstones in place, idempotent replay,
+        // cancels pending Question & queued AgentRun, rejects second delete with new key!
+        let cmt_del_val = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e1,
+                "body": "Disposable question for @planner https://github.com/a/b/issues/55",
+                "mentions": ["planner"],
+            }),
+            Some(&pid_cnt),
+        )?;
+        let cmt_del_id = cmt_del_val["id"].as_str().context("cmt_del id")?.to_owned();
+        let cmt_del_seq = cmt_del_val["sequence"].as_u64().unwrap_or(0);
+        let del_req = json!({
+            "card_id": cid_e1,
+            "comment_id": cmt_del_id,
+            "request_key": format!("cnt-del-1-{seed}"),
+        });
+        let del_res = world.client_call("comment.delete", del_req.clone(), Some(&pid_cnt))?;
+        let del_replay = world.client_call("comment.delete", del_req, Some(&pid_cnt))?;
+        ensure!(
+            del_res["deleted"] == true
+                && del_res["comment_id"] == cmt_del_id
+                && del_res["revision"].as_u64() == Some(e1_init_rev)
+                && del_replay == del_res,
+            "comment.delete / replay mismatch: first={del_res} replay={del_replay}"
+        );
+        ensure!(
+            world
+                .client_call(
+                    "comment.delete",
+                    json!({ "card_id": cid_e1, "comment_id": cmt_del_id }),
+                    Some(&pid_cnt),
+                )
+                .is_err(),
+            "Deleting an already-deleted comment with a new key must fail"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            ensure!(
+                snap.questions
+                    .iter()
+                    .find(|q| q.comment_id == cmt_del_id)
+                    .is_some_and(|q| q.state == "cancelled"),
+                "comment.delete must cancel pending Question"
+            );
+            ensure!(
+                snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_cid_e1
+                            && a.profile.id == "planner"
+                            && a.state == "cancelled"
+                    })
+                }),
+                "comment.delete must cancel still-queued AgentRun"
+            );
+            let tl = world.server_call(
+                "remote-a",
+                "timeline.list",
+                json!({ "card_id": raw_cid_e1, "limit": 50, "view": "full" }),
+            )?;
+            let tomb = tl["events"]
+                .as_array()
+                .and_then(|a| a.iter().find(|e| e["id"] == cmt_del_id))
+                .context("Tombstoned comment missing from timeline")?;
+            ensure!(
+                tomb["kind"] == "comment.deleted"
+                    && tomb["sequence"] == cmt_del_seq
+                    && !tomb["message"].as_str().unwrap_or("").contains("issues/55"),
+                "Tombstoned comment mismatch: {tomb}"
+            );
+        }
+
+        // Non-conflict check: `card.attention.clear` + `card.update` succeed at `e1_init_rev`!
+        let _ = world.client_call(
+            "card.attention.clear",
+            json!({ "card_id": cid_e1 }),
+            Some(&pid_cnt),
+        )?;
+        let e1_upd = world.client_call(
+            "card.update",
+            json!({
+                "card_id": cid_e1,
+                "revision": e1_init_rev,
+                "title": format!("Comment Lifecycle Updated {seed}"),
+                "body": "Updated without revision conflict after comment add/edit/delete",
+            }),
+            Some(&pid_cnt),
+        )?;
+        ensure!(
+            e1_upd["revision"].as_u64() == Some(e1_init_rev + 1),
+            "card.update after comment edit/delete must not conflict: {e1_upd}"
+        );
+
+        // Bring Herdr back online so `@codex` & `@reviewer` on E1 launch cleanly; verify:
+        // (a) deleting a follow-up `@reviewer` comment while `@reviewer` is running cancels only
+        //     the follow-up Question and preserves the running Agent,
+        // (b) agent reply (`comment.replied`) cannot be edited or deleted,
+        // (c) archived card rejects `comment.update` and `comment.delete`!
+        herdr_a.set_offline(false);
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            let codex_up = snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid_e1 && a.profile.id == "codex" && a.state == "running"
+                })
+            });
+            let rev_up = snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid_e1 && a.profile.id == "reviewer" && a.state == "running"
+                })
+            });
+            Ok(codex_up && rev_up)
+        })?;
+        // Block reviewer's Herdr terminal briefly so the follow-up mention stays `pending` until deleted.
+        let (rev_tid_e1, rev_addr_e1, codex_tid_e1) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let rev = snap
+                .terminals
+                .iter()
+                .find(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_cid_e1 && a.profile.id == "reviewer")
+                })
+                .context("reviewer terminal on E1")?;
+            let cdx = snap
+                .terminals
+                .iter()
+                .find(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_cid_e1 && a.profile.id == "codex")
+                })
+                .context("codex terminal on E1")?;
+            (
+                rev.id.clone(),
+                rev.agent.as_ref().unwrap().terminal.clone().unwrap(),
+                cdx.id.clone(),
+            )
+        };
+        herdr_a.set_status(&rev_addr_e1, "blocked", Some(2));
+        world.advance(Duration::from_millis(200))?;
+        let followup_cmt = world.client_call(
+            "comment.add",
+            json!({
+                "card_id": cid_e1,
+                "body": "Accidental follow-up @reviewer",
+                "mentions": ["reviewer"],
+            }),
+            Some(&pid_cnt),
+        )?;
+        let followup_id = followup_cmt["id"].as_str().unwrap().to_owned();
+        let _ = world.client_call(
+            "comment.delete",
+            json!({ "card_id": cid_e1, "comment_id": followup_id }),
+            Some(&pid_cnt),
+        )?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let rev_agent = snap
+                .terminals
+                .iter()
+                .find(|t| t.id == rev_tid_e1)
+                .and_then(|t| t.agent.as_ref())
+                .context("reviewer agent missing")?;
+            ensure!(
+                rev_agent.state == "running",
+                "Deleting follow-up comment must keep running reviewer agent alive"
+            );
+            ensure!(
+                snap.questions
+                    .iter()
+                    .find(|q| q.comment_id == followup_id)
+                    .is_some_and(|q| q.state == "cancelled"),
+                "Follow-up Question must be cancelled by comment.delete"
+            );
+        }
+        // Complete `@codex` with explicit `agent.reply` FIRST + then `execution.report(completed)`
+        // to verify fallback completion dedup (`comment_replied == true`, single `comment.replied`,
+        // unread count == 1), and verify agent replies reject `comment.update` & `comment.delete`!
+        let codex_q_id = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .questions
+            .into_iter()
+            .find(|q| q.card_id == raw_cid_e1 && q.profile_id == "codex")
+            .context("codex question missing")?
+            .id;
+        let _ = world.server_call(
+            "remote-a",
+            "agent.reply",
+            json!({
+                "request_key": format!("cnt-explicit-reply-{seed}"),
+                "card_id": raw_cid_e1,
+                "profile_id": "codex",
+                "question_id": codex_q_id,
+                "body": "Explicit reply before report.",
+            }),
+        )?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "request_key": format!("cnt-followup-rep-{seed}"),
+                "terminal_id": codex_tid_e1,
+                "state": "completed",
+                "message": "Answered mention",
+            }),
+        )?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "request_key": format!("cnt-rev-rep-{seed}"),
+                "terminal_id": rev_tid_e1,
+                "state": "completed",
+                "message": "Reviewer done",
+            }),
+        )?;
+        finish_all_live_herdr_terminals(world, "remote-a")?;
+        {
+            let tl = world.server_call(
+                "remote-a",
+                "timeline.list",
+                json!({ "card_id": raw_cid_e1, "limit": 50, "view": "full" }),
+            )?;
+            let evs: Vec<Event> = serde_json::from_value(tl["events"].clone())?;
+            let codex_replies: Vec<_> = evs
+                .iter()
+                .filter(|e| {
+                    e.data["terminal_id"].as_str() == Some(&codex_tid_e1)
+                        && e.kind == "comment.replied"
+                })
+                .collect();
+            ensure!(
+                codex_replies.len() == 1,
+                "Explicit reply + completed report must produce exactly 1 comment.replied: {codex_replies:?}"
+            );
+            let reported_ev = evs
+                .iter()
+                .find(|e| {
+                    e.data["terminal_id"].as_str() == Some(&codex_tid_e1)
+                        && e.kind == "execution.reported"
+                })
+                .context("codex execution.reported missing")?;
+            ensure!(
+                reported_ev.data["comment_replied"] == json!(true),
+                "execution.reported must mark comment_replied=true after explicit agent.reply: {reported_ev:?}"
+            );
+            let agent_reply_id = codex_replies[0].id.clone();
+            ensure!(
+                world
+                    .client_call(
+                        "comment.update",
+                        json!({ "card_id": cid_e1, "comment_id": agent_reply_id, "body": "Tamper" }),
+                        Some(&pid_cnt),
+                    )
+                    .is_err(),
+                "comment.update must reject editing agent replies"
+            );
+            ensure!(
+                world
+                    .client_call(
+                        "comment.delete",
+                        json!({ "card_id": cid_e1, "comment_id": agent_reply_id }),
+                        Some(&pid_cnt),
+                    )
+                    .is_err(),
+                "comment.delete must reject deleting agent replies"
+            );
+        }
+
+        // Archived card rejects both `comment.update` and `comment.delete`.
+        let arch_card = world.client_call(
+            "card.create",
+            json!({ "project_id": pid_cnt, "title": "Archived Comment Guard" }),
+            Some(&pid_cnt),
+        )?;
+        let arch_cid = arch_card["id"].as_str().unwrap().to_owned();
+        let arch_cmt = world.client_call(
+            "comment.add",
+            json!({ "card_id": arch_cid, "body": "Before archive" }),
+            Some(&pid_cnt),
+        )?;
+        let arch_cmt_id = arch_cmt["id"].as_str().unwrap().to_owned();
+        let _ = world.client_call(
+            "card.archive",
+            json!({ "card_id": arch_cid, "revision": arch_card["revision"] }),
+            Some(&pid_cnt),
+        )?;
+        ensure!(
+            world
+                .client_call(
+                    "comment.update",
+                    json!({ "card_id": arch_cid, "comment_id": arch_cmt_id, "body": "Edit archived" }),
+                    Some(&pid_cnt),
+                )
+                .is_err()
+                && world
+                    .client_call(
+                        "comment.delete",
+                        json!({ "card_id": arch_cid, "comment_id": arch_cmt_id }),
+                        Some(&pid_cnt),
+                    )
+                    .is_err(),
+            "Archived card must reject comment.update and comment.delete"
+        );
+
+        // E3. Card-create prose & explicit mentions, `card.update` non-trigger, & prompt verification!
+        let card_mention = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_cnt,
+                "title": format!("@developer Investigate title mention ({seed})"),
+                "body": "Please coordinate with @reviewer before coding.",
+            }),
+            Some(&pid_cnt),
+        )?;
+        let cid_m1 = card_mention["id"].as_str().unwrap().to_owned();
+        let raw_cid_m1 = strip_host(&cid_m1);
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            let running = snap
+                .terminals
+                .iter()
+                .filter(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_cid_m1 && a.state == "running")
+                })
+                .count();
+            Ok(running == 2)
+        })?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let tl = world.server_call(
+                "remote-a",
+                "timeline.list",
+                json!({ "card_id": raw_cid_m1, "limit": 20, "view": "full" }),
+            )?;
+            let created_ev_id = tl["events"]
+                .as_array()
+                .and_then(|a| a.iter().find(|e| e["kind"] == "card.created"))
+                .and_then(|e| e["id"].as_str())
+                .context("card.created event missing")?
+                .to_owned();
+            let dev_term = snap
+                .terminals
+                .iter()
+                .find(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.card_id == raw_cid_m1 && a.profile.id == "developer")
+                })
+                .context("developer mention terminal missing")?;
+            let dev_run = dev_term.agent.as_ref().unwrap();
+            ensure!(
+                dev_run.trigger
+                    == ExecutionTrigger::Comment {
+                        comment_id: created_ev_id.clone()
+                    }
+                    && !dev_run
+                        .instruction
+                        .contains("Please coordinate with @reviewer before coding."),
+                "card.create mention trigger/instruction mismatch: {dev_run:?}"
+            );
+            // Verify real captured `prompt.md` uses `reporting_mention.txt` (no duplicate reply--to).
+            ensure!(
+                !dev_run.input_path.is_empty(),
+                "input_path missing on mention run: {dev_run:?}"
+            );
+            let prompt_path = world.servers["remote-a"].home.join(&dev_run.input_path);
+            let prompt_text = std::fs::read_to_string(&prompt_path)?;
+            ensure!(
+                prompt_text.contains("Finish this `@mention` in one report (no separate `reply`).")
+                    && !prompt_text.contains("## Pending questions")
+                    && !prompt_text.contains("reply --to")
+                    && !prompt_text.contains("CANBAN_ENDPOINT="),
+                "Captured mention prompt mismatch: {prompt_text}"
+            );
+            // Complete `@developer` -> posts `comment.replied` referencing `card.created`!
+            let _ = world.server_call(
+                "remote-a",
+                "execution.report",
+                json!({
+                    "request_key": format!("cnt-m1-dev-{seed}"),
+                    "terminal_id": dev_term.id,
+                    "state": "completed",
+                    "message": "Title mention analysis complete.",
+                }),
+            )?;
+            let tl_after = world.server_call(
+                "remote-a",
+                "timeline.list",
+                json!({ "card_id": raw_cid_m1, "limit": 20, "view": "full" }),
+            )?;
+            ensure!(
+                tl_after["events"].as_array().is_some_and(|evs| {
+                    evs.iter().any(|e| {
+                        e["kind"] == "comment.replied"
+                            && e["actor"] == "agent:developer"
+                            && e["data"]["reply_to"] == created_ev_id
+                    })
+                }),
+                "Completing card.create mention must post comment.replied with reply_to=card.created: {tl_after}"
+            );
+        }
+        // Explicit `mentions: ["reviewer"]` and `mentions: []` on `card.create`, plus `card.update` non-trigger!
+        let m_exp = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_cnt,
+                "title": "Ask @developer about @reviewer",
+                "body": "Body mentions @developer",
+                "mentions": ["reviewer"],
+            }),
+            Some(&pid_cnt),
+        )?;
+        let raw_cid_m_exp = strip_host(m_exp["id"].as_str().unwrap());
+        let m_sup = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_cnt,
+                "title": "Discuss @developer behavior",
+                "body": "Mention @reviewer only in docs",
+                "mentions": [],
+            }),
+            Some(&pid_cnt),
+        )?;
+        let cid_m_sup = m_sup["id"].as_str().unwrap().to_owned();
+        let raw_cid_m_sup = strip_host(&cid_m_sup);
+        let _ = world.client_call(
+            "card.update",
+            json!({
+                "card_id": cid_m_sup,
+                "revision": m_sup["revision"],
+                "title": "@developer @reviewer Updated title",
+                "body": "Updated body mentioning @developer",
+            }),
+            Some(&pid_cnt),
+        )?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let exp_terms: Vec<_> = snap
+                .terminals
+                .iter()
+                .filter_map(|t| t.agent.as_ref().filter(|a| a.card_id == raw_cid_m_exp))
+                .collect();
+            ensure!(
+                exp_terms.len() == 1 && exp_terms[0].profile.id == "reviewer",
+                "Explicit card.create mentions must override prose: {exp_terms:?}"
+            );
+            ensure!(
+                snap.terminals
+                    .iter()
+                    .all(|t| t.agent.as_ref().is_none_or(|a| a.card_id != raw_cid_m_sup)),
+                "mentions: [] and card.update must never trigger agents"
+            );
+        }
+        // Interactive (`agent.open`) prompt uses `reporting_interactive.txt`; workflow task + concurrent
+        // question includes `## Pending questions` + `reply --to`!
+        let _ = world.client_call(
+            "agent.open",
+            json!({ "card_id": cid_m_sup, "profile_id": "developer" }),
+            Some(&pid_cnt),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid_m_sup && a.state == "running" && !a.input_path.is_empty()
+                })
+            }))
+        })?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let int_run = snap
+                .terminals
+                .iter()
+                .find_map(|t| t.agent.as_ref().filter(|a| a.card_id == raw_cid_m_sup))
+                .context("interactive run missing")?;
+            ensure!(int_run.trigger == ExecutionTrigger::Interactive);
+            let p_text =
+                std::fs::read_to_string(world.servers["remote-a"].home.join(&int_run.input_path))?;
+            ensure!(
+                p_text.contains("Interactive discussion: reply in the terminal during discussion")
+                    && !p_text.contains("CANBAN_ENDPOINT="),
+                "Interactive prompt mismatch: {p_text}"
+            );
+        }
+        finish_all_live_herdr_terminals(world, "remote-a")?;
+
+        // Workflow task + concurrent `@developer` question -> prompt includes `## Pending questions`
+        // AND tests profile reload immutability + referenced profile removal rejection!
+        let card_prof = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_cnt,
+                "title": format!("Profile Reload & Task Prompt {seed}"),
+                "body": "Build task",
+            }),
+            Some(&pid_cnt),
+        )?;
+        let cid_prof = card_prof["id"].as_str().unwrap().to_owned();
+        let raw_cid_prof = strip_host(&cid_prof);
+        herdr_a.set_offline(true);
+        let _ = world.client_call(
+            "card.move",
+            json!({ "card_id": cid_prof, "revision": card_prof["revision"], "stage": "develop" }),
+            Some(&pid_cnt),
+        )?;
+        let _ = world.client_call(
+            "comment.add",
+            json!({ "card_id": cid_prof, "body": "@developer Please also check Windows paths" }),
+            Some(&pid_cnt),
+        )?;
+        // Profile reload immutability: change `developer.role_instruction` in `config/agents.json`
+        // while the task is queued -> queued run & its launched prompt MUST preserve the original role,
+        // and removing a referenced profile (`developer`) must be REJECTED by `config.reload`!
+        let agents_json_path = world.servers["remote-a"].home.join("config/agents.json");
+        let original_agents_bytes = std::fs::read(&agents_json_path)?;
+        let orig_dev_role = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            snap.terminals
+                .iter()
+                .find_map(|t| t.agent.as_ref().filter(|a| a.card_id == raw_cid_prof))
+                .context("queued developer task missing")?
+                .profile
+                .role_instruction
+                .clone()
+        };
+        {
+            let mut bad_cfg: Value = serde_json::from_slice(&original_agents_bytes)?;
+            bad_cfg["profiles"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|p| p["id"] != "developer");
+            std::fs::write(&agents_json_path, serde_json::to_vec(&bad_cfg)?)?;
+            ensure!(
+                world
+                    .server_call("remote-a", "config.reload", json!({}))
+                    .is_err(),
+                "Removing referenced profile 'developer' must be rejected by config.reload"
+            );
+            let mut updated_cfg: Value = serde_json::from_slice(&original_agents_bytes)?;
+            for p in updated_cfg["profiles"].as_array_mut().unwrap() {
+                if p["id"] == "developer" {
+                    p["role_instruction"] = json!("Reloaded role v2");
+                }
+            }
+            std::fs::write(&agents_json_path, serde_json::to_vec(&updated_cfg)?)?;
+            let _ = world.server_call("remote-a", "config.reload", json!({}))?;
+        }
+        herdr_a.set_offline(false);
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid_prof && a.state == "running" && !a.input_path.is_empty()
+                })
+            }))
+        })?;
+        let prof_tid = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let entry = snap
+                .terminals
+                .iter()
+                .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid_prof))
+                .context("running developer task missing")?;
+            let run = entry.agent.as_ref().unwrap();
+            ensure!(
+                run.profile.role_instruction == orig_dev_role,
+                "Queued role_instruction mutated after config.reload!"
+            );
+            let p_text =
+                std::fs::read_to_string(world.servers["remote-a"].home.join(&run.input_path))?;
+            ensure!(
+                p_text.contains(&orig_dev_role)
+                    && !p_text.contains("Reloaded role v2")
+                    && p_text.contains("## Pending questions")
+                    && p_text.contains("\"$CANBAN_CLI\" reply --to"),
+                "Task prompt must preserve queued role and include Pending questions: {p_text}"
+            );
+            entry.id.clone()
+        };
+
+        // E4. Notes (`note.save`, `note.get`, `note.read`, `note.rename`, `note.write` with
+        //     agent execution provenance + idempotency, `note.history`, `note.revision`,
+        //     cross-project scope rollback, and `source_note_id` / `card.context.update`).
+        let note_b: Note = serde_json::from_value(world.client_call(
+            "note.save",
+            json!({ "project_id": pid_cnt, "title": "Architecture.md", "body": "Original" }),
+            Some(&pid_cnt),
+        )?)?;
+        let raw_note_b_id = strip_host(&note_b.id);
+        let note_a: Note = serde_json::from_value(world.client_call(
+            "note.save",
+            json!({
+                "project_id": pid_cnt,
+                "title": "Idea.md",
+                "body": format!("[Architecture](note:{raw_note_b_id})\n`[ignored](note:missing)`"),
+            }),
+            Some(&pid_cnt),
+        )?)?;
+        let raw_note_a_id = strip_host(&note_a.id);
+        ensure!(
+            note_a.links == vec![raw_note_b_id.clone()],
+            "Expected parsed note link to Architecture.md, got {:?}",
+            note_a.links
+        );
+        let hist_b1: Vec<NoteEvent> = serde_json::from_value(world.client_call(
+            "note.history",
+            json!({ "note_id": note_b.id }),
+            Some(&pid_cnt),
+        )?)?;
+        ensure!(
+            hist_b1
+                .iter()
+                .any(|e| e.kind == "note.referenced" && e.data["source_note_id"] == raw_note_a_id),
+            "note.history missing note.referenced event: {hist_b1:?}"
+        );
+        let renamed_b: Note = serde_json::from_value(world.client_call(
+            "note.rename",
+            json!({
+                "note_id": note_b.id,
+                "title": "Design.md",
+                "revision": note_b.revision,
+            }),
+            Some(&pid_cnt),
+        )?)?;
+        ensure!(
+            strip_host(&renamed_b.id) == raw_note_b_id && renamed_b.title == "Design.md",
+            "note.rename mismatch: {renamed_b:?}"
+        );
+        let note_a_after: Note = serde_json::from_value(world.client_call(
+            "note.get",
+            json!({ "note_id": note_a.id }),
+            Some(&pid_cnt),
+        )?)?;
+        ensure!(note_a_after.links == vec![raw_note_b_id.clone()]);
+
+        // Agent `note.write` with idempotent `request_key` + `note.revision(1)` + `note.read`!
+        let write_payload = json!({
+            "note_id": raw_note_b_id,
+            "revision": renamed_b.revision,
+            "body": format!("Updated by Agent ({seed})"),
+            "execution": { "terminal_id": prof_tid },
+            "request_key": format!("cnt-note-agent-{seed}"),
+        });
+        let written_b = world.server_call("remote-a", "note.write", write_payload.clone())?;
+        let written_b_replay = world.server_call("remote-a", "note.write", write_payload)?;
+        ensure!(
+            written_b == written_b_replay,
+            "Idempotent note.write replay diverged"
+        );
+        let read_b =
+            world.client_call("note.read", json!({ "note_id": note_b.id }), Some(&pid_cnt))?;
+        ensure!(
+            read_b["body"].as_str() == Some(&format!("Updated by Agent ({seed})")),
+            "note.read mismatch: {read_b}"
+        );
+        let rev1_b = world.client_call(
+            "note.revision",
+            json!({ "note_id": note_b.id, "revision": 1 }),
+            Some(&pid_cnt),
+        )?;
+        ensure!(
+            rev1_b["body"] == "Original",
+            "note.revision(1) mismatch: {rev1_b}"
+        );
+        let hist_b2: Vec<NoteEvent> = serde_json::from_value(world.client_call(
+            "note.history",
+            json!({ "note_id": note_b.id }),
+            Some(&pid_cnt),
+        )?)?;
+        let last_note_ev = hist_b2.last().context("note.history empty")?;
+        ensure!(
+            last_note_ev.actor == "@developer"
+                && last_note_ev.card_id.as_deref() == Some(raw_cid_prof.as_str())
+                && hist_b2.iter().filter(|e| e.kind == "note.updated").count() == 1,
+            "note.write provenance mismatch: {hist_b2:?}"
+        );
+        // Reject stale revision, unknown terminal_id, and cross-project foreign note links!
+        ensure!(
+            world
+                .server_call(
+                    "remote-a",
+                    "note.write",
+                    json!({ "note_id": raw_note_b_id, "revision": renamed_b.revision, "body": "Stale" }),
+                )
+                .is_err()
+                && world
+                    .server_call(
+                        "remote-a",
+                        "note.write",
+                        json!({
+                            "note_id": raw_note_b_id,
+                            "revision": written_b["revision"],
+                            "body": "Bad exec",
+                            "execution": { "terminal_id": "missing-terminal" },
+                        }),
+                    )
+                    .is_err(),
+            "Stale revision and invalid execution terminal_id must fail note.write"
+        );
+        let foreign_note: Note = serde_json::from_value(world.client_call(
+            "note.save",
+            json!({ "project_id": pid_foreign, "title": "Foreign", "body": "Keep" }),
+            Some(&pid_foreign),
+        )?)?;
+        let raw_foreign_note_id = strip_host(&foreign_note.id);
+        ensure!(
+            world
+                .server_call(
+                    "remote-a",
+                    "note.write",
+                    json!({
+                        "note_id": raw_note_b_id,
+                        "revision": written_b["revision"],
+                        "body": format!("[x](note:{raw_foreign_note_id})"),
+                    }),
+                )
+                .is_err()
+                && world
+                    .client_call(
+                        "card.create",
+                        json!({
+                            "project_id": pid_foreign,
+                            "title": "Invalid Scope",
+                            "source_note_id": raw_note_b_id,
+                        }),
+                        Some(&pid_foreign),
+                    )
+                    .is_err(),
+            "Cross-project note link and source_note_id must roll back cleanly"
+        );
+        let scoped_card = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_cnt,
+                "title": "Scoped Note Card",
+                "body": "Implement scope",
+                "source_note_id": raw_note_b_id,
+            }),
+            Some(&pid_cnt),
+        )?;
+        let scoped_cid = scoped_card["id"].as_str().unwrap().to_owned();
+        let raw_scoped_cid = strip_host(&scoped_cid);
+        let note_b_linked: Note = serde_json::from_value(world.client_call(
+            "note.get",
+            json!({ "note_id": note_b.id }),
+            Some(&pid_cnt),
+        )?)?;
+        ensure!(note_b_linked.card_ids.contains(&raw_scoped_cid));
+        let _ = world.client_call(
+            "card.context.update",
+            json!({
+                "card_id": scoped_cid,
+                "revision": scoped_card["revision"],
+                "note_ids": [],
+            }),
+            Some(&pid_cnt),
+        )?;
+        let note_b_unlinked: Note = serde_json::from_value(world.client_call(
+            "note.get",
+            json!({ "note_id": note_b.id }),
+            Some(&pid_cnt),
+        )?)?;
+        ensure!(
+            !note_b_unlinked.card_ids.contains(&raw_scoped_cid),
+            "card.context.update must unlink scoped card {raw_scoped_cid}: {:?}",
+            note_b_unlinked.card_ids
+        );
+        let hist_b3: Vec<NoteEvent> = serde_json::from_value(world.client_call(
+            "note.history",
+            json!({ "note_id": note_b.id }),
+            Some(&pid_cnt),
+        )?)?;
+        ensure!(
+            hist_b3
+                .last()
+                .is_some_and(|e| e.kind == "note.card_unlinked"),
+            "card.context.update unlink must record note.card_unlinked: {hist_b3:?}"
+        );
+
+        // Complete `prof_tid` -> next mention on `cid_prof` picks up `"Reloaded role v2"`, then restore config!
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "request_key": format!("cnt-prof-done-{seed}"),
+                "terminal_id": prof_tid,
+                "state": "completed",
+                "message": "Done old role",
+            }),
+        )?;
+        finish_all_live_herdr_terminals(world, "remote-a")?;
+        let _ = world.client_call(
+            "comment.add",
+            json!({ "card_id": cid_prof, "body": "@developer next assignment after reload" }),
+            Some(&pid_cnt),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == raw_cid_prof
+                        && (a.profile.role_instruction == "Reloaded role v2"
+                            || a.pending
+                                .as_ref()
+                                .is_some_and(|p| p.profile.role_instruction == "Reloaded role v2"))
+                })
+            }))
+        })?;
+        // Restore original agents.json so subsequent checks see clean defaults.
+        std::fs::write(&agents_json_path, &original_agents_bytes)?;
+        let _ = world.server_call("remote-a", "config.reload", json!({}))?;
+        finish_all_live_herdr_terminals(world, "remote-a")?;
+
+        // E5. Review activity warnings (`working` -> warns, `idle`/`done`/`blocked`/`error` -> clears,
+        //     `unavailable` -> warns, queued -> warns & `review.merge` still succeeds!).
+        let card_warn = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_rev,
+                "title": format!("Review Warning Check ({seed})"),
+                "body": "Advisory warnings never block review.merge",
+            }),
+            Some(&pid_rev),
+        )?;
+        let cid_warn = card_warn["id"].as_str().unwrap().to_owned();
+        let raw_cid_warn = strip_host(&cid_warn);
+        let _ = world.client_call(
+            "review.run_agent",
+            json!({ "card_id": cid_warn, "profile_id": "codex" }),
+            Some(&pid_rev),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .cards
+                .iter()
+                .any(|c| c.id == raw_cid_warn && c.worktree.is_some())
+                && snap.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        a.card_id == raw_cid_warn && a.state == "running" && a.terminal.is_some()
+                    })
+                }))
+        })?;
+        let (warn_wt, warn_addr) = {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let wt = snap
+                .cards
+                .iter()
+                .find(|c| c.id == raw_cid_warn)
+                .unwrap()
+                .worktree
+                .clone()
+                .unwrap();
+            let addr = snap
+                .terminals
+                .iter()
+                .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == raw_cid_warn))
+                .unwrap()
+                .agent
+                .as_ref()
+                .unwrap()
+                .terminal
+                .clone()
+                .unwrap();
+            (wt, addr)
+        };
+        let _ = exec.commit_in_worktree(&warn_wt, "feat(review): warn check commit")?;
+        herdr_a.set_status(&warn_addr, "working", Some(1));
+        world.advance(Duration::from_millis(200))?;
+        let p_working = world.client_call(
+            "review.preview",
+            json!({ "card_id": cid_warn }),
+            Some(&pid_rev),
+        )?;
+        ensure!(
+            p_working["merge_allowed"] == true
+                && p_working["warning"]
+                    .as_str()
+                    .is_some_and(|w| w.contains("still running")),
+            "Working agent must warn without blocking merge: {p_working}"
+        );
+        for stopped_state in ["idle", "done", "blocked", "error"] {
+            herdr_a.set_status(&warn_addr, stopped_state, Some(2));
+            world.advance(Duration::from_millis(200))?;
+            let p_clear = world.client_call(
+                "review.preview",
+                json!({ "card_id": cid_warn }),
+                Some(&pid_rev),
+            )?;
+            ensure!(
+                p_clear["merge_allowed"] == true && p_clear["warning"].is_null(),
+                "Stopped state '{stopped_state}' must clear review warning: {p_clear}"
+            );
+        }
+        // Offline Herdr (`unavailable`) + queued agent warning still allow `review.merge`!
+        herdr_a.set_offline(true);
+        world.advance(Duration::from_millis(200))?;
+        let _ = world.client_call(
+            "comment.add",
+            json!({ "card_id": cid_warn, "body": "@developer queued while offline", "mentions": ["developer"] }),
+            Some(&pid_rev),
+        )?;
+        let p_queued = world.client_call(
+            "review.preview",
+            json!({ "card_id": cid_warn }),
+            Some(&pid_rev),
+        )?;
+        ensure!(
+            p_queued["merge_allowed"] == true && p_queued["warning"].is_string(),
+            "Queued/unavailable agent must warn without blocking merge: {p_queued}"
+        );
+        let warn_rev = find_card(world, "remote-a", &raw_cid_warn)?.revision;
+        let warn_merged = world.client_call(
+            "review.merge",
+            json!({
+                "card_id": cid_warn,
+                "revision": warn_rev,
+                "token": p_queued["token"],
+                "strategy": "rebase",
+                "request_key": format!("cnt-warn-merge-{seed}"),
+            }),
+            Some(&pid_rev),
+        )?;
+        ensure!(
+            warn_merged["state"] == "merged",
+            "review.merge must succeed despite advisory warning: {warn_merged}"
+        );
+        herdr_a.set_offline(false);
+        world.advance(Duration::from_millis(1_500))?;
+        finish_all_live_herdr_terminals(world, "remote-a")?;
+
+        // Bounce `remote-a` and verify comments, notes, and tags persisted durably!
+        world.bounce_server("remote-a")?;
+        world.heal_and_quiesce(20_000)?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let p_cnt_after = snap
+                .projects
+                .iter()
+                .find(|p| p.id == raw_pid_cnt)
+                .context("CommentsNotesTags project missing after bounce")?;
+            ensure!(
+                p_cnt_after.tags == vec!["ui-kit".to_owned(), "前端".to_owned()],
+                "Tags did not persist across bounce: {:?}",
+                p_cnt_after.tags
+            );
+            let read_after =
+                world.client_call("note.read", json!({ "note_id": note_b.id }), Some(&pid_cnt))?;
+            ensure!(
+                read_after["title"] == "Design.md"
+                    && read_after["body"].as_str() == Some(&format!("Updated by Agent ({seed})")),
+                "Note rename/write did not persist across bounce: {read_after}"
+            );
+            let rev1_after = world.client_call(
+                "note.revision",
+                json!({ "note_id": note_b.id, "revision": 1 }),
+                Some(&pid_cnt),
+            )?;
+            ensure!(rev1_after["body"] == "Original");
+            let tl_after = world.server_call(
+                "remote-a",
+                "timeline.list",
+                json!({ "card_id": raw_cid_e1, "limit": 50, "view": "full" }),
+            )?;
+            let evs = tl_after["events"].as_array().context("tl events")?;
+            ensure!(
+                evs.iter()
+                    .any(|e| e["id"] == cmt_1_id && e["data"]["revision"] == 2)
+                    && evs
+                        .iter()
+                        .any(|e| e["id"] == cmt_del_id && e["kind"] == "comment.deleted"),
+                "Comment edit/delete did not persist across bounce: {tl_after}"
+            );
+        }
+        world.hit("review_events.comments_notes_tags");
+        oracle.check_step_invariants(world)?;
+
+        // =====================================================================
+        // PART F — Git Client RPCs (`git.{refs,compare,file_lines,stage,unstage,commit,log,commit_detail,fetch,sync}`)
+        //          + `review.send_agent(new_card)` backed 100% by `SimGitRepo` (ZERO host git spawns!)
+        // =====================================================================
+        let git_dir = world.project_dir(&format!("git-client-repo-{seed}"))?;
+        let outside_dir = world.project_dir(&format!("git-outside-{seed}"))?;
+        exec.register_git_repo(&git_dir, SimGitRepo::default());
+        exec.set_branch_upstream(&git_dir, "main", "origin/main")?;
+
+        let proj_git = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "remote-a",
+                "name": format!("Git Client Repo {seed}"),
+                "directory": git_dir,
+                "target_branch": "main",
+            }),
+            None,
+        )?;
+        let pid_git = proj_git["id"].as_str().context("proj_git id")?.to_owned();
+
+        // Checkout containment & user-action execution guards.
+        ensure!(
+            world
+                .client_call(
+                    "git.refs",
+                    json!({ "project_id": pid_git, "cwd": outside_dir }),
+                    Some(&pid_git),
+                )
+                .is_err()
+                && world
+                    .server_call(
+                        "remote-a",
+                        "git.stage",
+                        json!({
+                            "project_id": strip_host(&pid_git),
+                            "all": true,
+                            "execution": { "request_id": "agent-denied" },
+                        }),
+                    )
+                    .is_err()
+                && world
+                    .server_call(
+                        "remote-a",
+                        "git.sync",
+                        json!({
+                            "project_id": strip_host(&pid_git),
+                            "execution": { "request_id": "agent-denied" },
+                        }),
+                    )
+                    .is_err()
+                && world
+                    .client_call(
+                        "git.sync",
+                        json!({ "project_id": pid_git, "cwd": outside_dir }),
+                        Some(&pid_git),
+                    )
+                    .is_err(),
+            "git.* checkout containment or agent execution guard failed"
+        );
+
+        // Managed worktree + external git worktree discovery via `git.refs`.
+        let git_wt_res = world.client_call(
+            "worktree.create",
+            json!({
+                "project_id": pid_git,
+                "branch": "feat/git-ui",
+                "launch": "none",
+            }),
+            Some(&pid_git),
+        )?;
+        let git_wt_path = git_wt_res["worktree"]["path"]
+            .as_str()
+            .context("git_wt path")?
+            .to_owned();
+        let refs_wt = world.client_call(
+            "git.refs",
+            json!({ "project_id": pid_git, "cwd": git_wt_path }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            refs_wt["current_branch"] == "feat/git-ui"
+                && refs_wt["checkouts"]
+                    .as_array()
+                    .is_some_and(|a| a.len() == 2)
+                && refs_wt["branches"]
+                    .as_array()
+                    .is_some_and(|b| b.iter().any(|x| x["name"] == "feat/git-ui")),
+            "git.refs(managed worktree) mismatch: {refs_wt}"
+        );
+
+        let ext_wt_dir = std::path::Path::new(&git_dir).join(".worktrees/ext-branch");
+        exec.add_external_worktree(&git_dir, "fix/external-wt", &ext_wt_dir)?;
+        exec.write_worktree_file(&ext_wt_dir, "ext.rs", "pub fn external() {}\n")?;
+        let refs_with_ext =
+            world.client_call("git.refs", json!({ "project_id": pid_git }), Some(&pid_git))?;
+        ensure!(
+            refs_with_ext["checkouts"]
+                .as_array()
+                .is_some_and(|a| a.len() == 3 && a.iter().any(|c| c["branch"] == "fix/external-wt")),
+            "git.refs must discover external worktree: {refs_with_ext}"
+        );
+        let ext_refs = world.client_call(
+            "git.refs",
+            json!({ "project_id": pid_git, "cwd": ext_wt_dir }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            ext_refs["current_branch"] == "fix/external-wt" && ext_refs["dirty"] == true,
+            "git.refs(external worktree) mismatch: {ext_refs}"
+        );
+        ensure!(
+            world
+                .client_call(
+                    "git.refs",
+                    json!({ "project_id": pid_git, "cwd": outside_dir }),
+                    Some(&pid_git),
+                )
+                .is_err(),
+            "Outside dir must stay rejected with external worktree fallback"
+        );
+
+        // `git.stage`, `git.unstage`, `git.compare`, `git.file_lines`, `git.commit`, `git.log`,
+        // `git.commit_detail`, `git.fetch`, `git.sync`, and `review.send_agent(new_card)`!
+        exec.write_worktree_file(
+            &git_wt_path,
+            "client.rs",
+            "pub fn sync() -> i32 { 1 }\npub fn helper() {}\n",
+        )?;
+        let stg_req = json!({
+            "project_id": pid_git,
+            "cwd": git_wt_path,
+            "paths": ["client.rs"],
+            "request_key": format!("git-stg-1-{seed}"),
+        });
+        let stg_res = world.client_call("git.stage", stg_req.clone(), Some(&pid_git))?;
+        let stg_replay = world.client_call("git.stage", stg_req, Some(&pid_git))?;
+        ensure!(
+            stg_res == stg_replay
+                && stg_res["status_files"].as_array().is_some_and(|a| a
+                    .iter()
+                    .any(|f| f["path"] == "client.rs" && f["staged"] == true)),
+            "git.stage mismatch: {stg_res}"
+        );
+        let unstg_res = world.client_call(
+            "git.unstage",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "paths": ["client.rs"],
+                "request_key": format!("git-unstg-1-{seed}"),
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            unstg_res["status_files"].as_array().is_some_and(|a| a
+                .iter()
+                .any(|f| f["path"] == "client.rs" && f["staged"] == false)),
+            "git.unstage must unstage client.rs: {unstg_res}"
+        );
+        // Re-stage, verify `git.compare(UNCOMMITTED)` & `git.file_lines(index)`, then commit + push!
+        let _ = world.client_call(
+            "git.stage",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "paths": ["client.rs"],
+                "request_key": format!("git-stg-2-{seed}"),
+            }),
+            Some(&pid_git),
+        )?;
+        let cmp_uncommitted = world.client_call(
+            "git.compare",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "base": "HEAD",
+                "compare": "UNCOMMITTED",
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            cmp_uncommitted["files"].as_array().is_some_and(|f| f
+                .iter()
+                .any(|x| x["filename"] == "client.rs" && x["section"] == "staged")),
+            "git.compare(UNCOMMITTED) missing staged client.rs: {cmp_uncommitted}"
+        );
+        let idx_lines = world.client_call(
+            "git.file_lines",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "path": "client.rs",
+                "source": "index",
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            idx_lines["total_lines"].as_u64() == Some(2),
+            "git.file_lines(index) mismatch: {idx_lines}"
+        );
+
+        let cmt_res = world.client_call(
+            "git.commit",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "message": "feat: add git client rpc\n\nverified in worktree",
+                "push": true,
+                "request_key": format!("git-cmt-1-{seed}"),
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            cmt_res["pushed"] == true && cmt_res["subject"] == "feat: add git client rpc",
+            "git.commit mismatch: {cmt_res}"
+        );
+        let cmt_sha = cmt_res["sha"].as_str().context("commit sha")?.to_owned();
+
+        let cmp_branch = world.client_call(
+            "git.compare",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "base": "main",
+                "compare": "feat/git-ui",
+                "three_dot": true,
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            cmp_branch["files"]
+                .as_array()
+                .is_some_and(|f| f.len() == 1 && f[0]["filename"] == "client.rs"),
+            "git.compare(main..feat/git-ui) mismatch: {cmp_branch}"
+        );
+        let rev_lines = world.client_call(
+            "git.file_lines",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "path": "client.rs",
+                "source": "rev",
+                "rev": cmt_sha,
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            rev_lines["total_lines"].as_u64().unwrap_or(0) >= 2,
+            "git.file_lines(rev) mismatch: {rev_lines}"
+        );
+
+        let log_res = world.client_call(
+            "git.log",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "rev": "feat/git-ui",
+                "limit": 10,
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            log_res["commits"].as_array().is_some_and(|c| c.len() == 2),
+            "git.log expected 2 commits, got: {log_res}"
+        );
+
+        let detail_res = world.client_call(
+            "git.commit_detail",
+            json!({
+                "project_id": pid_git,
+                "cwd": git_wt_path,
+                "sha": cmt_sha,
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            detail_res["commit_detail"]["subject"] == "feat: add git client rpc"
+                && detail_res["commit_detail"]["body"] == "verified in worktree"
+                && detail_res["files"][0]["filename"] == "client.rs",
+            "git.commit_detail mismatch: {detail_res}"
+        );
+
+        let fetch_res = world.client_call(
+            "git.fetch",
+            json!({ "project_id": pid_git, "request_key": format!("git-fetch-1-{seed}") }),
+            Some(&pid_git),
+        )?;
+        ensure!(fetch_res["remote"] == "origin");
+
+        // Ad-hoc `review.send_agent(mode: "new_card")` creates a brand-new Card & assigns `@developer`.
+        let adhoc_card = world.client_call(
+            "review.send_agent",
+            json!({
+                "mode": "new_card",
+                "project_id": pid_git,
+                "profile_id": "developer",
+                "title": format!("Address compare review ({seed})"),
+                "context_label": "main <- feat/git-ui",
+                "summary": "Follow up on branch diff.",
+                "comments": [],
+                "request_key": format!("git-new-card-{seed}"),
+            }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            adhoc_card["state"] == "created"
+                && adhoc_card["card_record"]["id"] == adhoc_card["card_id"],
+            "review.send_agent(new_card) mismatch: {adhoc_card}"
+        );
+        finish_all_live_herdr_terminals(world, "remote-a")?;
+
+        // `git.sync`: publish/push worktree branch + idempotent replay + mismatched-key rejection +
+        // fast-forward pull on project root `main`!
+        let sync_wt_res = world.client_call(
+            "worktree.create",
+            json!({
+                "project_id": pid_git,
+                "branch": "feat/rpc-sync",
+                "launch": "none",
+            }),
+            Some(&pid_git),
+        )?;
+        let sync_wt_path = sync_wt_res["worktree"]["path"]
+            .as_str()
+            .context("sync_wt path")?
+            .to_owned();
+        exec.write_worktree_file(&sync_wt_path, "sync_rpc.rs", "pub fn ok() {}\n")?;
+        let _ = world.client_call(
+            "git.stage",
+            json!({ "project_id": pid_git, "cwd": sync_wt_path, "paths": ["sync_rpc.rs"] }),
+            Some(&pid_git),
+        )?;
+        let sync_cmt = world.client_call(
+            "git.commit",
+            json!({ "project_id": pid_git, "cwd": sync_wt_path, "message": "feat: rpc sync" }),
+            Some(&pid_git),
+        )?;
+        let sync_head = sync_cmt["sha"].as_str().unwrap().to_owned();
+        let sync_wt_req = json!({
+            "project_id": pid_git,
+            "cwd": sync_wt_path,
+            "request_key": format!("git-sync-wt-{seed}"),
+        });
+        let sync_wt = world.client_call("git.sync", sync_wt_req.clone(), Some(&pid_git))?;
+        ensure!(
+            sync_wt["pushed"] == true
+                && sync_wt["set_upstream"] == true
+                && exec
+                    .remote_ref_sha(&git_dir, "origin", "feat/rpc-sync")
+                    .as_deref()
+                    == Some(sync_head.as_str()),
+            "git.sync(worktree) mismatch: {sync_wt}"
+        );
+        let sync_wt_replay = world.client_call("git.sync", sync_wt_req, Some(&pid_git))?;
+        ensure!(sync_wt_replay == sync_wt, "git.sync replay diverged");
+        ensure!(
+            world
+                .client_call(
+                    "git.sync",
+                    json!({ "project_id": pid_git, "request_key": format!("git-sync-wt-{seed}") }),
+                    Some(&pid_git),
+                )
+                .is_err(),
+            "git.sync with same request_key and different payload must reject"
+        );
+
+        let upstream_sha = exec.advance_remote_ref(&git_dir, "origin", "main")?;
+        let sync_root = world.client_call(
+            "git.sync",
+            json!({ "project_id": pid_git, "request_key": format!("git-sync-root-{seed}") }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            sync_root["fast_forwarded"] == true
+                && sync_root["pulled_commits"] == 1
+                && sync_root["pushed"] == false
+                && exec.head_sha(&git_dir).as_deref() == Some(upstream_sha.as_str()),
+            "git.sync(root fast-forward) mismatch: {sync_root}"
+        );
+
+        // Bounce `remote-a` and verify `git.refs`, `git.log`, and idempotent receipt survive restart!
+        world.bounce_server("remote-a")?;
+        world.heal_and_quiesce(20_000)?;
+        let log_after_bounce = world.client_call(
+            "git.log",
+            json!({ "project_id": pid_git, "cwd": git_wt_path, "rev": "feat/git-ui", "limit": 10 }),
+            Some(&pid_git),
+        )?;
+        ensure!(
+            log_after_bounce["commits"]
+                .as_array()
+                .is_some_and(|c| c.len() == 2),
+            "git.log after bounce mismatch: {log_after_bounce}"
+        );
+        let sync_replay_after_bounce = world.client_call(
+            "git.sync",
+            json!({ "project_id": pid_git, "request_key": format!("git-sync-root-{seed}") }),
+            Some(&pid_git),
+        )?;
+        ensure!(sync_replay_after_bounce == sync_root);
+        world.hit("review_events.git_client_rpcs");
 
         // Final global quiesce, oracle verification, and zero-OS-spawn check.
         world.heal_and_quiesce(20_000)?;

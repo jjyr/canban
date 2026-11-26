@@ -37,10 +37,6 @@ fn page(db: Db<'_>, after: u64, limit: usize) -> Result<Vec<JournalEvent>> {
     })
     .collect()
 }
-#[cfg(test)]
-pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
-    pump_at_with_prune_state(db, config, now(), None)
-}
 pub(super) fn pump_at_with_prune_state(
     db: Db<'_>,
     config: &Config,
