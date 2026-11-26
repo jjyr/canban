@@ -76,6 +76,9 @@ enum Command {
         /// Directory where failure logs and `failed-seeds.txt` are persisted.
         #[arg(long, default_value = ".local/sim-failures")]
         trace_dir: PathBuf,
+        /// Optional path to write a structured JSON summary report (written on both pass and fail).
+        #[arg(long)]
+        report_json: Option<PathBuf>,
     },
     /// Shrink a failing `chaos` seed down to a minimal reproducing operation sequence.
     Shrink {
@@ -126,6 +129,9 @@ enum Command {
         /// Directory where failure logs and `failed-seeds.txt` are persisted.
         #[arg(long, default_value = ".local/sim-failures")]
         trace_dir: PathBuf,
+        /// Optional path to write a structured JSON summary report (written on both pass and fail).
+        #[arg(long)]
+        report_json: Option<PathBuf>,
     },
     /// Replay every regression seed recorded in a corpus file (`<scenario> <seed> [ops]`).
     Corpus {
@@ -144,6 +150,9 @@ enum Command {
         /// Directory where failure logs and `failed-seeds.txt` are persisted.
         #[arg(long, default_value = ".local/sim-failures")]
         trace_dir: PathBuf,
+        /// Optional path to write a structured JSON summary report (written on both pass and fail).
+        #[arg(long)]
+        report_json: Option<PathBuf>,
     },
 }
 
@@ -162,6 +171,344 @@ struct ActiveSeed {
     started: Instant,
 }
 
+type TimeoutHook = Arc<dyn Fn(&ActiveSeed, Duration, &anyhow::Error) + Send + Sync>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NamedCount {
+    name: String,
+    count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArmedVsFiredEntry {
+    name: String,
+    armed: u64,
+    fired: u64,
+    vacuous: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CoverageHighlights {
+    delivery_batch_entered: u64,
+    shell_executed: u64,
+    read_your_writes_checked: u64,
+    at_most_once_checked: u64,
+    committed_durability_checked: u64,
+    natural_quiesce_recovered: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CoverageReport {
+    distinct_properties: usize,
+    required_passed: usize,
+    required_total: usize,
+    coverage_gate_passed: bool,
+    never_gate_passed: bool,
+    never_violations: Vec<NamedCount>,
+    vacuous_faults: Vec<String>,
+    armed_vs_fired: Vec<ArmedVsFiredEntry>,
+    cold_top_10: Vec<NamedCount>,
+    highlights: CoverageHighlights,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShrunkReport {
+    orig_ops: usize,
+    shrunk_ops: usize,
+    digest: Option<String>,
+    ops_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FailureReport {
+    scenario: String,
+    seed: u64,
+    ops: usize,
+    profile: Option<String>,
+    error: String,
+    fingerprint: String,
+    digest: Option<String>,
+    timed_out: bool,
+    shrunk: Option<ShrunkReport>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SimReport {
+    command: &'static str,
+    scenario: String,
+    master_seed: Option<u64>,
+    ops: usize,
+    duration_secs: Option<u64>,
+    elapsed_secs: f64,
+    passed: u64,
+    failed: u64,
+    timed_out: u64,
+    total: u64,
+    coverage: CoverageReport,
+    failures: Vec<FailureReport>,
+}
+
+impl SimReport {
+    fn to_json(&self) -> serde_json::Value {
+        let never_violations: Vec<serde_json::Value> = self
+            .coverage
+            .never_violations
+            .iter()
+            .map(|v| serde_json::json!({ "name": v.name, "count": v.count }))
+            .collect();
+        let armed_vs_fired: Vec<serde_json::Value> = self
+            .coverage
+            .armed_vs_fired
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "name": row.name,
+                    "armed": row.armed,
+                    "fired": row.fired,
+                    "vacuous": row.vacuous,
+                })
+            })
+            .collect();
+        let cold_top_10: Vec<serde_json::Value> = self
+            .coverage
+            .cold_top_10
+            .iter()
+            .map(|row| serde_json::json!({ "name": row.name, "count": row.count }))
+            .collect();
+        let failures: Vec<serde_json::Value> = self
+            .failures
+            .iter()
+            .map(|f| {
+                let shrunk = f.shrunk.as_ref().map(|s| {
+                    serde_json::json!({
+                        "orig_ops": s.orig_ops,
+                        "shrunk_ops": s.shrunk_ops,
+                        "digest": s.digest,
+                        "ops_lines": s.ops_lines,
+                    })
+                });
+                serde_json::json!({
+                    "scenario": f.scenario,
+                    "seed": f.seed,
+                    "ops": f.ops,
+                    "profile": f.profile,
+                    "error": f.error,
+                    "fingerprint": f.fingerprint,
+                    "digest": f.digest,
+                    "timed_out": f.timed_out,
+                    "shrunk": shrunk,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "command": self.command,
+            "scenario": self.scenario,
+            "master_seed": self.master_seed,
+            "ops": self.ops,
+            "duration_secs": self.duration_secs,
+            "elapsed_secs": (self.elapsed_secs * 1000.0).round() / 1000.0,
+            "passed": self.passed,
+            "failed": self.failed,
+            "timed_out": self.timed_out,
+            "total": self.total,
+            "coverage": {
+                "distinct_properties": self.coverage.distinct_properties,
+                "required_passed": self.coverage.required_passed,
+                "required_total": self.coverage.required_total,
+                "coverage_gate_passed": self.coverage.coverage_gate_passed,
+                "never_gate_passed": self.coverage.never_gate_passed,
+                "never_violations": never_violations,
+                "vacuous_faults": self.coverage.vacuous_faults,
+                "armed_vs_fired": armed_vs_fired,
+                "cold_top_10": cold_top_10,
+                "highlights": {
+                    "delivery_batch_entered": self.coverage.highlights.delivery_batch_entered,
+                    "shell_executed": self.coverage.highlights.shell_executed,
+                    "read_your_writes_checked": self.coverage.highlights.read_your_writes_checked,
+                    "at_most_once_checked": self.coverage.highlights.at_most_once_checked,
+                    "committed_durability_checked": self.coverage.highlights.committed_durability_checked,
+                    "natural_quiesce_recovered": self.coverage.highlights.natural_quiesce_recovered,
+                },
+            },
+            "failures": failures,
+        })
+    }
+}
+
+fn extract_digest_from_error(err: &str) -> Option<String> {
+    err.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("Digest:")?.trim();
+        (!rest.is_empty()).then(|| rest.to_owned())
+    })
+}
+
+fn build_failure_report(
+    scenario: &str,
+    seed: u64,
+    ops: usize,
+    error: String,
+    timed_out: bool,
+    shrunk: Option<ShrunkReport>,
+) -> FailureReport {
+    let profile = (scenario == "chaos").then(|| scenarios::chaos::profile_name(seed));
+    let fingerprint = scenarios::chaos::error_class_fingerprint(&error);
+    let digest = extract_digest_from_error(&error);
+    FailureReport {
+        scenario: scenario.to_owned(),
+        seed,
+        ops,
+        profile,
+        error,
+        fingerprint,
+        digest,
+        timed_out,
+        shrunk,
+    }
+}
+
+fn build_shrunk_report(report: &scenarios::chaos::ShrinkReport) -> ShrunkReport {
+    let ops_lines = report
+        .ops
+        .iter()
+        .enumerate()
+        .map(|(idx, op)| format!("[{idx:02}] {op:?}"))
+        .collect();
+    ShrunkReport {
+        orig_ops: report.original_len,
+        shrunk_ops: report.minimized_len,
+        digest: extract_digest_from_error(&report.error),
+        ops_lines,
+    }
+}
+
+fn build_coverage_report(
+    tracker: &CoverageTracker,
+    assert_coverage: bool,
+    extra_required: &[String],
+    suite_required: &[&str],
+) -> CoverageReport {
+    let mut required: Vec<&str> = Vec::new();
+    if assert_coverage {
+        required.extend_from_slice(BASE_REQUIRED_COVERAGE);
+        required.extend_from_slice(suite_required);
+    }
+    for prop in extra_required {
+        required.push(prop.as_str());
+    }
+    let required_total = required.len();
+    let required_passed = required.iter().filter(|p| tracker.count(p) > 0).count();
+    let never_violations: Vec<NamedCount> =
+        match tracker.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
+            Ok(()) => Vec::new(),
+            Err(violations) => violations
+                .into_iter()
+                .map(|(name, count)| NamedCount { name, count })
+                .collect(),
+        };
+    let never_gate_passed = never_violations.is_empty();
+    let vacuous_faults = tracker.vacuous_armed_faults();
+    let coverage_gate_passed = if assert_coverage {
+        required_passed == required_total && never_gate_passed && vacuous_faults.is_empty()
+    } else if !extra_required.is_empty() {
+        required_passed == required_total
+    } else {
+        true
+    };
+    let armed_vs_fired = tracker
+        .armed_vs_fired_report()
+        .into_iter()
+        .map(|row| ArmedVsFiredEntry {
+            name: row.name,
+            armed: row.armed,
+            fired: row.fired,
+            vacuous: row.vacuous,
+        })
+        .collect();
+    let cold_top_10 = tracker
+        .cold_properties(COLD_PROPERTIES_TOP_N)
+        .into_iter()
+        .map(|(name, count)| NamedCount { name, count })
+        .collect();
+    CoverageReport {
+        distinct_properties: tracker.counts().len(),
+        required_passed,
+        required_total,
+        coverage_gate_passed,
+        never_gate_passed,
+        never_violations,
+        vacuous_faults,
+        armed_vs_fired,
+        cold_top_10,
+        highlights: CoverageHighlights {
+            delivery_batch_entered: tracker.count("chaos.delivery_batch_entered"),
+            shell_executed: tracker.count("exec.shell_executed"),
+            read_your_writes_checked: tracker.count("oracle.read_your_writes_checked"),
+            at_most_once_checked: tracker.count("oracle.at_most_once_checked"),
+            committed_durability_checked: tracker.count("oracle.committed_durability_checked"),
+            natural_quiesce_recovered: tracker.count("chaos.natural_quiesce_recovered"),
+        },
+    }
+}
+
+fn write_report_json(path: &Path, report: &SimReport) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create report directory {}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&report.to_json())
+        .context("serialize simulation JSON report")?;
+    std::fs::write(path, format!("{payload}\n"))
+        .with_context(|| format!("write simulation JSON report {}", path.display()))?;
+    Ok(())
+}
+
+fn persist_optional_report(
+    report_json: Option<&Path>,
+    report: &SimReport,
+    propagate_error: bool,
+) -> Result<()> {
+    let Some(path) = report_json else {
+        return Ok(());
+    };
+    if let Err(err) = write_report_json(path, report) {
+        eprintln!(
+            "ERROR: failed to write --report-json {}: {err:#}",
+            path.display()
+        );
+        if propagate_error {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CorpusFailure {
+    index: usize,
+    entry: ReplayEntry,
+    replay: String,
+    report: FailureReport,
+}
+
+#[derive(Clone, Debug)]
+struct SuiteFailure {
+    seed: u64,
+    scenario: &'static str,
+    ops: usize,
+    replay: String,
+    report: FailureReport,
+}
+
+#[derive(Clone, Debug)]
+struct RandomFailure {
+    seed: u64,
+    scenario: String,
+    replay: String,
+    report: FailureReport,
+}
+
 struct WatchdogHandle {
     active: Arc<Mutex<BTreeMap<usize, ActiveSeed>>>,
     done: Arc<AtomicBool>,
@@ -169,7 +516,11 @@ struct WatchdogHandle {
 }
 
 impl WatchdogHandle {
-    fn start(timeout_secs: Option<u64>, trace_dir: PathBuf) -> Self {
+    fn start(
+        timeout_secs: Option<u64>,
+        trace_dir: PathBuf,
+        on_timeout: Option<TimeoutHook>,
+    ) -> Self {
         let active: Arc<Mutex<BTreeMap<usize, ActiveSeed>>> = Arc::new(Mutex::new(BTreeMap::new()));
         let done = Arc::new(AtomicBool::new(false));
         let thread = timeout_secs.filter(|&s| s > 0).map(|secs| {
@@ -200,6 +551,9 @@ impl WatchdogHandle {
                         );
                         let saved =
                             write_failure_log(&trace_dir, item.seed, item.scenario, item.ops, &err);
+                        if let Some(ref hook) = on_timeout {
+                            hook(&item, elapsed, &err);
+                        }
                         eprintln!(
                             "\n=== CANBAN DST SEED TIMEOUT ===\nWorker:   w{worker_id}\nScenario: {}\nSeed:     {}\nOps:      {}\nElapsed:  {:.2}s (limit: {secs}s)\nReplay:   {replay}\n{}",
                             item.scenario,
@@ -804,6 +1158,7 @@ fn run_corpus(
     default_ops: usize,
     seed_timeout: Option<u64>,
     trace_dir: PathBuf,
+    report_json: Option<PathBuf>,
 ) -> Result<()> {
     let resolved = resolve_corpus_path(&file);
     let entries = load_replay_file(&resolved, default_ops)?;
@@ -820,13 +1175,64 @@ fn run_corpus(
     );
     let _ = io::stdout().flush();
 
-    let watchdog = Arc::new(WatchdogHandle::start(seed_timeout, trace_dir.clone()));
     let next_idx = Arc::new(AtomicUsize::new(0));
     let passed_count = Arc::new(AtomicU64::new(0));
     let failed_count = Arc::new(AtomicU64::new(0));
-    let failures: Arc<Mutex<Vec<(usize, ReplayEntry, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let failures: Arc<Mutex<Vec<CorpusFailure>>> = Arc::new(Mutex::new(Vec::new()));
+    let total_coverage: Arc<Mutex<CoverageTracker>> = Arc::new(Mutex::new(CoverageTracker::new()));
     let entries_ref = Arc::new(entries);
     let started = Instant::now();
+
+    let timeout_hook: Option<TimeoutHook> = report_json.clone().map(|report_path| {
+        let passed_ref = Arc::clone(&passed_count);
+        let failed_ref = Arc::clone(&failed_count);
+        let failures_ref = Arc::clone(&failures);
+        let cov_ref = Arc::clone(&total_coverage);
+        Arc::new(
+            move |item: &ActiveSeed, _elapsed: Duration, err: &anyhow::Error| {
+                let passed = passed_ref.load(Ordering::Relaxed);
+                let failed = failed_ref.load(Ordering::Relaxed);
+                let mut fail_list: Vec<FailureReport> = failures_ref
+                    .try_lock()
+                    .map(|guard| guard.iter().map(|f| f.report.clone()).collect())
+                    .unwrap_or_default();
+                fail_list.push(build_failure_report(
+                    item.scenario,
+                    item.seed,
+                    item.ops,
+                    format!("{err:#}"),
+                    true,
+                    None,
+                ));
+                let coverage = cov_ref
+                    .try_lock()
+                    .map(|guard| build_coverage_report(&guard, false, &[], &[]))
+                    .unwrap_or_else(|_| {
+                        build_coverage_report(&CoverageTracker::new(), false, &[], &[])
+                    });
+                let report = SimReport {
+                    command: "corpus",
+                    scenario: "corpus".into(),
+                    master_seed: None,
+                    ops: default_ops,
+                    duration_secs: None,
+                    elapsed_secs: started.elapsed().as_secs_f64(),
+                    passed,
+                    failed,
+                    timed_out: 1,
+                    total: passed + failed + 1,
+                    coverage,
+                    failures: fail_list,
+                };
+                let _ = persist_optional_report(Some(&report_path), &report, false);
+            },
+        ) as TimeoutHook
+    });
+    let watchdog = Arc::new(WatchdogHandle::start(
+        seed_timeout,
+        trace_dir.clone(),
+        timeout_hook,
+    ));
 
     std::thread::scope(|scope| {
         for worker_id in 0..workers {
@@ -835,6 +1241,7 @@ fn run_corpus(
             let passed_count = Arc::clone(&passed_count);
             let failed_count = Arc::clone(&failed_count);
             let failures = Arc::clone(&failures);
+            let total_coverage = Arc::clone(&total_coverage);
             let watchdog = Arc::clone(&watchdog);
             let trace_dir = trace_dir.clone();
             scope.spawn(move || {
@@ -854,8 +1261,9 @@ fn run_corpus(
 
                     watchdog.begin_seed(worker_id, entry.scenario, entry.seed, entry.ops);
                     let t0 = Instant::now();
-                    let (res, _cov) = execute_seed_caught(entry.scenario, entry.seed, entry.ops);
+                    let (res, cov) = execute_seed_caught(entry.scenario, entry.seed, entry.ops);
                     watchdog.end_seed(worker_id);
+                    total_coverage.lock().unwrap().merge(&cov);
 
                     match res {
                         Ok(digest) => {
@@ -889,7 +1297,20 @@ fn run_corpus(
                                     .map(|p| format!("  Log:    {}\n", p.display()))
                                     .unwrap_or_default(),
                             );
-                            failures.lock().unwrap().push((n, entry.clone(), replay));
+                            let fail_report = build_failure_report(
+                                entry.scenario.name(),
+                                entry.seed,
+                                entry.ops,
+                                format!("{e:#}"),
+                                false,
+                                None,
+                            );
+                            failures.lock().unwrap().push(CorpusFailure {
+                                index: n,
+                                entry: entry.clone(),
+                                replay,
+                                report: fail_report,
+                            });
                         }
                     }
                 }
@@ -903,7 +1324,24 @@ fn run_corpus(
     let failed = failed_count.load(Ordering::Relaxed);
     let elapsed = started.elapsed().as_secs_f64();
     let mut recorded = failures.lock().unwrap();
-    recorded.sort_by_key(|(idx, _, _)| *idx);
+    recorded.sort_by_key(|f| f.index);
+    let cov = total_coverage.lock().unwrap();
+
+    let report = SimReport {
+        command: "corpus",
+        scenario: "corpus".into(),
+        master_seed: None,
+        ops: default_ops,
+        duration_secs: None,
+        elapsed_secs: elapsed,
+        passed,
+        failed,
+        timed_out: 0,
+        total: passed + failed,
+        coverage: build_coverage_report(&cov, false, &[], &[]),
+        failures: recorded.iter().map(|f| f.report.clone()).collect(),
+    };
+    persist_optional_report(report_json.as_deref(), &report, recorded.is_empty())?;
 
     println!(
         "\nCorpus summary ({}): {passed} passed, {failed} failed ({total} total) in {elapsed:.2}s.",
@@ -911,12 +1349,14 @@ fn run_corpus(
     );
     if !recorded.is_empty() {
         eprintln!("Failed corpus seed(s):");
-        for (n, entry, replay) in recorded.iter() {
+        for item in recorded.iter() {
             eprintln!(
-                "  - #{n} {} seed={} ops={} -> {replay}",
-                entry.scenario.name(),
-                entry.seed,
-                entry.ops
+                "  - #{} {} seed={} ops={} -> {}",
+                item.index,
+                item.entry.scenario.name(),
+                item.entry.seed,
+                item.entry.ops,
+                item.replay,
             );
         }
         bail!("{failed} corpus regression seed(s) failed");
@@ -952,11 +1392,26 @@ fn run_suite(
     assert_coverage: bool,
     require_coverage: Vec<String>,
     trace_dir: PathBuf,
+    report_json: Option<PathBuf>,
 ) -> Result<()> {
     let is_full_suite = replay_file.is_none() && scenario.is_none();
     let single_scenario = match (&replay_file, &scenario) {
         (None, Some(name)) => Some(Scenario::parse(name)?),
         _ => None,
+    };
+    let report_scenario = if replay_file.is_some() {
+        "replay_file".to_owned()
+    } else if let Some(sc) = single_scenario {
+        sc.name().to_owned()
+    } else {
+        "all".to_owned()
+    };
+    let suite_req: &'static [&'static str] = if is_full_suite {
+        FULL_SUITE_REQUIRED_COVERAGE
+    } else if let Some(sc) = single_scenario {
+        required_coverage_for_scenario(sc)
+    } else {
+        &[]
     };
     let plan: Vec<ReplayEntry> = if let Some(path) = replay_file {
         load_replay_file(&path, ops)?
@@ -982,11 +1437,66 @@ fn run_suite(
         items
     };
 
-    let watchdog = WatchdogHandle::start(seed_timeout, trace_dir.clone());
     let started = Instant::now();
-    let mut passed = 0u64;
-    let mut failures: Vec<(u64, &'static str, usize, String)> = Vec::new();
-    let mut total_coverage = CoverageTracker::new();
+    let passed_count = Arc::new(AtomicU64::new(0));
+    let failures: Arc<Mutex<Vec<SuiteFailure>>> = Arc::new(Mutex::new(Vec::new()));
+    let total_coverage: Arc<Mutex<CoverageTracker>> = Arc::new(Mutex::new(CoverageTracker::new()));
+
+    let timeout_hook: Option<TimeoutHook> = report_json.clone().map(|report_path| {
+        let passed_ref = Arc::clone(&passed_count);
+        let failures_ref = Arc::clone(&failures);
+        let cov_ref = Arc::clone(&total_coverage);
+        let report_scenario = report_scenario.clone();
+        let req_cov = require_coverage.clone();
+        Arc::new(
+            move |item: &ActiveSeed, _elapsed: Duration, err: &anyhow::Error| {
+                let passed = passed_ref.load(Ordering::Relaxed);
+                let mut fail_list: Vec<FailureReport> = failures_ref
+                    .try_lock()
+                    .map(|guard| guard.iter().map(|f| f.report.clone()).collect())
+                    .unwrap_or_default();
+                let prior_failed = fail_list.len() as u64;
+                fail_list.push(build_failure_report(
+                    item.scenario,
+                    item.seed,
+                    item.ops,
+                    format!("{err:#}"),
+                    true,
+                    None,
+                ));
+                let coverage = cov_ref
+                    .try_lock()
+                    .map(|guard| {
+                        build_coverage_report(&guard, assert_coverage, &req_cov, suite_req)
+                    })
+                    .unwrap_or_else(|_| {
+                        build_coverage_report(
+                            &CoverageTracker::new(),
+                            assert_coverage,
+                            &req_cov,
+                            suite_req,
+                        )
+                    });
+                let report = SimReport {
+                    command: "run",
+                    scenario: report_scenario.clone(),
+                    master_seed: None,
+                    ops,
+                    duration_secs: None,
+                    elapsed_secs: started.elapsed().as_secs_f64(),
+                    passed,
+                    failed: prior_failed,
+                    timed_out: 1,
+                    total: passed + prior_failed + 1,
+                    coverage,
+                    failures: fail_list,
+                };
+                let _ = persist_optional_report(Some(&report_path), &report, false);
+            },
+        ) as TimeoutHook
+    });
+    let watchdog = WatchdogHandle::start(seed_timeout, trace_dir.clone(), timeout_hook);
+    let mut early_err: Option<anyhow::Error> = None;
 
     for entry in plan {
         println!(
@@ -1001,11 +1511,11 @@ fn run_suite(
         let t0 = Instant::now();
         let (res, cov) = execute_seed_caught(entry.scenario, entry.seed, entry.ops);
         watchdog.end_seed(0);
-        total_coverage.merge(&cov);
+        total_coverage.lock().unwrap().merge(&cov);
 
         match res {
             Ok(digest) => {
-                passed += 1;
+                passed_count.fetch_add(1, Ordering::Relaxed);
                 println!(
                     "PASS  {:<20} seed={:<12} digest={:#018x} ({:.2}s)",
                     entry.scenario.name(),
@@ -1027,70 +1537,129 @@ fn run_suite(
                         .map(|p| format!("Log:    {}\n", p.display()))
                         .unwrap_or_default(),
                 );
+                let mut shrunk = None;
                 if shrink_on_fail
                     && entry.scenario == Scenario::Chaos
                     && let Ok(Some(report)) = scenarios::chaos::shrink(entry.seed, entry.ops)
                 {
                     print_shrink_report(&report);
+                    shrunk = Some(build_shrunk_report(&report));
                 }
+                let fail_report = build_failure_report(
+                    entry.scenario.name(),
+                    entry.seed,
+                    entry.ops,
+                    format!("{e:#}"),
+                    false,
+                    shrunk,
+                );
+                failures.lock().unwrap().push(SuiteFailure {
+                    seed: entry.seed,
+                    scenario: entry.scenario.name(),
+                    ops: entry.ops,
+                    replay,
+                    report: fail_report,
+                });
                 if !continue_on_error {
-                    return Err(e);
+                    early_err = Some(e);
+                    break;
                 }
-                failures.push((entry.seed, entry.scenario.name(), entry.ops, replay));
             }
         }
     }
 
     drop(watchdog);
 
-    if !failures.is_empty() {
-        if let Err(violations) = total_coverage.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
+    let passed = passed_count.load(Ordering::Relaxed);
+    let recorded = failures.lock().unwrap();
+    let cov = total_coverage.lock().unwrap();
+    let failed = recorded.len() as u64;
+
+    if let Some(err) = early_err {
+        let report = SimReport {
+            command: "run",
+            scenario: report_scenario,
+            master_seed: None,
+            ops,
+            duration_secs: None,
+            elapsed_secs: started.elapsed().as_secs_f64(),
+            passed,
+            failed,
+            timed_out: 0,
+            total: passed + failed,
+            coverage: build_coverage_report(&cov, assert_coverage, &require_coverage, suite_req),
+            failures: recorded.iter().map(|f| f.report.clone()).collect(),
+        };
+        persist_optional_report(report_json.as_deref(), &report, false)?;
+        return Err(err);
+    }
+
+    if !recorded.is_empty() {
+        if let Err(violations) = cov.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
             eprintln!("\nWARNING: NEVER-PROPERTY VIOLATION(S) DETECTED:");
             for (prop, count) in &violations {
                 eprintln!("  - {prop}: hit {count} time(s) (must be 0)");
             }
         }
         eprintln!(
-            "\nSimulation suite finished with {passed} passed, {} failed in {:.2}s:",
-            failures.len(),
+            "\nSimulation suite finished with {passed} passed, {failed} failed in {:.2}s:",
             started.elapsed().as_secs_f64()
         );
-        for (seed, sc, sc_ops, replay) in &failures {
-            eprintln!("  - seed={seed} ({sc}, ops={sc_ops}) -> {replay}");
+        for item in recorded.iter() {
+            eprintln!(
+                "  - seed={} ({}, ops={}) -> {}",
+                item.seed, item.scenario, item.ops, item.replay
+            );
         }
-        bail!("{} deterministic simulation run(s) failed", failures.len());
+        let report = SimReport {
+            command: "run",
+            scenario: report_scenario,
+            master_seed: None,
+            ops,
+            duration_secs: None,
+            elapsed_secs: started.elapsed().as_secs_f64(),
+            passed,
+            failed,
+            timed_out: 0,
+            total: passed + failed,
+            coverage: build_coverage_report(&cov, assert_coverage, &require_coverage, suite_req),
+            failures: recorded.iter().map(|f| f.report.clone()).collect(),
+        };
+        persist_optional_report(report_json.as_deref(), &report, false)?;
+        bail!("{failed} deterministic simulation run(s) failed");
     }
 
     println!(
         "\nAll {passed} deterministic simulation run(s) passed in {:.2}s.",
         started.elapsed().as_secs_f64()
     );
-    if !assert_coverage
-        && let Err(violations) = total_coverage.assert_never_zero(NEVER_COVERAGE_PROPERTIES)
-    {
+    if !assert_coverage && let Err(violations) = cov.assert_never_zero(NEVER_COVERAGE_PROPERTIES) {
         eprintln!("\nWARNING: NEVER-PROPERTY VIOLATION(S) DETECTED:");
         for (prop, count) in &violations {
             eprintln!("  - {prop}: hit {count} time(s) (must be 0)");
         }
     }
     if assert_coverage {
-        print_fault_telemetry_table(&total_coverage);
-        print_cold_properties_table(&total_coverage, COLD_PROPERTIES_TOP_N);
+        print_fault_telemetry_table(&cov);
+        print_cold_properties_table(&cov, COLD_PROPERTIES_TOP_N);
     }
-    let suite_req: &[&str] = if is_full_suite {
-        FULL_SUITE_REQUIRED_COVERAGE
-    } else if let Some(sc) = single_scenario {
-        required_coverage_for_scenario(sc)
-    } else {
-        &[]
+    let cov_res = verify_coverage(&cov, assert_coverage, &require_coverage, suite_req);
+    let report = SimReport {
+        command: "run",
+        scenario: report_scenario,
+        master_seed: None,
+        ops,
+        duration_secs: None,
+        elapsed_secs: started.elapsed().as_secs_f64(),
+        passed,
+        failed: 0,
+        timed_out: 0,
+        total: passed,
+        coverage: build_coverage_report(&cov, assert_coverage, &require_coverage, suite_req),
+        failures: Vec::new(),
     };
-    verify_coverage(
-        &total_coverage,
-        assert_coverage,
-        &require_coverage,
-        suite_req,
-    )?;
-    Ok(())
+    persist_optional_report(report_json.as_deref(), &report, cov_res.is_ok())?;
+    cov_res
 }
 
 enum RandomTarget {
@@ -1145,6 +1714,35 @@ fn spawn_ctrlc_watcher(stop: Arc<AtomicBool>) {
     });
 }
 
+fn random_required_coverage(
+    scenario_arg: &str,
+    passed: u64,
+    cov: &CoverageTracker,
+) -> Vec<&'static str> {
+    let mut random_req: Vec<&'static str> = Vec::new();
+    if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
+        random_req.extend_from_slice(CHAOS_RANDOM_REQUIRED_COVERAGE);
+        if passed >= 24 {
+            random_req.extend_from_slice(CHAOS_SWARM_PROFILE_REQUIRED_COVERAGE);
+        }
+    } else if scenario_arg.trim().eq_ignore_ascii_case("all") && passed >= 12 {
+        random_req.extend_from_slice(&[
+            "oracle.post_bounce_recovery_checked",
+            "oracle.outbox_file_scanned",
+            "oracle.committed_durability_checked",
+        ]);
+        if cov.count("sim.scenario.chaos") >= 6 {
+            random_req.extend_from_slice(&[
+                "chaos.net_partition",
+                "chaos.server_crash_bounce",
+                "chaos.client_bounce",
+                "chaos.env_save",
+            ]);
+        }
+    }
+    random_req
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_random(
     fail_fast: bool,
@@ -1159,6 +1757,7 @@ fn run_random(
     require_coverage: Vec<String>,
     auto_shrink: bool,
     trace_dir: PathBuf,
+    report_json: Option<PathBuf>,
 ) -> Result<()> {
     let target = Arc::new(RandomTarget::parse(&scenario_arg)?);
     let workers = jobs.max(1);
@@ -1170,11 +1769,70 @@ fn run_random(
     let passed_count = Arc::new(AtomicU64::new(0));
     let failed_count = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
-    let failures: Arc<Mutex<Vec<(u64, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let failures: Arc<Mutex<Vec<RandomFailure>>> = Arc::new(Mutex::new(Vec::new()));
     let total_coverage: Arc<Mutex<CoverageTracker>> = Arc::new(Mutex::new(CoverageTracker::new()));
     let shrink_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
-    let watchdog = Arc::new(WatchdogHandle::start(seed_timeout, trace_dir.clone()));
+    let timeout_hook: Option<TimeoutHook> = report_json.clone().map(|report_path| {
+        let passed_ref = Arc::clone(&passed_count);
+        let failed_ref = Arc::clone(&failed_count);
+        let failures_ref = Arc::clone(&failures);
+        let cov_ref = Arc::clone(&total_coverage);
+        let scenario_name = scenario_arg.clone();
+        let req_cov = require_coverage.clone();
+        Arc::new(
+            move |item: &ActiveSeed, _elapsed: Duration, err: &anyhow::Error| {
+                let passed = passed_ref.load(Ordering::Relaxed);
+                let failed = failed_ref.load(Ordering::Relaxed);
+                let mut fail_list: Vec<FailureReport> = failures_ref
+                    .try_lock()
+                    .map(|guard| guard.iter().map(|f| f.report.clone()).collect())
+                    .unwrap_or_default();
+                fail_list.push(build_failure_report(
+                    item.scenario,
+                    item.seed,
+                    item.ops,
+                    format!("{err:#}"),
+                    true,
+                    None,
+                ));
+                let coverage = cov_ref
+                    .try_lock()
+                    .map(|guard| {
+                        let req = random_required_coverage(&scenario_name, passed, &guard);
+                        build_coverage_report(&guard, assert_coverage, &req_cov, &req)
+                    })
+                    .unwrap_or_else(|_| {
+                        build_coverage_report(
+                            &CoverageTracker::new(),
+                            assert_coverage,
+                            &req_cov,
+                            &[],
+                        )
+                    });
+                let report = SimReport {
+                    command: "random",
+                    scenario: scenario_name.clone(),
+                    master_seed: Some(resolved_master_seed),
+                    ops,
+                    duration_secs,
+                    elapsed_secs: started.elapsed().as_secs_f64(),
+                    passed,
+                    failed,
+                    timed_out: 1,
+                    total: passed + failed + 1,
+                    coverage,
+                    failures: fail_list,
+                };
+                let _ = persist_optional_report(Some(&report_path), &report, false);
+            },
+        ) as TimeoutHook
+    });
+    let watchdog = Arc::new(WatchdogHandle::start(
+        seed_timeout,
+        trace_dir.clone(),
+        timeout_hook,
+    ));
     spawn_ctrlc_watcher(Arc::clone(&stop));
 
     println!(
@@ -1263,11 +1921,25 @@ fn run_random(
                                     .map(|p| format!("  Log:    {}\n", p.display()))
                                     .unwrap_or_default()
                             );
-                            failures.lock().unwrap().push((
+                            let err_str = format!("{e:#}");
+                            let fail_report = build_failure_report(
+                                sc.name(),
                                 seed,
-                                sc.name().to_owned(),
-                                replay,
-                            ));
+                                ops,
+                                err_str.clone(),
+                                false,
+                                None,
+                            );
+                            let fail_idx = {
+                                let mut guard = failures.lock().unwrap();
+                                guard.push(RandomFailure {
+                                    seed,
+                                    scenario: sc.name().to_owned(),
+                                    replay,
+                                    report: fail_report,
+                                });
+                                guard.len() - 1
+                            };
                             if fail_fast {
                                 stop.store(true, Ordering::SeqCst);
                             }
@@ -1280,10 +1952,14 @@ fn run_random(
                                 let (report, timed_out) = auto_shrink_chaos_bounded(
                                     seed,
                                     ops,
-                                    format!("{e:#}"),
+                                    err_str,
                                     AUTO_SHRINK_MAX_ATTEMPTS,
                                     AUTO_SHRINK_TIME_BUDGET,
                                 );
+                                let shrunk = build_shrunk_report(&report);
+                                if let Some(entry) = failures.lock().unwrap().get_mut(fail_idx) {
+                                    entry.report.shrunk = Some(shrunk);
+                                }
                                 let formatted = format_shrink_report(&report, ops, timed_out);
                                 eprint!("{formatted}");
                                 if let Some(ref log_path) = saved
@@ -1309,6 +1985,7 @@ fn run_random(
     let elapsed = started.elapsed().as_secs_f64();
     let recorded = failures.lock().unwrap();
     let cov = total_coverage.lock().unwrap();
+    let random_req = random_required_coverage(&scenario_arg, passed, &cov);
 
     println!(
         "\nrandom-sim summary: {passed} passed, {failed} failed ({} total, master_seed={resolved_master_seed}) in {elapsed:.2}s.",
@@ -1328,34 +2005,47 @@ fn run_random(
 
     if !recorded.is_empty() {
         eprintln!("\nFailed seed(s):");
-        for (seed, sc, replay) in recorded.iter() {
-            eprintln!("  - seed={seed} ({sc}) -> {replay}");
+        for item in recorded.iter() {
+            eprintln!(
+                "  - seed={} ({}) -> {}",
+                item.seed, item.scenario, item.replay
+            );
         }
+        let report = SimReport {
+            command: "random",
+            scenario: scenario_arg,
+            master_seed: Some(resolved_master_seed),
+            ops,
+            duration_secs,
+            elapsed_secs: elapsed,
+            passed,
+            failed,
+            timed_out: 0,
+            total: passed + failed,
+            coverage: build_coverage_report(&cov, assert_coverage, &require_coverage, &random_req),
+            failures: recorded.iter().map(|f| f.report.clone()).collect(),
+        };
+        persist_optional_report(report_json.as_deref(), &report, false)?;
         bail!("{failed} random-sim seed(s) failed");
     }
-    let mut random_req: Vec<&str> = Vec::new();
-    if scenario_arg.trim().eq_ignore_ascii_case("chaos") && passed >= 10 {
-        random_req.extend_from_slice(CHAOS_RANDOM_REQUIRED_COVERAGE);
-        if passed >= 24 {
-            random_req.extend_from_slice(CHAOS_SWARM_PROFILE_REQUIRED_COVERAGE);
-        }
-    } else if scenario_arg.trim().eq_ignore_ascii_case("all") && passed >= 12 {
-        random_req.extend_from_slice(&[
-            "oracle.post_bounce_recovery_checked",
-            "oracle.outbox_file_scanned",
-            "oracle.committed_durability_checked",
-        ]);
-        if cov.count("sim.scenario.chaos") >= 6 {
-            random_req.extend_from_slice(&[
-                "chaos.net_partition",
-                "chaos.server_crash_bounce",
-                "chaos.client_bounce",
-                "chaos.env_save",
-            ]);
-        }
-    }
-    verify_coverage(&cov, assert_coverage, &require_coverage, &random_req)?;
-    Ok(())
+
+    let cov_res = verify_coverage(&cov, assert_coverage, &require_coverage, &random_req);
+    let report = SimReport {
+        command: "random",
+        scenario: scenario_arg,
+        master_seed: Some(resolved_master_seed),
+        ops,
+        duration_secs,
+        elapsed_secs: elapsed,
+        passed,
+        failed: 0,
+        timed_out: 0,
+        total: passed,
+        coverage: build_coverage_report(&cov, assert_coverage, &require_coverage, &random_req),
+        failures: Vec::new(),
+    };
+    persist_optional_report(report_json.as_deref(), &report, cov_res.is_ok())?;
+    cov_res
 }
 
 fn main() -> Result<()> {
@@ -1373,6 +2063,7 @@ fn main() -> Result<()> {
             false,
             Vec::new(),
             PathBuf::from(".local/sim-failures"),
+            None,
         ),
         Some(Command::Run {
             scenario,
@@ -1386,6 +2077,7 @@ fn main() -> Result<()> {
             assert_coverage,
             require_coverage,
             trace_dir,
+            report_json,
         }) => run_suite(
             scenario,
             seed,
@@ -1398,6 +2090,7 @@ fn main() -> Result<()> {
             assert_coverage,
             require_coverage,
             trace_dir,
+            report_json,
         ),
         Some(Command::Shrink { seed, ops }) => run_shrink_cmd(seed, ops),
         Some(Command::Random {
@@ -1413,6 +2106,7 @@ fn main() -> Result<()> {
             require_coverage,
             auto_shrink,
             trace_dir,
+            report_json,
         }) => run_random(
             fail_fast,
             scenario,
@@ -1426,6 +2120,7 @@ fn main() -> Result<()> {
             require_coverage,
             auto_shrink,
             trace_dir,
+            report_json,
         ),
         Some(Command::Corpus {
             file,
@@ -1433,7 +2128,8 @@ fn main() -> Result<()> {
             ops,
             seed_timeout,
             trace_dir,
-        }) => run_corpus(file, jobs, ops, seed_timeout, trace_dir),
+            report_json,
+        }) => run_corpus(file, jobs, ops, seed_timeout, trace_dir, report_json),
     }
 }
 
@@ -1699,5 +2395,180 @@ mod tests {
             violated.contains("Never-property gate: FAIL (exec.blocked_command=1)"),
             "{violated}"
         );
+    }
+
+    #[test]
+    fn cli_parses_optional_report_json_on_run_random_and_corpus() {
+        let cli_run = Cli::try_parse_from([
+            "canban-sim",
+            "run",
+            "--seeds",
+            "1",
+            "--report-json",
+            "out/gate-a.json",
+        ])
+        .expect("parse run with --report-json");
+        match cli_run.command {
+            Some(Command::Run { report_json, .. }) => {
+                assert_eq!(report_json, Some(PathBuf::from("out/gate-a.json")));
+            }
+            _ => panic!("expected Run command"),
+        }
+
+        let cli_run_default =
+            Cli::try_parse_from(["canban-sim", "run"]).expect("parse run without --report-json");
+        match cli_run_default.command {
+            Some(Command::Run { report_json, .. }) => assert_eq!(report_json, None),
+            _ => panic!("expected Run command"),
+        }
+
+        let cli_random = Cli::try_parse_from([
+            "canban-sim",
+            "random",
+            "--scenario",
+            "chaos",
+            "--duration",
+            "300",
+            "--report-json",
+            "out/soak.json",
+        ])
+        .expect("parse random with --report-json");
+        match cli_random.command {
+            Some(Command::Random { report_json, .. }) => {
+                assert_eq!(report_json, Some(PathBuf::from("out/soak.json")));
+            }
+            _ => panic!("expected Random command"),
+        }
+
+        let cli_corpus = Cli::try_parse_from([
+            "canban-sim",
+            "corpus",
+            "--jobs",
+            "4",
+            "--report-json",
+            "out/corpus.json",
+        ])
+        .expect("parse corpus with --report-json");
+        match cli_corpus.command {
+            Some(Command::Corpus { report_json, .. }) => {
+                assert_eq!(report_json, Some(PathBuf::from("out/corpus.json")));
+            }
+            _ => panic!("expected Corpus command"),
+        }
+    }
+
+    #[test]
+    fn report_json_serialization_and_parent_dir_creation() {
+        let mut tracker = CoverageTracker::new();
+        for key in BASE_REQUIRED_COVERAGE {
+            tracker.hit(key);
+        }
+        tracker.hit_n("chaos.delivery_batch_entered", 5);
+        tracker.hit_n("exec.shell_executed", 9);
+        tracker.hit_n("oracle.read_your_writes_checked", 42);
+        tracker.hit_n("oracle.at_most_once_checked", 17);
+        tracker.hit_n("oracle.committed_durability_checked", 11);
+        tracker.hit_n("chaos.natural_quiesce_recovered", 6);
+        tracker.add_fault_counts("herdr.after_terminal_run_before_db_commit", 3, 2);
+        tracker.arm_fault("git.after_push_before_batch_finalize");
+
+        let coverage = build_coverage_report(&tracker, true, &[], &[]);
+        assert!(!coverage.coverage_gate_passed);
+        assert!(coverage.never_gate_passed);
+        assert_eq!(
+            coverage.vacuous_faults,
+            vec!["git.after_push_before_batch_finalize".to_owned()]
+        );
+
+        let err_text = "=== CANBAN DST FAILURE ===\nScenario: chaos\nSeed: 42\nOps: 60\nDigest: 0x0011223344556677\nReason: [primary] RYW VIOLATION: Card c9 regressed to rev 2 < 3\n";
+        let shrunk = ShrunkReport {
+            orig_ops: 60,
+            shrunk_ops: 2,
+            digest: Some("0x0011223344556677".into()),
+            ops_lines: vec!["[00] CreateCard".into(), "[01] BounceClient".into()],
+        };
+        let fail_rep = build_failure_report("chaos", 42, 60, err_text.into(), false, Some(shrunk));
+        assert!(
+            fail_rep
+                .profile
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("delivery_and_storage (")
+        );
+        assert_eq!(fail_rep.digest.as_deref(), Some("0x0011223344556677"));
+        assert_eq!(
+            fail_rep.fingerprint,
+            "RYW VIOLATION: Card # regressed to rev # < #"
+        );
+
+        let sim_report = SimReport {
+            command: "random",
+            scenario: "chaos".into(),
+            master_seed: Some(2026),
+            ops: 60,
+            duration_secs: Some(300),
+            elapsed_secs: 12.3456,
+            passed: 19,
+            failed: 1,
+            timed_out: 0,
+            total: 20,
+            coverage,
+            failures: vec![fail_rep],
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let report_path = tmp.path().join("nested").join("reports").join("soak.json");
+        write_report_json(&report_path, &sim_report).expect("write report json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report_path).expect("read report"))
+                .expect("parse report json");
+
+        assert_eq!(parsed["command"], "random");
+        assert_eq!(parsed["scenario"], "chaos");
+        assert_eq!(parsed["master_seed"], 2026);
+        assert_eq!(parsed["ops"], 60);
+        assert_eq!(parsed["duration_secs"], 300);
+        assert_eq!(parsed["passed"], 19);
+        assert_eq!(parsed["failed"], 1);
+        assert_eq!(parsed["timed_out"], 0);
+        assert_eq!(parsed["total"], 20);
+        assert_eq!(parsed["coverage"]["coverage_gate_passed"], false);
+        assert_eq!(parsed["coverage"]["never_gate_passed"], true);
+        assert_eq!(
+            parsed["coverage"]["highlights"]["delivery_batch_entered"],
+            5
+        );
+        assert_eq!(parsed["coverage"]["highlights"]["shell_executed"], 9);
+        assert_eq!(
+            parsed["coverage"]["highlights"]["read_your_writes_checked"],
+            42
+        );
+        assert_eq!(parsed["coverage"]["highlights"]["at_most_once_checked"], 17);
+        assert_eq!(
+            parsed["coverage"]["highlights"]["natural_quiesce_recovered"],
+            6
+        );
+        assert_eq!(
+            parsed["coverage"]["armed_vs_fired"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            !parsed["coverage"]["cold_top_10"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let f0 = &parsed["failures"][0];
+        assert_eq!(f0["scenario"], "chaos");
+        assert_eq!(f0["seed"], 42);
+        assert_eq!(f0["ops"], 60);
+        assert_eq!(f0["timed_out"], false);
+        assert_eq!(f0["digest"], "0x0011223344556677");
+        assert_eq!(f0["shrunk"]["orig_ops"], 60);
+        assert_eq!(f0["shrunk"]["shrunk_ops"], 2);
+        assert_eq!(f0["shrunk"]["ops_lines"][0], "[00] CreateCard");
     }
 }

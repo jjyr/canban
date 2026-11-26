@@ -1,0 +1,260 @@
+name: DST Soak
+on:
+  schedule:
+    # Twice weekly: Monday & Thursday 18:00 UTC (Tuesday & Friday 02:00 CST)
+    - cron: '0 18 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Chaos soak duration in seconds'
+        required: false
+        default: '300'
+        type: string
+      ops:
+        description: 'Operations per chaos seed'
+        required: false
+        default: '60'
+        type: string
+      jobs:
+        description: 'Parallel simulation worker threads'
+        required: false
+        default: '4'
+        type: string
+      master_seed:
+        description: 'Optional deterministic master seed (blank for random)'
+        required: false
+        default: ''
+        type: string
+      open_issue:
+        description: 'Open a GitHub Issue on failure (set false for dry-run manual checks)'
+        required: false
+        default: true
+        type: boolean
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: dst-soak-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANBAN_UPDATES_DISABLED: '1'
+      CANBAN_GH_BIN: '/usr/bin/false'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare isolated soak workspace
+        run: |
+          set -euo pipefail
+          SOAK_DIR="$RUNNER_TEMP/canban-dst-soak"
+          SOAK_ARTIFACTS="$SOAK_DIR/artifacts"
+          mkdir -p \
+            "$SOAK_ARTIFACTS/reports" \
+            "$SOAK_ARTIFACTS/traces" \
+            "$SOAK_DIR/env/home" \
+            "$SOAK_DIR/env/tmp" \
+            "$SOAK_DIR/env/xdg-config" \
+            "$SOAK_DIR/env/xdg-state" \
+            "$SOAK_DIR/env/xdg-data"
+          : > "$SOAK_ARTIFACTS/dst-soak.log"
+          {
+            echo "SOAK_DIR=$SOAK_DIR"
+            echo "SOAK_ARTIFACTS=$SOAK_ARTIFACTS"
+            echo "SOAK_LOG=$SOAK_ARTIFACTS/dst-soak.log"
+            echo "CORPUS_REPORT=$SOAK_ARTIFACTS/reports/corpus.json"
+            echo "GATE_A_REPORT=$SOAK_ARTIFACTS/reports/gate-a.json"
+            echo "SOAK_REPORT=$SOAK_ARTIFACTS/reports/soak.json"
+            echo "TRACE_DIR=$SOAK_ARTIFACTS/traces"
+            echo "ARTIFACT_NAME=dst-soak-logs-${{ github.run_number }}-${{ github.run_attempt }}"
+          } >> "$GITHUB_ENV"
+      - name: Compute mise tool cache key
+        run: python3 scripts/ci-cache.py mise-tools-hash --github-env
+      - uses: jdx/mise-action@v5
+        with:
+          cache_key: '{{cache_key_prefix}}-{{platform}}-p{{cache_period}}-{{env.MISE_TOOLS_HASH}}'
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: ~/.cache/canban
+          shared-key: dst-soak-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Install minimal Linux build dependencies for canban-sim
+        run: |
+          set -euo pipefail
+          # canban-sim depends on canban-ui (default-features = false), which pulls nsh-platform-linux (gtk4-sys) on Linux.
+          # GStreamer, librsvg, zstd CLI, and Herdr Core are not required for DST.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev
+      - name: Build canban-sim (release)
+        run: |
+          set -euo pipefail
+          mise run terminal-deps 2>&1 | tee -a "$SOAK_LOG"
+          mise exec -- cargo build --release --locked -p canban-sim --bin canban-sim 2>&1 | tee -a "$SOAK_LOG"
+      - name: Run DST soak phases
+        id: run_dst
+        env:
+          SOAK_DURATION: ${{ inputs.duration || '300' }}
+          SOAK_OPS: ${{ inputs.ops || '60' }}
+          SOAK_JOBS: ${{ inputs.jobs || '4' }}
+          SOAK_MASTER_SEED: ${{ inputs.master_seed || '' }}
+        run: |
+          set -uo pipefail
+          # Strip any inherited HC_* variables to guarantee full Herdr isolation.
+          for var in $(env | awk -F= '/^HC_/ {print $1}'); do
+            unset "$var"
+          done
+
+          SIM_BIN="./target/release/canban-sim"
+          DURATION="${SOAK_DURATION:-300}"
+          OPS="${SOAK_OPS:-60}"
+          JOBS="${SOAK_JOBS:-4}"
+          MASTER_SEED="${SOAK_MASTER_SEED:-}"
+
+          run_isolated() {
+            env -u HC_SESSION -u HC_SOCKET -u HC_HOME -u HC_BIN \
+              HOME="$SOAK_DIR/env/home" \
+              TMPDIR="$SOAK_DIR/env/tmp" \
+              XDG_CONFIG_HOME="$SOAK_DIR/env/xdg-config" \
+              XDG_STATE_HOME="$SOAK_DIR/env/xdg-state" \
+              XDG_DATA_HOME="$SOAK_DIR/env/xdg-data" \
+              CANBAN_UPDATES_DISABLED=1 \
+              CANBAN_GH_BIN=/usr/bin/false \
+              "$@"
+          }
+
+          echo "=== Phase 1: Regression Corpus ===" | tee -a "$SOAK_LOG"
+          run_isolated "$SIM_BIN" corpus \
+            --jobs 4 \
+            --seed-timeout 60 \
+            --trace-dir "$TRACE_DIR" \
+            --report-json "$CORPUS_REPORT" 2>&1 | tee -a "$SOAK_LOG"
+          CORPUS_RC=${PIPESTATUS[0]}
+
+          echo "=== Phase 2: Gate A (Full Suite + Coverage) ===" | tee -a "$SOAK_LOG"
+          run_isolated "$SIM_BIN" run \
+            --seeds 1 \
+            --assert-coverage \
+            --seed-timeout 60 \
+            --trace-dir "$TRACE_DIR" \
+            --report-json "$GATE_A_REPORT" 2>&1 | tee -a "$SOAK_LOG"
+          GATE_A_RC=${PIPESTATUS[0]}
+
+          echo "=== Phase 3: Chaos Soak (duration=${DURATION}s, ops=${OPS}, jobs=${JOBS}) ===" | tee -a "$SOAK_LOG"
+          SOAK_ARGS=(
+            random
+            --scenario chaos
+            --duration "$DURATION"
+            --jobs "$JOBS"
+            --ops "$OPS"
+            --seed-timeout 60
+            --assert-coverage
+            --auto-shrink
+            --trace-dir "$TRACE_DIR"
+            --report-json "$SOAK_REPORT"
+          )
+          if [ -n "$MASTER_SEED" ]; then
+            SOAK_ARGS+=(--master-seed "$MASTER_SEED")
+          fi
+          run_isolated "$SIM_BIN" "${SOAK_ARGS[@]}" 2>&1 | tee -a "$SOAK_LOG"
+          SOAK_RC=${PIPESTATUS[0]}
+
+          FAILED="false"
+          if [ "$CORPUS_RC" -ne 0 ] || [ "$GATE_A_RC" -ne 0 ] || [ "$SOAK_RC" -ne 0 ]; then
+            FAILED="true"
+          fi
+          {
+            echo "corpus_rc=$CORPUS_RC"
+            echo "gate_a_rc=$GATE_A_RC"
+            echo "soak_rc=$SOAK_RC"
+            echo "failed=$FAILED"
+          } >> "$GITHUB_OUTPUT"
+      - name: Write step summary
+        if: always() && !cancelled()
+        env:
+          CORPUS_RC: ${{ steps.run_dst.outputs.corpus_rc }}
+          GATE_A_RC: ${{ steps.run_dst.outputs.gate_a_rc }}
+          SOAK_RC: ${{ steps.run_dst.outputs.soak_rc }}
+        run: |
+          set -euo pipefail
+          EXTRA_ARGS=()
+          if [ -n "${CORPUS_RC:-}" ]; then EXTRA_ARGS+=(--corpus-rc "$CORPUS_RC"); fi
+          if [ -n "${GATE_A_RC:-}" ]; then EXTRA_ARGS+=(--gate-a-rc "$GATE_A_RC"); fi
+          if [ -n "${SOAK_RC:-}" ]; then EXTRA_ARGS+=(--soak-rc "$SOAK_RC"); fi
+          python3 scripts/dst-soak-issue.py \
+            --corpus-report "$CORPUS_REPORT" \
+            --gate-a-report "$GATE_A_REPORT" \
+            --soak-report "$SOAK_REPORT" \
+            --log-file "$SOAK_LOG" \
+            --commit "${{ github.sha }}" \
+            --ref "${{ github.ref_name }}" \
+            --runner "ubuntu-24.04" \
+            --out-summary "$SOAK_ARTIFACTS/step-summary.md" \
+            "${EXTRA_ARGS[@]}"
+          cat "$SOAK_ARTIFACTS/step-summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Format failure issue
+        if: (failure() || steps.run_dst.outputs.failed == 'true') && !cancelled()
+        env:
+          CORPUS_RC: ${{ steps.run_dst.outputs.corpus_rc }}
+          GATE_A_RC: ${{ steps.run_dst.outputs.gate_a_rc }}
+          SOAK_RC: ${{ steps.run_dst.outputs.soak_rc }}
+        run: |
+          set -euo pipefail
+          EXTRA_ARGS=()
+          if [ -n "${CORPUS_RC:-}" ]; then EXTRA_ARGS+=(--corpus-rc "$CORPUS_RC"); fi
+          if [ -n "${GATE_A_RC:-}" ]; then EXTRA_ARGS+=(--gate-a-rc "$GATE_A_RC"); fi
+          if [ -n "${SOAK_RC:-}" ]; then EXTRA_ARGS+=(--soak-rc "$SOAK_RC"); fi
+          python3 scripts/dst-soak-issue.py \
+            --corpus-report "$CORPUS_REPORT" \
+            --gate-a-report "$GATE_A_REPORT" \
+            --soak-report "$SOAK_REPORT" \
+            --log-file "$SOAK_LOG" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --run-number "${{ github.run_number }}" \
+            --commit "${{ github.sha }}" \
+            --ref "${{ github.ref_name }}" \
+            --runner "ubuntu-24.04" \
+            --artifact-name "$ARTIFACT_NAME" \
+            --out-title "$SOAK_ARTIFACTS/issue-title.txt" \
+            --out-body "$SOAK_ARTIFACTS/issue-body.md" \
+            "${EXTRA_ARGS[@]}"
+          echo "Issue title: $(cat "$SOAK_ARTIFACTS/issue-title.txt")"
+      - name: Upload DST soak failure artifacts
+        if: (failure() || steps.run_dst.outputs.failed == 'true') && !cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          retention-days: 14
+          path: |
+            ${{ env.SOAK_ARTIFACTS }}/
+            .local/sim-failures/
+          if-no-files-found: ignore
+      - name: Create GitHub Issue on DST failure
+        if: (failure() || steps.run_dst.outputs.failed == 'true') && !cancelled() && (github.event_name == 'schedule' || (inputs.open_issue != false && inputs.open_issue != 'false'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TITLE="$(cat "$SOAK_ARTIFACTS/issue-title.txt")"
+          BODY_FILE="$SOAK_ARTIFACTS/issue-body.md"
+          gh label create dst --color 5319e7 --description "Deterministic Simulation Testing" --force || true
+          gh label create automated --color e4e669 --description "Automated CI report" --force || true
+          if ! gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label bug --label dst --label automated; then
+            echo "::warning::Retrying gh issue create with --label bug only"
+            if ! gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label bug; then
+              echo "::warning::Retrying gh issue create without labels"
+              gh issue create --title "$TITLE" --body-file "$BODY_FILE"
+            fi
+          fi
+      - name: Fail job if any DST soak phase failed
+        if: steps.run_dst.outputs.failed == 'true'
+        env:
+          CORPUS_RC: ${{ steps.run_dst.outputs.corpus_rc }}
+          GATE_A_RC: ${{ steps.run_dst.outputs.gate_a_rc }}
+          SOAK_RC: ${{ steps.run_dst.outputs.soak_rc }}
+        run: |
+          echo "DST soak failed (corpus_rc=${CORPUS_RC:-?}, gate_a_rc=${GATE_A_RC:-?}, soak_rc=${SOAK_RC:-?})" >&2
+          exit 1

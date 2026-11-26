@@ -6402,10 +6402,28 @@ pub fn shrink(seed: u64, max_ops: usize) -> Result<Option<ShrinkReport>> {
     }))
 }
 
+/// Formats a concise human-readable profile descriptor for a chaos `seed`, combining its
+/// deterministic Swarm sub-profile with topology and durability flags.
+pub fn profile_name(seed: u64) -> String {
+    let profile = ChaosProfile::from_seed(seed);
+    let mut tags = vec![if profile.desktop_local {
+        "desktop"
+    } else {
+        "mobile"
+    }];
+    if profile.framed_local_transport {
+        tags.push("framed_local");
+    }
+    if profile.full_durability {
+        tags.push("full_durability");
+    }
+    format!("{} ({})", profile.sub_profile.snake_name(), tags.join(", "))
+}
+
 /// Extracts a stable error-class fingerprint prefix from a failure message so `shrink_ops`
 /// preserves the original failure class instead of drifting onto an unrelated error when deleting
 /// ops, while still matching when dynamic IDs, revisions, or counts shift across shrunk traces.
-fn error_class_fingerprint(err: &str) -> String {
+pub fn error_class_fingerprint(err: &str) -> String {
     fn strip_leading_brackets(mut s: &str) -> &str {
         loop {
             let trimmed = s.trim_start();
@@ -6437,7 +6455,11 @@ fn error_class_fingerprint(err: &str) -> String {
         out.join(" ")
     }
 
-    let first_line = err.lines().next().unwrap_or(err).trim();
+    let first_line = err
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Reason:").map(str::trim))
+        .filter(|line| !line.is_empty())
+        .unwrap_or_else(|| err.lines().next().unwrap_or(err).trim());
     let mut parts = first_line.split(": ");
     let first = parts.next().map(normalize_segment).unwrap_or_default();
     if let Some(second_raw) = parts.next() {
@@ -6597,5 +6619,12 @@ mod tests {
             final_err.contains("RYW VIOLATION"),
             "final error must retain pinned class, got: {final_err}"
         );
+
+        let formatted = "=== CANBAN DST FAILURE ===\nScenario: chaos\nSeed: 42\nDigest: 0x0123456789abcdef\nReason: [primary] RYW VIOLATION: Card c99 regressed to rev 2 < 5\n";
+        assert_eq!(
+            error_class_fingerprint(formatted),
+            "RYW VIOLATION: Card # regressed to rev # < #"
+        );
+        assert!(profile_name(0).starts_with("delivery_and_storage ("));
     }
 }

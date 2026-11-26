@@ -54,6 +54,7 @@ jobs:
       - name: Run Deterministic Simulation Testing (DST)
         if: ${{ !cancelled() }}
         run: |
+          mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- corpus --jobs 4 --seed-timeout 60
           mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- run --seeds 1 --assert-coverage --seed-timeout 60
           mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario chaos --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
       - name: Run script and packaging tests
@@ -145,6 +146,7 @@ jobs:
       - name: Run Deterministic Simulation Testing (DST)
         if: ${{ !cancelled() }}
         run: |
+          mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- corpus --jobs 4 --seed-timeout 60
           mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- run --seeds 1 --assert-coverage --seed-timeout 60
           mise exec -- cargo run --release --locked -p canban-sim --bin canban-sim -- random --scenario chaos --seeds 12 --jobs 4 --master-seed 2026 --seed-timeout 60 --assert-coverage
       - name: Upload CI failure logs
