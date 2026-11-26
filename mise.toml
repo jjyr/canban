@@ -81,7 +81,7 @@ env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }
 run = "cargo nextest run --workspace --locked"
 
 [tasks.sim]
-description = "Run one complete deterministic simulation round (all 8 scenarios + chaos; pass -- --seed <N> [--scenario <name>] to replay)"
+description = "Run one complete deterministic simulation round (all 18 DST scenarios + chaos; pass -- --seed <N> [--scenario <name>] to replay)"
 env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }
 run = "cargo run --locked -p canban-sim --bin canban-sim -- run"
 
@@ -121,25 +121,13 @@ run = 'if [ "$(uname -s)" = "Darwin" ]; then exec .local/CanbanGallery.app/Conte
 depends = ["build"]
 run = "python3 scripts/acceptance-dev.py"
 
-[tasks.acceptance-notifications]
-depends = ["build"]
-run = "python3 scripts/acceptance-notifications.py"
-
 [tasks.acceptance]
 depends = ["build"]
 run = "python3 scripts/acceptance.py"
 
-[tasks.acceptance-agent-interface]
-depends = ["build"]
-run = 'python3 scripts/acceptance-agent-interface.py --output "${CANBAN_RUN_DIR:-/tmp}/canban-interface-acceptance"'
-
 [tasks.acceptance-real]
 depends = ["build"]
 run = "python3 scripts/acceptance-real.py"
-
-[tasks.acceptance-interactive]
-depends = ["build"]
-run = "python3 scripts/acceptance-interactive.py"
 
 [tasks.acceptance-real-interactive]
 depends = ["build"]
@@ -157,14 +145,6 @@ run = "python3 scripts/acceptance-real-workflows.py"
 depends = ["build"]
 run = "python3 scripts/acceptance-native.py"
 
-[tasks.acceptance-scheduling]
-depends = ["build"]
-run = "python3 scripts/acceptance-scheduling.py"
-
-[tasks.acceptance-overview]
-depends = ["build"]
-run = "python3 scripts/acceptance-overview.py"
-
 [tasks.acceptance-terminals]
 depends = ["build"]
 run = "python3 scripts/acceptance-terminals.py"
@@ -172,10 +152,6 @@ run = "python3 scripts/acceptance-terminals.py"
 [tasks.acceptance-terminal-context]
 depends = ["build"]
 run = "python3 scripts/acceptance-terminal-context.py"
-
-[tasks.acceptance-retained]
-depends = ["build"]
-run = "python3 scripts/acceptance-retained.py"
 
 [tasks.acceptance-events]
 depends = ["build"]
@@ -192,9 +168,6 @@ run = "python3 scripts/release.py dispatch"
 depends = ["build-release"]
 run = "python3 scripts/install-app.py"
 
-[tasks.acceptance-updates]
-run = "python3 scripts/acceptance-updates.py"
-
 [tasks.acceptance-backend]
 depends = ["build"]
 run = "python3 scripts/acceptance-backend.py"
@@ -208,6 +181,10 @@ run = "python3 scripts/test-package.py"
 [tasks.test-dev]
 run = "python3 scripts/test-dev.py"
 
+[tasks.test-dst-soak-issue]
+description = "Test DST soak issue formatting and deduplication helper"
+run = "python3 scripts/test-dst-soak-issue.py"
+
 [tasks.test-install]
 depends = ["build"]
 run = "python3 scripts/test-install.py"
@@ -220,25 +197,9 @@ run = "python3 scripts/test-release-upgrade.py"
 depends = ["build"]
 run = "python3 scripts/run-acceptance.py --suite integration"
 
-[tasks.acceptance-github-workspace]
-depends = ["build"]
-run = "python3 scripts/acceptance-github-workspace.py"
-
-[tasks.acceptance-github-native]
-depends = ["build"]
-run = "python3 scripts/acceptance-github-workspace.py --native"
-
 [tasks.acceptance-editor]
 depends = ["build"]
 run = "python3 scripts/acceptance-editor.py"
-
-[tasks.acceptance-workflows]
-depends = ["build"]
-run = "python3 scripts/acceptance-workflows.py"
-
-[tasks.acceptance-adoption]
-depends = ["build"]
-run = "python3 scripts/acceptance-adoption.py"
 
 [tasks.acceptance-agent-launch]
 depends = ["terminal-deps"]
@@ -250,7 +211,3 @@ run = ["cargo build --profile profiling --locked -p canban-ui -p canban-cli -p c
 
 [tasks.profile]
 run = "python3 scripts/profile.py"
-
-[tasks.acceptance-insights]
-depends = ["build"]
-run = "python3 scripts/acceptance-insights.py"

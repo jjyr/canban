@@ -89,9 +89,7 @@ New execution manifests keep source identities, local instructions and local his
 
 ## Validation
 
-`mise run test` covers provider caching/ETag/request coalescing, canonical references, pagination isolation, restart, migration and source ownership. `mise run acceptance-github-workspace` runs the real AppServer and gh subprocess boundary against `scripts/fixture-github.py` in an isolated home/Core. It checks Issue/PR intake, local references, paginated notification cache, versioned diff, write receipt replay, stale-head rejection, source refresh without dispatch and absence of remote bodies in business tables.
-
-`mise run acceptance-github-native` adds the packaged native app against the same deterministic remote for interactive acceptance. Gallery includes GitHub inbox, PR diff and offline cached-content scenes using production components. These fixtures are not live GitHub protected-branch, permission or OAuth acceptance. Historical live App/PR/merge evidence remains in [GitHub integration](github-integration.md).
+`mise run test` and `canban-sim` (`github_sync`, `workflow_faults`, `review_and_events`, `chaos`) cover provider caching/ETag/request coalescing, canonical references, pagination isolation, restart, migration, PR delivery, and source ownership. Gallery includes GitHub inbox, PR diff and offline cached-content scenes using production components. These fixtures are not live GitHub protected-branch, permission or OAuth acceptance. Historical live App/PR/merge evidence remains in [GitHub integration](github-integration.md).
 
 The [2026-11-10 acceptance report](github-workspace-acceptance-20261110.md) records the automated and native checks and the boundary between live notification reads and fixture-only writes.
 

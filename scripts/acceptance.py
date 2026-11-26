@@ -19,9 +19,42 @@ home = base / "home"
 cli = repo / "target/debug/canban"
 source = base / "source"
 source.mkdir(parents=True, exist_ok=True)
-env = {k:v for k,v in os.environ.items() if not k.startswith("CANBAN_")}
+env = {k: v for k, v in os.environ.items() if not k.startswith(("CANBAN_", "HC_", "HERDR_"))}
 env["CANBAN_HOME"] = str(home)
 core_env = {"HC_SESSION": "canban-acceptance", "HC_SOCKET": str(base / "hc.sock"), "XDG_STATE_HOME": str(base / "hc-state"), "XDG_CONFIG_HOME": str(base / "hc-config")}
+adopt_fixture = base / "adopt-fixture.py"
+adopt_fixture.write_text(r'''import json, os, subprocess, sys, termios, tty, uuid
+from pathlib import Path
+home = Path(os.environ["CANBAN_HOME"])
+sid = str(uuid.uuid4())
+subprocess.run([os.environ["CANBAN_CLI"], "bind-session", "--session-id", sid], check=True, capture_output=True)
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+tty.setraw(fd)
+try:
+    print("\x1b]7501;state=working\x1b\\", end="", flush=True)
+    (home / "adopt-ready.json").write_text(json.dumps({"pid": os.getpid(), "terminal": os.environ.get("HC_TERMINAL_ID"), "session": sid}))
+    buf = ""
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        buf += chunk.decode("utf-8", errors="replace")
+        if buf and all(c in ("\x1b", "\x03") for c in buf):
+            print("\x1b]7501;state=idle\x1b\\", end="", flush=True)
+            buf = ""
+        elif "\x1b[200~" in buf and "\x1b[201~" not in buf:
+            continue
+        elif buf.endswith(("\r", "\n")):
+            line = buf.replace("\x1b[200~", "").replace("\x1b[201~", "").strip()
+            buf = ""
+            if line == "adopt":
+                subprocess.run([os.environ["CANBAN_CLI"], "card", "adopt"], check=True, capture_output=True)
+            elif line == "/exit":
+                break
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+''')
 # Configure the isolated Core before the first service starts. Bootstrapping with
 # the default session and then changing sessions shares HC_SOCKET between two
 # Core identities and can leave the observer attached to the bootstrap Core.
@@ -67,6 +100,7 @@ try:
     config["default_agent"] = "fixture"
     config["capacity"] = 1  # Legacy keys must no longer restrict concurrency.
     config["profiles"].append({"id": "fixture", "argv": ["/usr/bin/python3", str(repo / "scripts/fixture-agent.py")], "capacity": 1})
+    config["profiles"].append({"id": "adopt", "preset": None, "resume_argv": [], "session_instruction": "", "exit": {"type": "input", "text": "/exit"}, "argv": ["/usr/bin/python3", str(adopt_fixture)]})
     for profile in config["profiles"]:
         if profile["id"] in ("developer", "reviewer"):
             profile["preset"] = None
@@ -196,9 +230,30 @@ steps:
     (barrier / "release").touch()
     wait_for(lambda s: len(s["reports"]) == 7 and all(r["state"] == "completed" for r in agents(s) if r["card_id"] in cards),
              "Concurrent Agents report independently")
-    print(f"GLOBAL_BUDGET_CONCURRENCY_OK three Boards, one profile, ignored legacy capacity=1\nACCEPTANCE_HOME={home}\nACCEPTANCE_PASSED", flush=True)
+    print("GLOBAL_BUDGET_CONCURRENCY_OK three Boards, one profile, ignored legacy capacity=1", flush=True)
+    # Smoke-test real-PTY adoption and interrupt delivery over the isolated Herdr Core.
+    adopt_project = call("project.create", {"name": "Adopt Smoke", "directory": str(base / "adopt-source"), "workspace": {"create_worktree": False, "sync_base": False}})
+    adopt_card = call("card.create", {"project_id": adopt_project["id"], "title": "Adopt and interrupt real PTY", "hold_auto_merge": True})
+    manual = call("terminal.create", {"card_id": adopt_card["id"], "agent": True, "profile_id": "adopt", "name": "Adopt smoke PTY"})
+    adopt_terminal = manual["runtime"]["terminal"]
+    wait_for(lambda _: (home / "adopt-ready.json").exists(), "Adopt smoke fixture ready")
+    before_adopt = json.loads((home / "adopt-ready.json").read_text())
+    assert before_adopt["terminal"] == adopt_terminal
+    subprocess.run(["hc", "send", adopt_terminal, "adopt", "--json"], env=env, capture_output=True, text=True, check=True, timeout=20)
+    adopted_state = wait_for(lambda s: any((t.get("agent") or {}).get("card_id") == adopt_card["id"] for t in s["terminals"]), "Real PTY adoption")
+    adopted_entry = next(t for t in adopted_state["terminals"] if (t.get("agent") or {}).get("card_id") == adopt_card["id"])
+    adopted_run = adopted_entry["agent"]
+    assert adopted_entry["id"] != manual["id"] and adopted_run["terminal"] == adopt_terminal
+    assert adopted_run["provider_session_id"] == before_adopt["session"]
+    assert adopted_run["observed"]["pid"] == before_adopt["pid"] and adopted_run["state"] == "running"
+    interrupt_req = {"terminal_id": adopted_entry["id"], "request_key": "acceptance-interrupt"}
+    interrupt_receipt = call("agent.interrupt", interrupt_req)
+    assert interrupt_receipt["state"] == "sent" and call("agent.interrupt", interrupt_req) == interrupt_receipt
+    wait_for(lambda s: any(t["id"] == adopted_entry["id"] and (((t.get("agent") or {}).get("observed") or {}).get("status") or {}).get("state") == "idle" for t in s["terminals"]),
+             "Real PTY interrupt observation")
+    print(f"ADOPT_INTERRUPT_SMOKE_OK\nACCEPTANCE_HOME={home}\nACCEPTANCE_PASSED", flush=True)
 finally:
     server.terminate()
     server.wait(timeout=10)
-    subprocess.run(["hc", "server", "stop"], env={**os.environ, **core_env}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    subprocess.run(["hc", "server", "stop"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
     log.close()

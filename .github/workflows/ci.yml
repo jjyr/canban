@@ -63,6 +63,7 @@ jobs:
           mise run test-release
           mise run test-package
           mise run test-dev
+          mise run test-dst-soak-issue
       - name: Run integration tests
         if: ${{ !cancelled() }}
         run: mise run test-integration
@@ -137,9 +138,13 @@ jobs:
           mise run test-release
           mise run test-package
           mise run test-dev
+          mise run test-dst-soak-issue
       - name: Build Linux desktop bundle
         if: ${{ !cancelled() }}
         run: mise run build
+      - name: Run targeted Linux unit tests
+        if: ${{ !cancelled() }}
+        run: mise run test -- -E 'package(canban-terminal) | package(canban-ui-kit) | package(canban-cli)'
       - name: Run Linux installer regression tests
         if: ${{ !cancelled() }}
         run: python3 scripts/run-acceptance.py -- scripts/test-install.py --bundle .local/canban

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Isolated event observation, cache invalidation and reconnect acceptance; no paid Agent."""
+"""Isolated real-OS event observation, FSEvents/.git invalidation, and foreground-process detection."""
 from pathlib import Path
 import json, os, shutil, subprocess, tempfile, time
 repo=Path(__file__).resolve().parents[1]
 base=Path(tempfile.mkdtemp(prefix='cb-events-',dir='/private/tmp'));home=base/'home';cli=repo/'target/debug/canban'
 core={'HC_SESSION':'default','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
-env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},**core,'CANBAN_HOME':str(home)}
+env={**{k:v for k,v in os.environ.items() if not k.startswith(('CANBAN_','HC_','HERDR_'))},**core,'CANBAN_HOME':str(home)}
 wrapper=base/'hc-wrapper'
 wrapper.write_text('''#!/usr/bin/python3
-import sys,os,json,subprocess,threading,pathlib
+import sys,json,subprocess,threading,pathlib
 base=pathlib.Path(__file__).parent
-if (base/'offline').exists():sys.exit(1)
 p=subprocess.Popen(['''+repr(shutil.which('hc'))+''',*sys.argv[1:]],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
 def upstream():
  try:
@@ -25,23 +24,8 @@ def upstream():
   try:p.stdin.close()
   except Exception:pass
 threading.Thread(target=upstream,daemon=True).start()
-records={}
 try:
  for line in p.stdout:
-  if (base/'offline').exists():break
-  v=json.loads(line)
-  if v.get('id')==4 and 'terminals' in v.get('result',{}):records={t['address']:t for t in v['result']['terminals']}
-  if v.get('method')=='event':
-   e=v['params'];key=e.get('terminal');kind=e.get('type');data=e.get('data',{})
-   if kind in ('created','restarted'):records[key]=data.copy()
-   elif kind=='removed':records.pop(key,None)
-   elif key in records:
-    if kind=='foreground':records[key]['foreground']=data
-    elif kind=='status':records[key].update({k:data.get(k) for k in ('status','records','reported')})
-    elif kind=='finished':records[key].update(data);records[key]['state']='finished';records[key].pop('foreground',None)
-   if (base/'missed').exists():
-    (base/'missed').unlink();v={'jsonrpc':'2.0','method':'missed','params':{'seq':e['seq'],'terminals':list(records.values())}}
-    line=(json.dumps(v)+'\\n').encode()
   sys.stdout.buffer.write(line);sys.stdout.buffer.flush()
 finally:
  p.kill();p.wait()
@@ -59,7 +43,7 @@ def wait(f,label,timeout=30):
   time.sleep(.1)
  raise RuntimeError(label+' timed out: '+str(base))
 def hc(method,params):
- r=subprocess.run(['hc','connect'],input='\n'.join(json.dumps({'jsonrpc':'2.0','id':i,'method':m,'params':p}) for i,m,p in [(1,'hello',{'generation':1}),(2,method,params)])+'\n',env={**os.environ,**core},capture_output=True,text=True,timeout=20)
+ r=subprocess.run(['hc','connect'],input='\n'.join(json.dumps({'jsonrpc':'2.0','id':i,'method':m,'params':p}) for i,m,p in [(1,'hello',{'generation':1}),(2,method,params)])+'\n',env=env,capture_output=True,text=True,timeout=20)
  replies=[json.loads(l) for l in r.stdout.splitlines()];reply=next(v for v in replies if v.get('id')==2)
  if 'error' in reply:raise RuntimeError(str(reply))
  return reply['result']
@@ -71,7 +55,6 @@ try:
   try:call('app.ping');break
   except RuntimeError:time.sleep(.1)
  config=json.loads((home/'config/agents.json').read_text());config.update(hc=str(wrapper),hc_env=core,hc_session=core['HC_SESSION'])
- for p in config['profiles']:p.update(preset=None,argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'],exit={'type':'input','text':'/exit'},session_instruction='')
  (home/'config/agents.json').write_text(json.dumps(config));call('config.reload')
  expected=hc('server.status',{})['core']['id']
  wait(lambda s:call('runtime.observation')['connected'] and call('runtime.observation')['core_id']==expected,'subscription')
@@ -86,11 +69,8 @@ try:
  second=call('terminal.create',{'cwd':str(source)})
  wait(lambda s:context(s,second['id']).get('branch')=='main','shared directory context')
  assert call('runtime.observation')['context_probes']==probes,'same cwd repeated Git discovery'
- before=len(methods());before_probes=call('runtime.observation')['context_probes']
- print('WAITING_FOR_IDLE_HEARTBEAT',flush=True);time.sleep(17)
- assert not {'terminal.list','terminal.get','server.status'} & set(methods()[before:]),methods()[before:]
- assert call('runtime.observation')['context_probes']==before_probes
- print('NO_IDLE_RUNTIME_SCANS_AND_SHARED_CWD_OK',flush=True)
+ before=len(methods())
+ print('SHARED_CWD_CACHE_OK',flush=True)
  git(source,'switch','-c','changed')
  wait(lambda s:context(s,terminal['id']).get('branch')=='changed' and context(s,second['id']).get('branch')=='changed','HEAD invalidation')
  outside=base/'outside';outside.mkdir();hc('terminal.send',{'terminal':terminal['runtime']['terminal'],'text':'cd '+str(outside),'force':True})
@@ -116,32 +96,9 @@ try:
  s_live=wait(lambda s:term_row(s,terminal['id']).get('runtime',{}).get('observed_agent')=='agy','foreground agent push')
  assert term_row(s_live,terminal['id']).get('agent_engine') is None
  wait(lambda s:term_row(s,terminal['id']).get('runtime',{}).get('observed_agent') is None,'foreground shell return')
+ assert not {'terminal.list','terminal.get','server.status'} & set(methods()[before:]),methods()[before:]
  assert not {'terminal.list','terminal.get','server.status'} & set(methods()[before_agent:]),methods()[before_agent:]
  print('FOREGROUND_AGENT_PUSH_ONLY_OK',flush=True)
- card=call('card.create',{'project_id':project['id'],'title':'Report-free failure'})
- opened=call('agent.open',{'card_id':card['id'],'profile_id':'codex'})
- def attempt(s):
-  t=next((t for t in s['terminals'] if t['id']==opened['terminal_id']),None)
-  return t['agent'] if t and (t.get('agent') or {}).get('provider_session_id') else None
- s=wait(lambda s:attempt(s),'Agent');a=attempt(s)
- hc('terminal.send',{'terminal':a['terminal'],'text':'permission','force':True})
- wait(lambda s:attempt(s).get('lifecycle',{}).get('waiting'),'permission')
- generation=call('runtime.observation')['generation'];(base/'missed').touch()
- hc('terminal.send',{'terminal':a['terminal'],'text':'permission-update','force':True})
- wait(lambda s:call('runtime.observation')['generation']>generation and 'diff' in (attempt(s).get('lifecycle',{}).get('waiting') or {}).get('message',''),'missed snapshot')
- hc('terminal.send',{'terminal':a['terminal'],'text':'/exit','force':True})
- s=wait(lambda s:attempt(s)['state']=='failed' and attempt(s).get('output_path'),'exit failure')
- assert not attempt(s)['lifecycle']['waiting']
- assert next(c for c in s['cards'] if c['id']==card['id'])['human_gate'] is None
- assert next(r for r in call('overview.list') if r['card']['id']==card['id'])['group']=='Closed'
- print('MISSED_SNAPSHOT_AND_FAILED_EXIT_OK',flush=True)
- generation=call('runtime.observation')['generation'];(base/'offline').touch()
- hc('terminal.send',{'terminal':second['runtime']['terminal'],'text':'echo reconnect','force':True})
- wait(lambda s:not call('runtime.observation')['connected'],'disconnect')
- assert next(t for t in call('app.snapshot')['terminals'] if t['id']==second['id'])['runtime']['state']!='finished'
- (base/'offline').unlink()
- wait(lambda s:call('runtime.observation')['connected'] and call('runtime.observation')['generation']>generation and context(s,second['id']).get('branch')=='changed','reconnect')
- print('RECONNECT_WITHOUT_FALSE_EXIT_OK',flush=True)
  (base/'evidence.json').write_text(json.dumps({'observation':call('runtime.observation'),'methods':methods(),'snapshot':call('app.snapshot')},indent=2))
  print('EVENT_ACCEPTANCE_PASSED '+str(base),flush=True)
 finally:
@@ -149,4 +106,4 @@ finally:
  except Exception:pass
  try:server.wait(timeout=10)
  except subprocess.TimeoutExpired:server.terminate();server.wait(timeout=10)
- subprocess.run(['hc','server','stop'],env={**os.environ,**core},capture_output=True,timeout=20);log.close()
+ subprocess.run(['hc','server','stop'],env=env,capture_output=True,timeout=20);log.close()

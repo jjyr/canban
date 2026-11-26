@@ -16,12 +16,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 INTEGRATION_SUITE = [
     "scripts/acceptance.py",
-    "scripts/acceptance-interactive.py",
-    "scripts/acceptance-adoption.py",
-    "scripts/acceptance-workflows.py",
-    "scripts/acceptance-github-workspace.py",
-    "scripts/acceptance-notifications.py",
-    "scripts/acceptance-scheduling.py",
     "scripts/acceptance-events.py",
     "scripts/acceptance-dev.py",
     "scripts/acceptance-backend.py",

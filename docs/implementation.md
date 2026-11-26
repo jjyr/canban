@@ -78,12 +78,10 @@ exit condition. The optional RPC context advances desktop API to **66**; the
 database schema is unchanged. Remote CLI requests carry the same optional context
 and are scoped to their authenticated reporting bridge's machine.
 
-`mise run acceptance-adoption` exercises a deterministic provider over a real
-isolated Core/PTy, including in-process CLI identity inheritance, no relaunch,
-idempotent takeover, AppServer restart, completed idle exit and exact Resume.
-`mise exec -- python3 scripts/acceptance-adoption.py --native` also opens a copied
-packaged app for selected-terminal continuity checks. These scenarios do not use
-paid provider APIs or the user's installed Canban home/Core.
+Full adoption, restart, idle exit, and resume coverage runs in DST (`canban-sim`
+`sessions_and_adoption` and `chaos`), while `mise run acceptance` includes a real-PTY
+`adopt` + `interrupt` smoke check over an isolated Core without paid provider APIs or
+the user's installed Canban home/Core.
 
 Executed acceptance (2026-11-18): baseline `mise run acceptance` passed with
 `/private/tmp/cb-l6_m56ma/home`. The adoption scenario passed at
@@ -209,14 +207,12 @@ The CLI sends file contents, not just a temporary path. Completed gets a stable 
 
 ```sh
 mise run test
-mise exec -- cargo clippy --workspace --all-targets -- -D warnings
-mise run acceptance
-mise run acceptance-interactive
+mise run lint
+mise run sim
+mise run test-integration
 # Explicitly opt in to real-model usage:
 mise run acceptance-real-interactive
 mise run acceptance-real-workflows
-# Deliver that real-workflow output without another model call:
-mise exec -- python3 scripts/acceptance-delivery.py /private/tmp/cb-real-workflows-BASE
 ```
 
 The acceptance script creates a fresh temporary Canban home and isolated HC_SESSION/HC_SOCKET/state/config. It starts a deterministic fixture program through the real installed Herdr core and PTY, and checks queued launch, work product, captured profile role instructions, distinct template-selected Developer/Reviewer executions, explicit CLI outcomes, automatic Develop -> Review, fresh mention, blocked notice, WAL, report compression/read/restore and restart without duplicate scheduling. It stops only that scratch core. It does not call a paid model.
