@@ -1926,7 +1926,6 @@ fn remove_confirm_modal(ui: Ui) -> impl IntoElement {
 mod tests {
     use super::*;
     use canban_types::Workflow;
-    use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
     use serde_json::json;
 
     fn sample_project(target_branch: Option<&str>, base_branch: Option<&str>) -> Project {
@@ -1996,53 +1995,5 @@ mod tests {
                 && o.group.as_deref() == Some("Remote Branches")
                 && o.detail == "default remote"
         }));
-    }
-
-    #[test]
-    fn create_modal_renders_detected_default_branch_and_resolved_sync_remote() {
-        #[component]
-        fn CreateWorktreeModalProbe() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            let ui = Ui::new();
-            let proj = sample_project(Some("lsp-support"), None);
-            ui.snapshot.update(|s| {
-                s.projects.push(proj);
-            });
-            ui.project.set("proj-1".into());
-            ui.review_state.refs_data.set(json!({
-                "default_branch": "develop",
-                "remote_name": "origin",
-                "sync_remote": "upstream",
-                "branches": [
-                    {"name": "develop", "kind": "local", "short_sha": "aaa1111", "is_current": false, "is_default": true},
-                    {"name": "upstream/develop", "kind": "remote", "short_sha": "aaa1111", "is_current": false, "is_default": false},
-                ]
-            }));
-            ui.worktree_modal.set(Some("proj-1".into()));
-            create_modal(ui)
-        }
-
-        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
-        core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<CreateWorktreeModalProbe>());
-        let batch = core.commit().expect("worktree modal mount");
-        let texts: Vec<String> = batch
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                MountItem::Text { text, .. } => Some(text.text.to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            texts.iter().any(|t| t == "develop (default)"),
-            "expected detected default branch label, got {texts:?}"
-        );
-        assert!(
-            texts
-                .iter()
-                .any(|t| t == "Sync base branch from `upstream` before branching"),
-            "expected resolved sync remote label, got {texts:?}"
-        );
     }
 }

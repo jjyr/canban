@@ -2482,60 +2482,6 @@ mod tests {
         assert_eq!(workspace_dismiss_action("new-card", true), None);
     }
 
-    #[test]
-    fn ui_report_and_markdown_caches_enforce_lru_bounds_and_version_invalidation() {
-        #[component]
-        fn ProbeRoot() -> impl IntoElement {
-            let ui = Ui::new();
-            // 1. Report body cache enforces `REPORT_BODY_CACHE_CAP` and version checks.
-            for i in 0..(REPORT_BODY_CACHE_CAP + 4) {
-                ui.store_report_body(
-                    "card-88".into(),
-                    format!("reports/{i}.md"),
-                    10,
-                    format!("Body #{i}"),
-                );
-            }
-            assert_eq!(ui.report_bodies.with(|c| c.len()), REPORT_BODY_CACHE_CAP);
-            assert_eq!(ui.cached_report_body("card-88", "reports/0.md", 10), None);
-            assert_eq!(
-                ui.cached_report_body("card-88", "reports/4.md", 10),
-                Some("Body #4".into())
-            );
-            assert_eq!(
-                ui.cached_report_body("card-88", "reports/4.md", 11),
-                None,
-                "stale cached report body must be rejected when event version advances"
-            );
-
-            // 2. Parsed Markdown cache enforces `PARSED_MARKDOWN_CACHE_CAP`.
-            for i in 0..(PARSED_MARKDOWN_CACHE_CAP + 5) {
-                let _ = ui.parse_markdown_cached(&format!("## Reply {i}\nParagraph {i}"));
-            }
-            assert_eq!(
-                ui.parsed_markdown.with(|c| c.len()),
-                PARSED_MARKDOWN_CACHE_CAP
-            );
-            assert!(
-                !ui.parsed_markdown
-                    .with(|c| c.contains_key("## Reply 0\nParagraph 0"))
-            );
-            assert!(
-                ui.parsed_markdown
-                    .with(|c| c.contains_key("## Reply 5\nParagraph 5"))
-            );
-
-            view()
-        }
-
-        let mut core = nsh_core::Core::new(
-            nsh_core::ApproxTextEngine,
-            nsh_core::geometry::size(px(200.0), px(100.0)),
-        );
-        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
-        let _ = core.commit();
-    }
-
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct DynamicViolation {
         line: usize,

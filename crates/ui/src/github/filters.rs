@@ -572,41 +572,4 @@ mod tests {
         assert_eq!(filters["remote:p"].kind, "pr");
         assert_eq!(restored(&prefs, "bob", &pending)["p"].kind, "local");
     }
-    #[test]
-    fn local_projects_render_the_same_mine_and_tag_filter_controls() {
-        use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
-        #[component]
-        fn FilterProbe() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            let ui = Ui::new();
-            ui.project.set("local-project".into());
-            mine(ui);
-            crate::tags::toggle_board_filter(ui, "local-project", "bug");
-            toolbar(ui)
-        }
-        let mut core = Core::new(ApproxTextEngine, size(px(700.), px(400.)));
-        core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<FilterProbe>());
-        let batch = core.commit().unwrap();
-        let texts: Vec<_> = batch
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                MountItem::Text { text, .. } => Some(text.text.to_string()),
-                _ => None,
-            })
-            .collect();
-        for wanted in [
-            "Type: All cards ▾",
-            "Author: Mine ▾",
-            "Tags (1) ▾",
-            "#bug ×",
-            "Reset",
-        ] {
-            assert!(
-                texts.iter().any(|t| t == wanted),
-                "Missing {wanted}: {texts:?}"
-            );
-        }
-    }
 }

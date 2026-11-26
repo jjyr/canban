@@ -15,11 +15,6 @@ pub use entries::{Entry, entries};
 use nsh_core::prelude::*;
 use serde_json::json;
 
-#[cfg(test)]
-pub(crate) fn sidebar_for_test(ui: Ui) -> impl IntoElement {
-    tree::sidebar(ui)
-}
-
 pub(crate) fn host_connect_epoch(ui: Ui, host_id: &str) -> u64 {
     if host_id.is_empty() || host_id == "local" {
         return 0;

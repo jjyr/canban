@@ -82,14 +82,6 @@ pub fn sidebar_host_badge(e: &Entry, machine: &str) -> Option<String> {
     }
 }
 
-/// Right-aligned compact Herdr status indicator for a Terminal sidebar row.
-/// Plain idle Shells return `None` to stay quiet. When `show_word` is `false`
-/// (narrow sidebars `< 230px`), only the semantic status mark is rendered.
-#[cfg(test)]
-pub fn sidebar_status_compact(e: &Entry, show_word: bool) -> Option<AnyElement> {
-    sidebar_status_model(e, show_word).map(render_sidebar_status)
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GroupStatusSummary {
     pub total: usize,
