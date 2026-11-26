@@ -14,8 +14,8 @@
 </p>
 
 <p align="center">
-  <strong>Run 10+ coding agents without drowning in terminal tabs.</strong><br/>
-  A native <strong>Rust + <code>libghostty</code></strong> workbench for <strong>Claude Code, Codex, and Cursor CLI</strong> - with an instant attention inbox (<code>⌘I</code>), per-card Git worktree review, and GitHub Actions-like local workflows.
+  <strong>Organize with Kanban. Work with native agent CLIs.</strong><br/>
+  A lightweight, native <strong>Rust + <code>libghostty</code></strong> app for <strong>Claude Code, Codex, Cursor CLI, Antigravity (<code>agy</code>), and more</strong> — zero Electron, zero chat wrapper, with restart-safe PTYs, an attention inbox (<code>⌘I</code>), and per-card Git worktree review.
 </p>
 
 <h3 align="center"><a href="#installation"><ins>Quick Install</ins></a> · <a href="https://canban.dev"><ins>canban.dev</ins></a> · <a href="https://canban.dev/docs/"><ins>Docs</ins></a></h3>
@@ -26,9 +26,9 @@
 
 ## Why Canban?
 
-- **Stop hunting through 10 tmux panes**: One global attention inbox (`⌘I`) tells you the exact moment an agent pauses for `[Y/n]` permission, input, or code review across every project and host.
-- **Zero-wrapper native terminals**: Keep your real `claude`, `codex`, `agy`, or `cursor-agent` CLI. Powered by native Rust UI and `libghostty-vt` over persistent PTYs that survive app restarts.
-- **Review and merge without leaving the app**: Every card gets an isolated Git worktree, built-in inline diff review (`@Agent` comments on specific lines), and an automated `plan → develop → merge` queue.
+- **Lightweight & native**: Built in Rust + NSH + `libghostty-vt`. No Electron, no Chromium, no cloud account — just a fast local app backed by SQLite that stays out of your way.
+- **Organize with Kanban**: One board per local directory or Git repo (`Backlog → Develop → Review`). Keep task specs, comments, worktrees, and inline diffs together on one card with zero setup ceremony.
+- **Work with native agent CLIs**: Run your real `claude`, `codex`, `agy`, `cursor-agent`, or `pi` CLI inside restart-safe persistent PTYs. Full native TUI, permissions, MCPs, skills, and session resume — plus a global `⌘I` inbox whenever an agent needs you.
 
 ## Features
 
@@ -36,27 +36,39 @@
 <tr>
 <td width="50%" valign="middle">
 
-### Attention Inbox (`⌘I`)
+### Kanban Board &amp; Card Context
 
-Never miss a blocked agent again. One global notification center across all projects, worktrees, and remote hosts shows which agent is waiting for input, tool approval, or review - and jumps straight to its Card and live terminal in one keystroke.
+Organize work around any local directory or Git repo with a fast `Backlog → Develop → Review` board. Keep Markdown specs, screenshots, `#Card` and GitHub Issue/PR links, and `@Agent` discussions right beside a live terminal.
 
 </td>
 <td width="50%">
-  <img src="docs/assets/notification-center.jpg" alt="Canban Notification Center showing waiting agents and one-click jump to Card and terminal" width="100%" />
+  <img src="website/screenshots/board-terminal.png" alt="Canban Kanban board and card specification beside a live native Agent CLI terminal" width="100%" />
 </td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
 
-### Native Agent CLI &amp; Persistent Terminals
+### Native Agent CLIs &amp; Persistent Terminals
 
-No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt` - preserving native TUIs, interactive permissions, MCPs, skills, and session resume.
+No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt` — preserving native TUIs, interactive permissions, MCPs, skills, and session resume.
 
 [Docs →](https://canban.dev/docs/agents/)
 
 </td>
 <td width="50%">
   <img src="docs/assets/terminals-cli.jpg" alt="Canban Terminals workspace running native Agent CLIs" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Attention Inbox (`⌘I`)
+
+Never miss a blocked agent again. One global notification center across all projects, worktrees, and remote hosts catches `[Y/n]` permissions, follow-up questions, and completed runs — and jumps straight to its Card and live terminal in one keystroke.
+
+</td>
+<td width="50%">
+  <img src="docs/assets/notification-center.jpg" alt="Canban Notification Center showing waiting agents and one-click jump to Card and terminal" width="100%" />
 </td>
 </tr>
 <tr>
@@ -76,9 +88,9 @@ Inspect commits and isolated per-card worktree diffs without switching to an ext
 <tr>
 <td width="50%" valign="middle">
 
-### Programmable Workflows (GitHub Actions for Local Agents)
+### Programmable Workflows (Optional)
 
-Ready to automate the loop? Write GitHub Actions-like YAML combining shell scripts and `agent` + prompt steps. Turn any card into a hands-free `plan → develop → merge` pipeline with cron schedules and a serialized merge queue.
+Want to automate the loop when you're ready? Opt in to GitHub Actions-like local YAML combining shell scripts and `agent` + prompt steps, cron schedules, and a serialized merge queue.
 
 [Docs →](https://canban.dev/docs/workflows/)
 
@@ -92,7 +104,7 @@ Ready to automate the loop? Write GitHub Actions-like YAML combining shell scrip
 
 ### Multi-Machine over SSH &amp; Tailscale
 
-Offload heavy builds and agent runs to remote Linux boxes. Connect your local macOS/Linux desktop app to headless `canband` hosts over SSH or Tailscale and control remote boards, workflows, and live 120Hz terminals seamlessly.
+Offload heavy builds and agent runs to remote Linux boxes. Connect your lightweight macOS/Linux desktop app to headless `canband` hosts over SSH or Tailscale and control remote boards, workflows, and live 120Hz terminals seamlessly.
 
 [Docs →](https://canban.dev/docs/remote-hosts/)
 

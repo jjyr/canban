@@ -12,10 +12,10 @@
     "nav_aria": "Main navigation",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-24",
+    "install_updated": "2026-11-26",
     "install_title": "Install Canban",
     "install_desc": "Install or update Canban on macOS, Linux, and Android, set up a headless server, and find answers to common questions.",
-    "install_intro": "A native workbench on your desktop. Persistent agents on your server.",
+    "install_intro": "Organize with Kanban. Work with native agent CLIs — lightweight on your desktop, persistent on your server.",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS desktop app showing Card #2 in Develop with an isolated Git worktree, activity comments, workflow pipeline status, and a live Herdr @developer terminal running cargo test.",
@@ -50,7 +50,7 @@
     "faq_items": [
       [
         "What is Canban?",
-        "Canban is a native Kanban and terminal workbench for AI coding agents. It brings task specifications, agent discussions, progress, and code review together on cards, with workflows that organize development and delivery."
+        "Canban is a lightweight, native Rust app (zero Electron) that pairs a local Kanban board with your real agent CLIs in persistent terminals. Keep task specs, agent discussions, worktree diffs, and optional workflows together on cards."
       ],
       [
         "Which agents can I use?",
@@ -95,10 +95,10 @@
     "nav_aria": "主导航",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-24",
+    "install_updated": "2026-11-26",
     "install_title": "安装 Canban",
     "install_desc": "在 macOS、Linux 和 Android 上安装或更新 Canban，配置无桌面的远程服务器，并查看常见问题解答。",
-    "install_intro": "桌面上的原生工作台，服务器上持续运行的 Agent。",
+    "install_intro": "用看板理清任务，用原生 Agent CLI 完成开发——轻量原生桌面端，持久可靠的后台会话。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS 桌面应用界面：Develop 列中的 Card #2 展示独立 Git Worktree、活动时间线、工作流进度条，以及右侧运行 cargo test 的实时 Herdr @developer 终端。",
@@ -133,7 +133,7 @@
     "faq_items": [
       [
         "Canban 是什么？",
-        "Canban 是面向 AI 编程 Agent 的原生看板与终端工作台。它将任务说明、Agent 讨论、开发进度和代码审查集中在卡片中，并通过工作流组织开发与交付。"
+        "Canban 是一款轻量级原生 Rust 应用（零 Electron），将本地看板与持久化终端中的真实 Agent CLI 结合在一起。你可以在卡片中集中管理任务说明、Agent 讨论、Worktree Diff 审查与按需启用的工作流。"
       ],
       [
         "支持哪些 Agent？",
@@ -178,10 +178,10 @@
     "nav_aria": "主導覽",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-24",
+    "install_updated": "2026-11-26",
     "install_title": "安裝 Canban",
     "install_desc": "在 macOS、Linux 與 Android 上安裝或更新 Canban，部署無桌面環境的遠端伺服器，並查看常見問題解答。",
-    "install_intro": "桌面上的原生工作台，伺服器上持續運作的 Agent。",
+    "install_intro": "用看板理清任務，用原生 Agent CLI 完成開發——輕量原生桌面端，持久可靠的背景工作階段。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS 桌面應用介面：Develop 欄中的 Card #2 展示獨立 Git Worktree、活動時間軸、工作流進度條，以及右側執行 cargo test 的即時 Herdr @developer 終端機。",
@@ -216,7 +216,7 @@
     "faq_items": [
       [
         "Canban 是什麼？",
-        "Canban 是面向 AI 程式設計 Agent 的原生看板與終端機工作台。它將任務規格、Agent 討論、執行進度與程式碼審查整合在同一張卡片上，並以工作流串聯開發與交付。"
+        "Canban 是一款輕量級原生 Rust 應用（零 Electron），將本地看板與持久化終端機中的真實 Agent CLI 結合在一起。你可以在卡片中集中管理任務規格、Agent 討論、Worktree Diff 審查與按需啟用的工作流。"
       ],
       [
         "支援哪些 Agent？",
@@ -261,10 +261,10 @@
     "nav_aria": "メインナビゲーション",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-24",
+    "install_updated": "2026-11-26",
     "install_title": "Canban をインストール",
     "install_desc": "macOS、Linux、Android への Canban のインストール・更新方法、ヘッドレス Linux サーバー構築、よくある質問をまとめています。",
-    "install_intro": "デスクトップにはネイティブワークベンチを。サーバーには止まらない永続エージェントを。",
+    "install_intro": "カンバンで整理し、ネイティブ Agent CLI で開発する——軽量なネイティブアプリと止まらない永続セッション。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS デスクトップアプリ画面：Develop 列の Card #2 に独立 Git Worktree、アクティビティログ、ワークフロー進捗バー、右側で cargo test を実行中の Herdr @developer ターミナルが並んで表示されています。",
@@ -299,7 +299,7 @@
     "faq_items": [
       [
         "Canban とは何ですか？",
-        "Canban は AI コーディングエージェント向けのネイティブカンバン＆ターミナルワークベンチです。タスク仕様、エージェントとの議論、進捗、コードレビューをカードに集約し、開発からマージまでをワークフローで自動化します。"
+        "Canban は Electron 不使用の軽量なネイティブ Rust アプリです。ローカルのカンバンボードと永続ターミナル上のネイティブ Agent CLI を組み合わせ、タスク仕様、エージェントとの議論、Worktree Diff レビュー、必要なときだけ使えるワークフローをカード上に集約します。"
       ],
       [
         "どのエージェントが使えますか？",
@@ -344,10 +344,10 @@
     "nav_aria": "기본 내비게이션",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-24",
+    "install_updated": "2026-11-26",
     "install_title": "Canban 설치",
     "install_desc": "macOS, Linux 및 Android에 Canban을 설치·업데이트하고, 헤드리스 Linux 서버를 구성하며, 자주 묻는 질문의 답변을 확인하세요.",
-    "install_intro": "데스크톱에서는 네이티브 워크벤치를, 서버에서는 끊김 없는 에이전트를 실행하세요.",
+    "install_intro": "칸반으로 정리하고 네이티브 Agent CLI로 개발하세요 — 가벼운 네이티브 앱, 끊기지 않는 영구 세션.",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS 데스크톱 앱 화면: Develop 열의 Card #2에 격리된 Git Worktree, 활동 내역, 워크플로우 진행 막대 및 오른쪽에서 cargo test를 실행 중인 Herdr @developer 터미널이 나란히 표시됩니다.",
@@ -382,7 +382,7 @@
     "faq_items": [
       [
         "Canban은 무엇인가요?",
-        "Canban은 AI 코딩 에이전트를 위한 네이티브 칸반 및 터미널 워크벤치입니다. 작업 명세, 에이전트 대화, 진행 상황, 코드 리뷰를 카드 하나에 모으고 워크플로우로 개발과 병합을 자동화합니다."
+        "Canban은 Electron 없는 가벼운 네이티브 Rust 앱으로, 로컬 칸반 보드와 영구 터미널의 네이티브 Agent CLI를 결합합니다. 작업 명세, 에이전트 대화, Worktree Diff 리뷰, 선택적 워크플로우를 카드 하나에서 관리하세요."
       ],
       [
         "어떤 에이전트를 사용할 수 있나요?",

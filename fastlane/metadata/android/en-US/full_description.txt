@@ -1,4 +1,4 @@
-Canban is the open-source (Apache-2.0) mobile companion for your self-hosted Canban desktop and headless Linux canband coding workbenches.
+Organize with Kanban. Work with native agent CLIs. Canban is the lightweight, open-source (Apache-2.0) mobile companion for your self-hosted Canban desktop and headless Linux canband hosts.
 
 Key capabilities:
 - Zero-QR Tailscale & on-demand Tailnet discovery: Sign into your own personal Tailscale hosts directly with host.ts.net or 100.x.y.z (WhoIs auto-auth) and discover sibling hosts in Settings -> Discover on Tailnet, or pair cross-account / custom-VPN hosts via one-time canban:// QR/URI invites with per-device revocable tokens over yamux/1.

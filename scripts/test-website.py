@@ -504,8 +504,8 @@ class WebsiteTest(unittest.TestCase):
                 # Page-scoped lastmod must reflect content metadata, not blindly mirror latest release date.
                 self.assertNotEqual(lastmod, self.releases[0]["published_at"][:10], loc)
                 self.assertEqual(lastmod, expected_lastmod[loc], loc)
-        self.assertEqual(pages_json["en"]["install_updated"], "2026-11-24")
-        self.assertEqual(locales_json["en"]["updated"], "2026-11-24")
+        self.assertEqual(pages_json["en"]["install_updated"], "2026-11-26")
+        self.assertEqual(locales_json["en"]["updated"], "2026-11-26")
         self.assertEqual(docs_by_lang["en"]["docs/workflows"]["updated"], "2026-11-24")
         self.assertEqual(docs_by_lang["en"]["guides/parallel-coding-agents"]["updated"], "2026-11-24")
         self.assertEqual(docs_by_lang["en"]["guides/scheduled-worktree-cleanup"]["updated"], "2026-11-24")

@@ -1312,7 +1312,7 @@ desktop_text = "\n".join([
     "[Desktop Entry]",
     "Type=Application",
     "Name=Canban",
-    "Comment=AI-native Kanban workbench with Git worktree workflows and Herdr PTY terminals",
+    "Comment=Organize with Kanban. Work with native agent CLIs.",
     f"Exec={exec_field}",
     "Icon=com.canban.desktop",
     "Terminal=false",

@@ -13,7 +13,7 @@
       ],
       "url": "https://canban.dev/",
       "inLanguage": "en",
-      "description": "Official website for Canban — the open-source native macOS and Linux Kanban & terminal workbench for AI coding agents (Canban = Kanban + Workflow + Herdr)."
+      "description": "Official website for Canban — Organize with Kanban. Work with native agent CLIs. A lightweight, open-source native macOS and Linux Rust app (Canban = Kanban + Workflow + Herdr)."
     },
     {
       "@type": "SoftwareApplication",
@@ -34,7 +34,7 @@
         "https://canban.dev/screenshots/review-diff.png"
       ],
       "applicationCategory": "DeveloperApplication",
-      "applicationSubCategory": "AI Coding Agent Kanban & Native Terminal Workbench",
+      "applicationSubCategory": "Lightweight Kanban & Native Agent CLI App",
       "operatingSystem": "macOS 13.0+, Linux (x86_64, arm64), Android (arm64-v8a)",
       "softwareRequirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode)",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
@@ -49,7 +49,7 @@
         "name": "JJy",
         "url": "https://github.com/jjyr"
       },
-      "description": "Canban is an open-source native macOS and Linux Kanban and terminal workbench built in Rust that unifies flexible Kanban cards, a global Attention Inbox, GitHub Actions-like Workflows with isolated Git worktrees and FIFO Queue Merge, inline Git diff review, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
+      "description": "Organize with Kanban. Work with native agent CLIs. Canban is a lightweight, open-source native macOS and Linux Rust app (zero Electron) pairing local Kanban cards, a global Attention Inbox, isolated Git worktree diff review, optional local workflows, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
       "featureList": [
         "Flexible Kanban board with Markdown specs, #Card links, screenshots, @Agent discussions, isolated per-card Git worktrees, and GitHub Issue/PR sync",
         "GitHub Actions-like YAML workflows & Visual Studio with shell scripts, agent + prompt steps, cron schedules, and serialized FIFO Queue Merge",
@@ -62,9 +62,9 @@
   ],
   "localized": {
     "en": {
-      "website_desc": "Official website for Canban — the open-source native macOS and Linux Kanban & terminal workbench for AI coding agents (Canban = Kanban + Workflow + Herdr).",
-      "software_desc": "Canban is an open-source native macOS and Linux Kanban and terminal workbench built in Rust that unifies flexible Kanban cards, a global Attention Inbox, GitHub Actions-like Workflows with isolated Git worktrees and FIFO Queue Merge, inline Git diff review, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
-      "application_sub_category": "AI Coding Agent Kanban & Native Terminal Workbench",
+      "website_desc": "Official website for Canban — Organize with Kanban. Work with native agent CLIs. A lightweight, open-source native macOS and Linux Rust app (Canban = Kanban + Workflow + Herdr).",
+      "software_desc": "Organize with Kanban. Work with native agent CLIs. Canban is a lightweight, open-source native macOS and Linux Rust app (zero Electron) pairing local Kanban cards, a global Attention Inbox, isolated Git worktree diff review, optional local workflows, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
+      "application_sub_category": "Lightweight Kanban & Native Agent CLI App",
       "software_requirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode)",
       "feature_list": [
         "Flexible Kanban board with Markdown specs, #Card links, screenshots, @Agent discussions, isolated per-card Git worktrees, and GitHub Issue/PR sync",
@@ -76,9 +76,9 @@
       "keywords": "Canban, Kanban, canban.dev, AI coding agent kanban, coding agents workbench, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, Attention Inbox, libghostty, Tailscale, SSH, macOS Rust app, Linux GTK4 Rust app"
     },
     "zh": {
-      "website_desc": "Canban（canban.dev）官方网站 — 面向 AI 编程 Agent 的开源原生 macOS / Linux 看板与持久化终端工作台（Canban = Kanban + Workflow + Herdr）。",
-      "software_desc": "Canban 是基于 Rust 与 libghostty-vt 构建的开源原生 macOS 和 Linux 看板及终端工作台，集成了结构化 Kanban 卡片、全局注意力收件箱（⌘I）、带独立 Git Worktree 与串行 FIFO Queue Merge 的类 GitHub Actions 工作流、行级 Diff 审查，以及支持本机与远程 Linux canband 主机的 Herdr 持久化 PTY 终端。",
-      "application_sub_category": "AI 编程 Agent 看板与原生持久化终端工作台",
+      "website_desc": "Canban（canban.dev）官方网站 — 用看板理清任务，用原生 Agent CLI 完成开发。轻量级开源原生 macOS / Linux Rust 应用（Canban = Kanban + Workflow + Herdr）。",
+      "software_desc": "用看板理清任务，用原生 Agent CLI 完成开发。Canban 是基于 Rust 与 libghostty-vt 构建的轻量级开源原生 macOS 和 Linux 应用（零 Electron），将本地 Kanban 卡片、全局注意力收件箱（⌘I）、隔离 Git Worktree Diff 审查、按需启用的本地工作流以及支持本机与远程 Linux canband 主机的 Herdr 持久化 PTY 终端融为一体。",
+      "application_sub_category": "轻量级看板与原生 Agent CLI 应用",
       "software_requirements": "git、Herdr Core (hc)、Linux 桌面需 GTK4 运行库，以及任意原生 Agent CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等）",
       "feature_list": [
         "灵活的 Kanban 看板：集成 Markdown 规格、#Card 关联、截图、@Agent 讨论、单卡隔离 Git Worktree 与 GitHub Issue/PR 同步",
@@ -90,9 +90,9 @@
       "keywords": "Canban, Kanban, 看板, AI 编程 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, 注意力收件箱, libghostty, Tailscale, SSH, Rust 桌面应用"
     },
     "zh-tw": {
-      "website_desc": "Canban（canban.dev）官方網站 — 面向 AI 程式設計 Agent 的開源原生 macOS / Linux 看板與持久化終端工作台（Canban = Kanban + Workflow + Herdr）。",
-      "software_desc": "Canban 是基於 Rust 與 libghostty-vt 建置的開源原生 macOS 與 Linux 看板及終端機工作台，整合結構化 Kanban 卡片、全域注意力收件匣（⌘I）、具備獨立 Git Worktree 與序列 FIFO Queue Merge 的類 GitHub Actions 工作流、行內 Diff 審查，以及支援本機與遠端 Linux canband 主機的 Herdr 持久化 PTY 終端機。",
-      "application_sub_category": "AI 程式設計 Agent 看板與原生持久化終端工作台",
+      "website_desc": "Canban（canban.dev）官方網站 — 用看板理清任務，用原生 Agent CLI 完成開發。輕量級開源原生 macOS / Linux Rust 應用（Canban = Kanban + Workflow + Herdr）。",
+      "software_desc": "用看板理清任務，用原生 Agent CLI 完成開發。Canban 是基於 Rust 與 libghostty-vt 建置的輕量級開源原生 macOS 與 Linux 應用（零 Electron），整合本地 Kanban 卡片、全域注意力收件匣（⌘I）、隔離 Git Worktree Diff 審查、可選本地工作流，以及支援本機與遠端 Linux canband 主機的 Herdr 持久化 PTY 終端機。",
+      "application_sub_category": "輕量級看板與原生 Agent CLI 應用",
       "software_requirements": "git、Herdr Core (hc)、Linux 桌面需 GTK4 執行庫，以及任意原生 Agent CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等）",
       "feature_list": [
         "靈活的 Kanban 看板：整合 Markdown 規格、#Card 關聯、截圖、@Agent 討論、單卡隔離 Git Worktree 與 GitHub Issue/PR 同步",
@@ -104,9 +104,9 @@
       "keywords": "Canban, Kanban, 看板, AI 程式設計 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust 桌面應用"
     },
     "ja": {
-      "website_desc": "Canban（canban.dev）公式サイト — AI コーディングエージェント向けオープンソースの macOS / Linux ネイティブカンバン＆永続ターミナルワークベンチ（Canban = Kanban + Workflow + Herdr）。",
-      "software_desc": "Canban は Rust と libghostty-vt で構築されたオープンソースの macOS・Linux ネイティブカンバン＆ターミナルワークベンチです。カンバンカード、グローバル通知インボックス（⌘I）、独立 Git Worktree と直列 FIFO Queue Merge を備えた GitHub Actions 風ワークフロー、行レベル Git Diff レビュー、ローカルおよびリモート Linux canband ホストの永続 Herdr PTY ターミナルを統合します。",
-      "application_sub_category": "AI コーディングエージェント向けカンバン＆ネイティブターミナルワークベンチ",
+      "website_desc": "Canban（canban.dev）公式サイト — カンバンで整理し、ネイティブ Agent CLI で開発する。軽量なオープンソース macOS / Linux ネイティブ Rust アプリ（Canban = Kanban + Workflow + Herdr）。",
+      "software_desc": "カンバンで整理し、ネイティブ Agent CLI で開発する。Canban は Rust と libghostty-vt で構築された Electron 不使用の軽量オープンソース macOS・Linux アプリです。ローカル Kanban カード、グローバル通知インボックス（⌘I）、独立 Git Worktree Diff レビュー、オプションのローカルワークフロー、ローカルおよびリモート Linux canband ホストの永続 Herdr PTY ターミナルを統合します。",
+      "application_sub_category": "軽量カンバン＆ネイティブ Agent CLI アプリ",
       "software_requirements": "git、Herdr Core (hc)、Linux デスクトップでは GTK4 ランタイム、および任意のネイティブ Agent CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode など）",
       "feature_list": [
         "柔軟な Kanban ボード：Markdown 仕様、#Card リンク、スクリーンショット、@Agent 議論、カード単位の隔離 Git Worktree、GitHub Issue/PR 同期を一元管理",
@@ -118,9 +118,9 @@
       "keywords": "Canban, Kanban, カンバン, AI コーディングエージェント, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust デスクトップアプリ"
     },
     "ko": {
-      "website_desc": "Canban(canban.dev) 공식 웹사이트 — AI 코딩 에이전트를 위한 오픈소스 macOS / Linux 네이티브 칸반 및 영구 터미널 워크벤치 (Canban = Kanban + Workflow + Herdr).",
-      "software_desc": "Canban은 Rust와 libghostty-vt로 구축된 오픈소스 네이티브 macOS 및 Linux 칸반·터미널 워크벤치입니다. 유연한 Kanban 카드, 전역 주의 인박스(⌘I), 독립 Git Worktree 및 직렬 FIFO Queue Merge를 지원하는 GitHub Actions 스타일 워크플로우, 인라인 Git Diff 리뷰, 로컬 및 원격 Linux canband 호스트의 Herdr 영구 PTY 터미널을 하나로 통합합니다.",
-      "application_sub_category": "AI 코딩 에이전트 칸반 및 네이티브 터미널 워크벤치",
+      "website_desc": "Canban(canban.dev) 공식 웹사이트 — 칸반으로 정리하고 네이티브 Agent CLI로 개발하세요. 가벼운 오픈소스 macOS / Linux 네이티브 Rust 앱 (Canban = Kanban + Workflow + Herdr).",
+      "software_desc": "칸반으로 정리하고 네이티브 Agent CLI로 개발하세요. Canban은 Rust와 libghostty-vt로 구축된 Electron 없는 경량 오픈소스 macOS 및 Linux 앱입니다. 로컬 Kanban 카드, 전역 주의 인박스(⌘I), 독립 Git Worktree Diff 리뷰, 선택적 로컬 워크플로우, 로컬 및 원격 Linux canband 호스트의 Herdr 영구 PTY 터미널을 하나로 통합합니다.",
+      "application_sub_category": "경량 칸반 및 네이티브 Agent CLI 앱",
       "software_requirements": "git, Herdr Core (hc), Linux 데스크톱용 GTK4 런타임 및 네이티브 Agent CLI (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode 등)",
       "feature_list": [
         "유연한 Kanban 보드: Markdown 명세, #Card 링크, 스크린샷, @Agent 대화, 카드별 격리 Git Worktree, GitHub Issue/PR 동기화 통합",

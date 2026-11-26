@@ -4,9 +4,9 @@ Canban is the product; Human Context names the proposed approach. Current direct
 
 The [Unified workflow engine, Studio and implementation](product/workflow-engine.md) records the 7 core workflow design principles, Project Workflows, SQLite-only original YAML/version history, graph-derived non-destructive Studio automation options, Queue Merge with upstream sync control, per-step Inspectors, optional YAML-declared Board columns, Edit with agent guidance, shared Column trigger hints and durable event subscriptions. Manual edits, Studio option toggles and Agent submissions use one transactional publication path and one interpreter. Onboarding/default Profile setup remains the next product discussion.
 
-The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09](real-agent-acceptance-20261109.md) covers the current Codex workflow, native post-Archive Resume repair and Claude provider-authentication boundary. [Latest acceptance](mvp-acceptance.md) covers the command-defined profile update, real Codex human-input/rework tasks, explicit Review commit/merge, and Terminal recovery checks. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
+The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09](acceptance/real-agent-acceptance-20261109.md) covers the current Codex workflow, native post-Archive Resume repair and Claude provider-authentication boundary. [Latest acceptance](acceptance/mvp-acceptance.md) covers the command-defined profile update, real Codex human-input/rework tasks, explicit Review commit/merge, and Terminal recovery checks. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
 
-[Real Agent workflow and cross-Board acceptance](real-agent-acceptance.md) records the two-Board, four-Codex-Session Develop/Review/Archive run and the exact concurrency/isolation limits.
+[Real Agent workflow and cross-Board acceptance](acceptance/real-agent-acceptance.md) records the two-Board, four-Codex-Session Develop/Review/Archive run and the exact concurrency/isolation limits.
 
 ## Reading and maintaining the current contract
 
@@ -14,37 +14,21 @@ Documentation has three roles:
 
 - **Current contract:** feature documents describe the accepted behavior and ownership. Start with [implementation](implementation.md), then follow the feature references below. [Development conventions](development-conventions.md) and [UI architecture](ui-architecture.md) describe cross-cutting rules.
 - **Decision history and proposals:** [product-log](product/product-log.md), dated research and explicitly marked proposals explain alternatives and rationale. They do not override the current feature contract. When a decision changes, rewrite the affected current section and retain the old rationale as clearly dated history.
-- **Acceptance evidence:** dated verification sections/reports record the build, environment, exercised actions and limits. Keep earlier results intact and mark superseded behavior; historical evidence is not a fresh verification of today's code.
+- **Acceptance evidence:** dated verification reports in `docs/acceptance/` record the build, environment, exercised actions and limits. Keep earlier results intact and mark superseded behavior; historical evidence is not a fresh verification of today's code.
 
 The latest explicit user decision takes precedence over earlier discussion. Before changing an existing feature, check its current contract and any later superseding decision. If code and documents disagree, record the discrepancy rather than declaring a proposal implemented. Use the current code/shared types for exact RPC payloads. Documentation-only reconciliation does not constitute new runtime acceptance.
 
-[Combined GitHub/editor/updater acceptance (2026-11-11)](merge-integration-20261111.md) records local branch integration, paired schema 9/10 migrations, desktop API 8 and native schema-8 upgrades.
+## Acceptance reports
 
-[Backend activation acceptance (2026-11-11)](backend-update-acceptance-20261111.md)
-records explicit activation of the installed backend, newer-backend entry and
-persisted daily release checks.
-
-[Workflow/event-system merge acceptance (2026-11-11)](event-system-merge-acceptance-20261111.md)
-records the combined schema-12/API-10 build, Workflow/Terminal interaction,
-local backend activation and branch-isolation regression checks.
-
-[Workflow UI refinement acceptance (2026-11-11)](workflow-ui-acceptance-20261111.md)
-records click-only Column automations, the simplified source editor, native
-modal dismissal/focus, syntax highlighting and publication-conflict retention.
-
-[NSH 0.5.0 upgrade acceptance (2026-11-11)](nsh-050-upgrade-20261111.md)
-records the official release pin, WindowRef API migration and isolated native
-editor, modal, window-title and terminal checks.
-
-[Card conversation refinement acceptance (2026-11-11)](card-conversation-acceptance-20261111.md) records content-derived references, local/Issue/PR identity, grouped Timeline, quick replies and native verification boundaries.
-
-[Column transition dispatch acceptance (2026-11-17)](column-transition-acceptance-20261117.md) records direction-specific event matching, isolated workflow/merge verification, native stage-menu acceptance and the Bullet build-path limitation.
-
-[Large GitHub Board performance acceptance (2026-11-18)](board-performance-acceptance-20261118.md) records indexed filtering/status, viewport ownership, bounded source batches, Fiber-derived measurements and isolated native checks.
-
-[Agent RPC/CLI acceptance (2026-11-17)](agent-interface-acceptance-20261117.md)
-records API-65 response defaults, isolated/native consumer verification and a
-synthetic 62-operation comparison separating wire, CLI and candidate-context bytes.
+- [Combined GitHub/editor/updater acceptance (2026-11-11)](acceptance/merge-integration-20261111.md)
+- [Backend activation acceptance (2026-11-11)](acceptance/backend-update-acceptance-20261111.md)
+- [Workflow/event-system merge acceptance (2026-11-11)](acceptance/event-system-merge-acceptance-20261111.md)
+- [Workflow UI refinement acceptance (2026-11-11)](acceptance/workflow-ui-acceptance-20261111.md)
+- [Card conversation refinement acceptance (2026-11-11)](acceptance/card-conversation-acceptance-20261111.md)
+- [Live Review and delivery exercise (2026-11-11)](acceptance/review-delivery-dogfood-20261111.md)
+- [Column transition dispatch acceptance (2026-11-17)](acceptance/column-transition-acceptance-20261117.md)
+- [Large GitHub Board performance acceptance (2026-11-18)](acceptance/board-performance-acceptance-20261118.md)
+- [Agent RPC/CLI acceptance (2026-11-17)](acceptance/agent-interface-acceptance-20261117.md)
 
 ## Current product documents
 
@@ -54,8 +38,6 @@ synthetic 62-operation comparison separating wire, CLI and candidate-context byt
 | [Multi-host daemons and Diagnostics](multi-host.md) | Simultaneous local + remote `canband` connections, Tailscale/SSH discovery, offline snapshot cache, per-host Settings and Diagnostics |
 | [Unified client architecture](unified-client.md) | Accepted direction: single `canban-client` layer for Desktop, Mobile, and CLI with `HostConnector`, Cargo feature pruning, and runtime `ClientCapabilities` |
 | [Deterministic Simulation Testing (DST)](dst.md) | Turmoil-backed multi-host DST covering all 8 data/client domains (`mise run sim`) and continuous random-seed fuzzing (`mise run random-sim`) |
-| [Multi-machine execution](multi-machine.md) | Single-server Project work locations, remote Herdr Core routing and Terminal byte relay |
-| [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
 | [Mobile interaction design](mobile-interaction.md) | Shared mobile UI (iOS/Android), NSH mapping, Tailscale WhoIs auto-auth & single-address pairing, on-demand Tailnet discovery, Terminals and Diff views |
 | [Offline editing and synchronization](offline-sync.md) | Proposal: cross-platform offline Card creation/editing/moves/archives, standalone `canban-sync` replay and field-level conflict merge |
 | [Cross-platform Terminal portability](terminal-portability.md) | Proposal: shared `canban-terminal` core, A+B rendering split across macOS/Linux/iOS/Android and remote `PtyTransport` |
@@ -67,7 +49,6 @@ synthetic 62-operation comparison separating wire, CLI and candidate-context byt
 | [GitHub integration implementation](github-integration.md) | Registered App, provider/Kanban boundaries, Issue intake, native creation, PR delivery, API and explicit live-acceptance limits |
 | [GitHub Cards and unified creation](product/github-cards.md) | Product decisions, automatic Issue intake, local removal and collaborator API research |
 | [GitHub App and device authorization](product/github-authentication.md) | Canban-owned App, Device Flow, installation access and secret-free token refresh |
-| [Notes deferred](notes-deferred.md) | Notes removed from current product scope; retained data, historical evidence and compatibility boundaries |
 | [Workspace and scheduling implementation](workspace-and-scheduling.md) | Named branches, remote/base synchronization, global Agent limit, priority and human approval gates |
 | [Scheduler](product/scheduler.md) | Stage determines work; profiles select agents; admission determines timing |
 | [Agent profile configuration](product/agent-profiles.md) | Implemented registry, role instructions, stage references, routing and JSON examples |
@@ -77,15 +58,10 @@ synthetic 62-operation comparison separating wire, CLI and candidate-context byt
 | [Unified timeline](product/timeline.md) | Card history presentation, comment revisions, artifacts and ordering; shared event contract links |
 | [Agent-callable interface](product/agent-interface.md) | Application operations shared with the desktop |
 | [Agent RPC and CLI responses](agent-response-contract.md) | Agent-first defaults, explicit fields/full views, reliable receipts and pagination |
-| [MVP sequence](mvp-plan.md) | Scope, implementation proposals, decision gates, and acceptance matrix |
-| [MVP scope review](product/mvp-scope-review.md) | User resolutions and the simplified first-release boundary |
 | [Review and code delivery](product/review-delivery.md) | Basic Diff, return-to-Develop, explicit commit/merge, conflict and receipt behavior |
 | [Git workbench](git-workbench.md) | Retained branch selectors, checkout/range separation, asynchronous cached reads and Git sync feedback |
-| [Live Review and delivery exercise](review-delivery-dogfood-20261111.md) | Two real App deliveries, continued-assignment blocker repair and interaction findings |
-| [MVP progress and next steps](product/mvp-next-steps.md) | Current acceptance boundaries and recommended daily-use, review and code-delivery priorities |
 | [Event-driven runtime observation](runtime-observation.md) | Subscription, connection recovery, bounded discovery, Git caches and exit classification |
 | [Memory profiling and synchronization](memory-profiling.md) | Conditional state synchronization, SQL history reads, UI indexes and Instruments capture |
-| [Runtime observation cost](runtime-observation-cost.md) | Historical polling baseline and prototype; superseded by event-driven runtime observation |
 | [Agent lifecycle implementation](agent-overview-and-lifecycle.md) | Status-aware global budget, idle reclamation, global Overview and isolated/native validation |
 | [Terminal interaction and navigation](terminal-interaction.md) | Delayed idle exit, live inactive filtering, input pipeline, global Back/Forward and current acceptance |
 | [Dedicated Terminal workspace](terminal-workspace.md) | Independent Terminals, Managed Branch Worktrees, live directory context, Project grouping, split chrome, Agent resume and isolated PTY acceptance |
@@ -102,7 +78,6 @@ synthetic 62-operation comparison separating wire, CLI and candidate-context byt
 | [Instance isolation and remaining gaps](instance-isolation.md) | Implemented checkout/branch isolation and explicit installed-backend activation and remaining generic compatibility boundaries |
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
 | [Global Activity & Notifications](product/overview.md) | Persistent top-right chrome pill & popover (`Command+I`), inline read/merge, 1-step Card+Terminal jump, superseding standalone Overview |
-| [Overview and Terminal refinement](overview-and-terminal-navigation-proposal.md) | Selected design, cross-surface Terminal entry inventory and navigation rules |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |
 | [Unified Card reminders](reminders.md) | Per-Card unread/pending items, Project counts, durable visible-read positions and local sound delivery |
 | [Events, subscriptions and notifications](product/events-and-notifications.md) | Accepted next design: durable facts/delivery, Card/GitHub selectors, recovery, source provenance and notifications |
@@ -114,11 +89,10 @@ Keep Backlog / Develop / Review as the default Board columns; planning is a work
 Start with [MVP interface contracts](interfaces/mvp-contract.md) for the proposed concrete reporting/call mechanism, then use the architecture/source references below for ownership and feasibility.
 
 1. [Canban architecture](architecture.md): native UI clients, independent AppServer, storage, callbacks and local/remote runtime bindings.
-   [Internal architecture comparison](architecture-internal-options.md) compares module/call organizations; [crates and timers](architecture-crates-and-timers.md) records the user-requested crate split, AppServer/Workflow Engine/Scheduler names, and card timer placement.
+   [crates and timers](architecture-crates-and-timers.md) records the user-requested crate split, AppServer/Workflow Engine/Scheduler names, and card timer placement.
    [Data architecture](data-architecture.md) records ~/.canban/, SQLite with WAL, file-backed execution context/reports, and zstd/lz4-compressed Card archives; detailed schema and archive mechanisms remain proposals.
    [UI architecture and design system](ui-architecture.md) records the approved NSH reuse, separate UI Kit, component contracts, native gallery, and regression workflow.
    [NSH integration notes](nsh-notes.md) tracks version-scoped NSH runtime quirks and Canban workarounds to audit on each NSH upgrade.
-   [App UI review and design directions](ui-direction-review.md) audits the current native UI and proposes visual styles, workspace layouts and component priorities for discussion.
 2. [herdr-core integration](research/herdr-core-integration.md): installed service versus app-managed service, embedding, and Herdr app linkage.
 3. [Herdr product concepts](research/herdr-core-concepts.md): existing Space/Tab/Pane versus core Terminal/Session, separate from Canban's Project model.
 4. [herdr-core architecture](research/herdr-core-architecture.md): source modules, holders/processes, protocol, status, persistence, and recovery.

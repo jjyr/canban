@@ -1,6 +1,6 @@
 # Canban (`canban.dev`)
 
-> Canban (`canban.dev`, GitHub: `jjyr/canban`, Rust + NSH + `libghostty-vt` + `herdr-core`) is an open-source native macOS and Linux Kanban and terminal workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
+> Canban (`canban.dev`, GitHub: `jjyr/canban`, Rust + NSH + `libghostty-vt` + `herdr-core`) — Organize with Kanban. Work with native agent CLIs. A lightweight, open-source native macOS and Linux app for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
 
 **Disambiguation**: "Canban" (spelled with a **C**, hosted at `https://canban.dev/` and `https://github.com/jjyr/canban`) is a specific open-source Rust desktop application and daemon (`canband`) built on `longbridge/nsh`, `herdr-core`, and `libghostty-vt` — distinct from the generic "Kanban" project management methodology or unrelated Kanban SaaS tools.
 

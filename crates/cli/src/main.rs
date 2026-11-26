@@ -12,7 +12,7 @@ const SKILL_HELP: &str = "Agent skill:
 #[command(
     name = "canban",
     version,
-    about = "Canban local task and Agent interface",
+    about = "Organize with Kanban. Work with native agent CLIs.",
     after_help = SKILL_HELP
 )]
 struct Args {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare current polling RPC shape with a shared-inventory prototype.
 Uses a disposable Herdr Core and synthetic sleeping PTYs; never launches an Agent.
-Not an end-to-end AppServer benchmark. See docs/runtime-observation-cost.md.
+Not an end-to-end AppServer benchmark. See docs/runtime-observation.md.
 """
 from pathlib import Path
 import json,os,subprocess,tempfile,time,statistics,resource,select

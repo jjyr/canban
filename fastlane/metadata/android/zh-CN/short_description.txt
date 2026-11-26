@@ -1,1 +1,1 @@
-Canban 移动端：远程管理 AI 编程 Agent 看板、Git Diff 与实时终端
+Canban 轻量移动端：管理看板任务、Git Diff 与原生 Agent CLI 终端

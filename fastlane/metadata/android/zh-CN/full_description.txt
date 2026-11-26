@@ -1,4 +1,4 @@
-Canban 是一款开源（Apache-2.0）的移动客户端，用于连接你自托管的 Canban 桌面端或无界面 Linux canband 守护进程，随时管理并行 AI 编程 Agent。
+用看板理清任务，用原生 Agent CLI 完成开发。Canban 是一款轻量、开源（Apache-2.0）的移动客户端，用于连接你自托管的 Canban 桌面端或无界面 Linux canband 主机。
 
 核心功能：
 - Tailscale 同账号免扫码直连与按需发现：输入 host.ts.net 或 100.x.y.z 即可通过 Tailscale WhoIs 自动登录同一账号下的主机，并可在「Discover on Tailnet」一键加入同网段其他主机；跨账号或自建内网也可通过 5 分钟一次性 canban:// 二维码 / 链接配合 yamux/1 每设备可吊销 Token 安全配对。

@@ -1197,7 +1197,7 @@ def render_llms_full(locales, pages, docs, releases):
     parts = [
         "# Canban (`canban.dev`) — Complete Reference for LLMs",
         "",
-        "> Canban (`canban.dev`, GitHub: `jjyr/canban`, Rust + NSH + `libghostty-vt` + `herdr-core`) is an open-source native macOS and Linux Kanban workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.",
+        "> Canban (`canban.dev`, GitHub: `jjyr/canban`, Rust + NSH + `libghostty-vt` + `herdr-core`) — Organize with Kanban. Work with native agent CLIs. A lightweight, open-source native macOS and Linux app for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.",
         "",
         "**Disambiguation**: Canban (`https://canban.dev/`) is a Rust desktop application and daemon (`canband`), distinct from generic Kanban boards or SaaS issue trackers.",
         "",

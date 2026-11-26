@@ -14,8 +14,8 @@
 </p>
 
 <p align="center">
-  <strong>同时并行 10+ 个 Coding Agent，告别在十几个终端标签页里迷失。</strong><br/>
-  基于原生 <strong>Rust + <code>libghostty</code></strong> 构建的 <strong>Claude Code、Codex、Cursor CLI</strong> 工作台 - 内置全局注意力收件箱（<code>⌘I</code>）、单卡片隔离 Git Worktree 行级代码审查，以及类 GitHub Actions 的本地自动化流水线。
+  <strong>用看板理清任务，用原生 Agent CLI 完成开发。</strong><br/>
+  基于原生 <strong>Rust + <code>libghostty</code></strong> 构建的轻量级应用（零 Electron、不做聊天框套壳），让 <strong>Claude Code、Codex、Cursor CLI、Antigravity（<code>agy</code>）</strong> 等真实终端 CLI 与本地看板、持久化 PTY、全局注意力收件箱（<code>⌘I</code>）及单卡 Git Worktree 审查自然协同。
 </p>
 
 <h3 align="center"><a href="#安装"><ins>快速安装</ins></a> · <a href="https://canban.dev/zh/"><ins>canban.dev</ins></a> · <a href="https://canban.dev/zh/docs/"><ins>文档</ins></a></h3>
@@ -26,9 +26,9 @@
 
 ## 为什么选择 Canban？
 
-- **不再盲目翻找 10 个 tmux 窗口**：全局注意力收件箱（`⌘I`）跨所有项目与远程主机，第一时间捕获哪个 Agent 正在等待 `[Y/n]` 权限确认、追问输入或代码审查，一键直达现场。
-- **零阉割的原生终端体验**：不做简陋的聊天框套壳。基于原生 Rust UI 与 `libghostty-vt` 驱动持久化防中断 PTY，直接运行你的 `claude`、`codex`、`agy` 或 `cursor-agent`，即使关闭或重启应用，终端会话依然存活。
-- **不切编辑器完成 Diff 审查与合并**：每张卡片自动分配独立 Git Worktree，内置行级 Diff 审查（直接在代码变更行写评论并 `@Agent` 返工），配合串行合并队列实现 `plan → develop → merge` 闭环。
+- **轻量原生、开箱即用**：基于 Rust + NSH + `libghostty-vt` 构建，无 Electron、无 Chromium、不绑定云账号——本地单文件 SQLite 驱动，快速、省内存、不打扰。
+- **用看板理清任务**：围绕任意本地目录或 Git 仓库建立看板（`Backlog → Develop → Review`），把需求描述、评论、独立 Worktree 与行内 Diff 集中在同一张卡片，零上手门槛。
+- **用原生 Agent CLI 工作**：在持久化防中断 PTY 中直接运行真实的 `claude`、`codex`、`agy`、`cursor-agent` 或 `pi` CLI，完整保留原生 TUI、权限交互、MCP、Skills 与会话恢复，并通过全局 `⌘I` 收件箱第一时间提醒需要你介入的 Agent。
 
 ## 核心功能
 
@@ -36,13 +36,13 @@
 <tr>
 <td width="50%" valign="middle">
 
-### 全局注意力收件箱（`⌘I`）
+### 看板与卡片上下文
 
-不再漏掉任何一个卡住等待的 Agent。跨项目、跨 Worktree 与跨主机的全局通知中心，一眼看清哪个 Agent 正在等待输入、工具权限审批或代码审查，一次按键直达对应卡片与实时终端。
+围绕任意本地目录或 Git 仓库构建简洁的 `Backlog → Develop → Review` 看板。将 Markdown 任务说明、截图、`#Card` 与 GitHub Issue/PR 关联以及 `@Agent` 讨论集中在一处，紧邻右侧实时终端。
 
 </td>
 <td width="50%">
-  <img src="docs/assets/notification-center.jpg" alt="Canban 通知中心：集中查看等待中的 Agent 并一键跳转到卡片与终端" width="100%" />
+  <img src="website/screenshots/board-terminal.png" alt="Canban 看板与卡片规格和右侧实时原生 Agent CLI 终端" width="100%" />
 </td>
 </tr>
 <tr>
@@ -62,6 +62,18 @@
 <tr>
 <td width="50%" valign="middle">
 
+### 全局注意力收件箱（`⌘I`）
+
+不再漏掉任何一个卡住等待的 Agent。跨项目、跨 Worktree 与跨主机的全局通知中心，第一时间捕获 `[Y/n]` 权限审批、追问输入或阶段完成状态，一次按键直达对应卡片与实时终端。
+
+</td>
+<td width="50%">
+  <img src="docs/assets/notification-center.jpg" alt="Canban 通知中心：集中查看等待中的 Agent 并一键跳转到卡片与终端" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
 ### 独立 Worktree 与行内 Diff 审查
 
 无需切出应用去开外部编辑器，直接查看提交历史与单卡片隔离 Worktree 的代码改动。支持在变更代码行上直接添加行内评审意见，并一键发送给 `@Agent` 继续修改。
@@ -76,9 +88,9 @@
 <tr>
 <td width="50%" valign="middle">
 
-### 可编程工作流（本地 Agent 的 GitHub Actions）
+### 可编程工作流（按需启用）
 
-用类似 GitHub Actions 的 YAML 编排 Shell 脚本与 `agent` + prompt 步骤。将任意卡片转化为无人值守的 `plan → develop → merge` 自动化流水线，内置定时触发（Cron）与串行合并队列。
+想要进一步自动化？可按需启用类似 GitHub Actions 的本地 YAML 工作流，串联 Shell 脚本与 `agent` + prompt 步骤、定时触发（Cron）与串行合并队列。
 
 [文档 →](https://canban.dev/zh/docs/workflows/)
 
@@ -92,7 +104,7 @@
 
 ### SSH / Tailscale 多机器协同
 
-把高负载编译和 Agent 任务交给远程 Linux 主机。通过 SSH 或 Tailscale 将本地桌面端连接到无头 `canband` 主机，像操作本地项目一样丝滑管理远程看板、工作流与 120Hz 实时终端。
+把高负载编译和 Agent 任务交给远程 Linux 主机。通过 SSH 或 Tailscale 将轻量级桌面端连接到无头 `canband` 主机，像操作本地项目一样丝滑管理远程看板、工作流与 120Hz 实时终端。
 
 [文档 →](https://canban.dev/zh/docs/remote-hosts/)
 
