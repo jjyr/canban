@@ -3373,7 +3373,7 @@ fn delivery_gates_isolate_unrelated_repos_and_serialize_same_canonical_checkout(
     )
     .expect("git.commit on unrelated Repo B must not be blocked by Repo A delivery");
 
-    // 2. Repo A's own main checkout `git.pull` and `git.commit` fail with clear contextual error.
+    // 2. Repo A's own main checkout `git.pull`, `git.sync`, and `git.commit` fail with clear contextual error.
     let err_a = app
         .call(
             "git.pull",
@@ -3384,6 +3384,17 @@ fn delivery_gates_isolate_unrelated_repos_and_serialize_same_canonical_checkout(
     assert!(
         err_a.contains("Code delivery for Repo A (main) is updating this checkout"),
         "unexpected error: {err_a}"
+    );
+    let err_sync_a = app
+        .call(
+            "git.sync",
+            json!({"project_id": proj_a.id, "request_key": "sync-a-while-locked"}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err_sync_a.contains("Code delivery for Repo A (main) is updating this checkout"),
+        "unexpected git.sync error: {err_sync_a}"
     );
 
     // 3. Another Project pointing to the same physical repo via symlink is ALSO serialized.
@@ -3416,14 +3427,30 @@ fn delivery_gates_isolate_unrelated_repos_and_serialize_same_canonical_checkout(
         }),
     )
     .expect("git.commit in a Card/managed worktree must not wait on main checkout gate");
+    let wt_sync = app
+        .call(
+            "git.sync",
+            json!({
+                "project_id": proj_a.id,
+                "cwd": wt_path,
+                "request_key": "sync-wt-while-main-locked"
+            }),
+        )
+        .expect("git.sync in a Card/managed worktree must not wait on main checkout gate");
+    assert_eq!(wt_sync["pushed"], true);
 
-    // 5. Releasing Repo A's gate allows `git.pull` on Repo A to proceed immediately.
+    // 5. Releasing Repo A's gate allows `git.pull` and `git.sync` on Repo A to proceed immediately.
     drop(guard_a);
     app.call(
         "git.pull",
         json!({"project_id": proj_a.id, "request_key": "pull-a-after-release"}),
     )
     .expect("git.pull on Repo A should succeed once delivery gate is released");
+    app.call(
+        "git.sync",
+        json!({"project_id": proj_a.id, "request_key": "sync-a-after-release"}),
+    )
+    .expect("git.sync on Repo A should succeed once delivery gate is released");
     assert_eq!(
         std::fs::read_to_string(repo_a.join("upstream-a.txt")).unwrap(),
         "from upstream\n"

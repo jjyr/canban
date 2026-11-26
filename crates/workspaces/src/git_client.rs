@@ -764,6 +764,208 @@ impl Ops {
             "set_upstream": configure_upstream,
         }))
     }
+
+    /// Safely fast-forwards the current branch from remote (`git pull --no-rebase --ff-only`)
+    /// and pushes local commits or publishes a new branch (never force-pushing or auto-merging).
+    pub fn git_sync(&self, project: &Project, dir: &Path, remote: Option<&str>) -> Result<Value> {
+        ensure!(
+            self.host.is_dir(dir),
+            "Checkout directory does not exist: {}",
+            dir.display()
+        );
+        let current_branch = self
+            .checked(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .ok()
+            .filter(|s| !s.is_empty())
+            .context("Checkout is on a detached HEAD; switch to a local branch before syncing")?;
+        ensure!(
+            self.git(dir, &["rev-parse", "--verify", "HEAD"])?
+                .status
+                .success(),
+            "No commits to sync yet"
+        );
+
+        let remote_name = self.resolve_remote_name(project, dir, remote)?;
+        ensure!(
+            self.git(dir, &["remote", "get-url", &remote_name])?
+                .status
+                .success(),
+            "Git remote '{remote_name}' is not configured"
+        );
+
+        let raw_merge = if remote.map(str::trim).filter(|s| !s.is_empty()).is_none() {
+            self.checked(
+                dir,
+                &["config", "--get", &format!("branch.{current_branch}.merge")],
+            )
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let is_fork_pr_ref = raw_merge
+            .as_deref()
+            .is_some_and(|r| r.starts_with("refs/pull/"));
+        let pull_branch = match raw_merge.as_deref() {
+            Some(r) if r.starts_with("refs/pull/") => r.to_owned(),
+            Some(r) => r.strip_prefix("refs/heads/").unwrap_or(r).to_owned(),
+            None => current_branch.clone(),
+        };
+        let target_remote_branch = if is_fork_pr_ref {
+            current_branch.clone()
+        } else {
+            pull_branch.clone()
+        };
+        validate_ref_arg(&pull_branch)?;
+        validate_ref_arg(&target_remote_branch)?;
+
+        let has_upstream = self
+            .git(
+                dir,
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+            )?
+            .status
+            .success();
+
+        let old_head = self.checked(dir, &["rev-parse", "HEAD"])?;
+        let should_pull = if has_upstream {
+            true
+        } else {
+            let ls_out = self.git(
+                dir,
+                &[
+                    "ls-remote",
+                    "--heads",
+                    "--",
+                    &remote_name,
+                    &format!("refs/heads/{target_remote_branch}"),
+                ],
+            )?;
+            if !ls_out.status.success() {
+                let stderr = String::from_utf8_lossy(&ls_out.stderr).trim().to_owned();
+                let stdout = String::from_utf8_lossy(&ls_out.stdout).trim().to_owned();
+                let detail = if !stderr.is_empty() { stderr } else { stdout };
+                bail!(
+                    "Failed to inspect remote branch {remote_name}/{target_remote_branch}: {detail}"
+                );
+            }
+            !String::from_utf8_lossy(&ls_out.stdout).trim().is_empty()
+        };
+
+        let (after_pull_head, fast_forwarded, pulled_commits) = if should_pull {
+            let out = self.git(
+                dir,
+                &[
+                    "pull",
+                    "--no-rebase",
+                    "--ff-only",
+                    "--",
+                    &remote_name,
+                    &pull_branch,
+                ],
+            )?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                let detail = if !stderr.is_empty() { stderr } else { stdout };
+                bail!("Fast-forward pull from {remote_name}/{pull_branch} failed: {detail}");
+            }
+            if is_fork_pr_ref {
+                let _ = self.git(dir, &["fetch", "--", &remote_name]);
+            }
+            let new_head = self.checked(dir, &["rev-parse", "HEAD"])?;
+            let ff = old_head != new_head;
+            let count = if ff {
+                self.checked(
+                    dir,
+                    &["rev-list", "--count", &format!("{old_head}..{new_head}")],
+                )
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+            } else {
+                0
+            };
+            (new_head, ff, count)
+        } else {
+            (old_head.clone(), false, 0)
+        };
+
+        let ahead_commits = if should_pull {
+            self.checked(dir, &["rev-list", "--count", "FETCH_HEAD..HEAD"])
+                .or_else(|_| self.checked(dir, &["rev-list", "--count", "@{upstream}..HEAD"]))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let should_push = !should_pull || !has_upstream || ahead_commits > 0;
+        let (pushed, pushed_commits, set_upstream) = if should_push {
+            if is_fork_pr_ref {
+                bail!(
+                    "Branch '{current_branch}' tracks a read-only GitHub PR ref ({pull_branch}) from a fork and cannot be pushed directly to '{remote_name}'"
+                );
+            }
+            ensure!(
+                self.git(dir, &["remote", "get-url", "--push", &remote_name])?
+                    .status
+                    .success(),
+                "Git remote '{remote_name}' is not configured"
+            );
+            let refspec = format!("HEAD:refs/heads/{target_remote_branch}");
+            let configure_upstream = !has_upstream;
+            let push_res = if configure_upstream {
+                self.checked(
+                    dir,
+                    &[
+                        "push",
+                        "--porcelain",
+                        "--set-upstream",
+                        &remote_name,
+                        &refspec,
+                    ],
+                )
+            } else {
+                self.checked(dir, &["push", "--porcelain", &remote_name, &refspec])
+            };
+            push_res.map_err(|e| {
+                if fast_forwarded {
+                    anyhow::anyhow!("Pulled {pulled_commits} commit(s), but push failed: {e:#}")
+                } else {
+                    e
+                }
+            })?;
+            (
+                !should_pull || ahead_commits > 0,
+                ahead_commits,
+                configure_upstream,
+            )
+        } else {
+            (false, 0, false)
+        };
+
+        Ok(json!({
+            "branch": current_branch,
+            "remote": remote_name,
+            "remote_branch": target_remote_branch,
+            "old_head": old_head,
+            "new_head": after_pull_head,
+            "pulled": should_pull,
+            "fast_forwarded": fast_forwarded,
+            "pulled_commits": pulled_commits,
+            "pushed": pushed,
+            "pushed_commits": pushed_commits,
+            "set_upstream": set_upstream,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -994,5 +1196,159 @@ mod tests {
         let err = ops.git_pull(&project, repo, None, None).unwrap_err();
         assert!(err.to_string().contains("Fast-forward pull"));
         assert_eq!(git(repo, &["rev-parse", "HEAD"]), local_head);
+    }
+
+    #[test]
+    fn syncs_up_to_date_behind_ahead_unpublished_diverged_and_error_states() {
+        let (tmp, project, remote) = setup_repo_with_remote();
+        let ops = Ops::local();
+        let repo = Path::new(&project.directory);
+
+        let peer = tmp.path().join("peer");
+        git(
+            tmp.path(),
+            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+        );
+        for (k, v) in [
+            ("user.name", "Peer"),
+            ("user.email", "peer@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&peer, &["config", k, v]);
+        }
+
+        // 1. Up to date: pulls check passes, nothing fast-forwarded or pushed.
+        let up_to_date = ops.git_sync(&project, repo, None).unwrap();
+        assert_eq!(up_to_date["branch"], "main");
+        assert_eq!(up_to_date["remote"], "origin");
+        assert_eq!(up_to_date["pulled"], true);
+        assert_eq!(up_to_date["fast_forwarded"], false);
+        assert_eq!(up_to_date["pulled_commits"], 0);
+        assert_eq!(up_to_date["pushed"], false);
+        assert_eq!(up_to_date["pushed_commits"], 0);
+        assert_eq!(up_to_date["set_upstream"], false);
+
+        // 2. Behind remote: fast-forwards cleanly without pushing.
+        fs::write(peer.join("from_peer.txt"), "peer 1\n").unwrap();
+        git(&peer, &["add", "."]);
+        git(&peer, &["commit", "-m", "feat: peer 1"]);
+        git(&peer, &["push", "origin", "main"]);
+
+        let behind = ops.git_sync(&project, repo, None).unwrap();
+        assert_eq!(behind["fast_forwarded"], true);
+        assert_eq!(behind["pulled_commits"], 1);
+        assert_eq!(behind["pushed"], false);
+        assert_eq!(behind["pushed_commits"], 0);
+        assert_eq!(
+            fs::read_to_string(repo.join("from_peer.txt")).unwrap(),
+            "peer 1\n"
+        );
+        let refs_after_pull = ops.git_refs(&project).unwrap();
+        assert_eq!(refs_after_pull["behind"], 0);
+        assert_eq!(refs_after_pull["ahead"], 0);
+
+        // 3. Ahead of remote (2 commits): pushes both cleanly.
+        fs::write(repo.join("local_a.txt"), "a\n").unwrap();
+        ops.git_commit(repo, "feat: local a", false, true).unwrap();
+        fs::write(repo.join("local_b.txt"), "b\n").unwrap();
+        ops.git_commit(repo, "feat: local b", false, true).unwrap();
+
+        let ahead = ops.git_sync(&project, repo, None).unwrap();
+        assert_eq!(ahead["fast_forwarded"], false);
+        assert_eq!(ahead["pulled_commits"], 0);
+        assert_eq!(ahead["pushed"], true);
+        assert_eq!(ahead["pushed_commits"], 2);
+        assert_eq!(ahead["set_upstream"], false);
+        assert_eq!(
+            git(repo, &["rev-parse", "HEAD"]),
+            git(&remote, &["rev-parse", "refs/heads/main"])
+        );
+
+        // 4. Brand-new unpublished local branch: skips missing pull and publishes with --set-upstream.
+        git(repo, &["switch", "-c", "feat/unpublished"]);
+        fs::write(repo.join("unpub.txt"), "unpublished\n").unwrap();
+        ops.git_commit(repo, "feat: unpublished branch", false, true)
+            .unwrap();
+
+        let published = ops.git_sync(&project, repo, None).unwrap();
+        assert_eq!(published["branch"], "feat/unpublished");
+        assert_eq!(published["pulled"], false);
+        assert_eq!(published["fast_forwarded"], false);
+        assert_eq!(published["pushed"], true);
+        assert_eq!(published["set_upstream"], true);
+        assert_eq!(
+            git(repo, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            "origin/feat/unpublished"
+        );
+        assert_eq!(
+            git(repo, &["rev-parse", "HEAD"]),
+            git(&remote, &["rev-parse", "refs/heads/feat/unpublished"])
+        );
+
+        // 5. Untracked local branch whose name already exists on remote: fast-forwards & sets upstream.
+        git(&peer, &["fetch", "origin"]);
+        git(&peer, &["switch", "-c", "feat/shared", "origin/main"]);
+        fs::write(peer.join("shared.txt"), "shared from peer\n").unwrap();
+        git(&peer, &["add", "."]);
+        git(&peer, &["commit", "-m", "feat: shared remote commit"]);
+        git(&peer, &["push", "origin", "feat/shared"]);
+
+        git(repo, &["switch", "-c", "feat/shared", "main"]);
+        let untracked_shared = ops.git_sync(&project, repo, None).unwrap();
+        assert_eq!(untracked_shared["pulled"], true);
+        assert_eq!(untracked_shared["fast_forwarded"], true);
+        assert_eq!(untracked_shared["pulled_commits"], 1);
+        assert_eq!(untracked_shared["set_upstream"], true);
+        assert_eq!(untracked_shared["pushed"], false);
+        assert_eq!(
+            git(repo, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            "origin/feat/shared"
+        );
+
+        // 6. Diverged history: fails fast-forward pull without auto-merging or moving HEAD.
+        git(repo, &["switch", "main"]);
+        git(&peer, &["switch", "main"]);
+        git(&peer, &["pull", "--ff-only", "origin", "main"]);
+        fs::write(peer.join("peer_div.txt"), "peer div\n").unwrap();
+        git(&peer, &["add", "."]);
+        git(&peer, &["commit", "-m", "feat: peer divergent"]);
+        git(&peer, &["push", "origin", "main"]);
+
+        fs::write(repo.join("local_div.txt"), "local div\n").unwrap();
+        ops.git_commit(repo, "feat: local divergent", false, true)
+            .unwrap();
+        let diverged_head = git(repo, &["rev-parse", "HEAD"]);
+        let div_err = ops.git_sync(&project, repo, None).unwrap_err();
+        assert!(div_err.to_string().contains("Fast-forward pull"));
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), diverged_head);
+
+        // 7. Read-only GitHub fork PR ref rejects push when locally ahead.
+        let pr_sha = git(&peer, &["rev-parse", "HEAD"]);
+        git(&remote, &["update-ref", "refs/pull/42/head", &pr_sha]);
+        git(repo, &["switch", "-c", "pr-42", &pr_sha]);
+        git(repo, &["config", "branch.pr-42.remote", "origin"]);
+        git(repo, &["config", "branch.pr-42.merge", "refs/pull/42/head"]);
+        fs::write(repo.join("pr_local.txt"), "local on fork pr\n").unwrap();
+        ops.git_commit(repo, "feat: local commit on pr", false, true)
+            .unwrap();
+        let pr_err = ops.git_sync(&project, repo, None).unwrap_err();
+        assert!(pr_err.to_string().contains("read-only GitHub PR ref"));
+
+        // 8. Detached HEAD & unborn HEAD errors.
+        let head_sha = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "--detach", &head_sha]);
+        let detached_err = ops.git_sync(&project, repo, None).unwrap_err();
+        assert!(detached_err.to_string().contains("detached HEAD"));
+
+        let empty_repo = tmp.path().join("empty_repo");
+        fs::create_dir_all(&empty_repo).unwrap();
+        git(&empty_repo, &["init", "-b", "main"]);
+        git(
+            &empty_repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let unborn_err = ops.git_sync(&project, &empty_repo, None).unwrap_err();
+        assert!(unborn_err.to_string().contains("No commits to sync yet"));
     }
 }

@@ -133,6 +133,7 @@ pub struct Ui {
     pub terminal_rename: Signal<Option<String>>,
     pub terminal_close_confirm: Signal<Option<String>>,
     pub closing_terminals: Signal<BTreeSet<String>>,
+    pub terminal_git_syncing: Signal<BTreeSet<String>>,
     pub terminal_entries: Memo<Vec<crate::terminals::Entry>>,
     pub operation_error: Signal<String>,
     pub backend_notice: Signal<String>,
@@ -614,6 +615,7 @@ impl Ui {
             terminal_rename: signal(None),
             terminal_close_confirm: signal(None),
             closing_terminals: signal(BTreeSet::new()),
+            terminal_git_syncing: signal(BTreeSet::new()),
             terminal_entries,
             operation_error: signal(String::new()),
             backend_notice: signal(String::new()),
@@ -1952,6 +1954,11 @@ pub fn dispatch_complete(
                             let r = value["remote"].as_str().unwrap_or("remote");
                             let b = value["branch"].as_str().unwrap_or("branch");
                             ui.notify(format!("Pushed {b} to {r}"));
+                        }
+                        "git.sync" => {
+                            ui.notify(crate::terminals::worktrees::format_git_sync_summary(
+                                &value, "branch",
+                            ));
                         }
                         _ => ui.notify("Saved"),
                     }

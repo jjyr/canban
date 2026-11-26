@@ -2992,6 +2992,169 @@ fn git_client_rpcs_enforce_checkout_containment_user_guard_and_remote_sync() {
 }
 
 #[test]
+fn git_sync_rpc_pulls_pushes_replays_idempotently_and_rejects_invalid_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let remote = dir.path().join("origin.git");
+    let source = dir.path().join("repo");
+    let peer = dir.path().join("peer");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let git = |cwd: &Path, args: &[&str]| {
+        let st = canban_exec::raw_command("git")
+            .current_dir(cwd)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success());
+    };
+    let git_out = |cwd: &Path, args: &[&str]| -> String {
+        let out = canban_exec::raw_command("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+
+    git(&remote, &["init", "--bare", "-b", "main"]);
+    git(&source, &["init", "-b", "main"]);
+    for (k, v) in [
+        ("user.name", "Test"),
+        ("user.email", "test@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&source, &["config", k, v]);
+    }
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    std::fs::write(source.join("README.md"), "seed\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "seed"]);
+    git(&source, &["push", "-u", "origin", "main"]);
+
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+    );
+    for (k, v) in [
+        ("user.name", "Peer"),
+        ("user.email", "peer@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&peer, &["config", k, v]);
+    }
+
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Sync RPC Demo", "directory": source, "target_branch": "main"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Agent execution context and outside directories must be rejected.
+    assert!(
+        app.call(
+            "git.sync",
+            json!({"project_id": p.id, "execution": {"request_id": "r1"}}),
+        )
+        .is_err()
+    );
+    assert!(
+        app.call("git.sync", json!({"project_id": p.id, "cwd": outside}))
+            .is_err()
+    );
+
+    // Managed worktree commit -> git.sync publishes & pushes, and replays idempotently.
+    let wt_res = app
+        .call(
+            "worktree.create",
+            json!({"project_id": p.id, "branch": "feat/rpc-sync", "launch": "none"}),
+        )
+        .unwrap();
+    let wt_path = wt_res["worktree"]["path"].as_str().unwrap().to_owned();
+    for (k, v) in [
+        ("user.name", "Test"),
+        ("user.email", "test@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(Path::new(&wt_path), &["config", k, v]);
+    }
+    std::fs::write(Path::new(&wt_path).join("sync_rpc.rs"), "pub fn ok() {}\n").unwrap();
+    app.call(
+        "git.stage",
+        json!({"project_id": p.id, "cwd": wt_path, "paths": ["sync_rpc.rs"]}),
+    )
+    .unwrap();
+    app.call(
+        "git.commit",
+        json!({"project_id": p.id, "cwd": wt_path, "message": "feat: rpc sync"}),
+    )
+    .unwrap();
+
+    let sync_wt = app
+        .call(
+            "git.sync",
+            json!({"project_id": p.id, "cwd": wt_path, "request_key": "sync-wt-1"}),
+        )
+        .unwrap();
+    assert_eq!(sync_wt["pushed"], true);
+    assert_eq!(sync_wt["set_upstream"], true);
+    assert_eq!(
+        git_out(Path::new(&wt_path), &["rev-parse", "HEAD"]),
+        git_out(&remote, &["rev-parse", "refs/heads/feat/rpc-sync"])
+    );
+
+    // Same request_key replays the saved receipt; mismatched payload rejects.
+    let replay = app
+        .call(
+            "git.sync",
+            json!({"project_id": p.id, "cwd": wt_path, "request_key": "sync-wt-1"}),
+        )
+        .unwrap();
+    assert_eq!(replay, sync_wt);
+    assert!(
+        app.call(
+            "git.sync",
+            json!({"project_id": p.id, "request_key": "sync-wt-1"}),
+        )
+        .is_err()
+    );
+
+    // Peer commit on main -> git.sync on Project root fast-forwards cleanly.
+    std::fs::write(peer.join("peer_update.txt"), "from peer\n").unwrap();
+    git(&peer, &["add", "."]);
+    git(&peer, &["commit", "-m", "feat: peer main update"]);
+    git(&peer, &["push", "origin", "main"]);
+
+    let sync_root = app
+        .call(
+            "git.sync",
+            json!({"project_id": p.id, "request_key": "sync-root-1"}),
+        )
+        .unwrap();
+    assert_eq!(sync_root["fast_forwarded"], true);
+    assert_eq!(sync_root["pulled_commits"], 1);
+    assert_eq!(sync_root["pushed"], false);
+    assert_eq!(
+        std::fs::read_to_string(source.join("peer_update.txt")).unwrap(),
+        "from peer\n"
+    );
+}
+
+#[test]
 fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     let (_d, app, p, c) = setup();
     assert_eq!(p.id.len(), 8);

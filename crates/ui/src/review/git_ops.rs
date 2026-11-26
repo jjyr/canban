@@ -435,10 +435,10 @@ fn reload_after_git_mutation(ui: Ui) {
 
 pub fn sync_pending(ui: Ui) -> bool {
     ui.pending_methods.with(|s| {
-        ["git.fetch", "git.pull", "git.push"]
+        ["git.fetch", "git.pull", "git.push", "git.sync"]
             .iter()
             .any(|m| s.contains(m))
-    })
+    }) || ui.terminal_git_syncing.with(|s| !s.is_empty())
 }
 
 /// Git sync does not need to replace the complete application snapshot. Keep

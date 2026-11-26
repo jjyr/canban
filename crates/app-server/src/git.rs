@@ -27,6 +27,7 @@ impl AppServer {
             "git.fetch" => self.git_fetch_rpc(p),
             "git.pull" => self.git_pull_rpc(p),
             "git.push" => self.git_push_rpc(p),
+            "git.sync" => self.git_sync_rpc(p),
             _ => bail!("Unknown Git operation: {method}"),
         }
     }
@@ -555,6 +556,53 @@ impl AppServer {
         };
         self.save_idempotent_operation(idem, &res)?;
         self.git_changed();
+        self.emit("review", ctx.card_id);
+        Ok(res)
+    }
+
+    fn git_sync_rpc(&self, p: Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Git sync requires a direct user action"
+        );
+        let (idem, cached) = self.check_idempotent_operation("git.sync", &p)?;
+        if let Some(res) = cached {
+            return Ok(res);
+        }
+        let ctx = self.resolve_project_checkout(&p)?;
+        let _gate = if ctx.is_project_root {
+            let holder = self.checkout_holder_label(
+                "Git sync",
+                &ctx.project,
+                ctx.project.target_branch.as_deref(),
+            );
+            Some(
+                self.try_lock_checkout(&ctx.project, holder)
+                    .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
+        let res = {
+            let _permit = self.check();
+            self.ops()
+                .git_sync(&ctx.project, Path::new(&ctx.cwd), p["remote"].as_str())
+        };
+        let res = match res {
+            Ok(res) => res,
+            Err(err) => {
+                // Even if pull/push failed (e.g. diverged branches), fetch may have updated
+                // remote tracking refs so Terminals ahead/behind counts should refresh immediately.
+                self.git_changed();
+                drop(_gate);
+                self.emit("review", ctx.card_id);
+                return Err(err);
+            }
+        };
+        self.save_idempotent_operation(idem, &res)?;
+        self.git_changed();
+        drop(_gate);
+        self.request_deliveries();
         self.emit("review", ctx.card_id);
         Ok(res)
     }

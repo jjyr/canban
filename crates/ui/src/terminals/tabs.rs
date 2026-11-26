@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::components::git_workspace::compact;
+use canban_types::Snapshot;
 use nsh_core::element::desktop::{MenuItem, current_window, popup_menu, popup_menu_at};
+use std::collections::BTreeSet;
 pub fn context_updates(ui: Ui) {
     // Regrouping only reveals the selected row. It never changes the tab/viewer or unfolds
     // an intentionally collapsed scope when switching terminals from the header/tabs.
@@ -57,15 +59,25 @@ pub fn context_updates(ui: Ui) {
 pub(crate) enum TerminalMenuEntry {
     RenameTab,
     CloseTerminal,
-    OpenCard { card_id: String },
+    OpenCard {
+        card_id: String,
+    },
     DisabledInfo(String),
+    SyncGitBranch {
+        target: super::worktrees::GitSyncTarget,
+        disabled: bool,
+    },
     InterruptAgent,
     ContextAndHistory,
     InterruptTerminal,
     ReopenTerminal,
 }
 
-pub(crate) fn terminal_menu_entries(e: &Entry) -> Vec<TerminalMenuEntry> {
+pub(crate) fn terminal_menu_entries(
+    s: &Snapshot,
+    e: &Entry,
+    syncing_keys: &BTreeSet<String>,
+) -> Vec<TerminalMenuEntry> {
     let mut out = vec![
         TerminalMenuEntry::RenameTab,
         TerminalMenuEntry::CloseTerminal,
@@ -87,6 +99,11 @@ pub(crate) fn terminal_menu_entries(e: &Entry) -> Vec<TerminalMenuEntry> {
             }
         }
         out.push(TerminalMenuEntry::DisabledInfo(line));
+    }
+    if let Some(target) = super::worktrees::git_sync_target(s, e) {
+        let disabled =
+            s.is_host_offline(&target.host_id) || syncing_keys.contains(&target.sync_key());
+        out.push(TerminalMenuEntry::SyncGitBranch { target, disabled });
     }
     if let Some(agent) = &e.agent {
         if agent
@@ -112,7 +129,11 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
     else {
         return;
     };
-    let items: Vec<MenuItem> = terminal_menu_entries(&e)
+    let entries = ui.snapshot.with_untracked(|s| {
+        ui.terminal_git_syncing
+            .with_untracked(|syncing| terminal_menu_entries(s, &e, syncing))
+    });
+    let items: Vec<MenuItem> = entries
         .into_iter()
         .map(|entry| match entry {
             TerminalMenuEntry::RenameTab => {
@@ -130,6 +151,11 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
                     .on_select(move || ui.terminal_card(card_id.clone(), Some(terminal.clone())))
             }
             TerminalMenuEntry::DisabledInfo(text) => MenuItem::new(text).disabled(true),
+            TerminalMenuEntry::SyncGitBranch { target, disabled } => {
+                MenuItem::new("Sync Git Branch (Pull & Push)")
+                    .disabled(disabled)
+                    .on_select(move || super::worktrees::sync_git_target(ui, target.clone()))
+            }
             TerminalMenuEntry::InterruptAgent => {
                 let terminal_id = e.saved.id.clone();
                 MenuItem::new("Interrupt").on_select(move || {
@@ -328,6 +354,8 @@ pub fn header(ui: Ui) -> impl IntoElement {
         })
     });
     let context = computed(move || {
+        let cur = current(ui);
+        let cur_host = cur.as_ref().map(|e| e.host_id.clone());
         (
             ui.project.get(),
             active_scope.get(),
@@ -335,6 +363,9 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 (
                     s.projects.len(),
                     s.worktrees.len(),
+                    cur_host
+                        .as_deref()
+                        .is_some_and(|hid| s.is_host_offline(hid)),
                     s.projects
                         .iter()
                         .map(|p| (p.id.clone(), p.name.clone(), p.target_branch.clone()))
@@ -355,7 +386,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         .collect::<Vec<_>>(),
                 )
             }),
-            current(ui).map(|e| {
+            cur.map(|e| {
                 (
                     e.saved.id.clone(),
                     e.card.clone(),
@@ -489,9 +520,9 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         .flex_row()
                         .items_center()
                         .justify_end()
-                        .gap_1p5()
+                        .gap_1()
                         .min_w(px(0.))
-                        .max_w(move || px((width.get() * 0.35).min(340.)))
+                        .max_w(move || px((width.get() * 0.38).min(376.)))
                         .overflow_hidden()
                         .flex_shrink(1.);
 
@@ -500,7 +531,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             let terminal = e.saved.id.clone();
                             context_bar = context_bar.child(
                                 view()
-                                    .flex_shrink(1.)
+                                    .flex_shrink(1.5)
                                     .min_w(px(0.))
                                     .overflow_hidden()
                                     .tooltip(
@@ -552,7 +583,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             let proj_label = s.project_display_name(&project);
                             context_bar = context_bar.child(
                                 canban_ui_kit::press_target()
-                                    .flex_shrink(1.)
+                                    .flex_shrink(1.5)
                                     .min_w(px(0.))
                                     .overflow_hidden()
                                     .h(px(30.))
@@ -581,7 +612,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             );
                             context_bar = context_bar.child(
                                 view()
-                                    .flex_shrink(1.)
+                                    .flex_shrink(1.5)
                                     .min_w(px(0.))
                                     .h(px(30.))
                                     .justify_center()
@@ -682,6 +713,37 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                 .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
                                 .child(pill),
                         );
+                        if let Some(sync_target) = super::worktrees::git_sync_target(&s, e) {
+                            let host_offline = s.is_host_offline(&sync_target.host_id);
+                            let sync_key = sync_target.sync_key();
+                            let sync_branch = sync_target.branch.clone();
+                            let ahead = git.ahead;
+                            let behind = git.behind;
+                            context_bar = context_bar.child(dynamic(move || {
+                                let syncing =
+                                    ui.terminal_git_syncing.with(|set| set.contains(&sync_key));
+                                let title = super::worktrees::sync_git_button_hint(
+                                    &sync_branch,
+                                    ahead,
+                                    behind,
+                                    syncing,
+                                    host_offline,
+                                );
+                                let target_for_press = sync_target.clone();
+                                canban_ui_kit::chrome::sync_action(
+                                    Icon::Refresh,
+                                    title,
+                                    syncing || host_offline,
+                                    syncing,
+                                    move |_| {
+                                        super::worktrees::sync_git_target(
+                                            ui,
+                                            target_for_press.clone(),
+                                        )
+                                    },
+                                )
+                            }));
+                        }
                     }
 
                     if let Some(e) = cur {

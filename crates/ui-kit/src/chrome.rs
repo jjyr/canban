@@ -154,10 +154,11 @@ pub fn sync_action(
                 .justify_center()
                 .rounded(px(5.))
                 .bg(CLEAR)
-                .hover(|s| s.bg(INSET))
+                .hover(|s| s.bg(CARD_HOVER))
                 .focus(|s| s.border_1().border_color(ACCENT))
                 .accessibility_label(move || Some(title.clone().into()))
                 .disabled(move || busy)
+                .disabled_style(move |s| s.opacity(if spinning { 1.0 } else { 0.45 }))
                 .child(
                     view()
                         .w(px(16.))

@@ -4913,12 +4913,19 @@ fn many_terminal_tabs_scroll_without_overlapping_project_branch_or_actions() {
         let (branch_left, branch_right) = tree
             .page_bounds(tree.find_label_prefix("View terminal changes in Git"))
             .unwrap();
+        let (sync_left, sync_right) = tree
+            .page_bounds(tree.find_label_prefix("Sync Git branch"))
+            .unwrap();
         let (more_left, more_right) = tree
             .page_bounds(tree.find_label_prefix("Terminal actions"))
             .unwrap();
         let context_left = ctx_item_left.min(branch_left);
         let context_right = more_right;
 
+        assert!(
+            branch_right <= sync_left + 0.5 && sync_right <= more_left + 0.5,
+            "{scope_label} at {header_width}pt (sidebar={sidebar_open}): branch/sync/more bounds invalid: branch=({branch_left},{branch_right}), sync=({sync_left},{sync_right}), more=({more_left},{more_right})"
+        );
         assert!(
             scroll_right <= context_left + 0.5,
             "{scope_label} at {header_width}pt (sidebar={sidebar_open}): tab strip overlapped context bar (scroll_right={scroll_right} > context_left={context_left})"
@@ -4935,6 +4942,10 @@ fn many_terminal_tabs_scroll_without_overlapping_project_branch_or_actions() {
             assert!(
                 branch_right - branch_left > 30.0,
                 "{scope_label} at {header_width}pt: branch pill collapsed: ({branch_left}, {branch_right})"
+            );
+            assert!(
+                sync_right - sync_left >= 24.0,
+                "{scope_label} at {header_width}pt: sync button collapsed: ({sync_left}, {sync_right})"
             );
             assert!(
                 more_right - more_left >= 24.0,
@@ -6413,10 +6424,11 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
         agent: None,
     });
 
+    let syncing = std::collections::BTreeSet::new();
     let all = crate::terminals::entries(&s);
     let agent_entry = all.iter().find(|e| e.saved.id == agent_id).unwrap();
     let agent_hint = agent_entry.hint();
-    let agent_menu = terminal_menu_entries(agent_entry);
+    let agent_menu = terminal_menu_entries(&s, agent_entry, &syncing);
     assert_eq!(agent_menu.first(), Some(&TerminalMenuEntry::RenameTab));
     for item in &agent_menu {
         if let TerminalMenuEntry::DisabledInfo(text) = item {
@@ -6435,13 +6447,24 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
             },
             TerminalMenuEntry::DisabledInfo("/repo/p1-wt".into()),
             TerminalMenuEntry::DisabledInfo("Branch: canban/1 (changed · ↑2)".into()),
+            TerminalMenuEntry::SyncGitBranch {
+                target: crate::terminals::worktrees::GitSyncTarget {
+                    host_id: "local".into(),
+                    project_id: "p1".into(),
+                    card_id: Some("c1".into()),
+                    cwd: "/repo/p1-wt".into(),
+                    branch: "canban/1".into(),
+                    scope_key: "scope:card:c1".into(),
+                },
+                disabled: false,
+            },
             TerminalMenuEntry::InterruptAgent,
             TerminalMenuEntry::ContextAndHistory,
         ]
     );
 
     let live_shell = all.iter().find(|e| e.saved.id == "shell-live").unwrap();
-    let live_menu = terminal_menu_entries(live_shell);
+    let live_menu = terminal_menu_entries(&s, live_shell, &syncing);
     assert_eq!(live_menu.first(), Some(&TerminalMenuEntry::RenameTab));
     assert_eq!(
         live_menu,
@@ -6454,7 +6477,7 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
     );
 
     let ended_shell = all.iter().find(|e| e.saved.id == "shell-ended").unwrap();
-    let ended_menu = terminal_menu_entries(ended_shell);
+    let ended_menu = terminal_menu_entries(&s, ended_shell, &syncing);
     assert_eq!(ended_menu.first(), Some(&TerminalMenuEntry::RenameTab));
     assert_eq!(
         ended_menu,
@@ -6465,4 +6488,421 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
             TerminalMenuEntry::ReopenTerminal,
         ]
     );
+}
+
+#[test]
+fn git_sync_target_hints_and_summary_cover_registered_checkouts_and_states() {
+    use crate::terminals::worktrees;
+    let mut s = fixture();
+    s.projects[0].directory = "/repo/p1".into();
+    s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+    s.worktrees.push(ManagedWorktree {
+        id: "wt1".into(),
+        project_id: "p1".into(),
+        branch: "feat/wt".into(),
+        base_branch: "main".into(),
+        base_commit: None,
+        path: "/repo/p1-wt/wt1".into(),
+        directory: "/repo/p1".into(),
+        created_at: 1,
+    });
+
+    let mk_shell = |id: &str, num: u64, proj: Option<&str>| TerminalEntry {
+        id: id.into(),
+        conversation_id: None,
+        number: num,
+        name: Some(id.into()),
+        origin_project_id: proj.map(str::to_owned),
+        origin_card_id: None,
+        agent_engine: None,
+        created_at: num,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("core".into()),
+            terminal: Some(format!("pty-{id}")),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+    };
+    s.terminals.push(mk_shell("root-shell", 10, Some("p1")));
+    s.terminals.push(mk_shell("wt-shell", 11, Some("p1")));
+    s.terminals.push(mk_shell("ext-shell", 12, Some("p1")));
+    s.terminals.push(mk_shell("detached-shell", 13, Some("p1")));
+    s.terminals.push(mk_shell("outside-shell", 14, None));
+
+    let agent_id = s.terminals[0].id.clone();
+    s.terminal_contexts.extend([
+        TerminalContext {
+            terminal_id: agent_id.clone(),
+            core_id: "core".into(),
+            terminal: "t-c1".into(),
+            cwd: Some("/repo/p1-wt/c1/sub".into()),
+            directory_root: Some("/repo/p1-wt/c1".into()),
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            branch: Some("canban/1".into()),
+            ..Default::default()
+        },
+        TerminalContext {
+            terminal_id: "root-shell".into(),
+            core_id: "core".into(),
+            terminal: "pty-root-shell".into(),
+            cwd: Some("/repo/p1".into()),
+            directory_root: Some("/repo/p1".into()),
+            project_id: Some("p1".into()),
+            branch: Some("main".into()),
+            ..Default::default()
+        },
+        TerminalContext {
+            terminal_id: "wt-shell".into(),
+            core_id: "core".into(),
+            terminal: "pty-wt-shell".into(),
+            cwd: Some("/repo/p1-wt/wt1".into()),
+            directory_root: Some("/repo/p1-wt/wt1".into()),
+            project_id: Some("p1".into()),
+            worktree_id: Some("wt1".into()),
+            branch: Some("feat/wt".into()),
+            ..Default::default()
+        },
+        TerminalContext {
+            terminal_id: "ext-shell".into(),
+            core_id: "core".into(),
+            terminal: "pty-ext-shell".into(),
+            cwd: Some("/repo/p1/.worktrees/ext".into()),
+            directory_root: Some("/repo/p1/.worktrees/ext".into()),
+            project_id: Some("p1".into()),
+            branch: Some("fix/ext".into()),
+            ..Default::default()
+        },
+        TerminalContext {
+            terminal_id: "detached-shell".into(),
+            core_id: "core".into(),
+            terminal: "pty-detached-shell".into(),
+            cwd: Some("/repo/p1".into()),
+            directory_root: Some("/repo/p1".into()),
+            project_id: Some("p1".into()),
+            branch: None,
+            ..Default::default()
+        },
+        TerminalContext {
+            terminal_id: "outside-shell".into(),
+            core_id: "core".into(),
+            terminal: "pty-outside-shell".into(),
+            cwd: Some("/tmp/unrelated".into()),
+            directory_root: Some("/tmp/unrelated".into()),
+            project_id: None,
+            branch: Some("other".into()),
+            ..Default::default()
+        },
+    ]);
+
+    let all_entries = crate::terminals::entries(&s);
+    let find = |id: &str| {
+        all_entries
+            .iter()
+            .find(|e| e.saved.id == id)
+            .cloned()
+            .unwrap()
+    };
+
+    let card_tgt = worktrees::git_sync_target(&s, &find(&agent_id)).unwrap();
+    assert_eq!(card_tgt.project_id, "p1");
+    assert_eq!(card_tgt.card_id.as_deref(), Some("c1"));
+    assert_eq!(card_tgt.cwd, "/repo/p1-wt/c1");
+    assert_eq!(card_tgt.branch, "canban/1");
+
+    let root_tgt = worktrees::git_sync_target(&s, &find("root-shell")).unwrap();
+    assert_eq!(root_tgt.cwd, "/repo/p1");
+    assert_eq!(root_tgt.card_id, None);
+
+    let wt_tgt = worktrees::git_sync_target(&s, &find("wt-shell")).unwrap();
+    assert_eq!(wt_tgt.cwd, "/repo/p1-wt/wt1");
+    assert_eq!(wt_tgt.branch, "feat/wt");
+
+    let ext_tgt = worktrees::git_sync_target(&s, &find("ext-shell")).unwrap();
+    assert_eq!(ext_tgt.cwd, "/repo/p1/.worktrees/ext");
+    assert_eq!(ext_tgt.branch, "fix/ext");
+
+    assert!(worktrees::git_sync_target(&s, &find("detached-shell")).is_none());
+    assert!(worktrees::git_sync_target(&s, &find("outside-shell")).is_none());
+
+    assert_eq!(
+        worktrees::sync_git_button_hint("main", 2, 1, false, false),
+        "Sync Git branch main (pull ↓1 & push ↑2)"
+    );
+    assert_eq!(
+        worktrees::sync_git_button_hint("main", 0, 3, false, false),
+        "Sync Git branch main (pull ↓3 & push)"
+    );
+    assert_eq!(
+        worktrees::sync_git_button_hint("main", 4, 0, false, false),
+        "Sync Git branch main (pull & push ↑4)"
+    );
+    assert_eq!(
+        worktrees::sync_git_button_hint("main", 0, 0, true, false),
+        "Syncing Git branch main (pull & push)…"
+    );
+    assert_eq!(
+        worktrees::sync_git_button_hint("main", 0, 0, false, true),
+        "Sync Git branch main unavailable: host is offline"
+    );
+
+    assert_eq!(
+        worktrees::format_git_sync_summary(
+            &json!({"branch":"feat/x","remote":"origin","remote_branch":"feat/x","pulled":false,"fast_forwarded":false,"pushed":true,"pushed_commits":1,"set_upstream":true}),
+            "feat/x"
+        ),
+        "Published feat/x to origin/feat/x"
+    );
+    assert_eq!(
+        worktrees::format_git_sync_summary(
+            &json!({"branch":"main","remote":"origin","remote_branch":"main","pulled":true,"fast_forwarded":true,"pulled_commits":2,"pushed":true,"pushed_commits":1,"set_upstream":false}),
+            "main"
+        ),
+        "Synced main: pulled 2 commits, pushed 1 commit"
+    );
+    assert_eq!(
+        worktrees::format_git_sync_summary(
+            &json!({"branch":"main","remote":"origin","remote_branch":"main","pulled":true,"fast_forwarded":false,"pulled_commits":0,"pushed":false,"pushed_commits":0,"set_upstream":false}),
+            "main"
+        ),
+        "main is already up to date"
+    );
+}
+
+#[test]
+fn terminals_header_git_sync_button_clears_ahead_behind_in_preview_and_hides_for_unregistered_dirs()
+{
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, element::JsEvent,
+        geometry::size, prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    type ObservedState = std::sync::Arc<std::sync::Mutex<(u32, u32, String)>>;
+    thread_local! {
+        static OBSERVER: std::cell::RefCell<Option<ObservedState>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[component]
+    fn HeaderSyncProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.terminals.clear();
+        s.terminal_contexts.clear();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        let mk_shell = |id: &str, num: u64, proj: Option<&str>| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: Some(id.into()),
+            origin_project_id: proj.map(str::to_owned),
+            origin_card_id: None,
+            agent_engine: None,
+            created_at: num,
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+        };
+        s.terminals.push(mk_shell("root-shell", 1, Some("p1")));
+        s.terminals.push(mk_shell("outside-shell", 2, None));
+        s.terminal_contexts.extend([
+            TerminalContext {
+                terminal_id: "root-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-root-shell".into(),
+                cwd: Some("/repo/p1".into()),
+                directory_root: Some("/repo/p1".into()),
+                project_id: Some("p1".into()),
+                branch: Some("main".into()),
+                ahead: 2,
+                behind: 1,
+                ..Default::default()
+            },
+            TerminalContext {
+                terminal_id: "outside-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-outside-shell".into(),
+                cwd: Some("/tmp/outside".into()),
+                directory_root: Some("/tmp/outside".into()),
+                project_id: None,
+                branch: Some("scratch".into()),
+                ahead: 1,
+                behind: 0,
+                ..Default::default()
+            },
+        ]);
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+        ui.open_terminal("root-shell".into());
+        if let Some(obs) = OBSERVER.with(|slot| slot.borrow().clone()) {
+            effect(move || {
+                let (ahead, behind) = ui.snapshot.with(|snap| {
+                    snap.terminal_contexts
+                        .iter()
+                        .find(|c| c.terminal_id == "root-shell")
+                        .map(|c| (c.ahead, c.behind))
+                        .unwrap_or((u32::MAX, u32::MAX))
+                });
+                let toast = ui.toast.get();
+                *obs.lock().unwrap() = (ahead, behind, toast);
+            });
+        }
+        view()
+            .w_full()
+            .h(px(42.))
+            .child(
+                canban_ui_kit::press_target()
+                    .w(px(0.))
+                    .h(px(0.))
+                    .accessibility_label(Some("Test Switch Outside".into()))
+                    .on_press(move |_: &()| ui.open_terminal("outside-shell".into())),
+            )
+            .child(crate::terminals::tabs::header(ui))
+    }
+
+    let _guard = PROBE_LOCK.lock().unwrap();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new((u32::MAX, u32::MAX, String::new())));
+    OBSERVER.with(|slot| *slot.borrow_mut() = Some(observed.clone()));
+    let mut core = Core::new(ApproxTextEngine, size(px(1000.), px(42.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<HeaderSyncProbe>());
+
+    let mut alive = HashSet::<NodeId>::new();
+    let mut parents = HashMap::<NodeId, NodeId>::new();
+    let mut labels = HashMap::<String, NodeId>::new();
+    let pump = |core: &mut Core<ApproxTextEngine>,
+                alive: &mut HashSet<NodeId>,
+                parents: &mut HashMap<NodeId, NodeId>,
+                labels: &mut HashMap<String, NodeId>| {
+        for _ in 0..8 {
+            let had_batch = if let Some(batch) = core.commit() {
+                for item in &batch.items {
+                    match item {
+                        MountItem::Create { id, .. } => {
+                            alive.insert(*id);
+                        }
+                        MountItem::Insert { parent, child, .. } => {
+                            parents.insert(*child, *parent);
+                        }
+                        MountItem::Remove { id } => {
+                            parents.remove(id);
+                        }
+                        MountItem::Delete { id } => {
+                            alive.remove(id);
+                            parents.remove(id);
+                        }
+                        MountItem::ViewProps { id, props } => {
+                            if let Some(lbl) = &props.accessibility.label {
+                                labels.insert(lbl.to_string(), *id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    };
+    let is_mounted =
+        |alive: &HashSet<NodeId>, parents: &HashMap<NodeId, NodeId>, mut id: NodeId| {
+            if !alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        };
+
+    pump(&mut core, &mut alive, &mut parents, &mut labels);
+    let sync_id = *labels
+        .iter()
+        .find(|(lbl, id)| {
+            lbl.starts_with("Sync Git branch main (pull ↓1 & push ↑2)")
+                && is_mounted(&alive, &parents, **id)
+        })
+        .expect("mounted Sync Git branch button for root-shell")
+        .1;
+
+    assert!(core.component_event(sync_id, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut alive, &mut parents, &mut labels);
+
+    let (ahead, behind, toast) = observed.lock().unwrap().clone();
+    assert_eq!(ahead, 0);
+    assert_eq!(behind, 0);
+    assert!(
+        toast.contains("Synced main"),
+        "expected preview toast for Synced main, got: {toast:?}"
+    );
+
+    // Switching to an unregistered directory hides the sync button.
+    let switch_id = *labels
+        .iter()
+        .find(|(lbl, id)| *lbl == "Test Switch Outside" && is_mounted(&alive, &parents, **id))
+        .expect("mounted Test Switch Outside probe button")
+        .1;
+    assert!(core.component_event(switch_id, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut alive, &mut parents, &mut labels);
+    assert!(
+        !labels.iter().any(
+            |(lbl, id)| lbl.starts_with("Sync Git branch") && is_mounted(&alive, &parents, *id)
+        ),
+        "sync button must not appear for unregistered directories"
+    );
+    OBSERVER.with(|slot| *slot.borrow_mut() = None);
 }

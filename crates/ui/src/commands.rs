@@ -442,6 +442,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "diff compare branch current directory",
     },
     Command {
+        id: "sync-terminal-git",
+        title: "Sync Terminal Git Branch (Pull & Push)",
+        key: "",
+        display: "Terminal",
+        context: "Terminal",
+        keywords: "git sync pull push remote branch upstream terminal",
+    },
+    Command {
         id: "copy-card-branch",
         title: "Copy Card Branch",
         key: "",
@@ -1098,6 +1106,7 @@ pub fn execute(ui: Ui, id: &str) {
             }
         }
         "open-terminal-diff" => crate::terminals::worktrees::open_current_diff(ui),
+        "sync-terminal-git" => crate::terminals::worktrees::sync_current_git(ui),
         "copy-card-branch" => crate::card::changes::copy_branch(ui),
         "refresh-card-diff" => crate::card::changes::refresh(ui),
         "open-card-diff" => crate::card::changes::open(ui),
@@ -1818,6 +1827,7 @@ mod tests {
         }
         assert!(CATALOG.iter().any(|c| c.id == "advance-card-stage"));
         assert!(CATALOG.iter().any(|c| c.id == "retry-auto-merge"));
+        assert!(CATALOG.iter().any(|c| c.id == "sync-terminal-git"));
         assert!(CATALOG.iter().any(|c| c.id == "go-insights"));
         assert!(!CATALOG.iter().any(|c| c.id.starts_with("insights-")));
         assert!(!CATALOG.iter().any(|c| c.id.starts_with("terminal-tab-")));

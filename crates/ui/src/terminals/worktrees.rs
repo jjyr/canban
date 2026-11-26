@@ -778,6 +778,300 @@ pub fn open_diff(ui: Ui, wt: &ManagedWorktree) {
     crate::navigation::checkpoint(ui);
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitSyncTarget {
+    pub host_id: String,
+    pub project_id: String,
+    pub card_id: Option<String>,
+    pub cwd: String,
+    pub branch: String,
+    pub scope_key: String,
+}
+
+impl GitSyncTarget {
+    pub fn sync_key(&self) -> String {
+        format!("{}:{}", self.host_id, self.cwd)
+    }
+}
+
+pub fn git_sync_target(s: &Snapshot, e: &Entry) -> Option<GitSyncTarget> {
+    let loc = e.location.as_ref()?;
+    let branch = loc
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())?
+        .to_owned();
+    loc.cwd.as_ref()?;
+    let scope = entry_scope(s, e);
+    let scope_key = scope.recent_key();
+    match scope {
+        WorktreeScope::CardWorktree(id) => {
+            let card = s.cards.iter().find(|c| c.id == id)?;
+            let cwd = loc
+                .directory_root
+                .clone()
+                .or_else(|| card.worktree.clone())
+                .or_else(|| loc.cwd.clone())?;
+            Some(GitSyncTarget {
+                host_id: e.host_id.clone(),
+                project_id: card.project_id.clone(),
+                card_id: Some(card.id.clone()),
+                cwd,
+                branch,
+                scope_key,
+            })
+        }
+        WorktreeScope::ManagedWorktree(id) => {
+            let wt = s.worktrees.iter().find(|w| w.id == id)?;
+            Some(GitSyncTarget {
+                host_id: e.host_id.clone(),
+                project_id: wt.project_id.clone(),
+                card_id: None,
+                cwd: wt.path.clone(),
+                branch,
+                scope_key,
+            })
+        }
+        WorktreeScope::ProjectRoot(id) => {
+            let proj = s.projects.iter().find(|p| p.id == id)?;
+            Some(GitSyncTarget {
+                host_id: e.host_id.clone(),
+                project_id: proj.id.clone(),
+                card_id: None,
+                cwd: proj.directory.clone(),
+                branch,
+                scope_key,
+            })
+        }
+        WorktreeScope::Directory {
+            path,
+            project: Some(pid),
+            ..
+        } => s
+            .projects
+            .iter()
+            .any(|p| p.id == pid)
+            .then(|| GitSyncTarget {
+                host_id: e.host_id.clone(),
+                project_id: pid,
+                card_id: None,
+                cwd: path,
+                branch,
+                scope_key,
+            }),
+        WorktreeScope::Directory { project: None, .. } | WorktreeScope::Unassigned(_) => None,
+    }
+}
+
+pub fn sync_git_button_hint(
+    branch: &str,
+    ahead: u32,
+    behind: u32,
+    syncing: bool,
+    offline: bool,
+) -> String {
+    if syncing {
+        format!("Syncing Git branch {branch} (pull & push)…")
+    } else if offline {
+        format!("Sync Git branch {branch} unavailable: host is offline")
+    } else if ahead > 0 && behind > 0 {
+        format!("Sync Git branch {branch} (pull ↓{behind} & push ↑{ahead})")
+    } else if behind > 0 {
+        format!("Sync Git branch {branch} (pull ↓{behind} & push)")
+    } else if ahead > 0 {
+        format!("Sync Git branch {branch} (pull & push ↑{ahead})")
+    } else {
+        format!("Sync Git branch {branch} (pull & push)")
+    }
+}
+
+pub fn format_git_sync_summary(val: &Value, fallback_branch: &str) -> String {
+    let branch = val["branch"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_branch);
+    let remote = val["remote"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("origin");
+    let remote_branch = val["remote_branch"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(branch);
+    let pulled = val["fast_forwarded"].as_bool().unwrap_or(false);
+    let pulled_n = val["pulled_commits"].as_u64().unwrap_or(0);
+    let pushed = val["pushed"].as_bool().unwrap_or(false);
+    let pushed_n = val["pushed_commits"].as_u64().unwrap_or(0);
+    let published =
+        val["set_upstream"].as_bool().unwrap_or(false) && !val["pulled"].as_bool().unwrap_or(true);
+
+    if published {
+        format!("Published {branch} to {remote}/{remote_branch}")
+    } else if pulled && pushed {
+        let pull_word = if pulled_n == 1 { "commit" } else { "commits" };
+        let push_word = if pushed_n == 1 { "commit" } else { "commits" };
+        format!("Synced {branch}: pulled {pulled_n} {pull_word}, pushed {pushed_n} {push_word}")
+    } else if pulled {
+        let word = if pulled_n == 1 { "commit" } else { "commits" };
+        format!("Pulled {pulled_n} {word} into {branch}")
+    } else if pushed {
+        let word = if pushed_n == 1 { "commit" } else { "commits" };
+        format!("Pushed {pushed_n} {word} from {branch} to {remote}/{remote_branch}")
+    } else {
+        format!("{branch} is already up to date")
+    }
+}
+
+pub fn sync_git_target(ui: Ui, target: GitSyncTarget) {
+    if ui.page.get_untracked() == "terminals" {
+        ui.terminal_focus.update(|v| *v += 1);
+    }
+    let offline = ui
+        .snapshot
+        .with_untracked(|s| s.is_host_offline(&target.host_id));
+    if offline {
+        ui.notify(format!(
+            "Sync Git branch {} unavailable: host is offline",
+            target.branch
+        ));
+        return;
+    }
+    let key = target.sync_key();
+    if ui
+        .terminal_git_syncing
+        .with_untracked(|set| set.contains(&key))
+    {
+        return;
+    }
+    if !crate::backend::is_connected() {
+        let scope_key = target.scope_key.clone();
+        let target_cwd = target.cwd.clone();
+        let target_branch = target.branch.clone();
+        let mut had_ahead = false;
+        let mut had_behind = false;
+        let mut ahead_n = 0u32;
+        let mut behind_n = 0u32;
+        ui.snapshot.update(|s| {
+            let entries_now = super::entries(s);
+            let matching_ids: std::collections::BTreeSet<String> = entries_now
+                .into_iter()
+                .filter(|e| {
+                    entry_scope(s, e).recent_key() == scope_key
+                        || e.location
+                            .as_ref()
+                            .and_then(|l| l.directory_root.as_deref().or(l.cwd.as_deref()))
+                            == Some(target_cwd.as_str())
+                })
+                .map(|e| e.saved.id)
+                .collect();
+            for ctx in &mut s.terminal_contexts {
+                if matching_ids.contains(&ctx.terminal_id)
+                    || ctx.directory_root.as_deref() == Some(target_cwd.as_str())
+                    || ctx.cwd.as_deref() == Some(target_cwd.as_str())
+                {
+                    if ctx.ahead > 0 {
+                        had_ahead = true;
+                        ahead_n = ahead_n.max(ctx.ahead);
+                        ctx.ahead = 0;
+                    }
+                    if ctx.behind > 0 {
+                        had_behind = true;
+                        behind_n = behind_n.max(ctx.behind);
+                        ctx.behind = 0;
+                    }
+                }
+            }
+        });
+        let msg = if had_ahead && had_behind {
+            format!("Synced {target_branch}: pulled {behind_n}, pushed {ahead_n} (Gallery preview)")
+        } else if had_behind {
+            format!("Pulled {behind_n} into {target_branch} (Gallery preview)")
+        } else if had_ahead {
+            format!("Pushed {ahead_n} from {target_branch} (Gallery preview)")
+        } else {
+            format!("{target_branch} is already up to date (Gallery preview)")
+        };
+        ui.notify(msg);
+        return;
+    }
+
+    ui.terminal_git_syncing.update(|set| {
+        set.insert(key.clone());
+    });
+    ui.status
+        .set(format!("Syncing Git branch {}…", target.branch));
+    ui.operation_error.set(String::new());
+    ui.review_state.read_cache.with(|cache| {
+        cache.invalidate_checkout(
+            &target.host_id,
+            &target.project_id,
+            &target.cwd,
+            target.card_id.as_deref(),
+        );
+    });
+
+    let mut params = json!({
+        "project_id": target.project_id,
+        "cwd": target.cwd,
+        "request_key": canban_types::id(),
+    });
+    if let Some(cid) = &target.card_id {
+        params["card_id"] = json!(cid);
+    }
+    let project_for_route = target.project_id.clone();
+
+    ui.spawn(async move {
+        let result =
+            blocking(move || crate::routed_call("git.sync", params, Some(&project_for_route)))
+                .await;
+        if let Some(mut set) = ui.terminal_git_syncing.try_get() {
+            set.remove(&key);
+            let _ = ui.terminal_git_syncing.try_set(set);
+        }
+        let _ = ui.review_state.read_cache.try_with(|cache| {
+            cache.invalidate_checkout(
+                &target.host_id,
+                &target.project_id,
+                &target.cwd,
+                target.card_id.as_deref(),
+            );
+        });
+        match result {
+            Ok(Ok(val)) => {
+                ui.notify(format_git_sync_summary(&val, &target.branch));
+                if ui.page.try_get() == Some("review".into())
+                    && ui.project.try_get().as_deref() == Some(target.project_id.as_str())
+                {
+                    crate::review::load_refs(ui);
+                    let branch = ui.review_state.log_branch.get_untracked();
+                    crate::review::git_ops::load_branch_log(ui, branch, false);
+                    crate::review::refresh_active_diff(ui, false);
+                }
+            }
+            Ok(Err(e)) => {
+                let err = format!("Git sync ({}): {e:#}", target.branch);
+                let _ = ui.status.try_set(err.clone());
+                let _ = ui.operation_error.try_set(err);
+            }
+            Err(e) => {
+                let err = format!("Git sync ({}): {e}", target.branch);
+                let _ = ui.status.try_set(err.clone());
+                let _ = ui.operation_error.try_set(err);
+            }
+        }
+    });
+}
+
+pub fn sync_current_git(ui: Ui) {
+    let target = current(ui).and_then(|e| ui.snapshot.with_untracked(|s| git_sync_target(s, &e)));
+    if let Some(target) = target {
+        sync_git_target(ui, target);
+    } else {
+        ui.notify("Git sync unavailable: no registered Git branch checkout for this terminal");
+    }
+}
+
 pub fn request_remove(ui: Ui, wt_id: String, force: bool) {
     if !crate::backend::is_connected() {
         ui.snapshot
