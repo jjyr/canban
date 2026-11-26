@@ -1,8 +1,12 @@
 # Project guide
 
+## No new unit tests
+
+- **Do NOT write new unit tests**: Never add new `#[test]` or `#[tokio::test]` unit tests anywhere in the workspace (backend, UI, CLI, or tooling) unless the user explicitly asks for one. Keep existing retained tests passing unless intentionally retired or replaced by DST coverage.
+
 ## DST-first & determinism
 
-- **DST-first, no new unit tests**: Do not write new unit tests (`#[test]`). Validate all backend, sync, client, scheduler, workflow, and protocol behavior through Deterministic Simulation Testing ([docs/dst.md](docs/dst.md), `crates/sim`). Keep existing tests passing unless intentionally replaced by DST coverage.
+- **DST-first verification**: Validate all backend, sync, client, scheduler, workflow, protocol, and backend-coupled UI projection behavior through Deterministic Simulation Testing ([docs/dst.md](docs/dst.md), `crates/sim`).
 - **Wire new features into DST**: Every new business capability, RPC, state transition, or I/O boundary must be deterministic and simulation-ready (injected `Clock`, `IdGen`, `canban-exec` runner, per-instance `Failpoints` / fault seams, zero process-global mutable statics, zero stray wall-clock calls) and covered in `crates/sim` (scenarios, `chaos` ops, oracles, and coverage gates).
 - **Turn bug fixes into DST regressions**: When fixing a bug, reproduce it in DST via a scenario, injectable fault (`Failpoints`, storage/network/fake faults), or oracle invariant, and record any failing chaos seed in `crates/sim/corpus/regressions.txt`.
 - **Keep time logic pure**: Express timeouts, backoff, debounce, cooldowns, and grace periods with explicit `now` / `Clock` inputs; never rely on wall-clock sleeps or stray `SystemTime::now()` / `Utc::now()` in core runtime/sync crates ([time-dependent logic](docs/development-conventions.md#time-dependent-logic-and-deterministic-testing)).

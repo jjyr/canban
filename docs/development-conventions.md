@@ -86,7 +86,7 @@ The implementation now includes UI Kit, a native Gallery and an opt-in real-Herd
 
 ## Time-dependent logic and deterministic testing
 
-Canban follows a **DST-first, no new unit tests** verification policy ([docs/dst.md](dst.md)): do not add new Rust `#[test]` unit tests; wire new capabilities, state transitions, and bug reproductions directly into `crates/sim` (scenarios, `chaos` ops, injectable `Failpoints`/fault seams, oracle invariants, and `crates/sim/corpus/regressions.txt`). Keep existing tests passing unless intentionally replaced by DST coverage.
+Canban follows two explicit testing rules ([AGENTS.md](../AGENTS.md)): **do not write new `#[test]` / `#[tokio::test]` unit tests** anywhere in the workspace unless explicitly requested, and apply **DST-first verification** ([docs/dst.md](dst.md)) by wiring new capabilities, state transitions, backend-coupled UI projections, and bug reproductions directly into `crates/sim` (scenarios, `chaos` ops, injectable `Failpoints`/fault seams, oracle invariants, and `crates/sim/corpus/regressions.txt`). Keep existing retained tests passing unless intentionally retired or replaced by DST coverage.
 
 Keep time-based state transitions deterministic and decouple them from OS thread scheduling and wall-clock sleeps:
 
