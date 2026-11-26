@@ -2,6 +2,380 @@ use nsh_core::prelude::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub const MAX_SCOPED_REVIEW_DRAFTS: usize = 64;
+
+/// Isolation key for in-progress diff review drafts (`pending_comments`, summary, verdict, anchor).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReviewDraftScope {
+    /// Standalone Git compare/client workbench scoped by host, project, and physical checkout path.
+    /// An empty `cwd` denotes the Project's main directory.
+    Checkout {
+        host: String,
+        project_id: String,
+        cwd: String,
+    },
+    /// Card-bound review (local card worktree or Card-linked GitHub PR).
+    Card {
+        host: String,
+        project_id: String,
+        card_id: String,
+    },
+    /// GitHub PR opened directly from the GitHub browser without an associated Card.
+    StandalonePr { repository: String, number: u64 },
+}
+
+impl ReviewDraftScope {
+    pub fn is_foreign_project(&self, host: &str, project_id: &str) -> bool {
+        match self {
+            Self::Checkout {
+                host: h,
+                project_id: p,
+                ..
+            }
+            | Self::Card {
+                host: h,
+                project_id: p,
+                ..
+            } => h != host || p != project_id,
+            Self::StandalonePr { .. } => false,
+        }
+    }
+
+    pub fn matches_project(&self, host: &str, project_id: &str) -> bool {
+        match self {
+            Self::Checkout {
+                host: h,
+                project_id: p,
+                ..
+            }
+            | Self::Card {
+                host: h,
+                project_id: p,
+                ..
+            } => h == host && p == project_id,
+            Self::StandalonePr { .. } => false,
+        }
+    }
+
+    pub fn matches_card(&self, card_id: &str) -> bool {
+        matches!(self, Self::Card { card_id: cid, .. } if cid == card_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DraftScopeInput<'a> {
+    pub host: &'a str,
+    pub project_id: &'a str,
+    pub project_dir: Option<&'a str>,
+    pub mode: &'a str,
+    pub review_card_id: &'a str,
+    pub ui_card_id: &'a str,
+    pub card_host_project: Option<(&'a str, &'a str)>,
+    pub checkout_cwd: &'a str,
+    pub pr_repository: Option<&'a str>,
+    pub pr_number: Option<u64>,
+}
+
+fn trim_checkout_path(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.len() > 1 {
+        trimmed.trim_end_matches('/')
+    } else {
+        trimmed
+    }
+}
+
+pub fn normalize_checkout_path(cwd: &str, project_dir: Option<&str>) -> String {
+    let norm_cwd = trim_checkout_path(cwd);
+    if norm_cwd.is_empty() {
+        return String::new();
+    }
+    if let Some(dir) = project_dir
+        .map(trim_checkout_path)
+        .filter(|d| !d.is_empty())
+        && norm_cwd == dir
+    {
+        return String::new();
+    }
+    norm_cwd.to_owned()
+}
+
+pub fn resolve_draft_scope(input: DraftScopeInput<'_>) -> ReviewDraftScope {
+    let card_id = if !input.review_card_id.is_empty() {
+        input.review_card_id
+    } else if input.mode != "git" && !input.ui_card_id.is_empty() {
+        input.ui_card_id
+    } else {
+        ""
+    };
+    if !card_id.is_empty() {
+        let (h, p) = input
+            .card_host_project
+            .unwrap_or((input.host, input.project_id));
+        return ReviewDraftScope::Card {
+            host: h.to_owned(),
+            project_id: p.to_owned(),
+            card_id: card_id.to_owned(),
+        };
+    }
+    if input.mode == "github_pr"
+        && let (Some(repo), Some(num)) = (
+            input.pr_repository.map(str::trim).filter(|s| !s.is_empty()),
+            input.pr_number.filter(|&n| n > 0),
+        )
+    {
+        return ReviewDraftScope::StandalonePr {
+            repository: repo.to_owned(),
+            number: num,
+        };
+    }
+    ReviewDraftScope::Checkout {
+        host: input.host.to_owned(),
+        project_id: input.project_id.to_owned(),
+        cwd: normalize_checkout_path(input.checkout_cwd, input.project_dir),
+    }
+}
+
+pub fn draft_scope_from_read_context(
+    read_context: &str,
+    project_dir: Option<&str>,
+) -> Option<ReviewDraftScope> {
+    let parsed: Value = serde_json::from_str(read_context).ok()?;
+    let arr = parsed.as_array()?;
+    let host = arr.first()?.as_str()?;
+    let project_id = arr.get(1)?.as_str()?;
+    let kind = arr.get(2)?.as_str()?;
+    let cwd = arr.get(3)?.as_str()?;
+    if kind != "checkout" {
+        return None;
+    }
+    Some(ReviewDraftScope::Checkout {
+        host: host.to_owned(),
+        project_id: project_id.to_owned(),
+        cwd: normalize_checkout_path(cwd, project_dir),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewDraftSnapshot {
+    pub pending_comments: Vec<PendingInlineComment>,
+    pub submit_summary: String,
+    pub submit_gh_event: String,
+    pub draft_anchor_sha: Option<String>,
+    pub draft_drift_dismissed: bool,
+    pub loaded_draft_key: (String, u64),
+}
+
+impl Default for ReviewDraftSnapshot {
+    fn default() -> Self {
+        Self {
+            pending_comments: Vec::new(),
+            submit_summary: String::new(),
+            submit_gh_event: "COMMENT".into(),
+            draft_anchor_sha: None,
+            draft_drift_dismissed: false,
+            loaded_draft_key: (String::new(), 0),
+        }
+    }
+}
+
+impl ReviewDraftSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.pending_comments.is_empty()
+            && self.submit_summary.trim().is_empty()
+            && self.submit_gh_event == "COMMENT"
+            && self.draft_anchor_sha.is_none()
+            && !self.draft_drift_dismissed
+            && self.loaded_draft_key.1 == 0
+    }
+
+    pub fn from_server_draft(draft: &canban_types::ReviewDraft) -> Self {
+        let pending_comments = draft
+            .comments
+            .iter()
+            .map(|c| PendingInlineComment {
+                id: c.id.clone(),
+                path: c.path.clone(),
+                section: c.section.clone(),
+                line: c.line,
+                side: c.side.clone(),
+                snippet: c.snippet.clone(),
+                body: c.body.clone(),
+                author: c.author.clone(),
+                edited_by_user: c.edited_by_user,
+            })
+            .collect();
+        let submit_gh_event = match draft.verdict.as_str() {
+            "approve" => "APPROVE",
+            "request_changes" => "REQUEST_CHANGES",
+            _ => "COMMENT",
+        }
+        .to_owned();
+        Self {
+            pending_comments,
+            submit_summary: draft.summary.clone(),
+            submit_gh_event,
+            draft_anchor_sha: draft.compare_sha.clone(),
+            draft_drift_dismissed: false,
+            loaded_draft_key: (draft.card_id.clone(), draft.updated_at),
+        }
+    }
+}
+
+/// Bounded per-scope storage for in-progress diff review drafts across Projects, worktrees, and Cards/PRs.
+#[derive(Clone, Debug)]
+pub struct ReviewDraftStore {
+    entries: crate::cache::LruCache<ReviewDraftScope, ReviewDraftSnapshot>,
+}
+
+impl Default for ReviewDraftStore {
+    fn default() -> Self {
+        Self::new(MAX_SCOPED_REVIEW_DRAFTS)
+    }
+}
+
+impl ReviewDraftStore {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: crate::cache::LruCache::new(capacity),
+        }
+    }
+
+    pub fn save(&mut self, scope: ReviewDraftScope, snapshot: ReviewDraftSnapshot) {
+        if snapshot.is_empty() {
+            self.entries.retain(|k, _| k != &scope);
+        } else {
+            self.entries.insert(scope, snapshot);
+        }
+    }
+
+    pub fn load(&mut self, scope: &ReviewDraftScope) -> ReviewDraftSnapshot {
+        self.entries.get(scope).cloned().unwrap_or_default()
+    }
+
+    pub fn peek(&self, scope: &ReviewDraftScope) -> Option<&ReviewDraftSnapshot> {
+        self.entries.peek(scope)
+    }
+
+    pub fn pending_count(&self, scope: &ReviewDraftScope) -> usize {
+        self.entries
+            .peek(scope)
+            .map_or(0, |d| d.pending_comments.len())
+    }
+
+    pub fn clear_scope(&mut self, scope: &ReviewDraftScope) {
+        self.entries.retain(|k, _| k != scope);
+    }
+
+    pub fn clear_card(&mut self, card_id: &str) {
+        self.entries.retain(|k, _| !k.matches_card(card_id));
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HydrateAction {
+    Unchanged,
+    Apply(ReviewDraftSnapshot),
+    ClearAnchorOnly,
+}
+
+pub fn plan_server_draft_hydration(
+    active_scope: Option<&ReviewDraftScope>,
+    current_loaded_key: &(String, u64),
+    card_id: &str,
+    server_draft: Option<&canban_types::ReviewDraft>,
+    force: bool,
+) -> HydrateAction {
+    if let Some(draft) = server_draft {
+        let key = (card_id.to_owned(), draft.updated_at);
+        if !force && current_loaded_key == &key {
+            return HydrateAction::Unchanged;
+        }
+        return HydrateAction::Apply(ReviewDraftSnapshot::from_server_draft(draft));
+    }
+    let server_draft_removed = current_loaded_key.0 == card_id && current_loaded_key.1 > 0;
+    let foreign_scope = active_scope.is_some_and(|s| !s.matches_card(card_id));
+    let foreign_loaded = !current_loaded_key.0.is_empty() && current_loaded_key.0 != card_id;
+    if force || server_draft_removed {
+        if server_draft_removed || foreign_scope || foreign_loaded {
+            HydrateAction::Apply(ReviewDraftSnapshot {
+                loaded_draft_key: (card_id.to_owned(), 0),
+                ..Default::default()
+            })
+        } else {
+            HydrateAction::ClearAnchorOnly
+        }
+    } else {
+        HydrateAction::Unchanged
+    }
+}
+
+/// Switches the active draft scope, saving any prior scope's draft and loading the target scope's
+/// saved bucket. Returns `true` when an actual switch between two distinct scopes occurred.
+pub fn switch_draft_scope_pure(
+    active_scope: &mut Option<ReviewDraftScope>,
+    current: &mut ReviewDraftSnapshot,
+    store: &mut ReviewDraftStore,
+    inferred_prev: Option<ReviewDraftScope>,
+    next: ReviewDraftScope,
+) -> bool {
+    if active_scope.as_ref() == Some(&next) {
+        return false;
+    }
+    let prev = active_scope
+        .take()
+        .or_else(|| inferred_prev.filter(|s| s != &next));
+    if let Some(old) = prev {
+        store.save(old, std::mem::take(current));
+        *current = store.load(&next);
+        *active_scope = Some(next);
+        true
+    } else {
+        if current.is_empty() {
+            *current = store.load(&next);
+        }
+        *active_scope = Some(next);
+        false
+    }
+}
+
+pub fn rail_pending_count_pure(
+    active_scope: Option<&ReviewDraftScope>,
+    active_pending_len: usize,
+    store: &ReviewDraftStore,
+    current_host: &str,
+    current_project_id: &str,
+    current_page: &str,
+) -> usize {
+    if let Some(scope) = active_scope {
+        let matches_active = match scope {
+            ReviewDraftScope::Checkout { .. } | ReviewDraftScope::Card { .. } => {
+                scope.matches_project(current_host, current_project_id)
+            }
+            ReviewDraftScope::StandalonePr { .. } => current_page == "review",
+        };
+        if matches_active {
+            active_pending_len
+        } else {
+            store.pending_count(&ReviewDraftScope::Checkout {
+                host: current_host.to_owned(),
+                project_id: current_project_id.to_owned(),
+                cwd: String::new(),
+            })
+        }
+    } else {
+        active_pending_len
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingInlineComment {
     pub id: String,
@@ -133,6 +507,9 @@ pub struct State {
     pub commit_description: Signal<String>,
     pub commit_amend: Signal<bool>,
     pub discard_confirm: Signal<Option<Vec<String>>>,
+    pub active_draft_scope: Signal<Option<ReviewDraftScope>>,
+    pub draft_store: Stored<ReviewDraftStore>,
+    pub draft_store_revision: Signal<u64>,
     pub loaded_draft_key: Stored<(String, u64)>,
     pub draft_anchor_sha: Signal<Option<String>>,
     pub draft_drift_dismissed: Signal<bool>,
@@ -228,6 +605,9 @@ impl State {
             commit_description: signal(String::new()),
             commit_amend: signal(false),
             discard_confirm: signal(None),
+            active_draft_scope: signal(None),
+            draft_store: stored(ReviewDraftStore::default()),
+            draft_store_revision: signal(0),
             loaded_draft_key: stored((String::new(), 0)),
             draft_anchor_sha: signal(None),
             draft_drift_dismissed: signal(false),

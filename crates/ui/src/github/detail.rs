@@ -170,24 +170,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 let num = r_rev.number.unwrap_or(0);
                                 let url = r_rev.url.clone();
                                 compact_action("Diff", Variant::Secondary, move |_| {
-                                    let st = ui.review_state;
-                                    let repo_val = repo.clone();
-                                    let url_val = url.clone();
-                                    batch(move || {
-                                        ui.card.set(String::new());
-                                        ui.review.set(None);
-                                        st.review_card_id.set(String::new());
-                                        st.pr_target.set(Some(json!({
-                                            "repository": repo_val,
-                                            "number": num,
-                                            "url": url_val,
-                                        })));
-                                        st.mode.set("github_pr".into());
-                                        st.selected_file.set(String::new());
-                                        st.active_line.set(None);
-                                        ui.navigate("review");
-                                    });
-                                    crate::review::refresh_active_diff(ui, false);
+                                    crate::review::open_standalone_pr(
+                                        ui,
+                                        repo.clone(),
+                                        num,
+                                        url.clone(),
+                                    );
                                 })
                             }
                         },

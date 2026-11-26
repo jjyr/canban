@@ -2170,6 +2170,7 @@ fn inline_composer_box(ui: Ui, target: LineTarget) -> View {
                         if body.trim().is_empty() {
                             return;
                         }
+                        super::ensure_active_draft_scope(ui);
                         st.pending_comments.update(|list| {
                             list.push(PendingInlineComment {
                                 id: canban_types::id(),

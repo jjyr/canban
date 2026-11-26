@@ -113,6 +113,7 @@ pub fn select_checkout(ui: Ui, cwd: String) {
         st.deleting_remote_comment.set(None);
         st.remote_delete_error.set(String::new());
         st.error.set(String::new());
+        super::sync_draft_scope(ui);
     });
     super::prepare_context(ui);
     if let Some(project) = ui.current_project() {

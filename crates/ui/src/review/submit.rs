@@ -177,6 +177,7 @@ pub fn render_bottom_bar(ui: Ui) -> impl IntoElement {
                                         "Discard Agent drafts",
                                         Variant::Quiet,
                                         move |_| {
+                                            super::ensure_active_draft_scope(ui);
                                             st.pending_comments.update(|list| {
                                                 list.retain(|c| c.author.is_none() || c.edited_by_user);
                                             });
@@ -185,6 +186,7 @@ pub fn render_bottom_bar(ui: Ui) -> impl IntoElement {
                                     ));
                                 }
                                 row.child(compact_action("Clear", Variant::Quiet, move |_| {
+                                    super::ensure_active_draft_scope(ui);
                                     st.pending_comments.set(Vec::new());
                                     super::sync_pending_draft_to_server(ui);
                                 }))
@@ -607,6 +609,7 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
     };
 
     action(btn_label, Variant::Primary, move |_| {
+        let submitted_scope = super::current_draft_scope(ui);
         let action_kind = st.submit_action.get_untracked();
         let summary = st.submit_summary.get_untracked();
         let pending = st.pending_comments.get_untracked();
@@ -625,9 +628,7 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
 
         if !crate::backend::is_connected() {
             // Gallery mode: simulate clean completion with toast feedback.
-            st.pending_comments.set(Vec::new());
-            st.submit_summary.set(String::new());
-            st.submit_open.set(false);
+            super::clear_draft_for_scope(ui, &submitted_scope);
             ui.notify(format!("Gallery preview · dispatched ({action_kind})"));
             return;
         }
@@ -677,13 +678,9 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
             if !cid.is_empty() {
                 gh_payload["card_id"] = json!(cid);
             }
+            let clear_scope = submitted_scope.clone();
             dispatch_then(ui, "github.remote.review", gh_payload, move |_| {
-                st.pending_comments.set(Vec::new());
-                st.submit_summary.set(String::new());
-                st.draft_anchor_sha.set(None);
-                st.draft_drift_dismissed.set(false);
-                st.loaded_draft_key.replace((String::new(), 0));
-                st.submit_open.set(false);
+                super::clear_draft_for_scope(ui, &clear_scope);
                 ui.notify("Review published to GitHub PR");
             });
             return;
@@ -744,11 +741,9 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
             }),
         };
 
+        let clear_scope = submitted_scope;
         dispatch_then(ui, "review.send_agent", payload, move |res| {
-            st.pending_comments.set(Vec::new());
-            st.submit_summary.set(String::new());
-            st.submit_new_card_title.set(String::new());
-            st.submit_open.set(false);
+            super::clear_draft_for_scope(ui, &clear_scope);
             match res["mode"].as_str().unwrap_or("") {
                 "terminal" => {
                     if let Some(tid) = res["terminal_id"].as_str() {

@@ -10,7 +10,10 @@ pub mod model;
 pub mod sidebar;
 pub mod submit;
 
-pub use model::{LineTarget, PendingInlineComment, PullRefreshTarget, State};
+pub use model::{
+    LineTarget, PendingInlineComment, PullRefreshTarget, ReviewDraftScope, ReviewDraftSnapshot,
+    ReviewDraftStore, State,
+};
 
 use crate::presenter::*;
 use canban_types::{Card, ReviewPreview};
@@ -308,21 +311,238 @@ pub fn start_agent_review(
     });
 }
 
+fn project_directory_untracked(ui: Ui, project_id: &str) -> Option<String> {
+    if project_id.is_empty() {
+        return None;
+    }
+    ui.snapshot.with_untracked(|s| {
+        s.projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.directory.clone())
+    })
+}
+
+fn card_host_project_untracked(ui: Ui, card_id: &str) -> Option<(String, String)> {
+    if card_id.is_empty() {
+        return None;
+    }
+    ui.snapshot.with_untracked(|s| {
+        let card = s.cards.iter().find(|c| c.id == card_id)?;
+        Some((s.card_host(&card.id).to_owned(), card.project_id.clone()))
+    })
+}
+
+pub(crate) fn current_draft_scope(ui: Ui) -> model::ReviewDraftScope {
+    let st = ui.review_state;
+    let host = ui.active_project_host();
+    let project_id = ui.project.get_untracked();
+    let project_dir = project_directory_untracked(ui, &project_id);
+    let mode = st.mode.get_untracked();
+    let review_card_id = st.review_card_id.get_untracked();
+    let ui_card_id = ui.card.get_untracked();
+    let effective_card_id = if !review_card_id.is_empty() {
+        review_card_id.as_str()
+    } else if mode != "git" && !ui_card_id.is_empty() {
+        ui_card_id.as_str()
+    } else {
+        ""
+    };
+    let card_host_project = card_host_project_untracked(ui, effective_card_id);
+    let checkout_cwd = st.checkout_cwd.get_untracked();
+    let pr_target = st.pr_target.get_untracked();
+    let pr_repo = pr_target
+        .as_ref()
+        .and_then(|pr| pr["repository"].as_str())
+        .map(str::to_owned);
+    let pr_num = pr_target.as_ref().and_then(|pr| pr["number"].as_u64());
+    model::resolve_draft_scope(model::DraftScopeInput {
+        host: &host,
+        project_id: &project_id,
+        project_dir: project_dir.as_deref(),
+        mode: &mode,
+        review_card_id: &review_card_id,
+        ui_card_id: &ui_card_id,
+        card_host_project: card_host_project
+            .as_ref()
+            .map(|(h, p)| (h.as_str(), p.as_str())),
+        checkout_cwd: &checkout_cwd,
+        pr_repository: pr_repo.as_deref(),
+        pr_number: pr_num,
+    })
+}
+
+fn read_live_draft_snapshot(st: State) -> model::ReviewDraftSnapshot {
+    model::ReviewDraftSnapshot {
+        pending_comments: st.pending_comments.get_untracked(),
+        submit_summary: st.submit_summary.get_untracked(),
+        submit_gh_event: st.submit_gh_event.get_untracked(),
+        draft_anchor_sha: st.draft_anchor_sha.get_untracked(),
+        draft_drift_dismissed: st.draft_drift_dismissed.get_untracked(),
+        loaded_draft_key: st.loaded_draft_key.with(|v| v.clone()),
+    }
+}
+
+fn apply_live_draft_snapshot(st: State, snap: model::ReviewDraftSnapshot) {
+    st.pending_comments.set(snap.pending_comments);
+    st.submit_summary.set(snap.submit_summary);
+    st.submit_gh_event.set(snap.submit_gh_event);
+    st.draft_anchor_sha.set(snap.draft_anchor_sha);
+    st.draft_drift_dismissed.set(snap.draft_drift_dismissed);
+    st.loaded_draft_key.replace(snap.loaded_draft_key);
+}
+
+fn reset_transient_review_inputs(st: State) {
+    st.active_line.set(None);
+    st.line_draft.set(String::new());
+    st.submit_open.set(false);
+    st.submit_new_card_title.set(String::new());
+    st.editing_remote_comment.set(None);
+    st.remote_edit_draft.set(String::new());
+    st.remote_edit_error.set(String::new());
+    st.deleting_remote_comment.set(None);
+    st.remote_delete_error.set(String::new());
+}
+
+pub(crate) fn sync_draft_scope(ui: Ui) {
+    let st = ui.review_state;
+    let next = current_draft_scope(ui);
+    if st
+        .active_draft_scope
+        .with_untracked(|cur| cur.as_ref() == Some(&next))
+    {
+        return;
+    }
+    let mut active_scope = st.active_draft_scope.get_untracked();
+    let inferred_prev = if active_scope.is_none() {
+        let raw_ctx = st.read_context.with(|v| v.clone());
+        let ctx_proj_dir = serde_json::from_str::<Value>(&raw_ctx)
+            .ok()
+            .and_then(|v| v[1].as_str().map(str::to_owned))
+            .and_then(|pid| project_directory_untracked(ui, &pid));
+        model::draft_scope_from_read_context(&raw_ctx, ctx_proj_dir.as_deref())
+    } else {
+        None
+    };
+    let mut current = read_live_draft_snapshot(st);
+    let was_empty = current.is_empty();
+    let switched = st.draft_store.with(|store| {
+        model::switch_draft_scope_pure(&mut active_scope, &mut current, store, inferred_prev, next)
+    });
+    batch(|| {
+        st.active_draft_scope.set(active_scope);
+        if switched || (was_empty && !current.is_empty()) {
+            apply_live_draft_snapshot(st, current);
+        }
+        if switched {
+            reset_transient_review_inputs(st);
+        }
+        st.draft_store_revision.update(|n| *n += 1);
+    });
+}
+
+pub(crate) fn ensure_active_draft_scope(ui: Ui) {
+    if ui
+        .review_state
+        .active_draft_scope
+        .with_untracked(Option::is_none)
+    {
+        sync_draft_scope(ui);
+    }
+}
+
+pub(crate) fn clear_draft_for_scope(ui: Ui, scope: &model::ReviewDraftScope) {
+    let st = ui.review_state;
+    let is_active = st
+        .active_draft_scope
+        .with_untracked(|cur| cur.as_ref() == Some(scope) || cur.is_none());
+    batch(|| {
+        st.draft_store.with(|store| store.clear_scope(scope));
+        if is_active {
+            apply_live_draft_snapshot(st, model::ReviewDraftSnapshot::default());
+            st.submit_open.set(false);
+            st.submit_new_card_title.set(String::new());
+        }
+        st.draft_store_revision.update(|n| *n += 1);
+    });
+}
+
+pub(crate) fn clear_card_draft(ui: Ui, card_id: &str) {
+    let st = ui.review_state;
+    let is_active = st
+        .active_draft_scope
+        .with_untracked(|cur| cur.as_ref().is_some_and(|s| s.matches_card(card_id)))
+        || ui.card.get_untracked() == card_id;
+    batch(|| {
+        st.draft_store.with(|store| store.clear_card(card_id));
+        if is_active {
+            apply_live_draft_snapshot(st, model::ReviewDraftSnapshot::default());
+        }
+        st.draft_store_revision.update(|n| *n += 1);
+    });
+}
+
+pub fn rail_pending_comment_count(ui: Ui) -> usize {
+    let st = ui.review_state;
+    let project_id = ui.project.get();
+    let host = ui.snapshot.with_untracked(|s| {
+        if project_id.is_empty() {
+            "local".to_owned()
+        } else {
+            s.project_host(&project_id).to_owned()
+        }
+    });
+    let _rev = st.draft_store_revision.get();
+    let active_scope = st.active_draft_scope.get();
+    let active_len = st.pending_comments.with(Vec::len);
+    let page = if matches!(
+        active_scope,
+        Some(model::ReviewDraftScope::StandalonePr { .. })
+    ) {
+        ui.page.get()
+    } else {
+        String::new()
+    };
+    st.draft_store.with(|store| {
+        model::rail_pending_count_pure(
+            active_scope.as_ref(),
+            active_len,
+            store,
+            &host,
+            &project_id,
+            &page,
+        )
+    })
+}
+
+pub fn open_standalone_pr(ui: Ui, repository: String, number: u64, url: String) {
+    let st = ui.review_state;
+    batch(move || {
+        ui.card.set(String::new());
+        ui.review.set(None);
+        st.review_card_id.set(String::new());
+        st.checkout_cwd.set(String::new());
+        st.pr_target.set(Some(json!({
+            "repository": repository,
+            "number": number,
+            "url": url,
+        })));
+        st.mode.set("github_pr".into());
+        st.selected_file.set(String::new());
+        st.active_line.set(None);
+        sync_draft_scope(ui);
+        ui.navigate("review");
+    });
+    refresh_active_diff(ui, false);
+}
+
 pub fn discard_review_draft(ui: Ui, card_id: &str) {
     if !crate::backend::is_connected() {
         let cid = card_id.to_owned();
         ui.snapshot.update(|s| {
             s.review_drafts.retain(|d| d.card_id != cid);
         });
-        let st = ui.review_state;
-        if ui.card.get_untracked() == card_id {
-            batch(|| {
-                st.pending_comments.set(Vec::new());
-                st.submit_summary.set(String::new());
-                st.draft_anchor_sha.set(None);
-                st.draft_drift_dismissed.set(false);
-            });
-        }
+        clear_card_draft(ui, &cid);
         ui.notify("Gallery preview · discarded review draft");
         return;
     }
@@ -332,16 +552,7 @@ pub fn discard_review_draft(ui: Ui, card_id: &str) {
         "review.draft.clear",
         json!({"card_id": cid}),
         move |_| {
-            let st = ui.review_state;
-            if ui.card.get_untracked() == cid {
-                batch(|| {
-                    st.pending_comments.set(Vec::new());
-                    st.submit_summary.set(String::new());
-                    st.draft_anchor_sha.set(None);
-                    st.draft_drift_dismissed.set(false);
-                    st.loaded_draft_key.replace((String::new(), 0));
-                });
-            }
+            clear_card_draft(ui, &cid);
             ui.notify("Discarded local review draft");
         },
     );
@@ -400,46 +611,44 @@ pub fn hydrate_card_review_draft(ui: Ui, card_id: &str, force: bool) {
     let draft_opt = ui
         .index
         .with_untracked(|idx| idx.review_draft(card_id).cloned());
-    let Some(draft) = draft_opt else {
-        if force {
-            st.loaded_draft_key.replace((card_id.to_owned(), 0));
-            st.draft_anchor_sha.set(None);
-            st.draft_drift_dismissed.set(false);
+    let active_scope = st.active_draft_scope.get_untracked();
+    let loaded_key = st.loaded_draft_key.with(|v| v.clone());
+    match model::plan_server_draft_hydration(
+        active_scope.as_ref(),
+        &loaded_key,
+        card_id,
+        draft_opt.as_ref(),
+        force,
+    ) {
+        model::HydrateAction::Unchanged => {}
+        model::HydrateAction::ClearAnchorOnly => {
+            batch(|| {
+                st.loaded_draft_key.replace((card_id.to_owned(), 0));
+                st.draft_anchor_sha.set(None);
+                st.draft_drift_dismissed.set(false);
+            });
         }
-        return;
-    };
-    let key = (card_id.to_owned(), draft.updated_at);
-    if !force && st.loaded_draft_key.with(|prev| *prev == key) {
-        return;
+        model::HydrateAction::Apply(snap) => {
+            let bind_scope = if active_scope.is_none() {
+                let (h, p) = card_host_project_untracked(ui, card_id)
+                    .unwrap_or_else(|| (ui.active_project_host(), ui.project.get_untracked()));
+                Some(model::ReviewDraftScope::Card {
+                    host: h,
+                    project_id: p,
+                    card_id: card_id.to_owned(),
+                })
+            } else {
+                None
+            };
+            batch(|| {
+                if let Some(scope) = bind_scope {
+                    st.active_draft_scope.set(Some(scope));
+                }
+                apply_live_draft_snapshot(st, snap);
+                st.draft_store_revision.update(|n| *n += 1);
+            });
+        }
     }
-    st.loaded_draft_key.replace(key);
-    let pending: Vec<PendingInlineComment> = draft
-        .comments
-        .into_iter()
-        .map(|c| PendingInlineComment {
-            id: c.id,
-            path: c.path,
-            section: c.section,
-            line: c.line,
-            side: c.side,
-            snippet: c.snippet,
-            body: c.body,
-            author: c.author,
-            edited_by_user: c.edited_by_user,
-        })
-        .collect();
-    let gh_event = match draft.verdict.as_str() {
-        "approve" => "APPROVE",
-        "request_changes" => "REQUEST_CHANGES",
-        _ => "COMMENT",
-    };
-    batch(|| {
-        st.pending_comments.set(pending);
-        st.submit_summary.set(draft.summary);
-        st.submit_gh_event.set(gh_event.into());
-        st.draft_anchor_sha.set(draft.compare_sha);
-        st.draft_drift_dismissed.set(false);
-    });
 }
 
 /// Re-entering Git retains this Project's selected checkout and comparison.
@@ -466,23 +675,26 @@ pub fn open_compare(ui: Ui) {
         if retain_pr {
             ui.review.set(None);
         }
+        sync_draft_scope(ui);
         prepare_context(ui);
         load_refs(ui);
         refresh_active_diff(ui, false);
     } else if !same_project || mode != "git" {
-        reset_git_selection(st);
+        reset_git_selection(ui);
         git_ops::select_checkout(ui, String::new());
     } else {
         ui.card.set(String::new());
         st.review_card_id.set(String::new());
         st.pr_target.set(None);
         ui.review.set(None);
+        sync_draft_scope(ui);
         load_refs_and_compare(ui, false);
     }
     ui.navigate("review");
 }
 
-fn reset_git_selection(st: State) {
+fn reset_git_selection(ui: Ui) {
+    let st = ui.review_state;
     reset_pull_refresh(st);
     cancel_reads(st);
     st.review_card_id.set(String::new());
@@ -496,6 +708,12 @@ fn reset_git_selection(st: State) {
     st.range_backup.set(None);
     st.selected_file.set(String::new());
     st.active_line.set(None);
+    st.line_draft.set(String::new());
+    st.editing_remote_comment.set(None);
+    st.remote_edit_draft.set(String::new());
+    st.remote_edit_error.set(String::new());
+    st.deleting_remote_comment.set(None);
+    st.remote_delete_error.set(String::new());
     st.error.set(String::new());
     st.refs_data.set(json!({}));
     st.compare_data.set(json!({}));
@@ -508,19 +726,25 @@ fn reset_git_selection(st: State) {
     st.log_has_more.set(false);
     clear_context_expansion(st);
     st.anchor_targets.with(std::collections::BTreeMap::clear);
+    sync_draft_scope(ui);
 }
 
 /// A history destination keeps its Project; only foreign Git selections expire.
 fn clear_foreign_project_selection(ui: Ui) {
     let host = ui.active_project_host();
     let project = ui.project.get_untracked();
-    let foreign = ui.review_state.read_context.with(|key| {
+    let foreign_context = ui.review_state.read_context.with(|key| {
         serde_json::from_str::<Value>(key).ok().is_some_and(|key| {
             key[0].as_str() != Some(host.as_str()) || key[1].as_str() != Some(project.as_str())
         })
     });
-    if foreign {
-        reset_git_selection(ui.review_state);
+    let foreign_draft = ui.review_state.active_draft_scope.with_untracked(|scope| {
+        scope
+            .as_ref()
+            .is_some_and(|s| s.is_foreign_project(&host, &project))
+    });
+    if foreign_context || foreign_draft {
+        reset_git_selection(ui);
     }
 }
 
@@ -562,6 +786,7 @@ pub fn open_card_pr(ui: Ui, card_id: &str) {
             ));
             st.selected_file.set(String::new());
             st.compare_open.set(false);
+            sync_draft_scope(ui);
         });
         hydrate_card_review_draft(ui, &card.id, !same_pr);
         prepare_context(ui);
@@ -599,23 +824,29 @@ pub fn open_card(ui: Ui, card_id: &str) {
             && st.checkout_cwd.get_untracked() == path
             && !st.base_ref.get_untracked().is_empty()
             && !st.compare_ref.get_untracked().is_empty();
+        let pr_info = card_pr_info(&card);
         if same_checkout {
-            ui.card.set(String::new());
-            st.review_card_id.set(String::new());
+            if pr_info.is_none() {
+                ui.card.set(String::new());
+                st.review_card_id.set(String::new());
+                st.pr_target.set(None);
+            }
             ui.review.set(None);
+            sync_draft_scope(ui);
             load_refs_and_compare(ui, false);
         } else {
             git_ops::select_checkout(ui, path);
         }
-        if let Some((repository, number, url)) = card_pr_info(&card) {
-            ui.card.set(card.id.clone());
-            st.review_card_id.set(card.id.clone());
-            st.pr_target.set(Some(
-                json!({"repository":repository, "number":number, "url":url}),
-            ));
-            if !same_checkout {
-                hydrate_card_review_draft(ui, &card.id, true);
-            }
+        if let Some((repository, number, url)) = pr_info {
+            batch(|| {
+                ui.card.set(card.id.clone());
+                st.review_card_id.set(card.id.clone());
+                st.pr_target.set(Some(
+                    json!({"repository":repository, "number":number, "url":url}),
+                ));
+                sync_draft_scope(ui);
+            });
+            hydrate_card_review_draft(ui, &card.id, !same_checkout);
         }
     } else {
         let same_checkout = same_project
@@ -626,7 +857,9 @@ pub fn open_card(ui: Ui, card_id: &str) {
         if same_checkout {
             ui.card.set(String::new());
             st.review_card_id.set(String::new());
+            st.pr_target.set(None);
             ui.review.set(None);
+            sync_draft_scope(ui);
             load_refs_and_compare(ui, false);
         } else {
             git_ops::select_checkout(ui, String::new());
@@ -817,6 +1050,7 @@ pub(crate) fn reset_pull_refresh(st: State) {
 }
 
 fn prepare_context(ui: Ui) {
+    sync_draft_scope(ui);
     if !crate::backend::is_connected() {
         return;
     }
@@ -1279,6 +1513,7 @@ pub(crate) fn select_git_pair(ui: Ui, base: impl Into<String>, compare: impl Int
         st.selected_file.set(String::new());
         st.visible_file_limit.set(4);
         st.active_line.set(None);
+        sync_draft_scope(ui);
     });
     refresh_active_diff(ui, false);
 }
@@ -1288,32 +1523,82 @@ pub fn screen(ui: Ui) -> impl IntoElement {
 
     if crate::backend::is_connected() {
         let has_card = !ui.card.get_untracked().is_empty();
-        if !has_card {
+        let is_standalone_pr =
+            st.mode.get_untracked() == "github_pr" && st.pr_target.with_untracked(Option::is_some);
+        if !has_card && !is_standalone_pr {
             clear_foreign_project_selection(ui);
         }
-        if has_card
-            && !st.compare_loading.get_untracked()
-            && st.compare_data.with_untracked(|v| v["files"].is_null())
-        {
-            if st.mode.get_untracked() == "github_pr"
-                && st.pr_target.with_untracked(Option::is_some)
-            {
+        if has_card {
+            let cid = ui.card.get_untracked();
+            let mut reconciled = false;
+            if st.review_card_id.get_untracked() != cid {
+                let card_opt = ui
+                    .snapshot
+                    .with_untracked(|s| s.cards.iter().find(|c| c.id == cid).cloned());
+                if let Some(card) = card_opt {
+                    let cwd = card.worktree.clone().unwrap_or_default();
+                    let pr = card_pr_info(&card).map(|(repository, number, url)| {
+                        json!({"repository": repository, "number": number, "url": url})
+                    });
+                    let mode = if card.is_github_pr() || (card.worktree.is_none() && pr.is_some()) {
+                        "github_pr"
+                    } else if st.mode.get_untracked() == "card_local" {
+                        "card_local"
+                    } else {
+                        "git"
+                    };
+                    let keep_card = mode != "git" || pr.is_some();
+                    batch(|| {
+                        st.review_card_id.set(if keep_card {
+                            cid.clone()
+                        } else {
+                            String::new()
+                        });
+                        st.checkout_cwd.set(cwd);
+                        st.mode.set(mode.into());
+                        st.pr_target.set(pr);
+                        st.selected_file.set(String::new());
+                        sync_draft_scope(ui);
+                    });
+                    if keep_card {
+                        hydrate_card_review_draft(ui, &cid, true);
+                    }
+                    prepare_context(ui);
+                    load_refs(ui);
+                    refresh_active_diff(ui, false);
+                    reconciled = true;
+                }
+            }
+            if !reconciled {
+                sync_draft_scope(ui);
+                if !st.compare_loading.get_untracked()
+                    && st.compare_data.with_untracked(|v| v["files"].is_null())
+                {
+                    if st.mode.get_untracked() == "github_pr"
+                        && st.pr_target.with_untracked(Option::is_some)
+                    {
+                        load_refs(ui);
+                        refresh_active_diff(ui, false);
+                    } else {
+                        open_card(ui, &cid);
+                    }
+                } else if !st.refs_loading.get_untracked() && !st.compare_loading.get_untracked() {
+                    // A remounted page reuses a fresh cache or asynchronously revalidates
+                    // after expiry/events, including Back/Forward navigation.
+                    load_refs(ui);
+                    refresh_active_diff(ui, false);
+                }
+            }
+        } else {
+            sync_draft_scope(ui);
+            if !st.refs_loading.get_untracked() && st.base_ref.get_untracked().is_empty() {
+                load_refs_and_compare(ui, true);
+            } else if !st.refs_loading.get_untracked() && !st.compare_loading.get_untracked() {
+                // A remounted page reuses a fresh cache or asynchronously revalidates
+                // after expiry/events, including Back/Forward navigation.
                 load_refs(ui);
                 refresh_active_diff(ui, false);
-            } else {
-                let cid = ui.card.get_untracked();
-                open_card(ui, &cid);
             }
-        } else if !has_card
-            && !st.refs_loading.get_untracked()
-            && st.base_ref.get_untracked().is_empty()
-        {
-            load_refs_and_compare(ui, true);
-        } else if !st.refs_loading.get_untracked() && !st.compare_loading.get_untracked() {
-            // A remounted page reuses a fresh cache or asynchronously revalidates
-            // after expiry/events, including Back/Forward navigation.
-            load_refs(ui);
-            refresh_active_diff(ui, false);
         }
     } else if let Some(p) = ui.review.get_untracked()
         && st.compare_data.with_untracked(|v| v["files"].is_null())
@@ -1322,13 +1607,19 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         st.base_ref.set(p.target_branch.clone());
         st.compare_ref.set("WORKDIR".into());
         st.compare_data.set(preview_to_compare_json(&p));
+        sync_draft_scope(ui);
+    } else {
+        sync_draft_scope(ui);
     }
 
     effect(move || {
         let _ = ui.index.get();
         let page = ui.page.get();
         let cid = ui.card.get();
-        if page == "review" && !cid.is_empty() && st.mode.get_untracked() != "git" {
+        if page == "review"
+            && !cid.is_empty()
+            && (st.mode.get_untracked() != "git" || st.review_card_id.get_untracked() == cid)
+        {
             untracked(|| hydrate_card_review_draft(ui, &cid, false));
         }
     });

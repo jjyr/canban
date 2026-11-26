@@ -34,6 +34,12 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use canban_types::Card;
+use canban_ui::review::model::{
+    DraftScopeInput, HydrateAction, MAX_SCOPED_REVIEW_DRAFTS, PendingInlineComment,
+    ReviewDraftScope, ReviewDraftSnapshot, ReviewDraftStore, normalize_checkout_path,
+    plan_server_draft_hydration, rail_pending_count_pure, resolve_draft_scope,
+    switch_draft_scope_pure,
+};
 use rand::Rng;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -964,6 +970,536 @@ pub fn run(seed: u64) -> Result<u64> {
             b2_reconciled.resolution
         );
         world.hit("github.pr_remote_merge_reconciled");
+        oracle.check_step_invariants(world)?;
+
+        // =====================================================================
+        // PART B2 — Scoped Review Draft Isolation Across Worktrees, Projects, Hosts, & Cards
+        // =====================================================================
+        let card_s1 = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_rev,
+                "title": format!("Scoped Draft Card 1 ({seed})"),
+                "body": "Card with server-persisted ReviewDraft",
+            }),
+            Some(&pid_rev),
+        )?;
+        let cid_s1 = card_s1["id"]
+            .as_str()
+            .context("card.create S1 missing id")?
+            .to_owned();
+        let raw_cid_s1 = strip_host(&cid_s1);
+        oracle.record_committed_card(
+            "remote-a",
+            &raw_cid_s1,
+            &strip_host(&pid_rev),
+            card_s1["revision"].as_u64().unwrap_or(1),
+        );
+
+        let card_s2 = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_rev,
+                "title": format!("Scoped Draft Card 2 ({seed})"),
+                "body": "Card without server ReviewDraft",
+            }),
+            Some(&pid_rev),
+        )?;
+        let cid_s2 = card_s2["id"]
+            .as_str()
+            .context("card.create S2 missing id")?
+            .to_owned();
+        let raw_cid_s2 = strip_host(&cid_s2);
+        oracle.record_committed_card(
+            "remote-a",
+            &raw_cid_s2,
+            &strip_host(&pid_rev),
+            card_s2["revision"].as_u64().unwrap_or(1),
+        );
+
+        let local_scope_dir = world.project_dir(&format!("local-scope-repo-{seed}"))?;
+        let proj_local = world.client_call(
+            "project.create",
+            json!({
+                "host_id": "local",
+                "name": format!("Local Scope Repo {seed}"),
+                "directory": local_scope_dir,
+            }),
+            None,
+        )?;
+        let pid_local = proj_local["id"]
+            .as_str()
+            .context("project.create(local) missing id")?
+            .to_owned();
+
+        let _ = world.client_call(
+            "review.draft.set",
+            json!({
+                "card_id": cid_s1,
+                "summary": format!("Server draft summary ({seed})"),
+                "verdict": "request_changes",
+                "compare_sha": a1_head,
+                "comments": [{
+                    "id": format!("srv-c1-{seed}"),
+                    "path": "src/lib.rs",
+                    "line": 12,
+                    "side": "RIGHT",
+                    "snippet": "fn check()",
+                    "body": format!("Server inline review comment ({seed})"),
+                }],
+            }),
+            Some(&pid_rev),
+        )?;
+
+        world.wait_until(15_000, |w| {
+            let snap = w.client_merged_snapshot()?;
+            Ok(snap.review_drafts.iter().any(|d| d.card_id == cid_s1)
+                && !snap.review_drafts.iter().any(|d| d.card_id == cid_s2))
+        })?;
+
+        let snap_with_draft = world.client_merged_snapshot()?;
+        let server_draft_s1 = snap_with_draft
+            .review_drafts
+            .iter()
+            .find(|d| d.card_id == cid_s1)
+            .context("merged_snapshot missing Card S1 ReviewDraft")?
+            .clone();
+
+        // 1. Canonical main-checkout normalization & cross-worktree isolation + restoration.
+        let mut store = ReviewDraftStore::default();
+        let mut active_scope: Option<ReviewDraftScope> = None;
+        let mut live = ReviewDraftSnapshot::default();
+
+        let main_scope_empty = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_rev,
+            project_dir: Some(&review_dir),
+            mode: "git",
+            review_card_id: "",
+            ui_card_id: "",
+            card_host_project: None,
+            checkout_cwd: "",
+            pr_repository: None,
+            pr_number: None,
+        });
+        let main_scope_explicit = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_rev,
+            project_dir: Some(&review_dir),
+            mode: "git",
+            review_card_id: "",
+            ui_card_id: "",
+            card_host_project: None,
+            checkout_cwd: &format!("{review_dir}/"),
+            pr_repository: None,
+            pr_number: None,
+        });
+        ensure!(
+            main_scope_empty == main_scope_explicit,
+            "Main checkout empty path and project_dir/ must map to the same scope"
+        );
+        ensure!(
+            normalize_checkout_path(&format!("{review_dir}/"), Some(&review_dir)).is_empty(),
+            "normalize_checkout_path must collapse trailing-slash project_dir to empty string"
+        );
+
+        let initial_switched = switch_draft_scope_pure(
+            &mut active_scope,
+            &mut live,
+            &mut store,
+            None,
+            main_scope_empty.clone(),
+        );
+        ensure!(
+            !initial_switched,
+            "Initial bind without prior scope must not count as a switch"
+        );
+        live.pending_comments = vec![
+            PendingInlineComment {
+                id: format!("main-1-{seed}"),
+                path: "src/main.rs".into(),
+                section: String::new(),
+                line: 4,
+                side: "RIGHT".into(),
+                snippet: String::new(),
+                body: "Main checkout comment 1".into(),
+                author: None,
+                edited_by_user: false,
+            },
+            PendingInlineComment {
+                id: format!("main-2-{seed}"),
+                path: "src/main.rs".into(),
+                section: String::new(),
+                line: 9,
+                side: "RIGHT".into(),
+                snippet: String::new(),
+                body: "Main checkout comment 2".into(),
+                author: None,
+                edited_by_user: false,
+            },
+        ];
+        live.submit_summary = format!("Main checkout notes ({seed})");
+        ensure!(
+            rail_pending_count_pure(
+                active_scope.as_ref(),
+                live.pending_comments.len(),
+                &store,
+                "remote-a",
+                &pid_rev,
+                "review",
+            ) == 2,
+            "Rail badge must show 2 pending comments on main checkout"
+        );
+
+        // Switching to another worktree clears active comments while preserving main's bucket.
+        let wt_scope = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_rev,
+            project_dir: Some(&review_dir),
+            mode: "git",
+            review_card_id: "",
+            ui_card_id: "",
+            card_host_project: None,
+            checkout_cwd: &a1_wt,
+            pr_repository: None,
+            pr_number: None,
+        });
+        ensure!(
+            switch_draft_scope_pure(
+                &mut active_scope,
+                &mut live,
+                &mut store,
+                None,
+                wt_scope.clone()
+            ),
+            "Switching from main checkout to worktree must switch draft scope"
+        );
+        ensure!(
+            live.pending_comments.is_empty() && live.submit_summary.is_empty(),
+            "Worktree switch leaked previous checkout's pending comments or summary"
+        );
+        ensure!(
+            rail_pending_count_pure(
+                active_scope.as_ref(),
+                live.pending_comments.len(),
+                &store,
+                "remote-a",
+                &pid_rev,
+                "review",
+            ) == 0,
+            "Rail badge must drop to 0 on empty worktree"
+        );
+
+        live.pending_comments.push(PendingInlineComment {
+            id: format!("wt-1-{seed}"),
+            path: "src/wt.rs".into(),
+            section: String::new(),
+            line: 7,
+            side: "RIGHT".into(),
+            snippet: String::new(),
+            body: "Worktree-only comment".into(),
+            author: None,
+            edited_by_user: false,
+        });
+
+        // Returning to main checkout via full `project_dir/` restores main's 2 comments & summary.
+        ensure!(
+            switch_draft_scope_pure(
+                &mut active_scope,
+                &mut live,
+                &mut store,
+                None,
+                main_scope_explicit.clone(),
+            ),
+            "Switching back to main checkout must return switched=true"
+        );
+        ensure!(
+            live.pending_comments.len() == 2
+                && live.submit_summary == format!("Main checkout notes ({seed})"),
+            "Returning to main checkout did not restore saved comments/summary"
+        );
+
+        // 2. Cross-project and cross-host isolation (including Board-level project switch rail badge).
+        ensure!(
+            rail_pending_count_pure(
+                active_scope.as_ref(),
+                live.pending_comments.len(),
+                &store,
+                "remote-a",
+                &pid_pr,
+                "board",
+            ) == 0,
+            "Switching project on Board must immediately isolate Rail pending comment badge"
+        );
+        let pr_proj_scope = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_pr,
+            project_dir: Some(&pr_dir),
+            mode: "git",
+            review_card_id: "",
+            ui_card_id: "",
+            card_host_project: None,
+            checkout_cwd: "",
+            pr_repository: None,
+            pr_number: None,
+        });
+        ensure!(
+            switch_draft_scope_pure(
+                &mut active_scope,
+                &mut live,
+                &mut store,
+                None,
+                pr_proj_scope
+            ),
+            "Switching to another Project must switch draft scope"
+        );
+        ensure!(
+            live.pending_comments.is_empty() && live.submit_summary.is_empty(),
+            "Cross-project switch leaked previous project's comments"
+        );
+
+        let local_checkout_scope = resolve_draft_scope(DraftScopeInput {
+            host: "local",
+            project_id: &pid_local,
+            project_dir: Some(&local_scope_dir),
+            mode: "git",
+            review_card_id: "",
+            ui_card_id: "",
+            card_host_project: None,
+            checkout_cwd: "/shared/same-rel",
+            pr_repository: None,
+            pr_number: None,
+        });
+        let remote_same_rel_scope = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_local,
+            project_dir: Some(&local_scope_dir),
+            mode: "git",
+            review_card_id: "",
+            ui_card_id: "",
+            card_host_project: None,
+            checkout_cwd: "/shared/same-rel",
+            pr_repository: None,
+            pr_number: None,
+        });
+        ensure!(
+            local_checkout_scope != remote_same_rel_scope,
+            "Identical relative checkout paths on different hosts must stay distinct"
+        );
+
+        // 3. Card draft hydration & zero cross-card leakage (plus server clear detection).
+        let card1_scope = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_rev,
+            project_dir: Some(&review_dir),
+            mode: "card_local",
+            review_card_id: &cid_s1,
+            ui_card_id: &cid_s1,
+            card_host_project: Some(("remote-a", &pid_rev)),
+            checkout_cwd: "",
+            pr_repository: None,
+            pr_number: None,
+        });
+        ensure!(
+            switch_draft_scope_pure(
+                &mut active_scope,
+                &mut live,
+                &mut store,
+                None,
+                card1_scope.clone()
+            ),
+            "Switching to Card S1 must switch draft scope"
+        );
+        match plan_server_draft_hydration(
+            active_scope.as_ref(),
+            &live.loaded_draft_key,
+            &cid_s1,
+            Some(&server_draft_s1),
+            true,
+        ) {
+            HydrateAction::Apply(snap) => live = snap,
+            other => anyhow::bail!("Expected HydrateAction::Apply for Card S1, got: {other:?}"),
+        }
+        ensure!(
+            live.pending_comments.len() == 1
+                && live.submit_gh_event == "REQUEST_CHANGES"
+                && live.draft_anchor_sha.as_deref() == Some(a1_head.as_str()),
+            "Card S1 hydration mismatch: {live:?}"
+        );
+
+        // Direct guard: hydrating Card S2 (no server draft) while Card S1 was previously loaded must clear!
+        match plan_server_draft_hydration(
+            Some(&card1_scope),
+            &live.loaded_draft_key,
+            &cid_s2,
+            None,
+            true,
+        ) {
+            HydrateAction::Apply(cleared) => ensure!(
+                cleared.pending_comments.is_empty()
+                    && cleared.submit_summary.is_empty()
+                    && cleared.loaded_draft_key == (cid_s2.clone(), 0),
+                "Expected empty cleared draft for Card S2"
+            ),
+            other => {
+                anyhow::bail!("Expected HydrateAction::Apply(empty) for Card S2, got: {other:?}")
+            }
+        }
+
+        let card2_scope = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_rev,
+            project_dir: Some(&review_dir),
+            mode: "card_local",
+            review_card_id: &cid_s2,
+            ui_card_id: &cid_s2,
+            card_host_project: Some(("remote-a", &pid_rev)),
+            checkout_cwd: "",
+            pr_repository: None,
+            pr_number: None,
+        });
+        ensure!(
+            switch_draft_scope_pure(&mut active_scope, &mut live, &mut store, None, card2_scope),
+            "Switching from Card S1 to Card S2 must switch draft scope"
+        );
+        ensure!(
+            live.pending_comments.is_empty() && live.submit_summary.is_empty(),
+            "Card S1 review draft leaked into Card S2"
+        );
+
+        // Switch back to Card S1, then clear its server draft via real RPC and verify non-forced hydration clears it.
+        ensure!(
+            switch_draft_scope_pure(
+                &mut active_scope,
+                &mut live,
+                &mut store,
+                None,
+                card1_scope.clone()
+            ),
+            "Returning to Card S1 must switch draft scope"
+        );
+        ensure!(
+            live.pending_comments.len() == 1,
+            "Returning to Card S1 lost its saved comment"
+        );
+        let _ = world.client_call(
+            "review.draft.clear",
+            json!({ "card_id": cid_s1 }),
+            Some(&pid_rev),
+        )?;
+        world.wait_until(15_000, |w| {
+            let snap = w.client_merged_snapshot()?;
+            Ok(!snap.review_drafts.iter().any(|d| d.card_id == cid_s1))
+        })?;
+        match plan_server_draft_hydration(
+            active_scope.as_ref(),
+            &live.loaded_draft_key,
+            &cid_s1,
+            None,
+            false,
+        ) {
+            HydrateAction::Apply(cleared) => live = cleared,
+            other => anyhow::bail!(
+                "Expected HydrateAction::Apply(empty) after review.draft.clear, got: {other:?}"
+            ),
+        }
+        ensure!(
+            live.pending_comments.is_empty() && live.submit_summary.is_empty(),
+            "Server-side review.draft.clear did not clear Card S1 live draft"
+        );
+
+        // 4. Standalone PR scope isolation & rail visibility rules.
+        let standalone_pr_scope = resolve_draft_scope(DraftScopeInput {
+            host: "remote-a",
+            project_id: &pid_pr,
+            project_dir: Some(&pr_dir),
+            mode: "github_pr",
+            review_card_id: "",
+            ui_card_id: "",
+            card_host_project: None,
+            checkout_cwd: "",
+            pr_repository: Some(gh_repo),
+            pr_number: Some(999),
+        });
+        ensure!(
+            !standalone_pr_scope.is_foreign_project("local", "unrelated")
+                && !standalone_pr_scope.matches_project("remote-a", &pid_pr),
+            "StandalonePr must not trigger foreign project reset or spoof project checkout badge"
+        );
+        ensure!(
+            switch_draft_scope_pure(
+                &mut active_scope,
+                &mut live,
+                &mut store,
+                None,
+                standalone_pr_scope.clone(),
+            ),
+            "Opening StandalonePr must switch scope"
+        );
+        live.pending_comments.push(PendingInlineComment {
+            id: format!("pr-standalone-{seed}"),
+            path: "README.md".into(),
+            section: String::new(),
+            line: 1,
+            side: "RIGHT".into(),
+            snippet: String::new(),
+            body: "Standalone PR comment".into(),
+            author: None,
+            edited_by_user: false,
+        });
+        ensure!(
+            rail_pending_count_pure(
+                active_scope.as_ref(),
+                live.pending_comments.len(),
+                &store,
+                "remote-a",
+                &pid_pr,
+                "review",
+            ) == 1
+                && rail_pending_count_pure(
+                    active_scope.as_ref(),
+                    live.pending_comments.len(),
+                    &store,
+                    "remote-a",
+                    &pid_pr,
+                    "board",
+                ) == 0,
+            "StandalonePr rail badge must only appear on review screen"
+        );
+
+        // 5. Async submit fencing (clearing off-screen submitted scope leaves active scope untouched)
+        //    and bounded LRU capacity guard.
+        store.clear_scope(&wt_scope);
+        ensure!(
+            store.peek(&wt_scope).is_none()
+                && store
+                    .peek(&main_scope_empty)
+                    .is_some_and(|d| d.pending_comments.len() == 2)
+                && live.pending_comments.len() == 1,
+            "Clearing off-screen submitted scope disturbed unrelated or active scopes"
+        );
+
+        let mut cap_store = ReviewDraftStore::default();
+        for idx in 0..(MAX_SCOPED_REVIEW_DRAFTS + 4) {
+            cap_store.save(
+                ReviewDraftScope::Checkout {
+                    host: "local".into(),
+                    project_id: format!("proj-{idx}"),
+                    cwd: String::new(),
+                },
+                ReviewDraftSnapshot {
+                    submit_summary: format!("draft-{idx}"),
+                    ..Default::default()
+                },
+            );
+        }
+        ensure!(
+            cap_store.len() <= MAX_SCOPED_REVIEW_DRAFTS,
+            "ReviewDraftStore exceeded MAX_SCOPED_REVIEW_DRAFTS ({})",
+            cap_store.len()
+        );
+
+        world.hit("review.draft_scope_isolated");
         oracle.check_step_invariants(world)?;
 
         // =====================================================================

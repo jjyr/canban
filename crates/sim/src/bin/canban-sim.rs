@@ -823,6 +823,7 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "review.preview_checked",
     "review.agent_steered",
     "review.merged_cleanly",
+    "review.draft_scope_isolated",
     "github.pr_published",
     "github.pr_refreshed",
     "github.pr_merged",
@@ -2200,8 +2201,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            79,
-            "full suite coverage gate must require 79 properties"
+            80,
+            "full suite coverage gate must require 80 properties"
         );
         assert_eq!(
             unique.len(),
