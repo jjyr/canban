@@ -858,7 +858,7 @@ pub fn workspace() -> canban_types::Snapshot {
             }),
             _ => None,
         };
-        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),assignee:if i==1{Some("developer".into())}else{None},content:Default::default(),removed_at:None,pull_request,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,resolution,created_at:now()});
+        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),assignee:match i{1=>Some("developer".into()),3|4=>Some("codex".into()),_=>None},content:Default::default(),removed_at:None,pull_request,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,resolution,created_at:now()});
     }
     s.cards.push(Card {
         schedule_source: None,
@@ -958,6 +958,64 @@ pub fn workspace() -> canban_types::Snapshot {
         columns: default_doc.columns,
         rules: default_doc.on,
     });
+    s
+}
+
+pub fn assignee_picker_workspace() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut s = workspace();
+    let base = now();
+    for (idx, card) in s.cards.iter_mut().enumerate() {
+        card.created_at = base + idx as u64 * 100;
+    }
+    let extra = [
+        ("picker-codex-1", 101_u64, Some("codex"), None),
+        ("picker-codex-2", 102, Some("codex"), None),
+        ("picker-agy-1", 103, Some("agy"), None),
+        ("picker-agy-2", 104, Some("agy"), None),
+        ("picker-agy-3", 105, Some("agy"), None),
+        ("picker-dev-1", 106, Some("developer"), None),
+        ("picker-qa-1", 107, Some("qa"), None),
+        ("picker-unassigned", 108, None, None),
+        ("picker-archived", 109, Some("developer"), Some(base + 500)),
+    ];
+    for (offset, (id, num, assignee, archived_at)) in extra.into_iter().enumerate() {
+        s.cards.push(Card {
+            schedule_source: None,
+            source_trust: Some("local".into()),
+            hold_auto_merge: false,
+            github_links: vec![],
+            created_by: "Gallery".into(),
+            assignee: assignee.map(str::to_owned),
+            content: Default::default(),
+            removed_at: None,
+            pull_request: None,
+            pull_request_history: Vec::new(),
+            delivery_mode: None,
+            workspace: None,
+            workspace_history: Vec::new(),
+            id: id.into(),
+            project_id: "gallery-project".into(),
+            number: num,
+            board_order: None,
+            title: format!("Assignee fixture #{num}"),
+            body: String::new(),
+            context_notes: None,
+            stage: "develop".into(),
+            revision: 1,
+            attention: None,
+            archived_at,
+            archive: None,
+            archive_error: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            human_gate: None,
+            delivery: None,
+            resolution: None,
+            created_at: base + 1_000 + offset as u64 * 100,
+        });
+    }
     s
 }
 

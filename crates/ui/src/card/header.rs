@@ -390,15 +390,6 @@ struct StagePickerModel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct AssigneePickerModel {
-    card_id: String,
-    active: bool,
-    assignee: Option<String>,
-    assignee_icon: Icon,
-    profiles: Vec<(String, Icon)>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 enum ResolvedOrMergingModel {
     Resolved(Option<String>),
     Merging,
@@ -545,33 +536,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             stage_id: c.stage,
             stage_name,
             stages,
-        })
-    });
-
-    let assignee_picker_model = computed(move || {
-        let c = ui.current_card()?;
-        let profiles: Vec<(String, Icon)> = ui
-            .profiles
-            .get()
-            .into_iter()
-            .filter(|p| p.enabled)
-            .map(|p| {
-                let (ic, _) = crate::profiles::provider(&p);
-                (p.id, ic)
-            })
-            .collect();
-        let assignee_icon = c
-            .assignee
-            .as_deref()
-            .and_then(|aid| profiles.iter().find(|(id, _)| id == aid).map(|(_, ic)| *ic))
-            .unwrap_or(Icon::Agent);
-        let active = c.active();
-        Some(AssigneePickerModel {
-            card_id: c.id,
-            active,
-            assignee: c.assignee,
-            assignee_icon,
-            profiles,
         })
     });
 
@@ -997,127 +961,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 }),
                         )
                     }))
-                    .child(dynamic(move || {
-                        let m = assignee_picker_model.get()?;
-                        let assign_anchor = element_ref();
-                        let card_id = m.card_id;
-                        let current = m.assignee;
-                        let active = m.active;
-                        let profiles = m.profiles;
-                        let pill_text = if let Some(ref pid) = current {
-                            format!("@{pid} ▾")
-                        } else {
-                            "Assign ▾".to_owned()
-                        };
-                        let pill_tip = if let Some(ref pid) = current {
-                            format!("Assigned to @{pid} — replies sync automatically")
-                        } else {
-                            "Assign an Agent so replies sync automatically".to_owned()
-                        };
-                        let pill_a11y = pill_tip.clone();
-                        let tint = if current.is_some() { ACCENT } else { MUTED };
-                        Some(
-                            view()
-                                .tooltip(hint_tooltip(pill_tip))
-                                .child(
-                                    canban_ui_kit::press_target()
-                                        .element_ref(&assign_anchor)
-                                        .h(px(24.))
-                                        .px_2()
-                                        .rounded(px(5.))
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1()
-                                        .bg(if current.is_some() { SELECTED } else { INSET })
-                                        .hover(|st| st.bg(CARD_HOVER))
-                                        .focus(|st| st.border_1().border_color(ACCENT))
-                                        .disabled(!active)
-                                        .accessibility_label(move || Some(pill_a11y.clone().into()))
-                                        .child(
-                                            icon_tinted(m.assignee_icon, tint)
-                                                .w(px(12.))
-                                                .h(px(12.)),
-                                        )
-                                        .child(if current.is_some() {
-                                            text(pill_text)
-                                                .text_size(px(12.))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(ACCENT)
-                                                .into_element()
-                                        } else {
-                                            muted(pill_text).into_element()
-                                        })
-                                        .on_press(move |_: &()| {
-                                            use nsh_core::element::desktop::popup_menu_at;
-                                            let cid_menu = card_id.clone();
-                                            let cur = current.clone();
-                                            let profs = profiles.clone();
-                                            ui.spawn(async move {
-                                                let Some(bounds) = assign_anchor.measure().await else {
-                                                    return;
-                                                };
-                                                let mut items = Vec::new();
-                                                if let Some(ref aid) = cur {
-                                                    let cid_open = cid_menu.clone();
-                                                    let aid_open = aid.clone();
-                                                    items.push(
-                                                        MenuItem::new(format!("Open @{aid} session"))
-                                                            .on_select(move || {
-                                                                crate::terminals::open_card_agent(
-                                                                    ui,
-                                                                    &cid_open,
-                                                                    Some(&aid_open),
-                                                                )
-                                                            }),
-                                                    );
-                                                    items.push(MenuItem::separator());
-                                                }
-                                                for (pid, _) in profs {
-                                                    let cid = cid_menu.clone();
-                                                    let assign_pid = pid.clone();
-                                                    let checked =
-                                                        cur.as_deref() == Some(pid.as_str());
-                                                    items.push(
-                                                        MenuItem::new(format!("@{pid}"))
-                                                            .checked(checked)
-                                                            .on_select(move || {
-                                                                crate::presenter::assign_card(
-                                                                    ui,
-                                                                    &cid,
-                                                                    Some(&assign_pid),
-                                                                )
-                                                            }),
-                                                    );
-                                                }
-                                                if cur.is_some() {
-                                                    let cid = cid_menu;
-                                                    if !items.is_empty() {
-                                                        items.push(MenuItem::separator());
-                                                    }
-                                                    items.push(MenuItem::new("Unassign").on_select(
-                                                        move || {
-                                                            crate::presenter::assign_card(
-                                                                ui, &cid, None,
-                                                            )
-                                                        },
-                                                    ));
-                                                }
-                                                if items.is_empty() {
-                                                    return;
-                                                }
-                                                popup_menu_at(
-                                                    items,
-                                                    point(
-                                                        bounds.page.x,
-                                                        bounds.page.y + bounds.frame.size.height,
-                                                    ),
-                                                )
-                                                .await;
-                                            });
-                                        }),
-                                ),
-                        )
-                    }))
+                    .child(crate::components::assignee_picker::card_header_assignee_picker(ui))
                     .child(dynamic(move || match resolved_or_merging.get()? {
                         ResolvedOrMergingModel::Resolved(tip) => {
                             let badge = status("Resolved", Tone::Success);

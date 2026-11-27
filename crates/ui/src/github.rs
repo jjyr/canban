@@ -801,8 +801,10 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     });
     let height = signal(280.);
     let active = computed(move || ui.page.get() == "new-card");
+    let escape_active =
+        computed(move || ui.page.get() == "new-card" && ui.open_popovers.get() == 0);
     effect(move || {
-        if !active.get() {
+        if !escape_active.get() {
             return;
         }
         on_key_with(
@@ -913,121 +915,23 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                 )
                                 .accessibility_label(|| Some("Choose target Project".into())),
                             )
-                            .child(dynamic(move || {
-                                let profs = ui
-                                    .profiles
-                                    .get()
-                                    .into_iter()
-                                    .filter(|p| p.enabled)
-                                    .collect::<Vec<_>>();
-                                if profs.is_empty() {
-                                    return view().into_element();
-                                }
-                                let proj = ui.snapshot.with_untracked(|s| {
-                                    let pid = target.get_untracked();
-                                    s.projects.iter().find(|p| p.id == pid).cloned()
-                                });
-                                let cur = draft.with(|d| d.assignee.clone());
-                                let mut row = view()
-                                    .flex_row()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(muted("Assignee").text_size(px(12.)));
-                                let mut seg = view().flex_row().flex_wrap().gap_1();
-                                seg = seg.child(compact_segment(
-                                    "None",
-                                    None,
-                                    {
-                                        let cur = cur.clone();
-                                        move || cur.is_none()
-                                    },
-                                    move |_| draft.update(|d| d.assignee = None),
-                                ));
-                                let inline_count = 5usize;
-                                for prof in profs.iter().take(inline_count) {
-                                    let (mark, _, _) =
-                                        crate::profiles::effective_provider(prof, proj.as_ref());
-                                    let pid = prof.id.clone();
-                                    let sel = pid.clone();
-                                    let is_selected = cur.as_deref() == Some(sel.as_str());
-                                    seg = seg.child(compact_segment(
-                                        format!("@{pid}"),
-                                        Some(mark),
-                                        move || is_selected,
-                                        move |_| {
-                                            let next = pid.clone();
-                                            let retain = pid.clone();
-                                            draft.update(|d| {
-                                                d.assignee = Some(next);
-                                                d.suppressed_recipients.retain(|x| x != &retain);
-                                            });
-                                            instructions_suppressed
-                                                .update(|list| list.retain(|x| x != &retain));
-                                        },
-                                    ));
-                                }
-                                if profs.len() > inline_count {
-                                    let more_anchor = element_ref();
-                                    let overflow = profs[inline_count..].to_vec();
-                                    let overflow_label = cur
-                                        .as_deref()
-                                        .filter(|id| overflow.iter().any(|p| p.id == *id))
-                                        .map(|id| format!("@{id} ▾"))
-                                        .unwrap_or_else(|| "More ▾".to_owned());
-                                    let cur_for_menu = cur;
-                                    seg = seg.child(view().element_ref(&more_anchor).child(
-                                        action(overflow_label, Variant::Quiet, move |_| {
-                                            use nsh_core::element::desktop::MenuItem;
-                                            let overflow = overflow.clone();
-                                            let cur = cur_for_menu.clone();
-                                            ui.spawn(async move {
-                                                let Some(bounds) = more_anchor.measure().await
-                                                else {
-                                                    return;
-                                                };
-                                                let items: Vec<MenuItem> = overflow
-                                                    .into_iter()
-                                                    .map(|p| {
-                                                        let pid = p.id;
-                                                        let set_pid = pid.clone();
-                                                        let checked =
-                                                            cur.as_deref() == Some(pid.as_str());
-                                                        MenuItem::new(format!("@{pid}"))
-                                                            .checked(checked)
-                                                            .on_select(move || {
-                                                                let next = set_pid.clone();
-                                                                let retain = set_pid.clone();
-                                                                draft.update(|d| {
-                                                                    d.assignee = Some(next);
-                                                                    d.suppressed_recipients
-                                                                        .retain(|x| x != &retain);
-                                                                });
-                                                                instructions_suppressed.update(
-                                                                    |list| {
-                                                                        list.retain(|x| {
-                                                                            x != &retain
-                                                                        });
-                                                                    },
-                                                                );
-                                                            })
-                                                    })
-                                                    .collect();
-                                                nsh_core::element::desktop::popup_menu_at(
-                                                    items,
-                                                    point(
-                                                        bounds.page.x,
-                                                        bounds.page.y + bounds.frame.size.height,
-                                                    ),
-                                                )
-                                                .await;
-                                            });
-                                        }),
-                                    ));
-                                }
-                                row = row.child(seg);
-                                row.into_element()
-                            })),
+                            .child(crate::components::assignee_picker::draft_assignee_picker(
+                                ui,
+                                computed(move || target.get()),
+                                computed(move || draft.with(|d| d.assignee.clone())),
+                                move |next| match next {
+                                    Some(pid) => {
+                                        let retain = pid.clone();
+                                        draft.update(|d| {
+                                            d.assignee = Some(pid);
+                                            d.suppressed_recipients.retain(|x| x != &retain);
+                                        });
+                                        instructions_suppressed
+                                            .update(|list| list.retain(|x| x != &retain));
+                                    }
+                                    None => draft.update(|d| d.assignee = None),
+                                },
+                            )),
                     )
                     .child(
                         segmented()

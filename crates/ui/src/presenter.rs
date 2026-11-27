@@ -120,6 +120,7 @@ pub struct Ui {
     pub utility_popup: Signal<String>,
     pub agent_popover: crate::components::agent_popover::AgentPopoverState,
     pub native_modal: Signal<bool>,
+    pub open_popovers: Signal<usize>,
     pub utility_query: Signal<String>,
     pub theme_preview: Signal<Option<String>>,
     pub utility_loading: Signal<bool>,
@@ -495,10 +496,23 @@ impl Ui {
             self.navigate("settings");
         });
     }
+    pub fn set_popover_open(self, open: bool) {
+        untracked(|| {
+            if let Some(cur) = self.open_popovers.try_get() {
+                let next = if open {
+                    cur.saturating_add(1)
+                } else {
+                    cur.saturating_sub(1)
+                };
+                let _ = self.open_popovers.try_set(next);
+            }
+        });
+    }
     pub fn has_blocking_overlay(self) -> bool {
         self.quick_open.get_untracked()
             || !self.utility_popup.get_untracked().is_empty()
             || self.native_modal.get_untracked()
+            || self.open_popovers.get_untracked() > 0
             || self.quick_merge.get_untracked().is_some()
             || self.resolve_confirm.get_untracked().is_some()
             || self.terminal_rename.get_untracked().is_some()
@@ -602,6 +616,7 @@ impl Ui {
             utility_popup: signal(String::new()),
             agent_popover: crate::components::agent_popover::AgentPopoverState::new(),
             native_modal: signal(false),
+            open_popovers: signal(0),
             utility_query: signal(String::new()),
             theme_preview: signal(None),
             utility_loading: signal(false),

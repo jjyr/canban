@@ -1048,6 +1048,150 @@ fn controls() -> impl IntoElement {
     )
 }
 
+fn assignee_picker_scene() -> impl IntoElement {
+    let cfg = fixtures::agent_config();
+    let snap = fixtures::assignee_picker_workspace();
+
+    let draft_ui = Ui::new();
+    draft_ui.apply_config(&cfg);
+    draft_ui.snapshot.set(snap.clone());
+    draft_ui.project.set("gallery-project".into());
+    let draft_unassigned = signal(Option::<String>::None);
+    let draft_assigned = signal(Some("codex".to_owned()));
+
+    let make_card_ui = |card_id: &str| {
+        let cu = Ui::new();
+        cu.apply_config(&cfg);
+        cu.snapshot.set(snap.clone());
+        cu.project.set("gallery-project".into());
+        cu.card.set(card_id.into());
+        cu.page.set("card".into());
+        cu
+    };
+    let card_assigned_ui = make_card_ui("picker-agy-3");
+    let card_unassigned_ui = make_card_ui("picker-unassigned");
+    let card_archived_ui = make_card_ui("picker-archived");
+
+    let mut small_cfg = cfg.clone();
+    small_cfg
+        .profiles
+        .retain(|p| matches!(p.id.as_str(), "codex" | "agy" | "developer" | "reviewer"));
+    let small_ui = Ui::new();
+    small_ui.apply_config(&small_cfg);
+    small_ui.snapshot.set(snap);
+    small_ui.project.set("gallery-project".into());
+    let small_draft = signal(Option::<String>::None);
+
+    let pid_memo = computed(|| "gallery-project".to_owned());
+
+    scroll().flex_1().min_h(px(0.)).child(
+        view()
+            .flex_1()
+            .p_6()
+            .gap_4()
+            .max_w(px(900.))
+            .child(heading("Assignee Combobox & Compact Recommendations"))
+            .child(muted(
+                "Searchable SearchPopover triggers for New Card & Card Detail with Top-2 recent recommendations and header Open action.",
+            ))
+            .child(
+                panel()
+                    .gap_3()
+                    .child(label("1. New Card · Unassigned (6 enabled profiles → Frequent + All Agents, Top 2 pills)"))
+                    .child(
+                        canban_ui::components::assignee_picker::draft_assignee_picker(
+                            draft_ui,
+                            pid_memo,
+                            computed(move || draft_unassigned.get()),
+                            move |next| draft_unassigned.set(next),
+                        ),
+                    )
+                    .child(muted(move || {
+                        format!(
+                            "Selected draft assignee: {}",
+                            draft_unassigned.get().unwrap_or_else(|| "Unassigned".into())
+                        )
+                    }))
+                    .child(view().h(px(1.)).bg(BORDER))
+                    .child(label("2. New Card · Assigned to @codex (shows clear × button and deduplicated Top 2 pills)"))
+                    .child(
+                        canban_ui::components::assignee_picker::draft_assignee_picker(
+                            draft_ui,
+                            pid_memo,
+                            computed(move || draft_assigned.get()),
+                            move |next| draft_assigned.set(next),
+                        ),
+                    )
+                    .child(muted(move || {
+                        format!(
+                            "Selected draft assignee: {}",
+                            draft_assigned.get().unwrap_or_else(|| "Unassigned".into())
+                        )
+                    })),
+            )
+            .child(
+                panel()
+                    .gap_3()
+                    .child(label("3. Card Detail Header · Assigned (@agy with [ Open ↗ ] header button), Unassigned, and Archived"))
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_3()
+                            .child(muted("Assigned Card:"))
+                            .child(
+                                canban_ui::components::assignee_picker::card_header_assignee_picker(
+                                    card_assigned_ui,
+                                ),
+                            )
+                            .child(muted(move || {
+                                let aid = card_assigned_ui
+                                    .current_card()
+                                    .and_then(|c| c.assignee)
+                                    .unwrap_or_else(|| "Unassigned".into());
+                                if card_assigned_ui.card_terminal_open.get() {
+                                    format!("@{aid} · session opened")
+                                } else {
+                                    format!("@{aid}")
+                                }
+                            }))
+                            .child(muted("· Unassigned Card:"))
+                            .child(
+                                canban_ui::components::assignee_picker::card_header_assignee_picker(
+                                    card_unassigned_ui,
+                                ),
+                            )
+                            .child(muted("· Archived Card (disabled):"))
+                            .child(
+                                canban_ui::components::assignee_picker::card_header_assignee_picker(
+                                    card_archived_ui,
+                                ),
+                            ),
+                    ),
+            )
+            .child(
+                panel()
+                    .gap_3()
+                    .child(label("4. Small Profile Set (4 enabled profiles → flat list without group headers)"))
+                    .child(
+                        canban_ui::components::assignee_picker::draft_assignee_picker(
+                            small_ui,
+                            pid_memo,
+                            computed(move || small_draft.get()),
+                            move |next| small_draft.set(next),
+                        ),
+                    )
+                    .child(muted(move || {
+                        format!(
+                            "Selected small-set assignee: {}",
+                            small_draft.get().unwrap_or_else(|| "Unassigned".into())
+                        )
+                    })),
+            ),
+    )
+}
+
 fn board_transitions_bar(
     ui: Ui,
     reduced_motion: Signal<bool>,
@@ -2878,6 +3022,9 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_card("card-5".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("assignee-picker") {
+        return assignee_picker_scene().into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("motion") {
         ui.page.set("board".into());
         return view()
@@ -3741,6 +3888,9 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())
                 }))
+                .child(action("Assignee Picker", Variant::Quiet, move |_| {
+                    scene.set("assignee-picker".into())
+                }))
                 .child(action("Startup POST", Variant::Quiet, move |_| {
                     scene.set("startup-checking".into())
                 }))
@@ -3770,6 +3920,9 @@ pub fn Gallery() -> impl IntoElement {
             }
             if scene.get() == "controls" {
                 return controls().into_element();
+            }
+            if scene.get() == "assignee-picker" {
+                return assignee_picker_scene().into_element();
             }
             if scene.get() == "startup-checking" {
                 return gallery_startup_post_fixture("startup-checking").into_element();

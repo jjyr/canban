@@ -879,6 +879,7 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "client_pages.insights_and_activity",
     "client_pages.remote_last_project_preference",
     "client_pages.cross_host_entity_scoping",
+    "client_pages.assignee_picker_projection",
     "herdr.overview_saved_output_and_activity_rules",
     // Card #180: card agent assignee & workflow default_agent/override
     "assignee.create_wake",
@@ -2262,8 +2263,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            120,
-            "full suite coverage gate must require 120 properties"
+            123,
+            "full suite coverage gate must require 123 properties"
         );
         assert_eq!(
             unique.len(),

@@ -3043,6 +3043,104 @@ impl InvariantOracle {
                 );
             }
 
+            // Assignee picker projection invariants (frequent ranking, inline deduplication,
+            // option uniqueness, and grouping threshold).
+            {
+                use canban_ui::components::assignee_picker::{
+                    AssigneePickerMode, GROUPING_MIN_PROFILES, MAX_DROPDOWN_FREQUENT,
+                    MAX_INLINE_FREQUENT, UNASSIGNED_OPTION_ID, build_assignee_options,
+                    frequent_assignees, inline_frequent_assignees,
+                };
+                let default_profiles = canban_types::Config::default().profiles;
+                let enabled_ids: BTreeSet<&str> = default_profiles
+                    .iter()
+                    .filter(|p| p.enabled)
+                    .map(|p| p.id.as_str())
+                    .collect();
+                for proj in &reused.project_order {
+                    let freq = frequent_assignees(
+                        reused.cards.values(),
+                        Some(&proj.id),
+                        &default_profiles,
+                        Some("developer"),
+                        MAX_DROPDOWN_FREQUENT,
+                    );
+                    ensure!(
+                        freq.len() <= MAX_DROPDOWN_FREQUENT,
+                        "[{client_name}] frequent_assignees exceeded cap for {}: {}",
+                        proj.id,
+                        freq.len()
+                    );
+                    let mut freq_ids = BTreeSet::new();
+                    for item in &freq {
+                        ensure!(
+                            enabled_ids.contains(item.profile_id.as_str()),
+                            "[{client_name}] frequent_assignees returned disabled/unknown profile {}",
+                            item.profile_id
+                        );
+                        ensure!(
+                            freq_ids.insert(item.profile_id.as_str()),
+                            "[{client_name}] frequent_assignees returned duplicate {}",
+                            item.profile_id
+                        );
+                    }
+                    let inline_none = inline_frequent_assignees(&freq, None);
+                    ensure!(
+                        inline_none.len() <= MAX_INLINE_FREQUENT,
+                        "[{client_name}] inline_frequent_assignees(None) exceeded cap: {}",
+                        inline_none.len()
+                    );
+                    if let Some(first) = freq.first() {
+                        let inline_dedup =
+                            inline_frequent_assignees(&freq, Some(&first.profile_id));
+                        ensure!(
+                            inline_dedup.len() <= MAX_INLINE_FREQUENT
+                                && !inline_dedup
+                                    .iter()
+                                    .any(|f| f.profile_id == first.profile_id),
+                            "[{client_name}] inline_frequent_assignees failed to exclude current {}",
+                            first.profile_id
+                        );
+                    }
+                    let expect_grouped =
+                        enabled_ids.len() >= GROUPING_MIN_PROFILES && !freq.is_empty();
+                    for mode in [AssigneePickerMode::Draft, AssigneePickerMode::Card] {
+                        for cur in [None, Some("codex")] {
+                            let opts = build_assignee_options(
+                                &default_profiles,
+                                Some(proj),
+                                &freq,
+                                cur,
+                                mode,
+                            );
+                            let mut seen_opts = BTreeSet::new();
+                            for opt in &opts {
+                                ensure!(
+                                    seen_opts.insert(opt.id.as_str()),
+                                    "[{client_name}] duplicate assignee option id {:?}",
+                                    opt.id
+                                );
+                                if opt.id != UNASSIGNED_OPTION_ID {
+                                    ensure!(
+                                        opt.group.is_some() == expect_grouped,
+                                        "[{client_name}] unexpected grouping state for {:?}: {:?}",
+                                        opt.id,
+                                        opt.group
+                                    );
+                                }
+                            }
+                            let has_unassigned = opts.iter().any(|o| o.id == UNASSIGNED_OPTION_ID);
+                            let expect_unassigned =
+                                mode == AssigneePickerMode::Draft || cur.is_some();
+                            ensure!(
+                                has_unassigned == expect_unassigned,
+                                "[{client_name}] unexpected unassigned option presence for ({mode:?}, {cur:?})"
+                            );
+                        }
+                    }
+                }
+            }
+
             self.shadow_ui_index.insert(client_name, reused);
         }
         Ok(())

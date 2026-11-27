@@ -24,6 +24,11 @@ use canban_ui::{
     BackendRefreshAction,
     backend::BackendEvent,
     card::quick_merge,
+    components::assignee_picker::{
+        AssigneePickerMode, GROUPING_MIN_PROFILES, MAX_DROPDOWN_FREQUENT, MAX_INLINE_FREQUENT,
+        RECENT_CARD_WINDOW, UNASSIGNED_OPTION_ID, build_assignee_options, filter_assignee_options,
+        frequent_assignees, inline_frequent_assignees,
+    },
     index::{KnownTagsIndex, LinkLookup, SnapshotIndex, build_card_status},
     is_runtime_only_event_batch,
     overview::{
@@ -3679,6 +3684,8 @@ steps:
             world.hit("client_pages.cross_host_entity_scoping");
         }
 
+        verify_assignee_picker_projection(world)?;
+
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;
 
@@ -3736,4 +3743,351 @@ steps:
     })?;
 
     Ok(desktop_digest ^ mobile_digest.rotate_left(17))
+}
+
+fn verify_assignee_picker_projection(world: &mut crate::world::SimWorld) -> Result<()> {
+    let profiles = canban_types::Config::default().profiles;
+    ensure!(
+        profiles.iter().filter(|p| p.enabled).count() >= GROUPING_MIN_PROFILES,
+        "default profiles fixture must exercise grouped assignee picker (>= {GROUPING_MIN_PROFILES})"
+    );
+
+    // 1. Empty-history fallback: at most 1 enabled default_agent, or empty when disabled.
+    let no_cards: Vec<canban_types::Card> = Vec::new();
+    let empty_fb = frequent_assignees(
+        no_cards.iter(),
+        Some("empty-project"),
+        &profiles,
+        Some("developer"),
+        MAX_DROPDOWN_FREQUENT,
+    );
+    ensure!(
+        empty_fb.len() == 1
+            && empty_fb[0].profile_id == "developer"
+            && empty_fb[0].count == 0
+            && !empty_fb[0].from_project,
+        "empty card history must fall back to 1 default_agent: {empty_fb:?}"
+    );
+    let mut disabled_default_profiles = profiles.clone();
+    if let Some(dev) = disabled_default_profiles
+        .iter_mut()
+        .find(|p| p.id == "developer")
+    {
+        dev.enabled = false;
+    }
+    let disabled_fb = frequent_assignees(
+        no_cards.iter(),
+        Some("empty-project"),
+        &disabled_default_profiles,
+        Some("developer"),
+        MAX_DROPDOWN_FREQUENT,
+    );
+    ensure!(
+        disabled_fb.is_empty(),
+        "disabled default_agent must not be recommended: {disabled_fb:?}"
+    );
+
+    // 2. Real simulated RPCs across two projects to verify windowing, recency ties,
+    // global backfill, disabled-profile exclusion, removed-card exclusion, and overrides.
+    let dir_a = world.project_dir("assignee-a")?;
+    let dir_b = world.project_dir("assignee-b")?;
+    let pa = world.client_call(
+        "project.create",
+        json!({ "name": "Assignee Picker A", "directory": dir_a }),
+        None,
+    )?;
+    let pb = world.client_call(
+        "project.create",
+        json!({ "name": "Assignee Picker B", "directory": dir_b }),
+        None,
+    )?;
+    let pid_a = pa["id"].as_str().unwrap().to_owned();
+    let pid_b = pb["id"].as_str().unwrap().to_owned();
+
+    // Oldest card in proj A assigned to `reviewer` will be pushed outside RECENT_CARD_WINDOW (30).
+    let old_reviewer = world.client_call(
+        "card.create",
+        with_ui_projection(
+            "card.create",
+            json!({
+                "project_id": pid_a,
+                "title": "Old reviewer card",
+                "assignee": "reviewer"
+            }),
+        ),
+        Some(&pid_a),
+    )?;
+    let old_reviewer_id = old_reviewer["id"].as_str().unwrap().to_owned();
+    world.advance(std::time::Duration::from_millis(50))?;
+
+    // Next 30 cards in proj A: 26x developer, 4x codex.
+    let mut reassigned_card_id = String::new();
+    for idx in 0..RECENT_CARD_WINDOW {
+        let assignee = if idx < 25 {
+            "developer"
+        } else if idx < 29 {
+            "codex"
+        } else {
+            "claude"
+        };
+        let created = world.client_call(
+            "card.create",
+            with_ui_projection(
+                "card.create",
+                json!({
+                    "project_id": pid_a,
+                    "title": format!("Recent A {idx}"),
+                    "assignee": assignee
+                }),
+            ),
+            Some(&pid_a),
+        )?;
+        if idx == 29 {
+            reassigned_card_id = created["id"].as_str().unwrap().to_owned();
+        }
+        world.advance(std::time::Duration::from_millis(50))?;
+    }
+    // Reassign card #29 from claude -> developer via card.update so proj A's recent 30
+    // only contains `developer` (26) and `codex` (4), requiring global backfill for slot #3.
+    let cur_rev = world
+        .client_merged_snapshot()?
+        .cards
+        .iter()
+        .find(|c| c.id == reassigned_card_id)
+        .unwrap()
+        .revision;
+    let _ = world.client_call(
+        "card.update",
+        with_ui_projection(
+            "card.update",
+            json!({
+                "card_id": reassigned_card_id,
+                "revision": cur_rev,
+                "assignee": "developer"
+            }),
+        ),
+        Some(&pid_a),
+    )?;
+
+    // Newer cards in proj B: 2x merger, 1x claude (newest timestamps).
+    for (i, assignee) in ["merger", "merger", "claude"].iter().enumerate() {
+        let _ = world.client_call(
+            "card.create",
+            with_ui_projection(
+                "card.create",
+                json!({
+                    "project_id": pid_b,
+                    "title": format!("Project B {i}"),
+                    "assignee": assignee
+                }),
+            ),
+            Some(&pid_b),
+        )?;
+        world.advance(std::time::Duration::from_millis(50))?;
+    }
+
+    world.heal_and_quiesce(10_000)?;
+    let snap = world.client_merged_snapshot()?;
+    let idx = SnapshotIndex::build(&snap);
+    let freq_a = frequent_assignees(
+        idx.cards.values(),
+        Some(&pid_a),
+        &profiles,
+        Some("developer"),
+        MAX_DROPDOWN_FREQUENT,
+    );
+    ensure!(
+        freq_a.len() == 3
+            && freq_a[0].profile_id == "developer"
+            && freq_a[0].count == 26
+            && freq_a[0].from_project
+            && freq_a[1].profile_id == "codex"
+            && freq_a[1].count == 4
+            && freq_a[1].from_project
+            && freq_a[2].profile_id == "merger"
+            && freq_a[2].count == 2
+            && !freq_a[2].from_project,
+        "unexpected proj A frequent ranking (window + backfill): {freq_a:?}"
+    );
+    ensure!(
+        !freq_a.iter().any(|f| f.profile_id == "reviewer"),
+        "card outside RECENT_CARD_WINDOW ({old_reviewer_id}) leaked into frequent: {freq_a:?}"
+    );
+
+    // Removed cards must be excluded from frequent calculation.
+    let mut cards_with_removed: Vec<canban_types::Card> = idx.cards.values().cloned().collect();
+    for c in &mut cards_with_removed {
+        if c.project_id == pid_a && c.assignee.as_deref() == Some("codex") {
+            c.removed_at = Some(123_456);
+        }
+    }
+    let freq_after_remove = frequent_assignees(
+        cards_with_removed.iter(),
+        Some(&pid_a),
+        &profiles,
+        Some("developer"),
+        MAX_DROPDOWN_FREQUENT,
+    );
+    ensure!(
+        !freq_after_remove
+            .iter()
+            .any(|f| f.profile_id == "codex" && f.from_project),
+        "removed cards must not count toward project frequency: {freq_after_remove:?}"
+    );
+
+    // Disabled profile exclusion.
+    let mut codex_disabled = profiles.clone();
+    if let Some(c) = codex_disabled.iter_mut().find(|p| p.id == "codex") {
+        c.enabled = false;
+    }
+    let freq_no_codex = frequent_assignees(
+        idx.cards.values(),
+        Some(&pid_a),
+        &codex_disabled,
+        Some("developer"),
+        MAX_DROPDOWN_FREQUENT,
+    );
+    ensure!(
+        !freq_no_codex.iter().any(|f| f.profile_id == "codex"),
+        "disabled profile leaked into frequent_assignees: {freq_no_codex:?}"
+    );
+
+    // Inline quick-pick cap (max 2) and current-assignee deduplication.
+    let inline_none = inline_frequent_assignees(&freq_a, None);
+    ensure!(
+        inline_none.len() == MAX_INLINE_FREQUENT
+            && inline_none[0].profile_id == "developer"
+            && inline_none[1].profile_id == "codex",
+        "unexpected inline_frequent_assignees(None): {inline_none:?}"
+    );
+    let inline_dev = inline_frequent_assignees(&freq_a, Some("@developer"));
+    ensure!(
+        inline_dev.len() == MAX_INLINE_FREQUENT
+            && inline_dev[0].profile_id == "codex"
+            && inline_dev[1].profile_id == "merger",
+        "expected selected @developer excluded and slot backfilled: {inline_dev:?}"
+    );
+    let single_freq = vec![freq_a[0].clone()];
+    ensure!(
+        inline_frequent_assignees(&single_freq, Some("developer")).is_empty(),
+        "single frequent item already selected must leave inline pills empty"
+    );
+
+    // Option building & fuzzy search in Draft vs Card mode, plus grouping threshold & overrides.
+    let mut proj_a_override = idx.projects.get(&pid_a).unwrap().clone();
+    proj_a_override.agent_overrides.insert(
+        "reviewer".into(),
+        canban_types::ProjectAgentOverride {
+            agent: Some("claude".into()),
+            ..Default::default()
+        },
+    );
+    let draft_opts = build_assignee_options(
+        &profiles,
+        Some(&proj_a_override),
+        &freq_a,
+        None,
+        AssigneePickerMode::Draft,
+    );
+    ensure!(
+        draft_opts
+            .first()
+            .is_some_and(|o| o.id == UNASSIGNED_OPTION_ID && o.selected),
+        "Draft mode with None must lead with selected Unassigned option"
+    );
+    let seen_draft: BTreeSet<&str> = draft_opts.iter().map(|o| o.id.as_str()).collect();
+    ensure!(
+        seen_draft.len() == draft_opts.len(),
+        "Draft assignee options must have unique IDs"
+    );
+    ensure!(
+        draft_opts
+            .iter()
+            .filter(|o| o.group.as_deref() == Some("Frequent"))
+            .count()
+            == 3
+            && draft_opts
+                .iter()
+                .any(|o| o.group.as_deref() == Some("All Agents")),
+        "expected Frequent (3) and All Agents groups for >= {GROUPING_MIN_PROFILES} profiles"
+    );
+    let reviewer_opt = draft_opts
+        .iter()
+        .find(|o| o.id == "reviewer")
+        .context("reviewer option expected")?;
+    ensure!(
+        reviewer_opt.detail.contains("Claude") && reviewer_opt.detail.contains("Override"),
+        "expected project override in reviewer detail, got {:?}",
+        reviewer_opt.detail
+    );
+
+    let card_unassigned = build_assignee_options(
+        &profiles,
+        Some(&proj_a_override),
+        &freq_a,
+        None,
+        AssigneePickerMode::Card,
+    );
+    ensure!(
+        !card_unassigned.iter().any(|o| o.id == UNASSIGNED_OPTION_ID),
+        "Card mode without assignee must omit Unassign row"
+    );
+    let card_assigned = build_assignee_options(
+        &profiles,
+        Some(&proj_a_override),
+        &freq_a,
+        Some("codex"),
+        AssigneePickerMode::Card,
+    );
+    ensure!(
+        card_assigned
+            .first()
+            .is_some_and(|o| o.id == UNASSIGNED_OPTION_ID)
+            && card_assigned.iter().any(|o| o.id == "codex" && o.selected),
+        "Card mode with assignee must expose Unassign and mark codex selected"
+    );
+
+    // <= 4 enabled profiles must remain flat (no group headers).
+    let small_profiles: Vec<canban_types::Profile> = profiles.iter().take(4).cloned().collect();
+    let small_freq = frequent_assignees(
+        idx.cards.values(),
+        Some(&pid_a),
+        &small_profiles,
+        Some("developer"),
+        MAX_DROPDOWN_FREQUENT,
+    );
+    let small_opts = build_assignee_options(
+        &small_profiles,
+        Some(&proj_a_override),
+        &small_freq,
+        None,
+        AssigneePickerMode::Draft,
+    );
+    ensure!(
+        small_opts.iter().all(|o| o.group.is_none()),
+        "<= 4 enabled profiles must not render group headers"
+    );
+
+    // Fuzzy search filtering matches @id, provider name, override, identity, and unassign,
+    // and strips group headers when query is non-empty.
+    let q_codex = filter_assignee_options(&card_assigned, "cod");
+    ensure!(
+        q_codex.first().is_some_and(|o| o.id == "codex")
+            && q_codex.iter().all(|o| o.group.is_none()),
+        "query 'cod' must rank codex first and drop group headers: {q_codex:?}"
+    );
+    let q_claude = filter_assignee_options(&draft_opts, "claude");
+    ensure!(
+        q_claude.first().is_some_and(|o| o.id == "claude")
+            && q_claude.iter().any(|o| o.id == "reviewer"),
+        "query 'claude' must rank @claude first and match overridden @reviewer: {q_claude:?}"
+    );
+    let q_unassign = filter_assignee_options(&card_assigned, "unassign");
+    ensure!(
+        q_unassign.iter().any(|o| o.id == UNASSIGNED_OPTION_ID),
+        "query 'unassign' must match Unassign row"
+    );
+
+    world.hit("client_pages.assignee_picker_projection");
+    Ok(())
 }
