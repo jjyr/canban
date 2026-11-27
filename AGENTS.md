@@ -14,7 +14,7 @@
 ## Architecture & compatibility
 
 - Read [docs/README.md](docs/README.md), [development conventions](docs/development-conventions.md), [UI architecture](docs/ui-architecture.md), and [implementation status](docs/implementation.md) (historical specs are not acceptance evidence).
-- Keep project docs, prompts, role/session instructions, `prompts/`, and `skills/` in English; get explicit user approval before modifying any prompt.
+- **English-only UI & docs**: Keep all product UI copy (labels, buttons, statuses, empty states, toasts, tooltips, and Gallery fixtures), project docs, prompts, role/session instructions, `prompts/`, and `skills/` strictly in English; get explicit user approval before modifying any prompt.
 - **Crate boundaries & license**: Use `canban-xxx` in `crates/xxx` (omitting `canban-` in module/file names), separating AppServer, Kanban, Workflow Engine, Scheduler, UI (`canban-ui-kit` vs product UI), and supporting crates. Apache-2.0 (`JJy <jjyruby@gmail.com>, 2026`, `license.workspace = true`; preserve third-party notices).
 - **Runtime contracts**:
   - Route all local CLI probing and child process launches through `crates/exec` (`std::process::Command::new` is disallowed by `clippy.toml`).
