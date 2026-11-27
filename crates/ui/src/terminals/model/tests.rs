@@ -9,7 +9,26 @@ fn observe_fixture_locations(s: &mut Snapshot) {
             .map(|a| &a.card_id)
             .or(t.origin_card_id.as_ref());
         let card = cid.and_then(|id| s.cards.iter().find(|c| &c.id == id));
-        let pid = card.map(|c| &c.project_id).or(t.origin_project_id.as_ref());
+        let pid = card
+            .map(|c| &c.project_id)
+            .or_else(|| {
+                s.configuration_sessions
+                    .iter()
+                    .find(|c| c.id == t.id)
+                    .map(|c| &c.project_id)
+            })
+            .or_else(|| {
+                s.merge_batches
+                    .iter()
+                    .find(|b| b.id == t.id)
+                    .map(|b| &b.project_id)
+            })
+            .or_else(|| {
+                s.scheduled_runs
+                    .iter()
+                    .find(|r| r.id == t.id)
+                    .map(|r| &r.project_id)
+            });
         let project = pid.and_then(|id| s.projects.iter().find(|p| &p.id == id));
         let path = card.and_then(|c| c.worktree.clone()).unwrap_or_else(|| {
             if let Some(c) = card {
@@ -116,7 +135,6 @@ fn fixture() -> Snapshot {
             conversation_id: Some(tid),
             number: idx as u64 + 1,
             name: None,
-            origin_project_id: None,
             origin_card_id: Some(card.into()),
             agent_engine: None,
             runtime: None,
@@ -189,7 +207,6 @@ fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() 
         conversation_id: Some(rev_id),
         number: 3,
         name: None,
-        origin_project_id: None,
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: None,
@@ -282,7 +299,6 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
         conversation_id: None,
         number: 9,
         name: Some("Server".into()),
-        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -340,7 +356,6 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
         conversation_id: None,
         number: 9,
         name: None,
-        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -526,7 +541,6 @@ fn card_destination_requires_choice_and_remembers_only_live_selection() {
         conversation_id: Some(preferred.clone()),
         number: 3,
         name: None,
-        origin_project_id: None,
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: None,
@@ -597,7 +611,6 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         conversation_id: None,
         number: 3,
         name: Some("Antigravity 1".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -620,7 +633,6 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         conversation_id: None,
         number: 4,
         name: Some("Terminal 2".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -643,7 +655,6 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         conversation_id: None,
         number: 5,
         name: Some("Terminal 3".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -712,7 +723,6 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
         conversation_id: None,
         number: 3,
         name: Some("Antigravity 1".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -735,7 +745,6 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
         conversation_id: None,
         number: 4,
         name: Some("Terminal 2".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -786,7 +795,6 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         conversation_id: None,
         number: 3,
         name: Some("Terminal 1".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -809,7 +817,6 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         conversation_id: None,
         number: 4,
         name: Some("Antigravity 2".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -919,7 +926,6 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
             conversation_id: None,
             number: 1,
             name: Some("Terminal 1".into()),
-            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -1078,7 +1084,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             conversation_id: None,
             number: 10,
             name: Some("Terminal 1".into()),
-            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -1101,7 +1106,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             conversation_id: None,
             number: 11,
             name: Some("Antigravity 1".into()),
-            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: Some("agy".into()),
             runtime: Some(TerminalRuntime {
@@ -1134,7 +1138,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             conversation_id: None,
             number: 12,
             name: Some("Workflows · developer".into()),
-            origin_project_id: Some("p1".into()),
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -1272,7 +1275,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 conversation_id: None,
                 number: 13,
                 name: Some("Terminal 3".into()),
-                origin_project_id: None,
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
@@ -1337,7 +1339,6 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                 conversation_id: None,
                 number: 21,
                 name: Some("Terminal 1".into()),
-                origin_project_id: Some("p1".into()),
                 origin_card_id: Some("c1".into()),
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
@@ -1360,7 +1361,6 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                 conversation_id: None,
                 number: 22,
                 name: Some("Terminal 2".into()),
-                origin_project_id: Some("p1".into()),
                 origin_card_id: Some("c1".into()),
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
@@ -1510,7 +1510,6 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
             conversation_id: None,
             number: num,
             name: Some(format!("Terminal {num}")),
-            origin_project_id: Some("p1".into()),
             origin_card_id: origin.map(str::to_owned),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -1792,7 +1791,6 @@ fn in_page_new_terminal_inherits_managed_and_external_worktree_scopes_even_when_
                 conversation_id: None,
                 number,
                 name: Some(format!("Terminal {number}")),
-                origin_project_id: Some("p1".into()),
                 origin_card_id: None,
                 agent_engine: None,
                 created_at: 1,
@@ -1972,7 +1970,6 @@ fn merge_batch_terminal_uses_its_actual_checkout_and_git_summary() {
         conversation_id: None,
         number: 10,
         name: Some("@merger".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(canban_types::TerminalRuntime {
@@ -2028,7 +2025,6 @@ fn manual_shell_observed_agent_exposes_icon_only_without_changing_title_or_close
         conversation_id: None,
         number: 10,
         name: Some("Terminal 2".into()),
-        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -2191,7 +2187,6 @@ fn shell_origin_does_not_override_observed_external_directory_and_status_does_no
     shell.agent = None;
     shell.conversation_id = None;
     shell.origin_card_id = None;
-    shell.origin_project_id = Some("p1".into());
     shell.runtime = Some(serde_json::from_value(json!({"state":"running", "connection":"connected", "core_id":"core", "terminal":"shell"})).unwrap());
     s.terminals.push(shell);
     s.terminal_contexts.push(TerminalContext {
@@ -2328,7 +2323,6 @@ fn external_directories_render_under_other_section_header_and_compact_local_home
     local_shell.agent = None;
     local_shell.conversation_id = None;
     local_shell.origin_card_id = None;
-    local_shell.origin_project_id = None;
     local_shell.runtime = Some(
         serde_json::from_value(json!({
             "state": "running",
@@ -2352,7 +2346,6 @@ fn external_directories_render_under_other_section_header_and_compact_local_home
     remote_shell.agent = None;
     remote_shell.conversation_id = None;
     remote_shell.origin_card_id = None;
-    remote_shell.origin_project_id = None;
     remote_shell.runtime = Some(
         serde_json::from_value(json!({
             "state": "running",
@@ -2555,7 +2548,6 @@ fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects
         conversation_id: None,
         number: 1,
         name: Some("devpc scratch".into()),
-        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -2690,7 +2682,6 @@ fn natural_terminal_exit_preserves_last_worktree_for_fallback_selection() {
             conversation_id: None,
             number: num,
             name: Some(id.into()),
-            origin_project_id: Some("p1".into()),
             origin_card_id: None,
             agent_engine: None,
             created_at: num,
@@ -2800,7 +2791,6 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
         conversation_id: None,
         number: 10,
         name: None,
-        origin_project_id: Some("p1".into()),
         origin_card_id: None,
         agent_engine: None,
         created_at: 2,
@@ -2832,7 +2822,6 @@ fn terminal_actions_menu_omits_long_hint_header_and_keeps_actions() {
         conversation_id: None,
         number: 11,
         name: None,
-        origin_project_id: Some("p1".into()),
         origin_card_id: None,
         agent_engine: None,
         created_at: 3,
@@ -2934,12 +2923,11 @@ fn git_sync_target_hints_and_summary_cover_registered_checkouts_and_states() {
         created_at: 1,
     });
 
-    let mk_shell = |id: &str, num: u64, proj: Option<&str>| TerminalEntry {
+    let mk_shell = |id: &str, num: u64, _proj: Option<&str>| TerminalEntry {
         id: id.into(),
         conversation_id: None,
         number: num,
         name: Some(id.into()),
-        origin_project_id: proj.map(str::to_owned),
         origin_card_id: None,
         agent_engine: None,
         created_at: num,
@@ -3120,7 +3108,6 @@ fn plain_shell_command_status_uses_unified_marks_and_agent_layer_overrides() {
             conversation_id: None,
             number: num,
             name: Some(format!("Terminal {num}")),
-            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {

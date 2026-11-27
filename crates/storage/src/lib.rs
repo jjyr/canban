@@ -147,7 +147,6 @@ impl Record for TerminalEntry {
         self.agent
             .as_ref()
             .map(|a| a.project_id.as_str())
-            .or(self.origin_project_id.as_deref())
             .or_else(|| {
                 self.id
                     .strip_prefix("merge-queue:")
@@ -564,7 +563,6 @@ impl Db<'_> {
                 conversation_id: Some(c.id.clone()),
                 number: self.counter("terminal-number")?,
                 name: None,
-                origin_project_id: None,
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: None,
@@ -646,7 +644,17 @@ impl Db<'_> {
                 .execute("DELETE FROM event_subscriptions WHERE id=?1", [sub_id])?;
         }
 
-        // 2. Delete child tables referencing cards(id) and/or projects(id).
+        // 2. Detach any legacy manual terminals before deleting project-owned child rows.
+        self.conn.execute(
+            "UPDATE terminals SET project_id=NULL WHERE project_id=?1 \
+             AND card_id IS NULL \
+             AND id NOT LIKE 'merge-queue:%' \
+             AND id NOT LIKE 'configuration:%' \
+             AND id NOT LIKE 'scheduled:%'",
+            [project_id],
+        )?;
+
+        // Delete child tables referencing cards(id) and/or projects(id).
         for table in [
             "card_reads",
             "artifacts",

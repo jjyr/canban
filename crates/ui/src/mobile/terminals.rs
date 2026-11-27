@@ -72,7 +72,7 @@ fn build_terminals_model(ui: Ui) -> TerminalsTabModel {
             if e.card.is_some() && e.agent.is_some() {
                 out.card_agents.push(row);
             } else if matches!(e.managed_kind(), Some(ManagedTerminalKind::MergeQueue))
-                || e.saved.origin_project_id.is_some() && e.agent.is_none()
+                || (e.project_id.is_some() && e.agent.is_none())
             {
                 if e.saved.title().contains("worktree")
                     || e.location.as_ref().is_some_and(|l| l.worktree_id.is_some())

@@ -1500,9 +1500,6 @@ fn runtime_references_unknown_entity(snapshot: &Snapshot, runtime: &RuntimeState
             .origin_card_id
             .as_deref()
             .is_some_and(|cid| !has_card(cid))
-            || t.origin_project_id
-                .as_deref()
-                .is_some_and(|pid| !has_project(pid))
     }) || runtime.terminal_contexts.iter().any(|ctx| {
         ctx.card_id.as_deref().is_some_and(|cid| !has_card(cid))
             || ctx

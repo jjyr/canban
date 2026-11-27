@@ -2103,7 +2103,6 @@ pub fn run(seed: u64) -> Result<u64> {
                     {
                         "id": "sim-tab-shell",
                         "number": 1,
-                        "origin_project_id": pid_local,
                         "origin_card_id": "sim-tab-card",
                         "runtime": { "core_id": "core", "state": "running", "connection": "connected", "terminal": "pty-s" },
                         "created_at": 1
@@ -2112,7 +2111,6 @@ pub fn run(seed: u64) -> Result<u64> {
                         "id": "sim-tab-card:developer",
                         "conversation_id": "sim-tab-card:developer",
                         "number": 2,
-                        "origin_project_id": pid_local,
                         "origin_card_id": "sim-tab-card",
                         "runtime": { "core_id": "core", "state": "finished", "connection": "disconnected" },
                         "agent": {
@@ -2132,7 +2130,6 @@ pub fn run(seed: u64) -> Result<u64> {
                         "id": "sim-tab-card:reviewer",
                         "conversation_id": "sim-tab-card:reviewer",
                         "number": 3,
-                        "origin_project_id": pid_local,
                         "origin_card_id": "sim-tab-card",
                         "runtime": { "core_id": "core", "state": "running", "connection": "connected", "terminal": "pty-r", "agent_status": "working" },
                         "agent": {
@@ -3295,7 +3292,6 @@ steps:
                 "conversation_id": null,
                 "number": 1,
                 "name": "Local Term",
-                "origin_project_id": "p-shared",
                 "runtime": { "state": "running", "connection": "connected", "terminal": "pty-l1" },
                 "created_at": 1
             }))?);
@@ -3398,7 +3394,6 @@ steps:
                 "conversation_id": null,
                 "number": 1,
                 "name": "Remote Shared Term",
-                "origin_project_id": "p-shared",
                 "runtime": { "state": "running", "connection": "connected", "terminal": "pty-r1" },
                 "created_at": 2
             }))?);
@@ -3421,7 +3416,6 @@ steps:
                 "conversation_id": null,
                 "number": 2,
                 "name": "Remote Config",
-                "origin_project_id": "p-shared",
                 "runtime": { "state": "running", "connection": "connected", "terminal": "pty-rcfg" },
                 "created_at": 2
             }))?);
@@ -3454,7 +3448,6 @@ steps:
                 "conversation_id": null,
                 "number": 3,
                 "name": "Remote Merge",
-                "origin_project_id": "p-shared",
                 "runtime": { "state": "running", "connection": "connected", "terminal": "pty-rmb" },
                 "created_at": 2
             }))?);
@@ -3497,7 +3490,6 @@ steps:
                 "conversation_id": null,
                 "number": 4,
                 "name": "Remote Global Sched",
-                "origin_project_id": "__global",
                 "runtime": { "state": "running", "connection": "connected", "terminal": "pty-rsched" },
                 "created_at": 2
             }))?);
@@ -3657,7 +3649,6 @@ steps:
                 "conversation_id": null,
                 "number": 99,
                 "name": "Remote Optimistic",
-                "origin_project_id": "host::remote-a::p-shared",
                 "runtime": { "state": "running", "connection": "connected", "terminal": "pty-opt" },
                 "created_at": 3
             }))?);

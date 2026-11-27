@@ -118,7 +118,6 @@ for line in sys.stdin:
         conversation_id: None,
         number: 2,
         name: Some("Terminal 1".into()),
-        origin_project_id: Some(p.id.clone()),
         origin_card_id: None,
         agent_engine: None,
         created_at: now().saturating_sub(5_000),

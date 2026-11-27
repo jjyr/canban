@@ -674,7 +674,6 @@ fn gallery_create_entry(ui: Ui, params: serde_json::Value) -> String {
             .with_untracked(|s| s.terminals.iter().map(|t| t.number).max().unwrap_or(8))
             + 1,
         name: Some(resolved_name),
-        origin_project_id: origin_project,
         origin_card_id: origin_card,
         agent_engine,
         agent: None,

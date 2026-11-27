@@ -585,8 +585,7 @@ pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectArchiveB
                     .is_some_and(|a| a.project_id == project_id && !a.finished())
                     || (t.runtime.as_ref().is_some_and(|r| r.state != "finished") && {
                         let raw_tid = canban_types::unqualified_entity_id(&t.id);
-                        t.origin_project_id.as_deref() == Some(project_id)
-                            || raw_tid.starts_with(&format!("merge-queue:{raw_pid}:"))
+                        raw_tid.starts_with(&format!("merge-queue:{raw_pid}:"))
                             || raw_tid.starts_with(&format!("configuration:{raw_pid}:"))
                             || raw_tid.starts_with(&format!("scheduled:{raw_pid}:"))
                     }))

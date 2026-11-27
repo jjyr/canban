@@ -942,14 +942,14 @@ impl AppServer {
                     project = best.map(|(_, p)| p);
                 }
             }
-            let origin_project_id = project.as_ref().map(|p| p.id.clone());
+            let initial_project_id = project.as_ref().map(|p| p.id.clone());
             let resolved_name = match custom_name {
                 Some(n) => Some(n),
                 None => {
                     let mut snap = db.terminal_snapshot()?;
                     snap.terminal_contexts = self.terminal_contexts.lock().unwrap().clone();
                     Some(snap.next_terminal_label(
-                        origin_project_id.as_deref(),
+                        initial_project_id.as_deref(),
                         agent_engine.as_deref(),
                         None,
                     ))
@@ -961,7 +961,6 @@ impl AppServer {
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
                 name: resolved_name,
-                origin_project_id,
                 origin_card_id,
                 agent_engine,
                 created_at: self.now_ms(),
@@ -1743,7 +1742,6 @@ mod tests {
             conversation_id: Some(agent_id.clone()),
             number: 1,
             name: None,
-            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: Some("codex".into()),
             created_at: now().saturating_sub(10_000),
@@ -1755,7 +1753,6 @@ mod tests {
             conversation_id: None,
             number: 2,
             name: Some("Shell".into()),
-            origin_project_id: Some("p1".into()),
             origin_card_id: None,
             agent_engine: None,
             created_at: now().saturating_sub(10_000),
@@ -1909,7 +1906,6 @@ mod tests {
             conversation_id: None,
             number: num,
             name: Some(id.into()),
-            origin_project_id: Some(project.id.clone()),
             origin_card_id: Some(card.id.clone()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -2071,7 +2067,6 @@ mod tests {
             conversation_id: None,
             number: 1,
             name: Some("Terminal 1".into()),
-            origin_project_id: None,
             origin_card_id: None,
             agent_engine: None,
             created_at: now().saturating_sub(10_000),

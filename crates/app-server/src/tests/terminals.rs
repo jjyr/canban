@@ -905,7 +905,7 @@ fn inherit_terminal_prefers_worktree_and_subdirectory_cwd_over_project_root() {
     )
     .unwrap();
     assert_eq!(
-        wt_sub_entry.origin_project_id.as_deref(),
+        app.snapshot().unwrap().terminal_project_id(&wt_sub_entry),
         Some(p.id.as_str())
     );
     assert_eq!(last_launch()["cwd"], wt_sub.to_string_lossy().as_ref());

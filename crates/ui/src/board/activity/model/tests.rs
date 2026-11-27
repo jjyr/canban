@@ -56,7 +56,6 @@ fn agent_terminal(s: &mut Snapshot, card: &str, profile: usize, state: &str) -> 
         conversation_id: Some(tid.clone()),
         number,
         name: None,
-        origin_project_id: None,
         origin_card_id: Some(card.into()),
         agent_engine: None,
         runtime: None,

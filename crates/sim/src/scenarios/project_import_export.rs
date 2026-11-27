@@ -2642,12 +2642,29 @@ steps:
             .join(&raw_pid_del);
         std::fs::create_dir_all(&del_meta_dir)?;
         std::fs::write(del_meta_dir.join("context.txt"), "canban metadata")?;
-        let del_live_term = world.server_call(
+        // Manual shell in the project must NOT block project.delete (and must survive deletion
+        // intact), whereas a managed project session (`configuration:*`) MUST block until closed.
+        let del_manual_shell = world.server_call(
             "remote-a",
             "terminal.create",
-            json!({ "project_id": raw_pid_del, "name": "Live Blocker Shell" }),
+            json!({ "project_id": raw_pid_del, "name": "Independent Manual Shell" }),
         )?;
-        let del_live_tid = del_live_term["id"].as_str().unwrap().to_owned();
+        let del_manual_tid = del_manual_shell["id"].as_str().unwrap().to_owned();
+        let del_cfg_res = world.server_call(
+            "remote-a",
+            "configuration.open",
+            json!({ "project_id": raw_pid_del }),
+        )?;
+        let del_cfg_tid = del_cfg_res["terminal_id"].as_str().unwrap().to_owned();
+        world.wait_until(10_000, |w| {
+            let s = w.server("remote-a").unwrap().snapshot()?;
+            Ok(s.terminals.iter().any(|t| {
+                t.id == del_cfg_tid
+                    && t.runtime
+                        .as_ref()
+                        .is_some_and(|r| r.state == "running" && r.terminal.is_some())
+            }))
+        })?;
 
         ensure!(
             world
@@ -2665,7 +2682,7 @@ steps:
                 json!({ "project_id": pid_del }),
                 Some(&pid_del),
             )
-            .expect_err("Live terminal must block project.delete");
+            .expect_err("Live managed terminal must block project.delete");
         ensure!(
             live_del_err.to_string().contains("1 live terminal"),
             "Unexpected live terminal blocker error: {live_del_err:#}"
@@ -2673,7 +2690,7 @@ steps:
         let _ = world.server_call(
             "remote-a",
             "terminal.close",
-            json!({ "terminal_id": del_live_tid }),
+            json!({ "terminal_id": del_cfg_tid }),
         )?;
         let del_receipt = world.client_call(
             "project.delete",
@@ -2689,6 +2706,23 @@ steps:
                 && std::fs::read_to_string(del_repo_path.join("README.md"))? == "user repo intact",
             "project.delete receipt or cleanup mismatch: {del_receipt}"
         );
+        // Verify the independent manual shell survived project deletion untouched, then close it.
+        ensure!(
+            world
+                .server("remote-a")
+                .unwrap()
+                .snapshot()?
+                .terminals
+                .iter()
+                .any(|t| t.id == del_manual_tid
+                    && t.runtime.as_ref().is_some_and(|r| r.state == "running")),
+            "independent manual shell must survive project.delete untouched"
+        );
+        let _ = world.server_call(
+            "remote-a",
+            "terminal.close",
+            json!({ "terminal_id": del_manual_tid }),
+        )?;
         {
             let snap = world.server("remote-a").unwrap().snapshot()?;
             ensure!(

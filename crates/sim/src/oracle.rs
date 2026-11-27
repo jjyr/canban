@@ -2434,8 +2434,8 @@ impl InvariantOracle {
 
     /// Verifies that a newly created project terminal is IMMEDIATELY placed under its Project
     /// in the pure UI terminal projection (`canban_ui::terminals::entries` + `worktrees::entry_scope`)
-    /// — never transiently falling into `"Other"` / `WorktreeScope::Unassigned`, BOTH in the live
-    /// merged snapshot AND even if `terminal_contexts` has not arrived yet.
+    /// via its seeded `cwd` / `terminal_contexts` entry — never transiently falling into
+    /// `"Other"` / `WorktreeScope::Unassigned`.
     pub fn assert_terminal_in_project(
         world: &SimWorld,
         terminal_id: &str,
@@ -2464,32 +2464,24 @@ impl InvariantOracle {
             scope
         );
 
-        // Also assert mid-flight safety when `terminal_contexts` for this terminal hasn't arrived yet.
-        let mut without_ctx = merged.clone();
-        without_ctx
-            .terminal_contexts
-            .retain(|c| c.terminal_id != terminal_id);
-        let rows_no_ctx = canban_ui::terminals::entries(&without_ctx);
-        let entry_no_ctx = rows_no_ctx
-            .iter()
-            .find(|e| e.saved.id == terminal_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("terminal {terminal_id} missing when contexts cleared")
-            })?;
-        let scope_no_ctx = canban_ui::terminals::worktrees::entry_scope(&without_ctx, entry_no_ctx);
-        ensure!(
-            entry_no_ctx.project_id.as_deref() == Some(expected_project_id)
-                && entry_no_ctx.project_name != "Other"
-                && !matches!(
-                    scope_no_ctx,
-                    canban_ui::terminals::worktrees::WorktreeScope::Unassigned(_)
-                )
-                && scope_no_ctx.project_id(&without_ctx).as_deref() == Some(expected_project_id),
-            "terminal {terminal_id} flashed in Other before discovery: project_id={:?}, project_name={:?}, scope={:?}",
-            entry_no_ctx.project_id,
-            entry_no_ctx.project_name,
-            scope_no_ctx
-        );
+        // Single-source-of-truth invariant: independent terminals get immediate Project placement
+        // from their seeded/observed `terminal_contexts` (`cwd` + `project_id`), not a durable
+        // `origin_project_id` field.
+        if entry.agent.is_none() && !entry.saved.is_special_session() {
+            let ctx = merged
+                .terminal_contexts
+                .iter()
+                .find(|c| c.terminal_id == terminal_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "independent terminal {terminal_id} missing seeded terminal_context for project {expected_project_id}"
+                    )
+                })?;
+            ensure!(
+                ctx.cwd.is_some() && ctx.project_id.as_deref() == Some(expected_project_id),
+                "independent terminal {terminal_id} has incomplete seeded context: {ctx:?}"
+            );
+        }
         Ok(())
     }
 
@@ -4119,9 +4111,8 @@ pub fn canonical_state_digest(world: &SimWorld) -> u64 {
                         a.connection_state.as_str(),
                     )
                 } else {
-                    let pidx = t
-                        .origin_project_id
-                        .as_deref()
+                    let pidx = snap
+                        .terminal_project_id(t)
                         .and_then(|p| proj_idx_map.get(p).copied())
                         .unwrap_or(usize::MAX);
                     ((pidx, 0), "shell", "shell", "")

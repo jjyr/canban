@@ -1039,7 +1039,6 @@ impl Snapshot {
 
         for mut t in remote.terminals {
             remap_string(&mut t.id, &terminal_map);
-            remap_opt(&mut t.origin_project_id, &project_map);
             remap_opt(&mut t.origin_card_id, &card_map);
             if let Some(ref mut a) = t.agent {
                 remap_string(&mut a.project_id, &project_map);
@@ -1562,9 +1561,6 @@ impl RuntimeState {
 
         for mut t in remote.terminals {
             t.id = resolve_runtime_id(entity_hosts, host_id, &t.id, &term_map);
-            if let Some(ref mut pid) = t.origin_project_id {
-                *pid = resolve_runtime_id(entity_hosts, host_id, pid, &term_map);
-            }
             if let Some(ref mut cid) = t.origin_card_id {
                 *cid = resolve_runtime_id(entity_hosts, host_id, cid, &term_map);
             }

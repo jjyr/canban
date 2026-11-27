@@ -628,7 +628,6 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
                 .with_untracked(|s| s.terminals.iter().map(|t| t.number).max().unwrap_or(8))
                 + 1,
             name: Some(wt.branch.clone()),
-            origin_project_id: Some(wt.project_id.clone()),
             origin_card_id: None,
             agent_engine: None,
             agent: None,

@@ -975,7 +975,6 @@ fn push_agent_terminal(s: &mut canban_types::Snapshot, run: canban_types::AgentR
         conversation_id: Some(tid.clone()),
         number,
         name: None,
-        origin_project_id: None,
         origin_card_id: origin,
         agent_engine: None,
         runtime: None,
@@ -1018,7 +1017,6 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
         conversation_id: None,
         number: 2,
         name: Some("Terminal 1".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-2".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -1041,7 +1039,6 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
         conversation_id: None,
         number: 3,
         name: Some("Antigravity 1".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-2".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -1438,7 +1435,6 @@ pub fn overview() -> canban_types::Snapshot {
         conversation_id: None,
         number,
         name: Some("Terminal 2".into()),
-        origin_project_id: Some("second-project".into()),
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -1586,7 +1582,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         conversation_id: None,
         number,
         name: Some("Terminal 1".into()),
-        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1685,7 +1680,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         conversation_id: None,
         number: number + 3,
         name: Some("Terminal 2".into()),
-        origin_project_id: Some(proj_id.clone()),
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1744,7 +1738,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         conversation_id: None,
         number: number + 4,
         name: Some("feat/standalone-spike".into()),
-        origin_project_id: Some(proj_id.clone()),
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1783,7 +1776,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         conversation_id: None,
         number: number + 5,
         name: Some("Terminal 3".into()),
-        origin_project_id: Some(proj_id.clone()),
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1812,7 +1804,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         conversation_id: None,
         number: number + 6,
         name: Some("Antigravity 1".into()),
-        origin_project_id: Some(proj_id.clone()),
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(canban_types::TerminalRuntime {
@@ -1873,7 +1864,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             conversation_id: None,
             number: number + 7 + idx as u64,
             name: Some((*name).into()),
-            origin_project_id: Some(proj_id.clone()),
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(canban_types::TerminalRuntime {
@@ -1958,7 +1948,6 @@ pub fn terminal_many_tabs() -> canban_types::Snapshot {
             conversation_id: None,
             number: next_num + idx,
             name: Some(format!("Shell {idx:02} · build-check")),
-            origin_project_id: Some(proj_id.clone()),
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(canban_types::TerminalRuntime {
@@ -2111,7 +2100,6 @@ pub fn board_cards() -> canban_types::Snapshot {
         conversation_id: None,
         number: 9,
         name: Some("Antigravity 1".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -2360,7 +2348,6 @@ pub fn board_cards() -> canban_types::Snapshot {
         conversation_id: Some("gallery-multi-blocked-agent".into()),
         number: 10,
         name: None,
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some(multi_agent.id.clone()),
         agent_engine: None,
         runtime: None,
@@ -2374,7 +2361,6 @@ pub fn board_cards() -> canban_types::Snapshot {
         conversation_id: None,
         number: 11,
         name: Some("Claude Code".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some(multi_agent.id.clone()),
         agent_engine: Some("claude".into()),
         runtime: Some(TerminalRuntime {
@@ -4230,7 +4216,6 @@ steps:
         conversation_id: None,
         number: 9,
         name: Some("Scheduled · Nightly Dependency Audit #42 (@developer)".into()),
-        origin_project_id: Some(project_id.clone()),
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -4254,7 +4239,6 @@ steps:
         conversation_id: None,
         number: 13,
         name: Some("Worktree GC (7d) #12".into()),
-        origin_project_id: Some(canban_types::GLOBAL_PROJECT_ID.into()),
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -4731,7 +4715,6 @@ pub fn terminal_managed_reclaim() -> canban_types::Snapshot {
         conversation_id: None,
         number: 10,
         name: Some("Workflow Setup".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: None,
         agent_engine: Some("codex".into()),
         runtime: Some(TerminalRuntime {
@@ -4756,7 +4739,6 @@ pub fn terminal_managed_reclaim() -> canban_types::Snapshot {
         conversation_id: None,
         number: 11,
         name: Some("Nightly Audit #42".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: None,
         agent_engine: Some("codex".into()),
         runtime: Some(TerminalRuntime {
@@ -4814,7 +4796,6 @@ pub fn terminal_managed_reclaim() -> canban_types::Snapshot {
         conversation_id: None,
         number: 12,
         name: Some("Antigravity 1".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-2".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -4837,7 +4818,6 @@ pub fn terminal_managed_reclaim() -> canban_types::Snapshot {
         conversation_id: None,
         number: 13,
         name: Some("Terminal 1".into()),
-        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-2".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {

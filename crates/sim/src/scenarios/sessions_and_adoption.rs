@@ -1701,7 +1701,7 @@ pub fn run(seed: u64) -> Result<u64> {
                         "INSERT INTO terminals(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
                         rusqlite::params![
                             dup.id,
-                            dup.origin_project_id,
+                            Option::<String>::None,
                             dup.origin_card_id,
                             "running",
                             dup.number as i64,

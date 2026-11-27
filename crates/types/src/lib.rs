@@ -1565,9 +1565,6 @@ impl Snapshot {
         {
             return Some(pid.as_str());
         }
-        if let Some(pid) = &t.origin_project_id {
-            return Some(pid.as_str());
-        }
         if let Some(cid) = &t.origin_card_id
             && let Some(c) = self.cards.iter().find(|c| &c.id == cid)
         {
@@ -1670,9 +1667,6 @@ pub struct TerminalEntry {
     pub conversation_id: Option<String>,
     pub number: u64,
     pub name: Option<String>,
-    /// Optional Project association when opened within a Project scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_project_id: Option<String>,
     /// Optional Card association when opened directly from a Card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_card_id: Option<String>,
@@ -2526,7 +2520,6 @@ mod tests {
             conversation_id: None,
             number: 1,
             name: Some(name.into()),
-            origin_project_id: None,
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -2708,7 +2701,6 @@ mod tests {
             conversation_id: None,
             number: 1,
             name: None,
-            origin_project_id: None,
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(rt),

@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 23;
+pub const CURRENT: u32 = 24;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -88,6 +88,11 @@ const STEPS: &[Migration] = &[
         version: 23,
         up: env_secrets_up,
         down: env_secrets_down,
+    },
+    Migration {
+        version: 24,
+        up: detach_manual_terminal_project_up,
+        down: detach_manual_terminal_project_down,
     },
 ];
 
@@ -378,6 +383,28 @@ fn env_secrets_down(tx: &Transaction<'_>) -> Result<()> {
         "DROP TABLE IF EXISTS env_entries;\
          DROP TABLE IF EXISTS vault_entries;",
     )?;
+    Ok(())
+}
+
+fn detach_manual_terminal_project_up(tx: &Transaction<'_>) -> Result<()> {
+    if !table_exists(tx, "terminals")? {
+        return Ok(());
+    }
+    tx.execute_batch(
+        "UPDATE terminals SET project_id=NULL \
+         WHERE card_id IS NULL \
+           AND id NOT LIKE 'merge-queue:%' \
+           AND id NOT LIKE 'configuration:%' \
+           AND id NOT LIKE 'scheduled:%';",
+    )?;
+    rewrite_json_table(tx, "terminals", |v| {
+        v.as_object_mut()
+            .is_some_and(|obj| obj.remove("origin_project_id").is_some())
+    })?;
+    Ok(())
+}
+
+fn detach_manual_terminal_project_down(_tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 

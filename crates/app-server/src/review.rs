@@ -1425,7 +1425,6 @@ impl AppServer {
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
                 name: Some(title_trimmed),
-                origin_project_id: Some(project.id.clone()),
                 origin_card_id: None,
                 agent_engine: Some(agent_engine),
                 created_at: self.now_ms(),

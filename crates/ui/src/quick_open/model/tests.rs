@@ -53,7 +53,6 @@ fn fixture() -> Snapshot {
         conversation_id: Some(tid),
         number: 1,
         name: None,
-        origin_project_id: None,
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: None,
@@ -272,7 +271,6 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
             conversation_id: Some(tid),
             number: 40 + idx as u64,
             name: None,
-            origin_project_id: None,
             origin_card_id: Some(card.id.clone()),
             agent_engine: None,
             runtime: None,
@@ -284,7 +282,6 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
             conversation_id: None,
             number: 50 + idx as u64,
             name: Some(format!("Shell needle {idx}")),
-            origin_project_id: None,
             origin_card_id: Some(card.id.clone()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -309,7 +306,6 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
         conversation_id: None,
         number: 60,
         name: Some("Ended shell needle".into()),
-        origin_project_id: None,
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -333,7 +329,6 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
         conversation_id: None,
         number: 61,
         name: Some("Active shell".into()),
-        origin_project_id: None,
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -694,12 +689,17 @@ fn quick_open_shows_host_names_on_duplicate_and_unique_multi_host_entries() {
         conversation_id: None,
         number: 1,
         name: Some("Local Shell".into()),
-        origin_project_id: Some("fiber".into()),
         origin_card_id: None,
         agent_engine: None,
         runtime: None,
         agent: None,
         created_at: 1,
+    });
+    local.terminal_contexts.push(TerminalContext {
+        terminal_id: "t-local".into(),
+        project_id: Some("fiber".into()),
+        cwd: Some("/Users/local/fiber".into()),
+        ..Default::default()
     });
     local.register_host_entities("local");
     local.host_summaries.insert(
@@ -749,12 +749,17 @@ fn quick_open_shows_host_names_on_duplicate_and_unique_multi_host_entries() {
         conversation_id: None,
         number: 2,
         name: Some("Remote Shell".into()),
-        origin_project_id: Some("fiber".into()),
         origin_card_id: None,
         agent_engine: None,
         runtime: None,
         agent: None,
         created_at: 2,
+    });
+    remote.terminal_contexts.push(TerminalContext {
+        terminal_id: "t-remote".into(),
+        project_id: Some("fiber".into()),
+        cwd: Some("/home/devpc/fiber".into()),
+        ..Default::default()
     });
     remote.schedule_states.push(ScheduleState {
         host_id: String::new(),

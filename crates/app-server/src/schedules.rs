@@ -473,11 +473,6 @@ pub(super) fn fire_schedule(
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
                 name: Some(format!("{} #{}", state.workflow_name, run_number)),
-                origin_project_id: Some(
-                    project_opt
-                        .as_ref()
-                        .map_or_else(|| GLOBAL_PROJECT_ID.to_owned(), |p| p.id.clone()),
-                ),
                 origin_card_id: None,
                 agent_engine: Some(profile_agent_engine(prof)),
                 created_at: now_ms,
@@ -1567,10 +1562,6 @@ impl AppServer {
                                 conversation_id: None,
                                 number: db.counter("terminal-number")?,
                                 name: Some(format!("{} #{}", run.workflow_name, run.number)),
-                                origin_project_id: Some(project.map_or_else(
-                                    || GLOBAL_PROJECT_ID.to_owned(),
-                                    |p| p.id.clone(),
-                                )),
                                 origin_card_id: None,
                                 agent_engine: Some(profile_agent_engine(&prof)),
                                 created_at: now_ms,

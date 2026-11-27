@@ -274,8 +274,7 @@ impl AppServer {
                     .as_ref()
                     .is_some_and(|a| a.project_id == pid && !a.finished())
                     || (t.runtime.as_ref().is_some_and(|r| r.state != "finished")
-                        && (t.origin_project_id.as_deref() == Some(pid)
-                            || t.id.starts_with(&format!("merge-queue:{pid}:"))
+                        && (t.id.starts_with(&format!("merge-queue:{pid}:"))
                             || t.id.starts_with(&format!("configuration:{pid}:"))
                             || t.id.starts_with(&format!("scheduled:{pid}:"))))
             })
@@ -486,7 +485,6 @@ impl AppServer {
                 .into_iter()
                 .filter(|t| {
                     let belongs = t.agent.as_ref().is_some_and(|a| a.project_id == pid)
-                        || t.origin_project_id.as_deref() == Some(pid.as_str())
                         || t.id.starts_with(&format!("merge-queue:{pid}:"))
                         || t.id.starts_with(&format!("configuration:{pid}:"))
                         || t.id.starts_with(&format!("scheduled:{pid}:"));

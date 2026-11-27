@@ -112,9 +112,8 @@ impl AppServer {
                 } else {
                     format!("Workflows · {}", session.profile_id)
                 };
-                let origin_project_id = (!is_global_project_id(&scope_id)).then_some(scope_id);
                 let now_ms = self.now_ms();
-                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(term_name),origin_project_id,origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now_ms});
+                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(term_name),origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now_ms});
                 terminal.created_at=now_ms;
                 terminal.runtime=None;db.save(&terminal)?;db.save(&session)?;
                 Ok(json!({"terminal_id":key,"reused":false,"state":"queued","terminal":terminal,"session":session}))

@@ -114,7 +114,6 @@ fn ipc_preserves_large_context_and_report_frames() {
         conversation_id: Some(cid),
         number: 1,
         name: None,
-        origin_project_id: None,
         origin_card_id: Some(initial_card.id.clone()),
         agent_engine: None,
         runtime: None,

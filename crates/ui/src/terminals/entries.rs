@@ -570,7 +570,6 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 conversation_id: Some(row.id.clone()),
                 number: saved.iter().map(|t| t.number).max().unwrap_or(0) + 1,
                 name: None,
-                origin_project_id: None,
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: None,
@@ -656,26 +655,14 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     })
             })
         };
-        // Presentation follows observed location; before directory discovery arrives,
-        // fall back to `origin_project_id` so newly created project terminals never
-        // flash in "Other". Once an external `cwd` is observed, `location_unobserved`
-        // is false and external directories still group under "Other".
-        let location_unobserved = location
-            .as_ref()
-            .is_none_or(|c| c.cwd.is_none() && c.project_id.is_none());
+        // Presentation follows observed location (`terminal_contexts` / live `cwd`) for
+        // independent terminals, and explicit session ownership for managed sessions.
         let project_id = location
             .as_ref()
             .and_then(|c| c.project_id.clone())
-            .or_else(|| scheduled_run.as_ref().map(|r| r.project_id.clone()))
-            .or_else(|| {
-                t.origin_project_id
-                    .as_deref()
-                    .filter(|id| {
-                        is_global_project_id(id)
-                            || (location_unobserved && s.projects.iter().any(|p| p.id == *id))
-                    })
-                    .map(str::to_owned)
-            });
+            .or_else(|| configuration.map(|c| c.project_id.clone()))
+            .or_else(|| merge_batch.map(|b| b.project_id.clone()))
+            .or_else(|| scheduled_run.map(|r| r.project_id.clone()));
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();
         let stage = agent.as_ref().and_then(|a| a.agent()).map(|att| {
             s.projects
@@ -693,13 +680,6 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             })
             .or_else(|| {
                 project_id
-                    .as_deref()
-                    .filter(|pid| !is_global_project_id(pid))
-                    .map(|pid| s.project_host(pid))
-                    .filter(|h| *h != "local")
-            })
-            .or_else(|| {
-                t.origin_project_id
                     .as_deref()
                     .filter(|pid| !is_global_project_id(pid))
                     .map(|pid| s.project_host(pid))

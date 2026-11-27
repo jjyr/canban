@@ -31,7 +31,6 @@ fn agent_terminal(id: &str, agent: serde_json::Value) -> TerminalEntry {
         conversation_id: Some(id.into()),
         number: 1,
         name: None,
-        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: None,
@@ -394,7 +393,6 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
         conversation_id: None,
         number: 2,
         name: Some("Antigravity 1".into()),
-        origin_project_id: None,
         origin_card_id: Some("c".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -439,7 +437,6 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
         conversation_id: None,
         number: 3,
         name: Some("Terminal 2".into()),
-        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {

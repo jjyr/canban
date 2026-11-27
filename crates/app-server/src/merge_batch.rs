@@ -818,7 +818,6 @@ impl AppServer {
                 conversation_id: None,
                 number,
                 name: Some(entry_name.clone()),
-                origin_project_id: Some(batch.project_id.clone()),
                 origin_card_id: None,
                 agent_engine: agent_engine.clone(),
                 runtime: None,
