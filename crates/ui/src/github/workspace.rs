@@ -515,7 +515,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child({
             let has_detail = computed(move || b.reference.get().is_some());
             let narrow = computed(move || ui.narrow.get());
-            canban_ui_kit::split::reveal_split(
+            canban_ui_kit::split::reveal_split_dismissible(
                 list_panel(ui).into_element(),
                 move || super::detail::screen(ui).into_element(),
                 b.width,

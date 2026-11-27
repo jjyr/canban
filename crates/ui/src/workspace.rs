@@ -37,7 +37,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             || ui.card_standalone.get()
             || (ui.page.get() == "card" && ui.card_terminal_open.get())
     });
-    let split_view = canban_ui_kit::split::reveal_split(
+    let split_view = canban_ui_kit::split::reveal_split_dismissible(
         board::screen(ui).into_element(),
         move || {
             dynamic(move || {

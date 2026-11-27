@@ -349,12 +349,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         ui.card_terminal_width,
         is_narrow,
         show_terminal,
-        move || {
-            batch(|| {
-                ui.card_terminal_open.set(false);
-                ui.card_terminal_focused.set(false);
-            });
-        },
     )
     .into_element()
 }

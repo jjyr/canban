@@ -49,13 +49,48 @@ pub fn split(
 /// A stable resizable workspace whose right pane reveals at its final text
 /// width. The native layout transition moves the pane boundary and the left
 /// viewport; it never feeds frame-by-frame widths back into document layout.
+///
+/// Clicking the left pane does not dismiss the right pane. Use
+/// [`reveal_split_dismissible`] for master-detail or drawer-style splits where
+/// clicking empty space in the left pane should collapse the right pane.
 pub fn reveal_split(
     left: AnyElement,
     right: impl Fn() -> AnyElement + 'static,
     width: Signal<f32>,
     full: Memo<bool>,
     requested: Memo<bool>,
+) -> impl IntoElement {
+    reveal_split_inner(left, right, width, full, requested, None)
+}
+
+/// Variant of [`reveal_split`] where clicking an unhandled area of the left
+/// pane while side-by-side (`!full`) invokes `on_dismiss` to collapse the right
+/// pane.
+pub fn reveal_split_dismissible(
+    left: AnyElement,
+    right: impl Fn() -> AnyElement + 'static,
+    width: Signal<f32>,
+    full: Memo<bool>,
+    requested: Memo<bool>,
     on_dismiss: impl Fn() + 'static,
+) -> impl IntoElement {
+    reveal_split_inner(
+        left,
+        right,
+        width,
+        full,
+        requested,
+        Some(Box::new(on_dismiss)),
+    )
+}
+
+fn reveal_split_inner(
+    left: AnyElement,
+    right: impl Fn() -> AnyElement + 'static,
+    width: Signal<f32>,
+    full: Memo<bool>,
+    requested: Memo<bool>,
+    on_dismiss: Option<Box<dyn Fn() + 'static>>,
 ) -> impl IntoElement {
     let total = signal(0f32);
     let open = computed(move || requested.get() && total.get() > 0.);
@@ -71,6 +106,30 @@ pub fn reveal_split(
         }
     });
     let wide = computed(move || open.get() && !full.get());
+    let mut left_pane = view()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .overflow_hidden()
+        .accessibility_elements_hidden(move || open.get() && full.get())
+        .pointer_events(move || {
+            if open.get() && full.get() {
+                PointerEvents::None
+            } else {
+                PointerEvents::Auto
+            }
+        });
+    if let Some(on_dismiss) = on_dismiss {
+        left_pane = left_pane
+            .accessible(false)
+            .focusable(false)
+            .on_press(move || {
+                if wide.get_untracked() {
+                    on_dismiss();
+                }
+            });
+    }
+    let left_pane = left_pane.child(left);
     view()
         .flex_1()
         .min_w(px(0.))
@@ -111,29 +170,7 @@ pub fn reveal_split(
                             })
                         })
                         .fixed(move || !wide.get())
-                        .child(
-                            view()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .min_h(px(0.))
-                                .overflow_hidden()
-                                .accessible(false)
-                                .focusable(false)
-                                .accessibility_elements_hidden(move || open.get() && full.get())
-                                .pointer_events(move || {
-                                    if open.get() && full.get() {
-                                        PointerEvents::None
-                                    } else {
-                                        PointerEvents::Auto
-                                    }
-                                })
-                                .on_press(move || {
-                                    if wide.get_untracked() {
-                                        on_dismiss();
-                                    }
-                                })
-                                .child(left),
-                        ),
+                        .child(left_pane),
                 )
                 .child(
                     nsh_base::resizable_panel()
@@ -708,7 +745,6 @@ mod tests {
                     width,
                     full,
                     requested,
-                    || {},
                 ))
         }
 
