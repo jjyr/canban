@@ -65,17 +65,25 @@ fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
 
     let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
     remote_app.config.write().unwrap().hc = mock_hc.to_string_lossy().into_owned();
-    let (_, remote_token) = remote_app.issue_device_token("mux-workstation").unwrap();
+    let desktop_client_kp = canban_transport::load_or_create_client_keypair(
+        &local_home,
+        true,
+        canban_transport::system_noise_rng().as_ref(),
+    )
+    .unwrap();
+    remote_app
+        .authorize_device_pubkey("mux-workstation", &desktop_client_kp.public_b64())
+        .unwrap();
     let remote_running = remote_app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
-            allow_insecure_bind: false,
             trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+    let remote_pubkey = remote_app.server_pubkey();
     let remote_proj: Project = serde_json::from_value(
         remote_app
             .call(
@@ -94,7 +102,8 @@ fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
             name: "Home Linux".into(),
             transport: HostTransport::Tcp {
                 addr: remote_addr,
-                token: remote_token,
+                server_pubkey: Some(remote_pubkey),
+                tailscale_auth: false,
             },
             ssh_target: None,
             server_id: None,
@@ -237,8 +246,16 @@ fn device_remote_access_set_toggles_tcp_listener_live_and_persists_config() {
     assert_eq!(enabled["tcp_enabled"], true);
     let addrs = app.bound_tcp_addrs();
     assert_eq!(addrs.len(), 1);
-    let (_, token) = app.issue_device_token("live-test").unwrap();
-    let client = AppClient::connect_tcp(addrs[0].clone(), token).unwrap();
+    let client_kp = Arc::new(canban_transport::NoiseKeypair::generate().unwrap());
+    app.authorize_device_pubkey("live-test", &client_kp.public_b64())
+        .unwrap();
+    let client = AppClient::connect_tcp(
+        addrs[0].clone(),
+        Some(app.server_pubkey()),
+        canban_transport::TcpAuthMode::Key,
+        client_kp,
+    )
+    .unwrap();
     assert_eq!(client.server_id(), Some(app.server_id()));
     drop(client);
 

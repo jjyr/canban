@@ -82,7 +82,8 @@ impl AppServer {
         let listen_cfg = network::load_listen_config(&self.home);
         json!({
             "devices": self.paired_devices(),
-            "has_legacy_token": network::read_server_token(&self.home).is_some(),
+            "server_pubkey": self.server_pubkey(),
+            "server_pubkey_fingerprint": self.server_pubkey_fingerprint(),
             "tcp_enabled": !bound.is_empty() || listen_cfg.tcp_enabled(),
             "listening": !bound.is_empty(),
             "listen_addrs": bound,
@@ -92,36 +93,29 @@ impl AppServer {
     }
 
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
-        let (value, pending_stop) = self.call_with_transport_token(method, p, None, false)?;
+        let (value, pending_stop) = self.call_inner(method, p, false)?;
         if pending_stop {
             self.trigger_stop();
         }
         Ok(value)
     }
 
-    pub(crate) fn call_with_transport_token(
+    pub(crate) fn call_inner(
         &self,
         method: &str,
         p: Value,
-        transport_token: Option<&str>,
         defer_stop: bool,
     ) -> Result<(Value, bool)> {
         representation::validate(method, &p)?;
         let mut business = p.clone();
         business.as_object_mut().unwrap().remove("view");
         business.as_object_mut().unwrap().remove("fields");
-        let result = self.call_business(method, business, transport_token, defer_stop)?;
+        let result = self.call_business(method, business, defer_stop)?;
         let pending_stop = defer_stop && method == "app.shutdown";
         Ok((representation::render(method, &p, result), pending_stop))
     }
 
-    fn call_business(
-        &self,
-        method: &str,
-        p: Value,
-        transport_token: Option<&str>,
-        defer_stop: bool,
-    ) -> Result<Value> {
+    fn call_business(&self, method: &str, p: Value, defer_stop: bool) -> Result<Value> {
         if canban_updater::handoff::active(&self.home)
             && !matches!(
                 method,
@@ -241,8 +235,8 @@ impl AppServer {
                 }))
             }
             "host.env.keys" => self.host_env_keys(),
-            "env.save" => self.env_save(p, transport_token),
-            "env.global.sync" => self.global_env_sync(p, transport_token),
+            "env.save" => self.env_save(p),
+            "env.global.sync" => self.global_env_sync(p),
             "env.preview" => self.env_preview(p),
             "host.discover" => {
                 let catalog = if self.exec_runner.is_system() {
@@ -301,7 +295,7 @@ impl AppServer {
                 )
             }
             "app.ping" => Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":self.api_version(),"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_with(self.exec_runner.as_ref()),"build":self.effective_build(),"updates_disabled":self.updates_disabled}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":self.api_version(),"pid":std::process::id(),"home":self.home,"server_id":self.identity,"server_pubkey":self.server_pubkey(),"server_pubkey_fingerprint":self.server_pubkey_fingerprint(),"hostname":network::hostname_with(self.exec_runner.as_ref()),"build":self.effective_build(),"updates_disabled":self.updates_disabled}),
             ),
             "device.list" => Ok(self.device_list_payload()),
             "device.remote_access.set" => {
@@ -379,15 +373,33 @@ impl AppServer {
                             })
                             .flatten()
                     });
+                let server_pubkey = self.server_pubkey();
                 let uri = preferred_addr
                     .as_deref()
-                    .map(|a| canban_types::format_pairing_uri(a, &code));
+                    .map(|a| canban_types::format_pairing_uri(a, &server_pubkey, &code));
                 Ok(json!({
                     "code": code,
                     "expires_at": expires_at,
                     "addr": preferred_addr,
+                    "server_pubkey": server_pubkey,
+                    "server_pubkey_fingerprint": self.server_pubkey_fingerprint(),
                     "uri": uri,
                     "listening": !bound.is_empty(),
+                }))
+            }
+            "device.authorize" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Authorizing a remote device requires an explicit user action"
+                );
+                let pubkey = strp(&p, "pubkey")?;
+                let name = p["name"].as_str().unwrap_or("Remote device");
+                let dev = self.authorize_device_pubkey(name, pubkey)?;
+                Ok(json!({
+                    "device": dev,
+                    "server_id": self.identity,
+                    "server_pubkey": self.server_pubkey(),
+                    "server_pubkey_fingerprint": self.server_pubkey_fingerprint(),
                 }))
             }
             "device.revoke" => {
@@ -401,18 +413,6 @@ impl AppServer {
                     "revoked": revoked,
                     "device_id": device_id,
                 }))
-            }
-            "device.remove_legacy_token" => {
-                ensure!(
-                    p["execution"].is_null(),
-                    "Removing legacy server.token requires an explicit user action"
-                );
-                let token_file = network::token_path(&self.home);
-                let existed = token_file.exists();
-                if existed {
-                    let _ = std::fs::remove_file(&token_file);
-                }
-                Ok(json!({ "removed": existed }))
             }
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
             "project.list" => Ok(serde_json::to_value(

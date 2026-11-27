@@ -2518,6 +2518,7 @@ fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects
             endpoint_label: "~/.canban/app.sock".into(),
             ssh_target: None,
             server_id: None,
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Connected {
                 rtt_ms: 0,
                 api_version: 1,
@@ -2588,6 +2589,7 @@ fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects
             endpoint_label: "devpc".into(),
             ssh_target: Some("devpc".into()),
             server_id: None,
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Connected {
                 rtt_ms: 10,
                 api_version: 1,
@@ -2614,6 +2616,7 @@ fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects
             endpoint_label: "gpu-box".into(),
             ssh_target: Some("gpu-box".into()),
             server_id: None,
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Connected {
                 rtt_ms: 12,
                 api_version: 1,

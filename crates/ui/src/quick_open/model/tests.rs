@@ -712,6 +712,7 @@ fn quick_open_shows_host_names_on_duplicate_and_unique_multi_host_entries() {
             endpoint_label: "~/.canban/app.sock".into(),
             ssh_target: None,
             server_id: None,
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Connected {
                 rtt_ms: 0,
                 api_version: 1,
@@ -789,6 +790,7 @@ fn quick_open_shows_host_names_on_duplicate_and_unique_multi_host_entries() {
             endpoint_label: "devpc".into(),
             ssh_target: Some("devpc".into()),
             server_id: None,
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Connected {
                 rtt_ms: 8,
                 api_version: 1,

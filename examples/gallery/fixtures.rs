@@ -1632,6 +1632,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             endpoint_label: "ssh-host".into(),
             ssh_target: Some("ssh-host".into()),
             server_id: None,
+            server_pubkey_fingerprint: None,
             connection: canban_types::HostConnectionState::Connected {
                 rtt_ms: 14,
                 api_version: canban_updater::DESKTOP_API,
@@ -2914,6 +2915,7 @@ pub fn paired_devices_preview() -> canban_ui::presenter::PairedDevicesPreview {
                 created_at: t.saturating_sub(3_600_000),
                 last_seen_at: Some(t.saturating_sub(90_000)),
                 auth_kind: String::new(),
+                pubkey_fingerprint: "A1B2-C3D4-E5F6".into(),
             },
             PairedDevice {
                 id: "dev-iphone".into(),
@@ -2921,14 +2923,18 @@ pub fn paired_devices_preview() -> canban_ui::presenter::PairedDevicesPreview {
                 created_at: t.saturating_sub(300_000),
                 last_seen_at: None,
                 auth_kind: String::new(),
+                pubkey_fingerprint: "9F8E-7D6C-5B4A".into(),
             },
         ],
-        has_legacy_token: true,
+        server_pubkey_fingerprint: Some("3A7C-91E4-B82F".into()),
         tcp_enabled: true,
         listening: true,
         listen_addrs: vec!["100.84.0.2:7680".into()],
         trust_tailscale_self: true,
-        generated_uri: Some("canban://100.84.0.2:7680#pair_demo9f8e7d6c5b4a3210".into()),
+        generated_uri: Some(
+            "canban://100.84.0.2:7680?pk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#pair_demo9f8e7d6c5b4a3210"
+                .into(),
+        ),
         generated_expires_at: Some(t + 240_000),
     }
 }
@@ -3044,6 +3050,7 @@ pub fn multi_host_workspace(
         endpoint_label: "~/.canban/app.sock".into(),
         ssh_target: None,
         server_id: Some("srv-local-mac".into()),
+        server_pubkey_fingerprint: None,
         connection: HostConnectionState::Connected {
             rtt_ms: 0,
             api_version: canban_updater::DESKTOP_API,
@@ -3067,6 +3074,7 @@ pub fn multi_host_workspace(
         endpoint_label: "100.84.0.2:7680".into(),
         ssh_target: Some("builder@100.84.0.2".into()),
         server_id: Some("srv-home-linux".into()),
+        server_pubkey_fingerprint: Some("9F8E-7D6C-5B4A".into()),
         connection: if offline_remote {
             HostConnectionState::Offline {
                 error: "Tailscale tunnel asleep while laptop was closed".into(),

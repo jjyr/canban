@@ -27,6 +27,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 sha2 = "0.10"
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process"] }
 yamux = "0.14"
 futures-io = "0.3"

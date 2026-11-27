@@ -12,7 +12,7 @@ Full mobile client connected to remote `canband` daemons over Tailscale or direc
 - **Terminals** tab for browsing `Card Agents`, `Shells`, and `Worktrees`, opening live sessions, and launching new Shells or Managed Branch Worktrees.
 - **Git Diff and delivery** with file list, unified per-file diff, `Return for rework`, and `Deliver…` (Queue Merge allowed on mobile).
 - **Offline Board and Card viewing/editing** across all stages and drafts; see [Offline editing and synchronization](offline-sync.md).
-- **QR pairing using the single address chosen on desktop**, with explicit `TransportSecurity` badges (`🔒` for Tailscale / SSH, `⚠` for other TCP) and zero implicit cross-network fallback.
+- **QR pairing using the single address chosen on desktop**, with Noise_XX end-to-end encryption, pinned host public keys (`?pk=<base64url>`), and zero implicit cross-network fallback.
 
 ## Visual style and platform adaptation
 
@@ -224,33 +224,29 @@ See [Offline editing and synchronization](offline-sync.md#ui-states-and-conflict
 Desktop, CLI (`canban pair`), and mobile share a unified single-address pairing URI while also accepting bare `canban://<addr>#<secret>` strings:
 
 ```text
-canban://<host:port>[?sid=<server_id>&name=<hostname>]#<secret>
+canban://<host:port>?pk=<server_pubkey>[&sid=<server_id>&name=<hostname>]#pair_<code...>
 ```
 
-- **Explicit desktop selection (zero silent cross-network fallback):** On desktop (`Settings -> Hosts -> Pair a phone`) or CLI (`canban pair`), the user selects the single endpoint address they intend to expose (typically Tailscale MagicDNS `*.ts.net` or Tailscale IPv4 `100.x.y.z`, or an explicit LAN/custom VPN address).
-- **Single-address confirmation & probe:** The client parses the single address, optionally checks reachability/RTT with an unauthenticated TCP connect (`probe_addr`), displays the transport security badge before confirmation, and saves **only that chosen address**—never storing hidden fallback addresses or silently failing over between Tailscale and LAN routes. Switching addresses later is an explicit edit in `Settings -> Hosts`.
-- **Transport security icons:** Pairing confirmation cards and `Settings -> Hosts` rows display explicit link security badges (`TransportSecurity` in `canban-client`):
-  - **Local socket / Tailscale / SSH** (`Local`, `*.ts.net` / `100.64.0.0/10` / `fd7a:115c:a1e0::/48`, or `HostTransport::Ssh` encrypted tunnels): display a lock icon (`🔒`) with hint `"Tailscale — encrypted by WireGuard"` or `"SSH — encrypted tunnel"`.
-  - **All other TCP addresses** (LAN IPs, custom hostnames): display a caution icon (`⚠`) with hint `"Not Tailscale — may be unencrypted unless your own VPN protects it"`.
-  - Hints are purely informational and **never block selection or connection**; the user decides because Canban cannot inspect whether a non-Tailscale TCP route runs inside the user's own VPN.
+- **Explicit desktop selection (zero silent cross-network fallback):** On desktop (`Settings -> Hosts -> Generate Pairing URI`) or CLI (`canban pair`), the user exposes the single endpoint address alongside the daemon's X25519 public key (`?pk=<base64url>`).
+- **Single-address confirmation & probe:** The client parses the single address, enforces `?pk=` on all non-Tailscale endpoints (Option B), optionally checks reachability/RTT with a TCP connect (`probe_addr`), displays the host key fingerprint before confirmation, and saves **only that chosen address**—never storing hidden fallback addresses or silently failing over between Tailscale and LAN routes.
+- **No transport warning badges:** Because every TCP connection (Tailscale, LAN, or custom network) is now end-to-end encrypted with `Noise_XX_25519_ChaChaPoly_BLAKE2s` and pinned by host key, the legacy `🔒` / `⚠ Not Tailscale` (`TransportSecurity`) badges are removed.
 - **Unreachable tailnet guidance:** If a Tailscale endpoint does not respond, show `"Tailscale is not connected on this phone"` with a shortcut button to open the Tailscale app alongside a `Retry` action.
-- **Camera capture:** Because NSH has no camera or barcode scanner component, desktop renders the pairing URI as a QR code and the phone uses the OS camera to open the registered `canban://` deep link; an in-app `Paste URI` button serves as fallback.
+- **Camera capture:** Because NSH has no camera or barcode scanner component, desktop renders the pairing URI as a QR code and the phone uses the OS camera to open the registered `canban://` deep link; an in-app `Paste Pairing Link` button serves as fallback.
 
 ### Transport security
 
-Link confidentiality is provided by the user's chosen network path (Tailscale WireGuard, a user-managed VPN, or the SSH tunnel fallback) rather than Canban-managed transport encryption:
+Every TCP connection is end-to-end encrypted and mutually authenticated using `Noise_XX_25519_ChaChaPoly_BLAKE2s` (`CBN1` wire preface) over `canban-transport`:
 
-- `canband`'s TCP listener carries no application-layer encryption: JSON-RPC requests, Terminal byte streams, and the bearer token travel in plaintext over that TCP socket, so users should only expose `--listen` addresses that sit on an encrypted or private network.
-- Desktop already supports encrypted SSH tunnels via `HostTransport::Ssh`; mobile presently connects over TCP (Tailscale or another VPN) because iOS sandboxing forbids spawning `ssh` subprocesses, and any future pure-Rust SSH tunnel transport on mobile will share the same `🔒` `TransportSecurity::Ssh` classification.
-- Application-layer TLS (e.g., TLS 1.3 with QR-pinned certificates) and mandatory Tailscale-only enforcement were evaluated and declined on 2026-11-22 so users remain free to route traffic through their own VPN setups.
+- All JSON-RPC requests, `env.save` / `env.global.sync` secrets, `app.subscribe` push events, and `herdr.connect` Terminal byte streams travel inside Noise AEAD transport ciphertexts.
+- Non-Tailscale TCP URIs require `?pk=<base64url>` host-key pinning; server key mismatches abort before Noise Message 3 (`HostConnectionState::KeyMismatch`) and halt background reconnects.
+- Tailscale endpoints accept bare addresses for first-time `WhoIs` TOFU (`server_pubkey: None`) and pin the learned `server_pubkey` into `hosts.json` on first connect.
 
 ### Pairing credentials & Tailscale WhoIs auto-auth
 
-- **Zero-QR Tailscale same-account sign-in (`ts_auto`):** Both first-run onboarding and the Add Host / Pairing sheet accept bare Tailscale addresses without `#secret` (`host.ts.net`, `100.x.y.z`, `canban://host.ts.net`, or `tcp://100.x.y.z:7680`). During `transport.mux`, `canband` verifies the peer via local `tailscale whois --json` (requiring the same personal Tailscale `UserID` and rejecting tagged or shared-in peers unless `"trust_tailscale_self": false` is configured) and returns an ephemeral per-connection `session_token` for RPCs and `enc:v1:` secret sealing. Confirmation cards and `Settings` host detail rows show `Tailscale — automatic same-account sign-in (managed in Tailscale Admin)`.
-- **On-demand Tailnet host discovery (`host.discover_canban`):** After pairing with a first host—and manually via **Settings → Hosts → Discover on Tailnet** (never background-polled)—`canban-client` invokes `host.discover_canban` on the connected host, which probes its enabled saved TCP entries in `config/hosts.json` (`linked_on_host: true`) and online same-user non-tagged desktop/server Tailscale peers (`16` parallel workers, `1.5s` timeout). Already-paired hosts are filtered out by `server_id` and normalized address; reachable peers appear in the `AVAILABLE ON TAILNET` sheet with one-tap **Join** / **Join All (N)** for Tailscale endpoints and **URI…** (`canban://<addr>#` prefill) for linked non-Tailscale TCP hosts.
-- **One-time pairing code -> per-device revocable token:** For cross-account peers, tagged servers, non-Tailscale VPNs, or hosts with `"trust_tailscale_self": false`, the QR / pairing URI carries a short-lived (5-minute) single-use `pair_...` pairing code rather than a static shared secret. On first connection, the client exchanges that pairing code for a **per-device revocable bearer token** (`dev_...`) persisted on `canband` (and stored locally in the client's `CredentialStore`).
-- **Paired devices management:** Desktop `Settings -> Hosts` provides a `Paired devices` list showing persistent `dev_...` tokens (with `[Revoke]` to invalidate an individual device live) alongside active Tailscale WhoIs sessions (`Tailscale` badge and `Managed in Tailscale Admin`).
-- **Backward compatibility:** Bare single-address URIs without query parameters (`canban://<host>:<port>#<token>` or `<host>:<port>#<token>`) remain accepted by the parser.
+- **Zero-QR Tailscale same-account sign-in:** Both first-run onboarding and the Add Host / Pairing sheet accept bare Tailscale addresses without `#pair_...` (`host.ts.net`, `100.x.y.z`, `canban://host.ts.net`, or `tcp://100.x.y.z:7680`). Inside the Noise-encrypted `transport.mux` handshake (`auth_mode: "tailscale"`), `canband` verifies the peer via local `tailscale whois --json` (requiring the same personal Tailscale `UserID` and rejecting tagged or shared-in peers unless `"trust_tailscale_self": false` is configured).
+- **On-demand Tailnet host discovery (`host.discover_canban`):** After pairing with a first host—and manually via **Settings → Hosts → Discover on Tailnet** (never background-polled)—`canban-client` invokes `host.discover_canban` on the connected host, which probes its enabled saved TCP entries in `config/hosts.json` (`linked_on_host: true`) and online same-user non-tagged desktop/server Tailscale peers (`16` parallel workers, `1.5s` timeout).
+- **One-time pairing code -> authorized Noise client public key:** For cross-account peers, tagged servers, non-Tailscale networks, or hosts with `"trust_tailscale_self": false`, the QR / pairing URI carries `?pk=<server_pubkey>` and a short-lived (5-minute) single-use `pair_...` pairing code. On first connection, the Noise handshake authenticates the client's static X25519 keypair (`client_noise.key` / `CredentialStore`), consumes the single-use `pair_...` code, and registers the client's public key in `<home>/authorized_devices.json`.
+- **Paired devices management:** Desktop `Settings -> Hosts` provides a `Paired Devices` list showing authorized client public keys (with fingerprints and `[Revoke]` to kick active sessions live) alongside active Tailscale WhoIs sessions (`Tailscale` badge and `Managed in Tailscale Admin`).
 
 ## Planned Gallery scenes
 

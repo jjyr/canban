@@ -144,6 +144,8 @@ impl AppServer {
             home: self.home.clone(),
             server_id: self.identity.clone(),
             api_version: self.api_version(),
+            server_keypair: self.server_keypair.clone(),
+            noise_rng: self.noise_rng.clone(),
             device_store: self.device_store.clone(),
             pairing_codes: self.pairing_codes.clone(),
             revocations: self.device_revocations.clone(),
@@ -204,7 +206,7 @@ impl AppServer {
             initial_request: None,
             has_pipelined_bytes: false,
             device_id: None,
-            auth_token: None,
+            client_pubkey: None,
             stop_rx: self.stop_receiver(),
         };
         serve_stream(self, accepted).await
@@ -355,6 +357,8 @@ impl AppServer {
             home: self.home.clone(),
             server_id: self.identity.clone(),
             api_version: self.api_version(),
+            server_keypair: self.server_keypair.clone(),
+            noise_rng: self.noise_rng.clone(),
             device_store: self.device_store.clone(),
             pairing_codes: self.pairing_codes.clone(),
             revocations: self.device_revocations.clone(),
@@ -416,7 +420,6 @@ async fn serve_stream(
 ) -> Result<()> {
     let mut initial_request = accepted.initial_request;
     let mut has_initial_pipelined = accepted.has_pipelined_bytes;
-    let auth_token = accepted.auth_token;
     let mut stop_rx = accepted.stop_rx;
     let (read_half, mut writer) = tokio::io::split(accepted.stream);
     let mut reader = tokio::io::BufReader::new(read_half);
@@ -494,16 +497,8 @@ async fn serve_stream(
         first = false;
         let srv = server.clone();
         let params = input["params"].clone();
-        let tok = auth_token.clone();
         let call_res = server
-            .run_work(move || {
-                srv.call_with_transport_token(
-                    &method,
-                    params,
-                    tok.as_deref().map(String::as_str),
-                    true,
-                )
-            })
+            .run_work(move || srv.call_inner(&method, params, true))
             .await?;
         let (reply, mut deferred_stop) = match call_res {
             Ok((result, pending_stop)) => (
@@ -2703,38 +2698,31 @@ mod tests {
                 tailscale: false,
                 port: 0,
                 listen: Some("127.0.0.1:0".into()),
-                allow_insecure_bind: false,
                 trust_tailscale_self: true,
             }))
             .unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-        assert!(
-            network::read_server_token(&home).is_none(),
-            "new daemon must not auto-generate legacy server.token"
-        );
-        let (_, token) = app.issue_device_token("runtime-test").unwrap();
-
-        // 1. Open an idle authenticated TCP socket and verify it is tracked while open.
-        let mut live_stream = std::net::TcpStream::connect(&addr).unwrap();
-        live_stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+        let server_pk = app.server_pubkey();
+        let client_kp = Arc::new(canban_transport::NoiseKeypair::generate().unwrap());
+        let unauth_kp = Arc::new(canban_transport::NoiseKeypair::generate().unwrap());
+        app.authorize_device_pubkey("runtime-test", &client_kp.public_b64())
             .unwrap();
-        writeln!(
-            live_stream,
-            "{}",
-            json!({"jsonrpc":"2.0","id":1,"method":"app.ping","params":{},"auth":token})
+
+        // 1. Open an idle authenticated Noise_XX + yamux/1 session and verify it is tracked while open.
+        let live_client = canban_transport::ClientTransport::connect_tcp(
+            addr.clone(),
+            Some(server_pk.clone()),
+            canban_transport::TcpAuthMode::Key,
+            "runtime-test".into(),
+            client_kp.clone(),
         )
         .unwrap();
-        live_stream.flush().unwrap();
-        let mut reply = String::new();
-        BufReader::new(live_stream.try_clone().unwrap())
-            .read_line(&mut reply)
-            .unwrap();
-        assert!(reply.contains("\"api_version\""));
+        let ping_live = live_client.call("app.ping", &json!({})).unwrap();
+        assert_eq!(ping_live["server_id"], app.server_id());
         assert_eq!(app.active_tcp_count(), 1);
 
-        // Close the live client socket and wait for the handler task to observe EOF.
-        drop(live_stream);
+        // Close the live client and wait for the handler task to observe EOF.
+        drop(live_client);
         let wait_empty = || {
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
             while std::time::Instant::now() < deadline {
@@ -2750,21 +2738,34 @@ mod tests {
             "active_tcp_connections leaked after client closed TCP socket"
         );
 
-        // 2. Churn short-lived reachability probes, auth failures, and one-shot RPCs
-        //    and verify zero sockets remain tracked and unauthenticated host.probe is rejected.
-        for _ in 0..15 {
+        // 2. Churn reachability probes, unauthorized key rejections, legacy plaintext rejections,
+        //    and one-shot encrypted RPCs, verifying zero descriptors remain tracked.
+        for _ in 0..10 {
             network::probe_tcp_reachable(&addr, Duration::from_secs(3)).unwrap();
 
-            let unauth_probe = client::rpc_tcp(&addr, None, "host.probe", json!({})).unwrap_err();
+            let unauth_probe = client::rpc_tcp(
+                &addr,
+                Some(&server_pk),
+                canban_transport::TcpAuthMode::Key,
+                unauth_kp.clone(),
+                "host.probe",
+                json!({}),
+            )
+            .unwrap_err();
             assert!(
                 format!("{unauth_probe:#}").contains("auth_failed:"),
-                "unauthenticated host.probe must be rejected: {unauth_probe:#}"
+                "unauthorized client key must be rejected: {unauth_probe:#}"
             );
 
-            let bad_auth = client::rpc_tcp(&addr, Some("invalid-token"), "app.ping", json!({}));
-            assert!(bad_auth.is_err());
-
-            let ping = client::rpc_tcp(&addr, Some(&token), "app.ping", json!({})).unwrap();
+            let ping = client::rpc_tcp(
+                &addr,
+                Some(&server_pk),
+                canban_transport::TcpAuthMode::Key,
+                client_kp.clone(),
+                "app.ping",
+                json!({}),
+            )
+            .unwrap();
             assert_eq!(ping["server_id"], app.server_id());
         }
         assert!(
@@ -2772,27 +2773,22 @@ mod tests {
             "active_tcp_connections accumulated leaked descriptors across short-lived TCP RPCs"
         );
 
-        // 3. Verify shutdown still unblocks an actively open idle TCP connection cleanly.
-        let mut held = std::net::TcpStream::connect(&addr).unwrap();
-        held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        writeln!(
-            held,
-            "{}",
-            json!({"jsonrpc":"2.0","id":1,"method":"app.ping","params":{},"auth":token})
+        // 3. Verify shutdown still unblocks an actively open idle Noise_XX + yamux connection cleanly.
+        let held = canban_transport::ClientTransport::connect_tcp(
+            addr.clone(),
+            Some(server_pk),
+            canban_transport::TcpAuthMode::Key,
+            "runtime-held".into(),
+            client_kp,
         )
         .unwrap();
-        held.flush().unwrap();
-        let mut ping_line = String::new();
-        let mut held_reader = BufReader::new(held.try_clone().unwrap());
-        held_reader.read_line(&mut ping_line).unwrap();
-        assert!(ping_line.contains("\"api_version\""));
+        let ping_held = held.call("app.ping", &json!({})).unwrap();
+        assert!(ping_held["api_version"].as_u64().is_some());
         assert!(app.active_tcp_count() > 0);
 
         drop(running);
-        let mut eof_line = String::new();
-        let n = held_reader.read_line(&mut eof_line).unwrap_or(0);
-        assert_eq!(n, 0);
         assert!(wait_empty());
+        drop(held);
     }
 
     fn encode_relay_frame(out: &mut Vec<u8>, channel: u32, kind: u8, payload: &[u8]) {
@@ -2906,36 +2902,39 @@ else:
                 tailscale: false,
                 port: 0,
                 listen: Some("127.0.0.1:0".into()),
-                allow_insecure_bind: false,
                 trust_tailscale_self: true,
             }))
             .unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-        assert!(
-            network::read_server_token(&home).is_none(),
-            "new daemon must not auto-generate legacy server.token"
-        );
-        let (_, token) = app.issue_device_token("runtime-test").unwrap();
-
-        let mut stream = std::net::TcpStream::connect(&addr).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+        let server_pk = app.server_pubkey();
+        let client_kp = Arc::new(canban_transport::NoiseKeypair::generate().unwrap());
+        app.authorize_device_pubkey("runtime-test", &client_kp.public_b64())
             .unwrap();
-        writeln!(
-            stream,
-            "{}",
-            json!({
+
+        let transport = canban_transport::ClientTransport::connect_tcp(
+            addr,
+            Some(server_pk),
+            canban_transport::TcpAuthMode::Key,
+            "runtime-relay".into(),
+            client_kp,
+        )
+        .unwrap();
+        let stream = transport
+            .open_sync_stream(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)))
+            .unwrap();
+        let (read_io, mut write_io) = (stream.reader, stream.writer);
+        canban_transport::write_json_line(
+            &mut write_io,
+            &json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "herdr.connect",
                 "params": {"terminal": term_id},
-                "auth": token
-            })
+            }),
         )
         .unwrap();
-        stream.flush().unwrap();
 
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut reader = BufReader::new(read_io);
         let mut ready_line = String::new();
         reader.read_line(&mut ready_line).unwrap();
         let ready_json: Value = serde_json::from_str(&ready_line).unwrap();
@@ -2948,17 +2947,17 @@ else:
         std::thread::sleep(Duration::from_millis(5));
         let mut relay_payload = b"{\"viewer\":1}\n".to_vec();
         encode_relay_frame(&mut relay_payload, 3, 0, b"hello relay");
-        stream.write_all(&relay_payload).unwrap();
-        stream.flush().unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        write_io.write_all(&relay_payload).unwrap();
+        write_io.flush().unwrap();
 
-        let mut echoed = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut echoed).unwrap();
+        let mut echoed = vec![0u8; relay_payload.len()];
+        std::io::Read::read_exact(&mut reader, &mut echoed).unwrap();
         assert_eq!(echoed, relay_payload);
         assert!(canban_herdr::activity::get(&core_id, &term_id).last_at > before_activity.last_at);
 
         drop(reader);
-        drop(stream);
+        drop(write_io);
+        drop(transport);
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while std::time::Instant::now() < deadline {
             if canban_herdr::activity::get(&core_id, &term_id).viewers == 0

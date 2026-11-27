@@ -50,38 +50,21 @@ pub struct GlobalEnvSyncWireRecord {
 }
 
 impl GlobalEnvSyncRecord {
-    pub fn to_wire(&self, tcp_token: Option<&str>) -> Result<GlobalEnvSyncWireRecord> {
-        self.to_wire_with_id_gen(tcp_token, None)
-    }
-
-    pub fn to_wire_with_id_gen(
-        &self,
-        tcp_token: Option<&str>,
-        id_gen: Option<&dyn IdGen>,
-    ) -> Result<GlobalEnvSyncWireRecord> {
-        let value = match (&self.value, self.kind.as_str(), self.deleted) {
-            (_, _, true) | (None, _, false) => None,
-            (Some(v), "secret", false) => match tcp_token {
-                Some(tok) => match id_gen {
-                    Some(generator) => Some(vault::seal_transport_with_id_gen(
-                        tok, &self.key, v, generator,
-                    )?),
-                    None => Some(vault::seal_transport(tok, &self.key, v)?),
-                },
-                None => Some(v.as_str().to_owned()),
-            },
-            (Some(v), _, false) => Some(v.as_str().to_owned()),
+    pub fn to_wire(&self) -> GlobalEnvSyncWireRecord {
+        let value = match (&self.value, self.deleted) {
+            (_, true) | (None, false) => None,
+            (Some(v), false) => Some(v.as_str().to_owned()),
         };
-        Ok(GlobalEnvSyncWireRecord {
+        GlobalEnvSyncWireRecord {
             key: self.key.clone(),
             kind: self.kind.clone(),
             value,
             updated_at: self.updated_at,
             deleted: self.deleted,
-        })
+        }
     }
 
-    pub fn from_wire(wire: GlobalEnvSyncWireRecord, tcp_token: Option<&str>) -> Result<Self> {
+    pub fn from_wire(wire: GlobalEnvSyncWireRecord) -> Result<Self> {
         ensure!(
             is_valid_env_key(&wire.key),
             "Invalid synced environment key '{}'",
@@ -92,23 +75,10 @@ impl GlobalEnvSyncRecord {
             "Unsupported synced environment kind '{}'",
             wire.kind
         );
-        let value = match wire.value {
-            None => None,
-            Some(raw) => {
-                if raw.starts_with(vault::TRANSPORT_SEAL_PREFIX) {
-                    let tok = tcp_token.context(
-                        "Received transport-encrypted secret without server authentication token",
-                    )?;
-                    Some(vault::open_transport(tok, &wire.key, &raw)?)
-                } else {
-                    Some(Zeroizing::new(raw))
-                }
-            }
-        };
         Ok(Self {
             key: wire.key,
             kind: wire.kind,
-            value,
+            value: wire.value.map(Zeroizing::new),
             updated_at: wire.updated_at,
             deleted: wire.deleted,
         })

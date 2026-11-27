@@ -58,6 +58,7 @@ pub struct ServerRuntimeEnv {
     pub script_execution_mode: ScriptExecutionMode,
     pub storage_faults: Option<Arc<canban_storage::StorageFaultInjector>>,
     pub failpoints: Option<Arc<canban_types::Failpoints>>,
+    pub noise_rng: Option<Arc<dyn canban_transport::NoiseRngFactory>>,
 }
 
 impl Default for ServerRuntimeEnv {
@@ -77,6 +78,7 @@ impl Default for ServerRuntimeEnv {
             script_execution_mode: ScriptExecutionMode::Auto,
             storage_faults: None,
             failpoints: None,
+            noise_rng: None,
         }
     }
 }
@@ -147,7 +149,9 @@ pub struct AppServer {
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
     branch_pr_probes: Mutex<std::collections::BTreeMap<(String, String), u64>>,
     identity: String,
-    device_store: Arc<auth::DeviceTokenStore>,
+    server_keypair: Arc<canban_transport::NoiseKeypair>,
+    noise_rng: Arc<dyn canban_transport::NoiseRngFactory>,
+    device_store: Arc<auth::AuthorizedDeviceStore>,
     pairing_codes: Arc<auth::PairingCodeStore>,
     device_revocations: canban_transport::RevocationBus,
     tailscale_devices: Arc<canban_transport::TailscaleSessionRegistry>,
@@ -705,6 +709,7 @@ impl AppServer {
             script_execution_mode,
             storage_faults,
             failpoints,
+            noise_rng,
         } = env;
         let development = if exec_runner.is_system() {
             instance::bundled()?
@@ -876,8 +881,14 @@ impl AppServer {
         let (push_tx, _) = tokio::sync::broadcast::channel(256);
         let (stop_tx, _) = tokio::sync::watch::channel(false);
         let fs_sync = fs_durability == canban_context::FsDurability::Full;
+        let noise_rng = noise_rng.unwrap_or_else(canban_transport::system_noise_rng);
+        let server_keypair = Arc::new(canban_transport::load_or_create_server_keypair(
+            &home,
+            fs_sync,
+            noise_rng.as_ref(),
+        )?);
         let device_store = Arc::new(
-            auth::DeviceTokenStore::open_with_clock(&home, clock.clone())
+            auth::AuthorizedDeviceStore::open_with_clock(&home, clock.clone())
                 .with_id_gen(id_gen.clone())
                 .with_fs_sync(fs_sync),
         );
@@ -975,6 +986,8 @@ impl AppServer {
                 clock,
             )),
             identity,
+            server_keypair,
+            noise_rng,
             device_store,
             pairing_codes,
             device_revocations,
@@ -1333,8 +1346,14 @@ impl AppServer {
     pub fn server_id(&self) -> &str {
         &self.identity
     }
-    pub fn issue_device_token(&self, name: &str) -> Result<(PairedDevice, String)> {
-        self.device_store.issue_device(name)
+    pub fn server_pubkey(&self) -> String {
+        self.server_keypair.public_b64()
+    }
+    pub fn server_pubkey_fingerprint(&self) -> String {
+        self.server_keypair.fingerprint()
+    }
+    pub fn authorize_device_pubkey(&self, name: &str, pubkey_b64: &str) -> Result<PairedDevice> {
+        self.device_store.authorize_pubkey(name, pubkey_b64)
     }
     pub fn create_pairing_code(&self, ttl_secs: u64) -> Result<(String, u64)> {
         self.pairing_codes.create_code(ttl_secs)

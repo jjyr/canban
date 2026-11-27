@@ -1,23 +1,29 @@
-//! Scenario #13 — Real transport authentication & handshake security over `turmoil::net`,
+//! Scenario #13 — Real Noise_XX E2EE transport authentication & handshake security over `turmoil::net`,
 //! driven end-to-end through real `MultiHostClient`:
-//! (a) Real `MultiHostClient::pair_internal` pairing from a `device.invite.create` URI
-//!     (`parse_pairing_uri` + `parse_pairing_invite` -> authenticated `yamux/1` handshake ->
-//!     upgraded `dev_...` token persisted to `hosts.json` -> `HostConnectionState::Connected`),
+//! (a) Strict `?pk=` host-key pinning (Option B), wrong-`?pk=` pre-Msg3 abort without consuming
+//!     single-use `pair_...` code, real `MultiHostClient::pair_with_invite` over Noise_XX + `yamux/1`,
+//!     wire-tap confidentiality verification (`CBN1` preface, zero plaintext secrets/codes/RPCs on wire),
 //!     single-use invite replay & TTL expiry rejection, duplicate `server_id` + self-loopback
-//!     rejection, and persisted-token reconnection across `crash_client` + `bounce_client`,
-//! (b) Live `device.revoke` + `RevocationBus` kicking an active `MultiHostClient` `yamux/1`
+//!     rejection, and persisted `client_noise.key` + pinned `server_pubkey` reconnection across
+//!     `crash_client` + `bounce_client`,
+//! (b) Live `device.revoke` + `RevocationBus` kicking an active `MultiHostClient` Noise `yamux/1`
 //!     session -> transitioning to `HostConnectionState::AuthFailed`, halting retry loops over
-//!     +16s virtual time (including background wakes/polls), failing routed RPCs cleanly with
-//!     an auth error (with zero orphaned outbox items) while unaffected hosts stay `Connected`,
-//! (c) Real `MultiHostClient` Tailscale WhoIs (`TAILSCALE_AUTH_SENTINEL` / `ts_auto`, no static
-//!     device token) against `SimTailscaleVerifier`: unauthorized peer rejected, authorized peer
-//!     negotiates deterministic ephemeral `ts_sess_...` token, `env.save` through `MultiHostClient`
-//!     auto-seals via `slot.tcp_token()` + `seal_params_for_tcp_with_id_gen` over `enc:v1:` and
-//!     unseals verbatim into the server's vault while snapshots mask it,
-//! (d) `ApiMismatch` via `desktop_api_override` (`SingleHostSession` typed error + `MultiHostClient`
-//!     `HostConnectionState::ApiMismatch` surfacing + clean recovery once restored).
+//!     +16s virtual time (0 background dials), failing routed RPCs cleanly with an auth error
+//!     (zero orphaned outbox items) while unaffected hosts stay `Connected`,
+//! (c) Unauthorized client Noise keypair rejection, legacy plaintext JSON-RPC rejection (`-32002`),
+//!     and deterministic bit-flip ciphertext tampering fault (`FaultyStream::corrupt_read_byte_at`),
+//! (d) Real `MultiHostClient` Tailscale WhoIs (`tailscale_auth: true`, `server_pubkey: None` TOFU)
+//!     against `SimTailscaleVerifier`: unauthorized peer rejected, authorized peer connects & pins
+//!     `server_pubkey` in `hosts.json`, `env.save` secret flows encrypted purely inside Noise AEAD
+//!     (verified against wire-tap bytes) and unseals into server vault while snapshots mask it,
+//! (e) Server `noise.key` rotation -> `HostConnectionState::KeyMismatch` + 0 background dials +
+//!     clean re-pairing recovery,
+//! (f) `ApiMismatch` via `desktop_api_override` (`SingleHostSession` typed error + `MultiHostClient`
+//!     `HostConnectionState::ApiMismatch` surfacing + clean recovery),
+//! (g) Push-topic separation, legacy no-`app.subscribe` polling fallback, `set_host_enabled` TCP
+//!     drop, side-channel `UtilitiesChanged`/`UsageChanged` forwarding, and `host.probe`/`discover_canban`.
 use crate::{
-    net::TurmoilConnector,
+    net::{StreamFaultConfig, TurmoilConnector},
     oracle::InvariantOracle,
     scenarios::finalize_digest,
     world::{SIM_PORT, SimTailscaleVerifier, SimWorldConfig, run_with_world},
@@ -27,30 +33,42 @@ use canban_client::{
     ApiMismatchError, ClientEvent, SingleHostSession,
     format_pairing_uri as format_client_pairing_uri, parse_pairing_invite,
 };
-use canban_transport::TailscalePeerIdentity;
+use canban_transport::{
+    HostKeyMismatchError, NOISE_PREFACE, TailscalePeerIdentity, TcpAuthMode, decode_pubkey,
+    pubkey_fingerprint,
+};
 use canban_types::{
-    HostConnectionState, HostTransport, HostsFile, SavedHost, TAILSCALE_AUTH_SENTINEL,
-    format_pairing_uri, is_device_token, is_pairing_code, parse_pairing_uri,
+    HostConnectionState, HostTransport, HostsFile, SavedHost, format_pairing_uri, is_pairing_code,
+    parse_pairing_uri,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
 
 pub fn run(seed: u64) -> Result<u64> {
     let mut cfg = SimWorldConfig::desktop_default(seed, "transport_auth");
     cfg.framed_local_transport = true;
-    cfg.remote_hosts = vec!["remote-a".into(), "remote-b".into()];
+    cfg.remote_hosts = vec!["remote-a".into(), "remote-b.ts.net".into()];
     cfg.min_latency_ms = 2;
     cfg.max_latency_ms = 12;
 
     run_with_world(cfg, |world| {
         let mut oracle = InvariantOracle::default();
         let addr_a = format!("remote-a:{SIM_PORT}");
-        let addr_b = format!("remote-b:{SIM_PORT}");
+        let addr_b = format!("remote-b.ts.net:{SIM_PORT}");
         let addr_local = format!("local-server:{SIM_PORT}");
         let hosts_path = world.client_data_dir.join("hosts.json");
 
-        // Create real projects on both remote-a and remote-b for authenticated RPCs and project-scoped secrets.
+        // Create real projects on both remote-a and remote-b.ts.net for authenticated RPCs and project-scoped secrets.
         let dir_a = world.project_dir(&format!("auth-proj-a-{seed}"))?;
         let proj_a = world.client_call(
             "project.create",
@@ -62,7 +80,7 @@ pub fn run(seed: u64) -> Result<u64> {
         let dir_b = world.project_dir(&format!("auth-proj-b-{seed}"))?;
         let proj_b = world.client_call(
             "project.create",
-            json!({ "host_id": "remote-b", "name": format!("Auth Proj B {seed}"), "directory": dir_b }),
+            json!({ "host_id": "remote-b.ts.net", "name": format!("Auth Proj B {seed}"), "directory": dir_b }),
             None,
         )?;
         let pid_b = proj_b["id"].as_str().unwrap().to_owned();
@@ -70,32 +88,83 @@ pub fn run(seed: u64) -> Result<u64> {
             .map(|(_, r)| r.to_owned())
             .unwrap_or_else(|| pid_b.clone());
 
-        let initial_remote_b_token = world.servers["remote-b"]
-            .token()
-            .expect("initial remote-b token");
-        let remote_b_server_id = world.server_call("remote-b", "app.ping", json!({}))?["server_id"]
-            .as_str()
-            .expect("remote-b server_id")
-            .to_owned();
+        let remote_a_pk = world.servers["remote-a"]
+            .server_pubkey()
+            .expect("remote-a server_pubkey");
+        let remote_b_pk = world.servers["remote-b.ts.net"]
+            .server_pubkey()
+            .expect("remote-b.ts.net server_pubkey");
+        let local_pk = world.servers["local-server"]
+            .server_pubkey()
+            .expect("local-server server_pubkey");
+        let remote_b_server_id =
+            world.server_call("remote-b.ts.net", "app.ping", json!({}))?["server_id"]
+                .as_str()
+                .expect("remote-b.ts.net server_id")
+                .to_owned();
+        let remote_b_fp = pubkey_fingerprint(&decode_pubkey(&remote_b_pk)?);
 
         // -------------------------------------------------------------------------
-        // (a) Real `MultiHostClient::pair_internal` end-to-end over `turmoil::net`:
-        //     invite URI -> `parse_pairing_uri` -> `hosts.json` persistence ->
-        //     single-use replay & TTL rejection -> duplicate `server_id` rejection ->
-        //     client restart (`bounce_client`) reconnect using persisted token
+        // (a) Strict Option B `?pk=` pinning, wrong-`?pk=` pre-Msg3 abort, real
+        //     `MultiHostClient::pair_with_invite` over Noise_XX, wire-tap check,
+        //     replay/TTL rejection, duplicate `server_id` + self-loopback, bounce!
         // -------------------------------------------------------------------------
+        // Option B: non-Tailscale pairing URI missing `?pk=` MUST be rejected at parse time
+        // AND at `MultiHostClient::add_host_async` time!
+        ensure!(
+            parse_pairing_uri("canban://192.168.1.50:7680#pair_abc").is_none()
+                && parse_pairing_invite("canban://192.168.1.50:7680#pair_abc").is_none(),
+            "Option B violation: non-Tailscale URI missing ?pk= must be rejected"
+        );
+        let non_ts_err = world.client_run_on("ui-client", 15_000, |client| async move {
+            match client
+                .add_host_async(SavedHost {
+                    id: "unpinned-lan".into(),
+                    name: "Unpinned LAN".into(),
+                    transport: HostTransport::Tcp {
+                        addr: "192.168.1.50:7680".into(),
+                        server_pubkey: None,
+                        tailscale_auth: false,
+                    },
+                    ssh_target: None,
+                    server_id: None,
+                    enabled: true,
+                    added_at: 0,
+                })
+                .await
+            {
+                Ok(s) => anyhow::bail!("Expected unpinned non-Tailscale host to fail, got {s:?}"),
+                Err(e) => Ok(format!("{e:#}")),
+            }
+        })?;
+        ensure!(
+            non_ts_err.contains("pinned host public key"),
+            "Option B violation: expected pinned host public key error, got: {non_ts_err}"
+        );
+
+        // Remove `remote-b.ts.net` from `ui-client` AND revoke `ui-client`'s pre-authorized pubkey on `remote-b.ts.net`
+        // so fresh pairing genuinely tests Noise_XX + one-time `pair_...` authorization!
         world.client_run_on("ui-client", 15_000, |client| async move {
-            client.remove_host("remote-b")
+            client.remove_host("remote-b.ts.net")
         })?;
         ensure!(
             !world
                 .client_host_summaries()
                 .iter()
-                .any(|s| s.id == "remote-b"),
-            "remote-b must be removed before fresh pairing"
+                .any(|s| s.id == "remote-b.ts.net"),
+            "remote-b.ts.net must be removed before fresh pairing"
         );
-
-        let pre_pair_devs = world.server_call("remote-b", "device.list", json!({}))?;
+        let initial_devs_b = world.server_call("remote-b.ts.net", "device.list", json!({}))?;
+        for dev in initial_devs_b["devices"].as_array().into_iter().flatten() {
+            if let Some(id) = dev["id"].as_str() {
+                world.server_call(
+                    "remote-b.ts.net",
+                    "device.revoke",
+                    json!({ "device_id": id }),
+                )?;
+            }
+        }
+        let pre_pair_devs = world.server_call("remote-b.ts.net", "device.list", json!({}))?;
         let pre_pair_ids: BTreeSet<String> = pre_pair_devs["devices"]
             .as_array()
             .into_iter()
@@ -104,7 +173,7 @@ pub fn run(seed: u64) -> Result<u64> {
             .collect();
 
         let invite = world.server_call(
-            "remote-b",
+            "remote-b.ts.net",
             "device.invite.create",
             json!({ "ttl_secs": 300 }),
         )?;
@@ -116,62 +185,114 @@ pub fn run(seed: u64) -> Result<u64> {
             is_pairing_code(&code),
             "Expected pairing code prefix, got {code}"
         );
+        ensure!(
+            invite["server_pubkey"].as_str() == Some(remote_b_pk.as_str()),
+            "device.invite.create must include server_pubkey"
+        );
         world.trace.mix_str(&code);
 
-        let pairing_uri = invite["uri"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| format_pairing_uri(&addr_b, &code));
+        let pairing_uri = format_pairing_uri(&addr_b, &remote_b_pk, &code);
         let parsed_invite = parse_pairing_invite(&pairing_uri)
             .with_context(|| format!("parse_pairing_invite failed on {pairing_uri}"))?;
-        let (parsed_addr_check, parsed_code_check) = parse_pairing_uri(&pairing_uri)
-            .with_context(|| format!("parse_pairing_uri failed on {pairing_uri}"))?;
+        let (parsed_addr_check, parsed_pk_check, parsed_code_check) =
+            parse_pairing_uri(&pairing_uri)
+                .with_context(|| format!("parse_pairing_uri failed on {pairing_uri}"))?;
         ensure!(
-            parsed_invite.addr == parsed_addr_check && parsed_invite.secret == parsed_code_check,
+            parsed_invite.addr == parsed_addr_check
+                && parsed_invite.server_pubkey == parsed_pk_check
+                && parsed_invite.pairing_code.as_deref() == Some(parsed_code_check.as_str()),
             "parse_pairing_uri and parse_pairing_invite diverged on {pairing_uri}"
         );
 
-        // Pair `remote-b` through real `MultiHostClient::add_host_async` -> `pair_internal`.
+        // Wrong `?pk=` MUST abort BEFORE Noise Msg 3 with `HostKeyMismatchError`, AND leave
+        // the single-use `pair_...` code UNCONSUMED on `remote-b`!
+        let wrong_kp = world.ephemeral_keypair("wrong-server-pk")?;
+        let wrong_pk_b64 = wrong_kp.public_b64();
+        let client_kp = world.client_keypair("ui-client")?;
+        let mismatch_err = world
+            .connect_raw_transport(
+                &addr_b,
+                Arc::clone(&client_kp),
+                Some(wrong_pk_b64.clone()),
+                TcpAuthMode::PairingCode(code.clone()),
+                "Wrong PK Probe",
+            )
+            .err()
+            .context("connecting with wrong expected_server_pubkey must fail")?;
+        ensure!(
+            mismatch_err
+                .downcast_ref::<HostKeyMismatchError>()
+                .is_some()
+                || format!("{mismatch_err:#}").contains("Host key mismatch"),
+            "Expected HostKeyMismatchError for wrong ?pk= ({wrong_pk_b64}), got: {mismatch_err:#}"
+        );
+        world.hit("noise.host_key_pinning");
+
+        // Attach wire-tap on `remote-b` before pairing to verify Noise_XX wire confidentiality!
+        let wire_tap = Arc::new(Mutex::new(Vec::<u8>::new()));
+        world
+            .stream_fault_policy()
+            .set_wire_tap("remote-b.ts.net", Some(Arc::clone(&wire_tap)));
+
+        // Pair `remote-b` through real `MultiHostClient::add_host_with_pairing_code_async`
+        // reusing the SAME `code` (proving the wrong-`?pk=` abort did NOT burn it!).
         let uri_for_pair = pairing_uri.clone();
-        let (paired_summary, active_paired_token) =
+        let paired_summary =
             world.client_run_on("ui-client", 30_000, move |client| async move {
-                let (addr, token) = parse_pairing_uri(&uri_for_pair)
+                let (addr, server_pubkey, pair_code) = parse_pairing_uri(&uri_for_pair)
                     .ok_or_else(|| anyhow!("Failed to parse pairing URI: {uri_for_pair}"))?;
-                let summary = client
-                    .add_host_async(SavedHost {
-                        id: "remote-b".into(),
-                        name: "Paired Remote B".into(),
-                        transport: HostTransport::Tcp { addr, token },
-                        ssh_target: None,
-                        server_id: None,
-                        enabled: true,
-                        added_at: 0,
-                    })
-                    .await?;
-                let active_tok = client
-                    .transport_for_host(&summary.id)?
-                    .active_token()
-                    .map(str::to_owned);
-                Ok((summary, active_tok))
+                client
+                    .add_host_with_pairing_code_async(
+                        SavedHost {
+                            id: "remote-b.ts.net".into(),
+                            name: "Paired Remote B".into(),
+                            transport: HostTransport::Tcp {
+                                addr,
+                                server_pubkey,
+                                tailscale_auth: false,
+                            },
+                            ssh_target: None,
+                            server_id: None,
+                            enabled: true,
+                            added_at: 0,
+                        },
+                        Some(pair_code),
+                    )
+                    .await
             })?;
 
         ensure!(
-            paired_summary.id == "remote-b" && paired_summary.is_connected(),
-            "MultiHostClient pairing must reach Connected for remote-b: {paired_summary:?}"
+            paired_summary.id == "remote-b.ts.net" && paired_summary.is_connected(),
+            "MultiHostClient Noise pairing must reach Connected for remote-b: {paired_summary:?}"
         );
         ensure!(
             paired_summary.server_id.as_deref() == Some(remote_b_server_id.as_str()),
             "Paired host summary missing expected server_id: {paired_summary:?}"
         );
-        let upgraded_token = active_paired_token
-            .expect("paired MultiHostClient transport must hold upgraded device token");
         ensure!(
-            is_device_token(&upgraded_token) && upgraded_token != initial_remote_b_token,
-            "Expected fresh per-device token from pairing, got {upgraded_token}"
+            paired_summary.server_pubkey_fingerprint.as_deref() == Some(remote_b_fp.as_str()),
+            "Paired host summary missing expected key fingerprint {remote_b_fp}: {paired_summary:?}"
         );
-        world.trace.mix_str(&upgraded_token);
 
-        // Verify `hosts.json` persisted the upgraded `dev_...` token (and never the single-use `pair_...` code).
+        // Verify wire-tap captured `CBN1` preface and ZERO plaintext `pair_...` code!
+        {
+            let tapped = wire_tap.lock().unwrap();
+            ensure!(
+                contains_bytes(&tapped, NOISE_PREFACE),
+                "Wire tap did not observe CBN1 Noise preface ({} bytes captured)",
+                tapped.len()
+            );
+            ensure!(
+                !contains_bytes(&tapped, code.as_bytes()),
+                "CRITICAL: raw TCP wire bytes leaked plaintext pairing code!"
+            );
+            ensure!(
+                !contains_bytes(&tapped, b"app.ping"),
+                "CRITICAL: raw TCP wire bytes leaked plaintext JSON-RPC method name!"
+            );
+        }
+
+        // Verify `hosts.json` persisted pinned `server_pubkey` and never retained the single-use `pair_...` code.
         let raw_hosts_json = std::fs::read_to_string(&hosts_path)
             .with_context(|| format!("read {}", hosts_path.display()))?;
         ensure!(
@@ -182,21 +303,27 @@ pub fn run(seed: u64) -> Result<u64> {
         let saved_b = persisted_hosts
             .hosts
             .iter()
-            .find(|h| h.id == "remote-b")
+            .find(|h| h.id == "remote-b.ts.net")
             .context("remote-b missing from persisted hosts.json")?;
         match &saved_b.transport {
-            HostTransport::Tcp { addr, token } => {
+            HostTransport::Tcp {
+                addr,
+                server_pubkey,
+                tailscale_auth,
+            } => {
                 ensure!(
-                    addr == &addr_b && token == &upgraded_token,
-                    "hosts.json persisted unexpected transport for remote-b: addr={addr} token={token}"
+                    addr == &addr_b
+                        && server_pubkey.as_deref() == Some(remote_b_pk.as_str())
+                        && !*tailscale_auth,
+                    "hosts.json persisted unexpected transport for remote-b: addr={addr} pk={server_pubkey:?} ts={tailscale_auth}"
                 );
             }
             other => anyhow::bail!("Expected Tcp transport in hosts.json, got {other:?}"),
         }
 
-        // Verify routed RPCs work immediately over the newly paired MultiHostClient session and capture paired device ID.
+        // Verify routed RPCs work immediately over the newly paired Noise session and capture paired device ID.
         let post_pair_devs =
-            world.client_call("device.list", json!({ "host_id": "remote-b" }), None)?;
+            world.client_call("device.list", json!({ "host_id": "remote-b.ts.net" }), None)?;
         let new_dev_ids: Vec<String> = post_pair_devs["devices"]
             .as_array()
             .into_iter()
@@ -210,65 +337,59 @@ pub fn run(seed: u64) -> Result<u64> {
         );
         let paired_dev_id = new_dev_ids[0].clone();
 
-        // Single-use invite replay via REAL MultiHostClient MUST be rejected with `auth_failed`.
-        let replay_uri = pairing_uri.clone();
-        let replay_err = world.client_run_on("ui-client", 15_000, move |client| async move {
-            let (addr, token) =
-                parse_pairing_uri(&replay_uri).ok_or_else(|| anyhow!("parse replay URI failed"))?;
-            let res = client
-                .add_host_async(SavedHost {
-                    id: "remote-b-replay".into(),
-                    name: "Replay Attempt".into(),
-                    transport: HostTransport::Tcp { addr, token },
-                    ssh_target: None,
-                    server_id: None,
-                    enabled: true,
-                    added_at: 0,
-                })
-                .await;
-            match res {
-                Ok(s) => anyhow::bail!("Expected invite replay to fail, got {s:?}"),
-                Err(e) => Ok(format!("{e:#}")),
-            }
-        })?;
+        // Single-use invite replay with an unauthorized client keypair MUST be rejected with `auth_failed`.
+        let replay_kp = world.ephemeral_keypair("replay-client")?;
+        let replay_err = world
+            .connect_raw_transport(
+                &addr_b,
+                replay_kp,
+                Some(remote_b_pk.clone()),
+                TcpAuthMode::PairingCode(code.clone()),
+                "Replay Attempt",
+            )
+            .err()
+            .context("invite replay must fail")?;
         ensure!(
-            replay_err.contains("auth_failed"),
-            "Expected auth_failed on MultiHostClient invite replay, got: {replay_err}"
+            format!("{replay_err:#}").contains("auth_failed"),
+            "Expected auth_failed on invite replay, got: {replay_err:#}"
         );
 
-        // Short-lived invite TTL expiry via REAL MultiHostClient MUST also fail with `auth_failed`.
+        // Short-lived invite TTL expiry via unauthorized client keypair MUST also fail with `auth_failed`.
         let expiring = world.server_call(
-            "remote-b",
+            "remote-b.ts.net",
             "device.invite.create",
             json!({ "ttl_secs": 30 }),
         )?;
         let exp_code = expiring["code"].as_str().unwrap().to_owned();
-        let exp_uri = format_pairing_uri(&addr_b, &exp_code);
         world.advance(Duration::from_secs(35))?;
-        let exp_err = world.client_run_on("ui-client", 15_000, move |client| async move {
-            let inv = parse_pairing_invite(&exp_uri)
-                .ok_or_else(|| anyhow!("parse expiring invite failed"))?;
-            match client.pair_with_invite(&inv, Some("Late Device")).await {
-                Ok(s) => anyhow::bail!("Expected expired invite to fail, got {s:?}"),
-                Err(e) => Ok(format!("{e:#}")),
-            }
-        })?;
+        let late_kp = world.ephemeral_keypair("late-client")?;
+        let exp_err = world
+            .connect_raw_transport(
+                &addr_b,
+                late_kp,
+                Some(remote_b_pk.clone()),
+                TcpAuthMode::PairingCode(exp_code),
+                "Late Device",
+            )
+            .err()
+            .context("expired invite must fail")?;
         ensure!(
-            exp_err.contains("auth_failed"),
-            "Expected auth_failed on expired invite via MultiHostClient, got: {exp_err}"
+            format!("{exp_err:#}").contains("auth_failed"),
+            "Expected auth_failed on expired invite, got: {exp_err:#}"
         );
         world.hit("auth.invite_single_use");
 
         // Duplicate `server_id` rejection via REAL MultiHostClient:
         // 1) Pre-handshake rejection when `?sid=...` is encoded in the URI (must NOT consume the invite).
         let dup_sid_invite = world.server_call(
-            "remote-b",
+            "remote-b.ts.net",
             "device.invite.create",
             json!({ "ttl_secs": 300 }),
         )?;
         let dup_sid_code = dup_sid_invite["code"].as_str().unwrap().to_owned();
         let dup_sid_uri = format_client_pairing_uri(
             &addr_b,
+            &remote_b_pk,
             &dup_sid_code,
             Some(&remote_b_server_id),
             Some("Dup Remote B"),
@@ -277,18 +398,22 @@ pub fn run(seed: u64) -> Result<u64> {
             let inv = parse_pairing_invite(&dup_sid_uri)
                 .ok_or_else(|| anyhow!("parse dup sid URI failed"))?;
             match client
-                .add_host_async(SavedHost {
-                    id: "remote-b-dup-sid".into(),
-                    name: "Duplicate Remote B (SID)".into(),
-                    transport: HostTransport::Tcp {
-                        addr: inv.addr,
-                        token: inv.secret,
+                .add_host_with_pairing_code_async(
+                    SavedHost {
+                        id: "remote-b-dup-sid".into(),
+                        name: "Duplicate Remote B (SID)".into(),
+                        transport: HostTransport::Tcp {
+                            addr: inv.addr,
+                            server_pubkey: inv.server_pubkey,
+                            tailscale_auth: inv.tailscale_auth,
+                        },
+                        ssh_target: None,
+                        server_id: inv.server_id,
+                        enabled: true,
+                        added_at: 0,
                     },
-                    ssh_target: None,
-                    server_id: inv.server_id,
-                    enabled: true,
-                    added_at: 0,
-                })
+                    inv.pairing_code,
+                )
                 .await
             {
                 Ok(s) => anyhow::bail!("Expected duplicate server_id rejection, got {s:?}"),
@@ -301,20 +426,27 @@ pub fn run(seed: u64) -> Result<u64> {
         );
 
         // 2) Post-handshake rejection when URI omits `?sid=` (reuses `dup_sid_code` proving pre-check did not consume it!).
-        let dup_bare_uri = format_pairing_uri(&addr_b, &dup_sid_code);
+        let dup_bare_uri = format_pairing_uri(&addr_b, &remote_b_pk, &dup_sid_code);
         let dup_bare_err = world.client_run_on("ui-client", 15_000, move |client| async move {
-            let (addr, token) =
+            let (addr, server_pubkey, pair_code) =
                 parse_pairing_uri(&dup_bare_uri).ok_or_else(|| anyhow!("parse bare dup URI"))?;
             match client
-                .add_host_async(SavedHost {
-                    id: "remote-b-dup".into(),
-                    name: "Duplicate Remote B".into(),
-                    transport: HostTransport::Tcp { addr, token },
-                    ssh_target: None,
-                    server_id: None,
-                    enabled: true,
-                    added_at: 0,
-                })
+                .add_host_with_pairing_code_async(
+                    SavedHost {
+                        id: "remote-b-dup".into(),
+                        name: "Duplicate Remote B".into(),
+                        transport: HostTransport::Tcp {
+                            addr,
+                            server_pubkey,
+                            tailscale_auth: false,
+                        },
+                        ssh_target: None,
+                        server_id: None,
+                        enabled: true,
+                        added_at: 0,
+                    },
+                    Some(pair_code),
+                )
                 .await
             {
                 Ok(s) => anyhow::bail!("Expected duplicate server_id rejection, got {s:?}"),
@@ -332,20 +464,31 @@ pub fn run(seed: u64) -> Result<u64> {
             "device.invite.create",
             json!({ "ttl_secs": 300 }),
         )?;
-        let local_uri = format_pairing_uri(&addr_local, local_invite["code"].as_str().unwrap());
+        let local_uri = format_pairing_uri(
+            &addr_local,
+            &local_pk,
+            local_invite["code"].as_str().unwrap(),
+        );
         let self_err = world.client_run_on("ui-client", 15_000, move |client| async move {
-            let (addr, token) =
+            let (addr, server_pubkey, pair_code) =
                 parse_pairing_uri(&local_uri).ok_or_else(|| anyhow!("parse local URI"))?;
             match client
-                .add_host_async(SavedHost {
-                    id: "self-loop".into(),
-                    name: "Self Loopback".into(),
-                    transport: HostTransport::Tcp { addr, token },
-                    ssh_target: None,
-                    server_id: None,
-                    enabled: true,
-                    added_at: 0,
-                })
+                .add_host_with_pairing_code_async(
+                    SavedHost {
+                        id: "self-loop".into(),
+                        name: "Self Loopback".into(),
+                        transport: HostTransport::Tcp {
+                            addr,
+                            server_pubkey,
+                            tailscale_auth: false,
+                        },
+                        ssh_target: None,
+                        server_id: None,
+                        enabled: true,
+                        added_at: 0,
+                    },
+                    Some(pair_code),
+                )
                 .await
             {
                 Ok(s) => anyhow::bail!("Expected self-loopback rejection, got {s:?}"),
@@ -366,7 +509,7 @@ pub fn run(seed: u64) -> Result<u64> {
         world.hit("auth.duplicate_server_rejected");
 
         // Persistence across client restart: crash + bounce `ui-client` on the same `client_data_dir`,
-        // confirming `remote-b` reconnects automatically using the persisted paired token in `hosts.json`.
+        // confirming `remote-b` reconnects automatically using persisted `client_noise.key` + pinned `server_pubkey`.
         world.crash_client()?;
         world.advance(Duration::from_millis(150))?;
         world.bounce_client()?;
@@ -377,21 +520,14 @@ pub fn run(seed: u64) -> Result<u64> {
                 .any(|s| s.id == "remote-a" && s.is_connected());
             let b_ok = summaries
                 .iter()
-                .any(|s| s.id == "remote-b" && s.is_connected());
+                .any(|s| s.id == "remote-b.ts.net" && s.is_connected());
             Ok(a_ok && b_ok)
         })?;
-        let post_bounce_token = world.client_run_on("ui-client", 10_000, |client| async move {
-            Ok(client
-                .transport_for_host("remote-b")?
-                .active_token()
-                .map(str::to_owned))
-        })?;
-        ensure!(
-            post_bounce_token.as_deref() == Some(upgraded_token.as_str()),
-            "Client bounce must reconnect remote-b with persisted paired token ({upgraded_token}), got {post_bounce_token:?}"
-        );
-        let post_bounce_projs =
-            world.client_call("project.list", json!({ "host_id": "remote-b" }), None)?;
+        let post_bounce_projs = world.client_call(
+            "project.list",
+            json!({ "host_id": "remote-b.ts.net" }),
+            None,
+        )?;
         ensure!(
             post_bounce_projs
                 .as_array()
@@ -408,7 +544,7 @@ pub fn run(seed: u64) -> Result<u64> {
         //     + retry-loop halting + clean RPC auth errors + unaffected host health
         // -------------------------------------------------------------------------
         let revoke_res = world.server_call(
-            "remote-b",
+            "remote-b.ts.net",
             "device.revoke",
             json!({ "device_id": paired_dev_id }),
         )?;
@@ -417,22 +553,23 @@ pub fn run(seed: u64) -> Result<u64> {
             "Expected device.revoke to return revoked=true, got {revoke_res}"
         );
 
-        // Wait for `RevocationBus` to kick the live `yamux/1` stream and for `MultiHostClient`
+        // Wait for `RevocationBus` to kick the live Noise `yamux/1` stream and for `MultiHostClient`
         // to observe the rejected reconnect and transition `remote-b` to `HostConnectionState::AuthFailed`.
         world.wait_until(10_000, |w| {
             let summaries = w.client_host_summaries();
             Ok(summaries.iter().any(|s| {
-                s.id == "remote-b" && matches!(s.connection, HostConnectionState::AuthFailed { .. })
+                s.id == "remote-b.ts.net"
+                    && matches!(s.connection, HostConnectionState::AuthFailed { .. })
             }))
         })?;
         world.hit("auth.revoke_kicks_live_stream");
 
         oracle.check_auth_failed_zero_dials(world)?;
-        let dials_at_auth_failed = world.client_dial_count("ui-client", "remote-b");
+        let dials_at_auth_failed = world.client_dial_count("ui-client", "remote-b.ts.net");
         let reconnect_count_at_auth_failed = world
             .client_host_summaries()
             .into_iter()
-            .find(|s| s.id == "remote-b")
+            .find(|s| s.id == "remote-b.ts.net")
             .map(|s| s.reconnect_count)
             .expect("remote-b summary present");
 
@@ -440,7 +577,7 @@ pub fn run(seed: u64) -> Result<u64> {
         // `MultiHostClient` halts retry loops and does NOT keep hammering reconnects!
         world.advance(Duration::from_secs(8))?;
         world.client_run_on("ui-client", 10_000, |client| async move {
-            client.wake_host("remote-b");
+            client.wake_host("remote-b.ts.net");
             client.wake_all();
             client.on_foreground();
             client.poll_remotes_once_async().await;
@@ -451,7 +588,7 @@ pub fn run(seed: u64) -> Result<u64> {
         let summary_b_after_wait = world
             .client_host_summaries()
             .into_iter()
-            .find(|s| s.id == "remote-b")
+            .find(|s| s.id == "remote-b.ts.net")
             .expect("remote-b summary after wait");
         ensure!(
             matches!(
@@ -470,14 +607,18 @@ pub fn run(seed: u64) -> Result<u64> {
         oracle.assert_auth_failed_zero_dials_for(
             world,
             "ui-client",
-            "remote-b",
+            "remote-b.ts.net",
             dials_at_auth_failed,
             reconnect_count_at_auth_failed,
         )?;
 
         // RPCs targeted at the revoked host must fail cleanly with an auth error (and NEVER enqueue offline outbox items).
         let list_err = world
-            .client_call("project.list", json!({ "host_id": "remote-b" }), None)
+            .client_call(
+                "project.list",
+                json!({ "host_id": "remote-b.ts.net" }),
+                None,
+            )
             .expect_err("project.list against revoked host must fail");
         ensure!(
             format!("{list_err:#}")
@@ -511,7 +652,7 @@ pub fn run(seed: u64) -> Result<u64> {
             .client_call(
                 "env.save",
                 json!({
-                    "host_id": "remote-b",
+                    "host_id": "remote-b.ts.net",
                     "scope": "project",
                     "target_id": raw_pid_b,
                     "entries": { "BLOCKED_KEY": { "kind": "plain", "value": "nope" } },
@@ -528,7 +669,7 @@ pub fn run(seed: u64) -> Result<u64> {
         oracle.assert_auth_failed_zero_dials_for(
             world,
             "ui-client",
-            "remote-b",
+            "remote-b.ts.net",
             dials_at_auth_failed,
             reconnect_count_at_auth_failed,
         )?;
@@ -566,15 +707,87 @@ pub fn run(seed: u64) -> Result<u64> {
         oracle.check_step_invariants(world)?;
 
         // -------------------------------------------------------------------------
-        // (c) Real `MultiHostClient` Tailscale WhoIs (`TAILSCALE_AUTH_SENTINEL` +
-        //     deterministic `ts_sess_...` + automatic `enc:v1:` sealing via `slot.tcp_token()`)
+        // (c) Unauthorized client keypair, legacy plaintext rejection (-32002),
+        //     and ciphertext bit-flip tampering fault!
+        // -------------------------------------------------------------------------
+        let unauth_kp = world.ephemeral_keypair("unauth-client")?;
+        let unauth_err = world
+            .connect_raw_transport(
+                &addr_b,
+                unauth_kp,
+                Some(remote_b_pk.clone()),
+                TcpAuthMode::Key,
+                "Unauthorized Client",
+            )
+            .err()
+            .context("unauthorized client keypair must be rejected")?;
+        ensure!(
+            format!("{unauth_err:#}").contains("auth_failed"),
+            "Expected auth_failed for unauthorized client keypair, got: {unauth_err:#}"
+        );
+        world.hit("noise.unauth_client_rejected");
+
+        // Legacy plaintext JSON-RPC sent directly to Noise TCP listener -> JSON-RPC -32002 error + close.
+        let addr_b_plain = addr_b.clone();
+        let plain_reply = world.client_run_on("ui-client", 15_000, move |_| async move {
+            let mut stream = turmoil::net::TcpStream::connect(addr_b_plain.as_str())
+                .await
+                .context("connect plaintext probe")?;
+            stream
+                .write_all(
+                    b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"app.ping\",\"params\":{}}\n",
+                )
+                .await?;
+            stream.flush().await?;
+            let mut buf = Vec::new();
+            let _ =
+                tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf)).await;
+            Ok(String::from_utf8_lossy(&buf).into_owned())
+        })?;
+        ensure!(
+            plain_reply.contains("-32002") && plain_reply.to_ascii_lowercase().contains("noise"),
+            "Expected JSON-RPC -32002 Noise upgrade error for legacy plaintext client, got: {plain_reply:?}"
+        );
+        world.hit("noise.plaintext_rejected");
+
+        // Bit-flip tampering fault in Noise handshake/transport ciphertext via FaultyStream!
+        world.stream_fault_policy().set_for_host(
+            "remote-b.ts.net",
+            StreamFaultConfig {
+                corrupt_read_byte_at: Some(12),
+                ..StreamFaultConfig::default()
+            },
+        );
+        let tamper_kp = world.ephemeral_keypair("tamper-client")?;
+        let tamper_err = world
+            .connect_raw_transport(
+                &addr_b,
+                tamper_kp,
+                Some(remote_b_pk.clone()),
+                TcpAuthMode::Key,
+                "Tamper Probe",
+            )
+            .err()
+            .context("bit-flipped Noise handshake/ciphertext must fail AEAD")?;
+        world
+            .stream_fault_policy()
+            .clear_for_host("remote-b.ts.net");
+        ensure!(
+            !format!("{tamper_err:#}").is_empty(),
+            "Expected AEAD/handshake error on bit-flipped Noise stream"
+        );
+        world.hit("noise.tamper_rejected");
+
+        // -------------------------------------------------------------------------
+        // (d) Real `MultiHostClient` Tailscale WhoIs TOFU + key pinning +
+        //     Noise-encrypted `env.save` (zero plaintext on wire!)
         // -------------------------------------------------------------------------
         let verifier = SimTailscaleVerifier::rejecting();
-        world.set_tailscale_verifier("remote-b", Some(verifier.clone()))?;
+        world.set_tailscale_verifier("remote-b.ts.net", Some(verifier.clone()))?;
 
-        // Remove the revoked static-token slot for `remote-b` and re-register using ONLY `TAILSCALE_AUTH_SENTINEL`.
+        // Remove the revoked host slot for `remote-b` and re-register using ONLY `tailscale_auth: true` (no `?pk=` -> TOFU!).
         world.client_run_on("ui-client", 15_000, |client| async move {
-            client.remove_host("remote-b")
+            client.remove_host("remote-b.ts.net")
         })?;
 
         // Unauthorized Tailscale peer MUST be rejected through real `MultiHostClient`.
@@ -582,11 +795,12 @@ pub fn run(seed: u64) -> Result<u64> {
         let ts_unauth_err = world.client_run_on("ui-client", 15_000, move |client| async move {
             match client
                 .add_host_async(SavedHost {
-                    id: "remote-b".into(),
+                    id: "remote-b.ts.net".into(),
                     name: "Tailscale Remote B".into(),
                     transport: HostTransport::Tcp {
                         addr: addr_b_unauth,
-                        token: TAILSCALE_AUTH_SENTINEL.into(),
+                        server_pubkey: None,
+                        tailscale_auth: true,
                     },
                     ssh_target: None,
                     server_id: None,
@@ -611,11 +825,11 @@ pub fn run(seed: u64) -> Result<u64> {
             !world
                 .client_host_summaries()
                 .iter()
-                .any(|s| s.id == "remote-b"),
+                .any(|s| s.id == "remote-b.ts.net"),
             "Rejected Tailscale host must not be persisted in host_summaries"
         );
 
-        // Authorize the Tailscale peer identity and connect `remote-b` through `MultiHostClient` with `ts_auto`.
+        // Authorize the Tailscale peer identity and connect `remote-b` through `MultiHostClient` with TOFU (`server_pubkey: None`).
         let ts_node = format!("nSimNode-{seed}");
         let ts_dev = format!("Sim iPad {seed}");
         verifier.set_default_identity(Some(TailscalePeerIdentity {
@@ -626,57 +840,51 @@ pub fn run(seed: u64) -> Result<u64> {
         verifier.set_enabled(true);
 
         let addr_b_ts = addr_b.clone();
-        let (ts_summary, ts_active_tok) =
-            world.client_run_on("ui-client", 30_000, move |client| async move {
-                let sum = client
-                    .add_host_async(SavedHost {
-                        id: "remote-b".into(),
-                        name: "Tailscale Remote B".into(),
-                        transport: HostTransport::Tcp {
-                            addr: addr_b_ts,
-                            token: TAILSCALE_AUTH_SENTINEL.into(),
-                        },
-                        ssh_target: None,
-                        server_id: None,
-                        enabled: true,
-                        added_at: 0,
-                    })
-                    .await?;
-                let active_tok = client
-                    .transport_for_host(&sum.id)?
-                    .active_token()
-                    .map(str::to_owned);
-                Ok((sum, active_tok))
-            })?;
+        let ts_summary = world.client_run_on("ui-client", 30_000, move |client| async move {
+            client
+                .add_host_async(SavedHost {
+                    id: "remote-b.ts.net".into(),
+                    name: "Tailscale Remote B".into(),
+                    transport: HostTransport::Tcp {
+                        addr: addr_b_ts,
+                        server_pubkey: None,
+                        tailscale_auth: true,
+                    },
+                    ssh_target: None,
+                    server_id: None,
+                    enabled: true,
+                    added_at: 0,
+                })
+                .await
+        })?;
         ensure!(
-            ts_summary.id == "remote-b" && ts_summary.is_connected(),
+            ts_summary.id == "remote-b.ts.net" && ts_summary.is_connected(),
             "Tailscale MultiHostClient host must reach Connected: {ts_summary:?}"
         );
-        let sess_tok = ts_active_tok
-            .expect("Tailscale MultiHostClient session must hold ephemeral ts_sess_ token");
-        ensure!(
-            sess_tok.starts_with("ts_sess_"),
-            "Expected ephemeral ts_sess_ token on MultiHostClient transport, got {sess_tok}"
-        );
-        world.trace.mix_str(&sess_tok);
 
-        // Verify `hosts.json` preserves `TAILSCALE_AUTH_SENTINEL` (no static `dev_` or ephemeral `ts_sess_` persisted).
+        // Verify `hosts.json` preserved `tailscale_auth: true` AND pinned `remote-b`'s `server_pubkey` (TOFU)!
         let ts_hosts: HostsFile = serde_json::from_slice(&std::fs::read(&hosts_path)?)?;
         let saved_ts_b = ts_hosts
             .hosts
             .iter()
-            .find(|h| h.id == "remote-b")
+            .find(|h| h.id == "remote-b.ts.net")
             .context("Tailscale remote-b missing from hosts.json")?;
         match &saved_ts_b.transport {
-            HostTransport::Tcp { token, .. } => ensure!(
-                token == TAILSCALE_AUTH_SENTINEL,
-                "Tailscale host must persist ts_auto sentinel in hosts.json, got {token}"
+            HostTransport::Tcp {
+                server_pubkey,
+                tailscale_auth,
+                ..
+            } => ensure!(
+                *tailscale_auth && server_pubkey.as_deref() == Some(remote_b_pk.as_str()),
+                "Tailscale TOFU must persist tailscale_auth=true and pinned server_pubkey={remote_b_pk}, got pk={server_pubkey:?} ts={tailscale_auth}"
             ),
             other => anyhow::bail!("Expected Tcp transport for Tailscale host, got {other:?}"),
         }
+        world.hit("noise.tailscale_tofu_pinned");
 
         // Verify Tailscale peer appears in `device.list` routed via `MultiHostClient` with `auth_kind == "tailscale"`.
-        let ts_devs = world.client_call("device.list", json!({ "host_id": "remote-b" }), None)?;
+        let ts_devs =
+            world.client_call("device.list", json!({ "host_id": "remote-b.ts.net" }), None)?;
         let found_ts = ts_devs["devices"].as_array().is_some_and(|arr| {
             arr.iter().any(|d| {
                 d["id"].as_str() == Some(&format!("ts:{ts_node}"))
@@ -688,20 +896,19 @@ pub fn run(seed: u64) -> Result<u64> {
             "Authorized Tailscale session missing from device.list: {ts_devs}"
         );
 
-        // Save a plaintext secret THROUGH `MultiHostClient::call_routed_async("env.save", ...)`:
-        // `slot.tcp_token()` MUST pick the live `ts_sess_...` token (since `ts_auto` is only 7 bytes
-        // and would fail `transport_key`'s >=16-byte check!) and auto-seal via `seal_params_for_tcp_with_id_gen`.
-        let secret_plain = format!("sk-ts-sealed-{seed}");
+        // Reset wire-tap and send sensitive `env.save` + `card.create` over Noise_XX -> verify zero plaintext on wire!
+        wire_tap.lock().unwrap().clear();
+        let secret_plain = format!("sk-noise-e2ee-secret-{seed}");
         oracle.track_secret(secret_plain.clone());
         let save_res = world.client_call(
             "env.save",
             json!({
-                "host_id": "remote-b",
+                "host_id": "remote-b.ts.net",
                 "scope": "project",
                 "target_id": raw_pid_b,
                 "entries": {
                     "TS_SEALED_KEY": { "kind": "secret", "value": secret_plain },
-                    "TS_PLAIN_KEY": { "kind": "plain", "value": "tailscale-ok" },
+                    "TS_PLAIN_KEY": { "kind": "plain", "value": "noise-e2ee-ok" },
                 },
             }),
             Some(&pid_b),
@@ -709,12 +916,53 @@ pub fn run(seed: u64) -> Result<u64> {
         ensure!(
             save_res["env"]["TS_SEALED_KEY"]["kind"].as_str() == Some("secret")
                 && save_res["env"]["TS_SEALED_KEY"]["configured"].as_bool() == Some(true),
-            "Expected MultiHostClient auto-sealed secret to save cleanly over Tailscale: {save_res}"
+            "Expected Noise-encrypted secret to save cleanly over Tailscale: {save_res}"
+        );
+        let secret_card_title = format!("Confidential Noise Card {seed}");
+        let secret_card = world.client_call(
+            "card.create",
+            json!({
+                "project_id": pid_b,
+                "title": secret_card_title,
+                "body": "must never appear plaintext on wire",
+            }),
+            Some(&pid_b),
+        )?;
+        oracle.record_committed_card(
+            "remote-b.ts.net",
+            secret_card["id"].as_str().unwrap(),
+            &pid_b,
+            secret_card["revision"].as_u64().unwrap_or(1),
         );
 
-        // Verify the server actually unsealed `enc:v1:` and persisted the exact plaintext into its vault,
-        // while both server and merged client snapshots mask it.
-        let srv_b_home = world.servers["remote-b"].home.clone();
+        // Inspect raw TCP wire bytes: MUST have captured encrypted traffic and ZERO plaintext!
+        {
+            let tapped = wire_tap.lock().unwrap();
+            ensure!(
+                !tapped.is_empty(),
+                "Wire tap captured 0 bytes during env.save + card.create on remote-b"
+            );
+            for forbidden in [
+                secret_plain.as_bytes(),
+                b"TS_SEALED_KEY",
+                b"noise-e2ee-ok",
+                b"env.save",
+                secret_card_title.as_bytes(),
+            ] {
+                ensure!(
+                    !contains_bytes(&tapped, forbidden),
+                    "CRITICAL: raw TCP wire bytes leaked plaintext {:?}",
+                    String::from_utf8_lossy(forbidden)
+                );
+            }
+        }
+        world
+            .stream_fault_policy()
+            .set_wire_tap("remote-b.ts.net", None);
+        world.hit("noise.wire_confidentiality");
+
+        // Verify the server persisted the exact plaintext into its at-rest vault while snapshots mask it.
+        let srv_b_home = world.servers["remote-b.ts.net"].home.clone();
         let db_conn = Connection::open_with_flags(
             srv_b_home.join("canban.sqlite"),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -731,18 +979,19 @@ pub fn run(seed: u64) -> Result<u64> {
             .context("TS_SEALED_KEY missing from remote-b decrypted vault")?;
         ensure!(
             stored_plain == secret_plain,
-            "Server vault did not unseal Tailscale secret verbatim: expected {secret_plain:?}, got {stored_plain:?}"
+            "Server vault did not store Noise-delivered secret verbatim: expected {secret_plain:?}, got {stored_plain:?}"
         );
 
-        let srv_snap_json = serde_json::to_string(&world.server("remote-b").unwrap().snapshot()?)?;
+        let srv_snap_json =
+            serde_json::to_string(&world.server("remote-b.ts.net").unwrap().snapshot()?)?;
         let merged_snap_json = serde_json::to_string(&world.client_merged_snapshot()?)?;
         ensure!(
             !srv_snap_json.contains(&secret_plain) && !merged_snap_json.contains(&secret_plain),
-            "Snapshot leaked plaintext Tailscale secret"
+            "Snapshot leaked plaintext secret"
         );
         let preview = world.client_call(
             "env.preview",
-            json!({ "host_id": "remote-b", "project_id": raw_pid_b }),
+            json!({ "host_id": "remote-b.ts.net", "project_id": raw_pid_b }),
             Some(&pid_b),
         )?;
         let preview_has_secret = preview["rows"].as_array().is_some_and(|rows| {
@@ -756,31 +1005,141 @@ pub fn run(seed: u64) -> Result<u64> {
             preview_has_secret,
             "Expected TS_SEALED_KEY in routed project env.preview: {preview}"
         );
-
-        world.hit("auth.tailscale_ephemeral_enc");
-        world.hit("auth.client_tailscale_autoseal");
         oracle.check_step_invariants(world)?;
 
         // -------------------------------------------------------------------------
-        // (d) `ApiMismatch` via `desktop_api_override` + clean recovery
+        // (e) Server `noise.key` rotation -> `HostConnectionState::KeyMismatch`
+        //     + 0 background dials + clean re-pair recovery!
+        // -------------------------------------------------------------------------
+        world.crash_server("remote-b.ts.net")?;
+        let noise_key_path = srv_b_home.join("noise.key");
+        ensure!(
+            noise_key_path.exists(),
+            "remote-b must persist noise.key on disk"
+        );
+        std::fs::remove_file(&noise_key_path)?;
+        world.bounce_server("remote-b.ts.net")?;
+        let rotated_remote_b_pk = world.servers["remote-b.ts.net"]
+            .server_pubkey()
+            .expect("rotated remote-b server_pubkey");
+        ensure!(
+            rotated_remote_b_pk != remote_b_pk,
+            "Deleting noise.key + bouncing server must generate a fresh server keypair"
+        );
+        let rotated_remote_b_fp = pubkey_fingerprint(&decode_pubkey(&rotated_remote_b_pk)?);
+
+        // Client's pinned `server_pubkey` no longer matches -> MUST transition to `HostConnectionState::KeyMismatch`!
+        world.client_reconnect(Some("remote-b.ts.net"))?;
+        world.wait_until(15_000, |w| {
+            let summaries = w.client_host_summaries();
+            Ok(summaries.iter().any(|s| {
+                s.id == "remote-b.ts.net"
+                    && matches!(
+                        &s.connection,
+                        HostConnectionState::KeyMismatch {
+                            expected_fingerprint,
+                            actual_fingerprint,
+                            ..
+                        } if expected_fingerprint == &remote_b_fp
+                            && actual_fingerprint == &rotated_remote_b_fp
+                    )
+            }))
+        })?;
+
+        oracle.check_auth_failed_zero_dials(world)?;
+        let dials_at_mismatch = world.client_dial_count("ui-client", "remote-b.ts.net");
+        let reconn_at_mismatch = world
+            .client_host_summaries()
+            .into_iter()
+            .find(|s| s.id == "remote-b.ts.net")
+            .map(|s| s.reconnect_count)
+            .expect("remote-b summary present");
+
+        // Advance +16s virtual time with wakes/polls: `KeyMismatch` MUST stay halted with 0 background dials!
+        world.advance(Duration::from_secs(8))?;
+        world.client_run_on("ui-client", 10_000, |client| async move {
+            client.wake_host("remote-b.ts.net");
+            client.wake_all();
+            client.on_foreground();
+            client.poll_remotes_once_async().await;
+            Ok(())
+        })?;
+        world.advance(Duration::from_secs(8))?;
+        oracle.check_auth_failed_zero_dials(world)?;
+        oracle.assert_auth_failed_zero_dials_for(
+            world,
+            "ui-client",
+            "remote-b.ts.net",
+            dials_at_mismatch,
+            reconn_at_mismatch,
+        )?;
+        world.hit("noise.key_rotation_mismatch");
+
+        // Re-pair `remote-b` cleanly with the rotated server pubkey using a fresh single-use invite!
+        world.client_run_on("ui-client", 15_000, |client| async move {
+            client.remove_host("remote-b.ts.net")
+        })?;
+        let repair_invite = world.server_call(
+            "remote-b.ts.net",
+            "device.invite.create",
+            json!({ "ttl_secs": 300 }),
+        )?;
+        let repair_code = repair_invite["code"].as_str().unwrap().to_owned();
+        let addr_b_repair = addr_b.clone();
+        let rotated_pk_c = rotated_remote_b_pk.clone();
+        let repaired_sum = world.client_run_on("ui-client", 20_000, move |client| async move {
+            client
+                .add_host_with_pairing_code_async(
+                    SavedHost {
+                        id: "remote-b.ts.net".into(),
+                        name: "Rotated Remote B".into(),
+                        transport: HostTransport::Tcp {
+                            addr: addr_b_repair,
+                            server_pubkey: Some(rotated_pk_c),
+                            tailscale_auth: false,
+                        },
+                        ssh_target: None,
+                        server_id: None,
+                        enabled: true,
+                        added_at: 0,
+                    },
+                    Some(repair_code),
+                )
+                .await
+        })?;
+        ensure!(
+            repaired_sum.is_connected()
+                && repaired_sum.server_pubkey_fingerprint.as_deref()
+                    == Some(rotated_remote_b_fp.as_str()),
+            "Re-paired rotated remote-b must connect with updated key fingerprint: {repaired_sum:?}"
+        );
+
+        // -------------------------------------------------------------------------
+        // (f) `ApiMismatch` via `desktop_api_override` + clean recovery
         // -------------------------------------------------------------------------
         let old_api = canban_app_server::API_VERSION.saturating_sub(2);
         world.set_desktop_api_override("remote-a", Some(old_api))?;
 
         // Direct `SingleHostSession::connect_checked_async_with_clock` must return typed `ApiMismatchError`.
-        let remote_tok = world.servers["remote-a"].token().expect("remote-a token");
         let addr_check = addr_a.clone();
+        let remote_a_pk_check = remote_a_pk.clone();
         let clock_check = world.servers["remote-a"].clock.clone();
+        let probe_connector = TurmoilConnector::new(
+            Arc::clone(&client_kp),
+            world.noise_rng("api-mismatch-probe"),
+        );
         let mismatch_check = world.client_run_on("ui-client", 15_000, move |_| async move {
             let transport = HostTransport::Tcp {
                 addr: addr_check,
-                token: remote_tok,
+                server_pubkey: Some(remote_a_pk_check),
+                tailscale_auth: false,
             };
             let res = SingleHostSession::connect_checked_async_with_clock(
-                &TurmoilConnector,
+                &probe_connector,
                 "remote-a",
                 &transport,
                 "ApiMismatch Probe",
+                None,
                 json!(null),
                 Some(canban_app_server::API_VERSION),
                 clock_check.as_ref(),
@@ -802,7 +1161,7 @@ pub fn run(seed: u64) -> Result<u64> {
         );
 
         // `MultiHostClient` reconnect must surface `HostConnectionState::ApiMismatch` cleanly
-        // while Tailscale-authenticated `remote-b` remains Connected!
+        // while `remote-b` remains Connected!
         world.client_reconnect(Some("remote-a"))?;
         world.wait_until(15_000, |w| {
             let summaries = w.client_host_summaries();
@@ -822,8 +1181,8 @@ pub fn run(seed: u64) -> Result<u64> {
             world
                 .client_host_summaries()
                 .iter()
-                .any(|s| s.id == "remote-b" && s.is_connected()),
-            "Tailscale remote-b must remain Connected during remote-a ApiMismatch"
+                .any(|s| s.id == "remote-b.ts.net" && s.is_connected()),
+            "remote-b must remain Connected during remote-a ApiMismatch"
         );
         world.hit("auth.api_mismatch");
 
@@ -852,36 +1211,31 @@ pub fn run(seed: u64) -> Result<u64> {
             "card.create",
             json!({
                 "project_id": pid_b,
-                "title": format!("Post-Tailscale Card B {seed}"),
-                "body": "tailscale-active",
+                "title": format!("Post-Rotation Card B {seed}"),
+                "body": "noise-active",
             }),
             Some(&pid_b),
         )?;
         oracle.record_committed_card(
-            "remote-b",
+            "remote-b.ts.net",
             recovered_card_b["id"].as_str().unwrap(),
             &pid_b,
             recovered_card_b["revision"].as_u64().unwrap_or(1),
         );
 
         // -------------------------------------------------------------------------
-        // (e) Client Push-Topic Separation (`runtime.state`-only skips `app.state`,
-        //     same-rev `application` push non-suppression), Legacy No-`app.subscribe`
-        //     Polling Fallback, `set_host_enabled` Lease/TCP Drop, Side-Channel
-        //     `UtilitiesChanged`/`UsageChanged` Forwarding, Legacy `server.token`
-        //     Auto-Upgrade + `device.remove_legacy_token`, and `host.probe`/`discover_canban`!
+        // (g) Client Push-Topic Separation, Legacy No-`app.subscribe` Polling
+        //     Fallback, `set_host_enabled` TCP Drop, Side-Channel Forwarding,
+        //     and `host.probe`/`discover_canban`!
         // -------------------------------------------------------------------------
         let srv_a = world
             .server("remote-a")
             .context("remote-a server missing")?;
-        let srv_b = world
-            .server("remote-b")
-            .context("remote-b server missing")?;
         let srv_local = world
             .server("local-server")
             .context("local-server missing")?;
 
-        // e1: `runtime.state`-only push skips `app.state`; same-rev `application` push is NOT suppressed!
+        // g1: `runtime.state`-only push skips `app.state`; same-rev `application` push is NOT suppressed!
         world.advance(Duration::from_millis(250))?;
         let app_before_rt = srv_a.app_state_call_count();
         let rt_before_rt = srv_a.runtime_state_call_count();
@@ -896,11 +1250,10 @@ pub fn run(seed: u64) -> Result<u64> {
             app_before_rt,
             srv_a.app_state_call_count()
         );
-        // Now emit `application` push at the EXACT same `state_revision` -> MUST call `app.state`!
         srv_a.emit_state_push_for_sim("application", false);
         world.wait_until(8_000, |_| Ok(srv_a.app_state_call_count() > app_before_rt))?;
 
-        // e2: Legacy daemon lacking `app.subscribe` falls back cleanly to polling!
+        // g2: Legacy daemon lacking `app.subscribe` falls back cleanly to polling!
         let rej_before = srv_a.subscribe_rejection_count();
         srv_a.set_disable_app_subscribe(true);
         world.client_reconnect(Some("remote-a"))?;
@@ -930,7 +1283,6 @@ pub fn run(seed: u64) -> Result<u64> {
             let snap = w.client_merged_snapshot()?;
             Ok(snap.cards.iter().any(|c| c.title == polled_title))
         })?;
-        // Re-enable `app.subscribe` and reconnect cleanly!
         srv_a.set_disable_app_subscribe(false);
         world.client_reconnect(Some("remote-a"))?;
         world.wait_until(15_000, |w| {
@@ -939,7 +1291,7 @@ pub fn run(seed: u64) -> Result<u64> {
                 .any(|s| s.id == "remote-a" && s.is_connected()))
         })?;
 
-        // e3: `set_host_enabled(false)` drops active TCP push connection / lease, re-enable reconnects!
+        // g3: `set_host_enabled(false)` drops active TCP push connection / lease, re-enable reconnects!
         ensure!(
             srv_a.active_tcp_count() >= 1,
             "Expected active TCP connection on remote-a before disable"
@@ -963,8 +1315,7 @@ pub fn run(seed: u64) -> Result<u64> {
                 && srv_a.active_tcp_count() >= 1)
         })?;
 
-        // e4: Side-channel `UtilitiesChanged` (local) & `UsageChanged` (remote) push forwarding!
-        // Let remote-a's newly reconnected supervisor attach its `app.subscribe` stream first.
+        // g4: Side-channel `UtilitiesChanged` (local) & `UsageChanged` (remote) push forwarding!
         world.advance(Duration::from_millis(300))?;
         let _ = world.drain_client_events();
         srv_local.emit_utilities();
@@ -996,115 +1347,7 @@ pub fn run(seed: u64) -> Result<u64> {
             Ok(saw_utilities && saw_usage)
         })?;
 
-        // e5: Legacy `server.token` auto-upgrade on connect -> persists `dev_...` in `hosts.json` ->
-        //     `device.remove_legacy_token` deletes `server.token` -> reconnect succeeds with upgraded token!
-        //     Also verify non-upgrade bearer auth rejects pairing code without burning it!
-        let legacy_tok = canban_app_server::network::ensure_server_token(&srv_b_home)?;
-        ensure!(canban_app_server::network::token_path(&srv_b_home).exists());
-        // Disable Tailscale verifier temporarily on `remote-b` so connect genuinely uses legacy token upgrade!
-        srv_b.set_tailscale_verifier(None);
-        world.client_run_on("ui-client", 15_000, |client| async move {
-            client.remove_host("remote-b")
-        })?;
-        let addr_b_leg = addr_b.clone();
-        let legacy_tok_c = legacy_tok.clone();
-        let legacy_upgraded_tok =
-            world.client_run_on("ui-client", 20_000, move |client| async move {
-                let summary = client
-                    .add_host_async(SavedHost {
-                        id: "remote-b".into(),
-                        name: "Legacy Upgraded Remote B".into(),
-                        transport: HostTransport::Tcp {
-                            addr: addr_b_leg,
-                            token: legacy_tok_c,
-                        },
-                        ssh_target: None,
-                        server_id: None,
-                        enabled: true,
-                        added_at: 0,
-                    })
-                    .await?;
-                ensure!(
-                    summary.is_connected(),
-                    "Legacy upgrade host must connect: {summary:?}"
-                );
-                Ok(client
-                    .transport_for_host("remote-b")?
-                    .active_token()
-                    .map(str::to_owned))
-            })?;
-        let legacy_upgraded = legacy_upgraded_tok
-            .context("Legacy server.token upgrade did not store active token")?;
-        ensure!(
-            is_device_token(&legacy_upgraded) && legacy_upgraded != legacy_tok,
-            "Expected legacy token auto-upgrade to dev_... token, got {legacy_upgraded}"
-        );
-        let hosts_after_legacy = std::fs::read_to_string(&hosts_path)?;
-        ensure!(
-            !hosts_after_legacy.contains(&legacy_tok)
-                && hosts_after_legacy.contains(&legacy_upgraded),
-            "hosts.json must persist upgraded dev_... token and not legacy server.token"
-        );
-        let dev_list_before_rm =
-            world.client_call("device.list", json!({ "host_id": "remote-b" }), None)?;
-        ensure!(dev_list_before_rm["has_legacy_token"] == true);
-        let rm_leg = world.client_call(
-            "device.remove_legacy_token",
-            json!({ "host_id": "remote-b" }),
-            None,
-        )?;
-        ensure!(rm_leg["removed"] == true);
-        ensure!(!canban_app_server::network::token_path(&srv_b_home).exists());
-        let dev_list_after_rm =
-            world.client_call("device.list", json!({ "host_id": "remote-b" }), None)?;
-        ensure!(dev_list_after_rm["has_legacy_token"] == false);
-        world.client_reconnect(Some("remote-b"))?;
-        world.wait_until(15_000, |w| {
-            Ok(w.client_host_summaries()
-                .iter()
-                .any(|s| s.id == "remote-b" && s.is_connected()))
-        })?;
-        // Non-upgrade auth (`allow_upgrade = false`) must reject a pairing code WITHOUT burning it!
-        {
-            let cfg_b = srv_b.transport_config();
-            let (no_burn_code, _) = srv_b.create_pairing_code(300)?;
-            let non_upgrade = canban_transport::auth::authenticate_tcp_token(
-                &cfg_b.home,
-                &cfg_b.device_store,
-                &cfg_b.pairing_codes,
-                &no_burn_code,
-                Some("Post-NonUpgrade Device"),
-                false,
-            )?;
-            ensure!(
-                matches!(
-                    non_upgrade,
-                    canban_transport::auth::TcpAuthOutcome::Rejected
-                ),
-                "Non-upgrade auth must reject pairing code"
-            );
-            let upgrade_ok = canban_transport::auth::authenticate_tcp_token(
-                &cfg_b.home,
-                &cfg_b.device_store,
-                &cfg_b.pairing_codes,
-                &no_burn_code,
-                Some("Post-NonUpgrade Device"),
-                true,
-            )?;
-            ensure!(
-                matches!(
-                    upgrade_ok,
-                    canban_transport::auth::TcpAuthOutcome::Authenticated {
-                        upgraded_token: Some(_),
-                        deprecated_legacy: false,
-                        ..
-                    }
-                ),
-                "Rejected non-upgrade check must not burn single-use pairing code!"
-            );
-        }
-
-        // e6: `host.probe` and `host.discover_canban` with deterministic TCP probe override!
+        // g5: `host.probe` and `host.discover_canban` with deterministic TCP probe override!
         let probe_res = world.client_call("host.probe", json!({ "host_id": "remote-a" }), None)?;
         ensure!(
             probe_res["server_id"].as_str() == Some(srv_a.server_id())
@@ -1121,7 +1364,8 @@ pub fn run(seed: u64) -> Result<u64> {
                     name: "Linked Remote B".into(),
                     transport: HostTransport::Tcp {
                         addr: addr_b.clone(),
-                        token: legacy_upgraded.clone(),
+                        server_pubkey: Some(rotated_remote_b_pk.clone()),
+                        tailscale_auth: false,
                     },
                     ssh_target: None,
                     server_id: Some(remote_b_server_id.clone()),
@@ -1133,7 +1377,8 @@ pub fn run(seed: u64) -> Result<u64> {
                     name: "Unreachable Peer".into(),
                     transport: HostTransport::Tcp {
                         addr: "192.0.2.1:9999".into(),
-                        token: "dev_dead_token_placeholder".into(),
+                        server_pubkey: Some(remote_a_pk.clone()),
+                        tailscale_auth: false,
                     },
                     ssh_target: None,
                     server_id: Some("dead0001".into()),
@@ -1172,12 +1417,12 @@ pub fn run(seed: u64) -> Result<u64> {
                 && disc_hosts[0]["rtt_ms"] == 4,
             "Unexpected host.discover_canban result: {disc_res}"
         );
-        world.hit("transport_auth.legacy_token_and_polling_fallback");
+        world.hit("transport_auth.polling_fallback_and_discovery");
 
         world.heal_and_quiesce(15_000)?;
         oracle.check_quiescent_invariants(world)?;
 
-        for host in ["remote-a", "remote-b"] {
+        for host in ["remote-a", "remote-b.ts.net"] {
             ensure!(
                 world.servers[host].exec.blocked_commands().is_empty(),
                 "transport_auth leaked unexpected OS commands on {host}: {:?}",

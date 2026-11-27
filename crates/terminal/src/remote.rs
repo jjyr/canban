@@ -95,7 +95,7 @@ async fn connect_and_attach(
     bool,
     bool,
 )> {
-    let (stream, auth_token) = transport.open_async_stream().await?;
+    let stream = transport.open_async_stream().await?;
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
@@ -105,15 +105,12 @@ async fn connect_and_attach(
     if !params.core_id.is_empty() {
         hc_params.insert("expected_core_id".into(), json!(params.core_id));
     }
-    let mut connect_req = json!({
+    let connect_req = json!({
         "jsonrpc": "2.0",
         "id": 0,
         "method": "herdr.connect",
         "params": Value::Object(hc_params),
     });
-    if let Some(token) = auth_token {
-        connect_req["auth"] = json!(token);
-    }
     write_json_line_async(&mut write_half, &connect_req).await?;
 
     let connect_line = read_bounded_line(&mut reader, MAX_FRAME_BYTES)
@@ -483,8 +480,9 @@ mod tests {
     use super::*;
     use crate::session::{SessionInit, evict_session, get_or_spawn_session};
     use canban_transport::{
-        AcceptedStream, ClientEndpoint, DeviceTokenStore, PairingCodeStore, RevocationBus,
-        ServerTransportConfig, TailscaleSessionRegistry, spawn_tcp_listener,
+        AcceptedStream, AuthorizedDeviceStore, NoiseKeypair, PairingCodeStore, RevocationBus,
+        ServerTransportConfig, TailscaleSessionRegistry, TcpAuthMode, spawn_tcp_listener,
+        system_noise_rng,
     };
     use canban_types::Config;
     use std::sync::atomic::AtomicUsize;
@@ -498,11 +496,11 @@ mod tests {
 
     struct MockDaemon {
         addr: String,
-        token: String,
+        server_pubkey: String,
+        client_keypair: Arc<NoiseKeypair>,
         stop_tx: tokio::sync::watch::Sender<bool>,
         active_tcp: Arc<AtomicUsize>,
         frames_rx: Mutex<Option<mpsc::UnboundedReceiver<RecordedFrame>>>,
-        auth_tokens_seen: Arc<Mutex<Vec<Option<String>>>>,
         _home: tempfile::TempDir,
     }
 
@@ -523,14 +521,18 @@ mod tests {
     ) -> MockDaemon {
         let rt = shared_remote_runtime().handle().clone();
         let home = tempfile::tempdir().unwrap();
-        let store = Arc::new(DeviceTokenStore::open(home.path()));
-        let (_dev, token) = store.issue_device("test-device").unwrap();
+        let server_keypair = Arc::new(NoiseKeypair::generate().unwrap());
+        let server_pubkey = server_keypair.public_b64();
+        let client_keypair = Arc::new(NoiseKeypair::generate().unwrap());
+        let store = Arc::new(AuthorizedDeviceStore::open(home.path()));
+        store
+            .authorize_pubkey("test-device", &client_keypair.public_b64())
+            .unwrap();
         let pairing_codes = Arc::new(PairingCodeStore::open(home.path()));
         let revocations = RevocationBus::new();
         let active_tcp = Arc::new(AtomicUsize::new(0));
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let (frames_tx, frames_rx) = mpsc::unbounded_channel();
-        let auth_tokens_seen = Arc::new(Mutex::new(Vec::new()));
         let listener = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
@@ -540,6 +542,8 @@ mod tests {
             home: home.path().to_path_buf(),
             server_id: "srv-remote-pty-test".into(),
             api_version: 1,
+            server_keypair,
+            noise_rng: system_noise_rng(),
             device_store: store,
             pairing_codes,
             revocations,
@@ -550,7 +554,6 @@ mod tests {
 
         let expected_core = expected_core.to_owned();
         let ftx = frames_tx.clone();
-        let tokens_seen = auth_tokens_seen.clone();
         spawn_tcp_listener(
             &rt,
             listener,
@@ -559,7 +562,6 @@ mod tests {
             move |accepted: AcceptedStream| {
                 let expected_core = expected_core.clone();
                 let ftx = ftx.clone();
-                let tokens_seen = tokens_seen.clone();
                 async move {
                     let _ = handle_mock_stream(
                         accepted,
@@ -567,7 +569,6 @@ mod tests {
                         reject_mismatch,
                         prior_size,
                         ftx,
-                        tokens_seen,
                     )
                     .await;
                 }
@@ -576,11 +577,11 @@ mod tests {
 
         MockDaemon {
             addr,
-            token,
+            server_pubkey,
+            client_keypair,
             stop_tx,
             active_tcp,
             frames_rx: Mutex::new(Some(frames_rx)),
-            auth_tokens_seen,
             _home: home,
         }
     }
@@ -591,7 +592,6 @@ mod tests {
         reject_mismatch: bool,
         prior_size: Option<(u16, u16)>,
         frames_tx: mpsc::UnboundedSender<RecordedFrame>,
-        auth_tokens_seen: Arc<Mutex<Vec<Option<String>>>>,
     ) -> Result<()> {
         let (read_half, mut writer) = tokio::io::split(accepted.stream);
         let mut reader = BufReader::new(read_half);
@@ -608,10 +608,6 @@ mod tests {
                 serde_json::from_str(&line)?
             }
         };
-        auth_tokens_seen
-            .lock()
-            .unwrap()
-            .push(connect_val["auth"].as_str().map(str::to_owned));
 
         ensure!(connect_val["method"] == "herdr.connect");
         let terminal = connect_val["params"]["terminal"]
@@ -743,8 +739,10 @@ mod tests {
         let client = Arc::new(
             ClientTransport::connect_tcp(
                 daemon.addr.clone(),
-                daemon.token.clone(),
+                Some(daemon.server_pubkey.clone()),
+                TcpAuthMode::Key,
                 "ios-test".into(),
+                daemon.client_keypair.clone(),
             )
             .unwrap(),
         );
@@ -866,13 +864,15 @@ mod tests {
     }
 
     #[test]
-    fn remote_pty_transport_concurrent_mux_streams_and_error_and_direct_tcp() {
+    fn remote_pty_transport_concurrent_mux_streams_and_error() {
         let daemon = start_mock_daemon("core-conc", true);
         let client = Arc::new(
             ClientTransport::connect_tcp(
                 daemon.addr.clone(),
-                daemon.token.clone(),
+                Some(daemon.server_pubkey.clone()),
+                TcpAuthMode::Key,
                 "ios-conc".into(),
+                daemon.client_keypair.clone(),
             )
             .unwrap(),
         );
@@ -932,47 +932,6 @@ mod tests {
         assert_eq!(daemon.active_tcp.load(Ordering::SeqCst), 1);
         drop(a2);
 
-        // Direct TCP (non-mux) includes bearer token on `herdr.connect`.
-        let direct_client = Arc::new(
-            ClientTransport::connect_direct(ClientEndpoint::Tcp {
-                addr: daemon.addr.clone(),
-                token: daemon.token.clone(),
-            })
-            .unwrap(),
-        );
-        assert!(!direct_client.is_mux());
-        let direct_remote = RemotePtyTransport::with_transport(direct_client).unwrap();
-        let mut direct_attach = direct_remote
-            .attach(&PtyAttachParams {
-                core_id: "core-conc".into(),
-                terminal: "tty-direct".into(),
-                cols: 80,
-                rows: 24,
-                display: DisplayFacts::default(),
-            })
-            .unwrap();
-        direct_attach.write(b"ping", false).unwrap();
-        let mut saw_direct_echo = false;
-        for _ in 0..20 {
-            if let Some(PtyEvent::Data(data)) =
-                direct_attach.recv(Duration::from_millis(200)).unwrap()
-                && data == b"echo:tty-direct:ping"
-            {
-                saw_direct_echo = true;
-                break;
-            }
-        }
-        assert!(saw_direct_echo);
-        assert!(
-            daemon
-                .auth_tokens_seen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|t| t.as_deref() == Some(daemon.token.as_str()))
-        );
-        drop(direct_attach);
-
         // End-to-end LiveSession integration using RemotePtyTransport.
         let session = get_or_spawn_session(SessionInit {
             host_id: String::new(),
@@ -1028,8 +987,10 @@ mod tests {
         let client_mismatch = Arc::new(
             ClientTransport::connect_tcp(
                 daemon_mismatch.addr.clone(),
-                daemon_mismatch.token.clone(),
+                Some(daemon_mismatch.server_pubkey.clone()),
+                TcpAuthMode::Key,
                 "ios-get".into(),
+                daemon_mismatch.client_keypair.clone(),
             )
             .unwrap(),
         );
@@ -1043,8 +1004,10 @@ mod tests {
         let client_same = Arc::new(
             ClientTransport::connect_tcp(
                 daemon_same.addr.clone(),
-                daemon_same.token.clone(),
+                Some(daemon_same.server_pubkey.clone()),
+                TcpAuthMode::Key,
                 "ios-get".into(),
+                daemon_same.client_keypair.clone(),
             )
             .unwrap(),
         );
@@ -1058,8 +1021,10 @@ mod tests {
         let client_legacy = Arc::new(
             ClientTransport::connect_tcp(
                 daemon_legacy.addr.clone(),
-                daemon_legacy.token.clone(),
+                Some(daemon_legacy.server_pubkey.clone()),
+                TcpAuthMode::Key,
                 "ios-get".into(),
+                daemon_legacy.client_keypair.clone(),
             )
             .unwrap(),
         );
@@ -1075,8 +1040,10 @@ mod tests {
         let client1 = Arc::new(
             ClientTransport::connect_tcp(
                 daemon.addr.clone(),
-                daemon.token.clone(),
+                Some(daemon.server_pubkey.clone()),
+                TcpAuthMode::Key,
                 "reconnect-1".into(),
+                daemon.client_keypair.clone(),
             )
             .unwrap(),
         );
@@ -1124,8 +1091,10 @@ mod tests {
         let client2 = Arc::new(
             ClientTransport::connect_tcp(
                 daemon.addr.clone(),
-                daemon.token.clone(),
+                Some(daemon.server_pubkey.clone()),
+                TcpAuthMode::Key,
                 "reconnect-2".into(),
+                daemon.client_keypair.clone(),
             )
             .unwrap(),
         );

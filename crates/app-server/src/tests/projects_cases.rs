@@ -78,44 +78,62 @@ fn app_shutdown_flushes_rpc_reply_over_tcp_and_yamux_before_teardown() {
         tailscale: false,
         port: 0,
         listen: Some("127.0.0.1:0".into()),
-        allow_insecure_bind: false,
         trust_tailscale_self: true,
     };
 
-    // Direct TCP RPC
+    // Direct TCP RPC over Noise_XX
     for iter in 0..5 {
         let dir = tempfile::tempdir().unwrap();
         let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
         let running = app.start_with_listen(Some(listen.clone())).unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-        let (_, token) = app.issue_device_token("tcp-shutdown-test").unwrap();
+        let server_pk = app.server_pubkey();
+        let client_kp = Arc::new(canban_transport::NoiseKeypair::generate().unwrap());
+        app.authorize_device_pubkey("tcp-shutdown-test", &client_kp.public_b64())
+            .unwrap();
         let wait_app = Arc::clone(&app);
         let server_thread = std::thread::spawn(move || {
             wait_app.wait_stopped();
             drop(running);
         });
 
-        let reply = client::rpc_tcp(&addr, Some(&token), "app.shutdown", json!({}))
-            .unwrap_or_else(|e| panic!("direct TCP iteration {iter} failed: {e:#}"));
+        let reply = client::rpc_tcp(
+            &addr,
+            Some(&server_pk),
+            canban_transport::TcpAuthMode::Key,
+            client_kp,
+            "app.shutdown",
+            json!({}),
+        )
+        .unwrap_or_else(|e| panic!("direct TCP iteration {iter} failed: {e:#}"));
         assert_eq!(reply, json!({"stopping": true}));
         assert!(app.stopped());
         server_thread.join().unwrap();
     }
 
-    // yamux/1 multiplexed AppClient RPC
+    // Noise_XX + yamux/1 multiplexed AppClient RPC
     for iter in 0..5 {
         let dir = tempfile::tempdir().unwrap();
         let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
         let running = app.start_with_listen(Some(listen.clone())).unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-        let (_, token) = app.issue_device_token("yamux-shutdown-test").unwrap();
+        let server_pk = app.server_pubkey();
+        let client_kp = Arc::new(canban_transport::NoiseKeypair::generate().unwrap());
+        app.authorize_device_pubkey("yamux-shutdown-test", &client_kp.public_b64())
+            .unwrap();
         let wait_app = Arc::clone(&app);
         let server_thread = std::thread::spawn(move || {
             wait_app.wait_stopped();
             drop(running);
         });
 
-        let mux_client = client::AppClient::connect_tcp(addr, token).unwrap();
+        let mux_client = client::AppClient::connect_tcp(
+            addr,
+            Some(server_pk),
+            canban_transport::TcpAuthMode::Key,
+            client_kp,
+        )
+        .unwrap();
         let reply = mux_client
             .call("app.shutdown", json!({}))
             .unwrap_or_else(|e| panic!("yamux iteration {iter} failed: {e:#}"));

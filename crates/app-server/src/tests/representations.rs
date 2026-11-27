@@ -42,21 +42,25 @@ fn revision_conflicts_and_legacy_operation_replays_survive_projection() {
 #[test]
 fn tcp_first_frame_accepts_payloads_over_64_kib() {
     let (_dir, app, _project, card) = setup();
-    let (_, token) = app.issue_device_token("repr-test").unwrap();
+    let client_kp = Arc::new(canban_transport::NoiseKeypair::generate().unwrap());
+    app.authorize_device_pubkey("repr-test", &client_kp.public_b64())
+        .unwrap();
     let _running = app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
-            allow_insecure_bind: false,
             trust_tailscale_self: true,
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs()[0].clone();
+    let server_pk = app.server_pubkey();
     let large_body = "x".repeat(100 * 1024);
     let reply = crate::client::rpc_tcp(
         &addr,
-        Some(&token),
+        Some(&server_pk),
+        canban_transport::TcpAuthMode::Key,
+        client_kp,
         "card.update",
         json!({
             "card_id": card.id,

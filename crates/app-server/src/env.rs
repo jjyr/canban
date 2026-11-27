@@ -300,41 +300,17 @@ pub(crate) fn resolve_effective_env(
     })
 }
 
-fn decrypt_incoming_write_entries(
-    home: &Path,
-    raw_entries: &Value,
-    transport_token: Option<&str>,
-) -> Result<BTreeMap<String, EnvWriteEntry>> {
+fn parse_incoming_write_entries(raw_entries: &Value) -> Result<BTreeMap<String, EnvWriteEntry>> {
     let obj = raw_entries
         .as_object()
         .context("`entries` must be a JSON object")?;
     let mut parsed = BTreeMap::new();
-    let mut server_token: Option<String> = None;
 
     for (key, val) in obj {
         let key = key.trim();
         ensure!(is_valid_env_key(key), "Invalid environment key '{key}'");
-        let mut entry: EnvWriteEntry = serde_json::from_value(val.clone())
+        let entry: EnvWriteEntry = serde_json::from_value(val.clone())
             .with_context(|| format!("Invalid environment entry for '{key}'"))?;
-        if let EnvWriteEntry::Secret {
-            value: Some(raw_val),
-            ..
-        } = &mut entry
-            && raw_val.starts_with(vault::TRANSPORT_SEAL_PREFIX)
-        {
-            let tok = if let Some(t) = transport_token.map(str::trim).filter(|s| !s.is_empty()) {
-                t
-            } else {
-                if server_token.is_none() {
-                    server_token = network::read_server_token(home);
-                }
-                server_token.as_deref().context(
-                    "Cannot unseal transport secret without session auth token or legacy server.token",
-                )?
-            };
-            let plain = vault::open_transport(tok, key, raw_val)?;
-            *raw_val = plain.as_str().to_owned();
-        }
         parsed.insert(key.to_owned(), entry);
     }
     Ok(parsed)
@@ -552,7 +528,7 @@ impl AppServer {
         Ok(HerdrLaunchOutcome { receipt, resolved })
     }
 
-    pub(super) fn env_save(&self, p: Value, transport_token: Option<&str>) -> Result<Value> {
+    pub(super) fn env_save(&self, p: Value) -> Result<Value> {
         let scope = strp(&p, "scope")?.trim();
         ensure!(
             matches!(
@@ -562,7 +538,7 @@ impl AppServer {
             "Unsupported env scope '{scope}'"
         );
         let raw_target = p["target_id"].as_str().map(str::trim).unwrap_or("");
-        let entries = decrypt_incoming_write_entries(&self.home, &p["entries"], transport_token)?;
+        let entries = parse_incoming_write_entries(&p["entries"])?;
         let now_ts = self.now_ms();
         let config = self.config();
         let fs_sync = self.fs_durability == canban_context::FsDurability::Full;
@@ -618,19 +594,13 @@ impl AppServer {
         }))
     }
 
-    pub(super) fn global_env_sync(&self, p: Value, transport_token: Option<&str>) -> Result<Value> {
+    pub(super) fn global_env_sync(&self, p: Value) -> Result<Value> {
         let wire: Vec<env_store::GlobalEnvSyncWireRecord> =
             serde_json::from_value(p["records"].clone())
                 .context("Invalid global env sync payload")?;
-        let active_tok = transport_token.map(str::trim).filter(|s| !s.is_empty());
-        let fallback_tok = active_tok
-            .is_none()
-            .then(|| network::read_server_token(&self.home))
-            .flatten();
-        let tok = active_tok.or(fallback_tok.as_deref());
         let mut records = Vec::with_capacity(wire.len());
         for w in wire {
-            records.push(env_store::GlobalEnvSyncRecord::from_wire(w, tok)?);
+            records.push(env_store::GlobalEnvSyncRecord::from_wire(w)?);
         }
         let fs_sync = self.fs_durability == canban_context::FsDurability::Full;
         let vault_id_gen = self.vault_id_gen();

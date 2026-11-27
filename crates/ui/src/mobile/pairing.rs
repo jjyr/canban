@@ -4,16 +4,14 @@ use super::{
     chrome::{
         MOBILE_CAPTION, MOBILE_HEADLINE, MOBILE_HERO_TITLE, MOBILE_RADIUS, empty_state,
         grouped_card, icon_badge, is_mobile_os, mobile_button, mobile_field, mobile_footnote,
-        mobile_inline_button, mobile_subhead, mobile_title, section_header, security_badge,
-        trigger_haptic,
+        mobile_inline_button, mobile_subhead, mobile_title, section_header, trigger_haptic,
     },
 };
 use crate::presenter::*;
 use canban_client::{
-    AddrProbeResult, PairingInvite, TransportSecurity, parse_pairing_invite,
-    parse_tailscale_host_input,
+    AddrProbeResult, PairingInvite, parse_pairing_invite, parse_tailscale_host_input,
 };
-use canban_types::{DiscoveredCanbanHost, is_tailscale_auth};
+use canban_types::DiscoveredCanbanHost;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::{Haptic, HapticNotification, prelude::*};
 use std::time::Duration;
@@ -69,10 +67,7 @@ fn connect_invite(ui: Ui, state: MobileState, invite: PairingInvite, name_overri
         } else {
             name_override.trim()
         };
-        ui.notify(format!(
-            "Gallery preview · paired {label} ({})",
-            invite.security.label()
-        ));
+        ui.notify(format!("Gallery preview · paired {label}"));
         state.close_sheet();
         return;
     };
@@ -118,7 +113,7 @@ fn connect_invite(ui: Ui, state: MobileState, invite: PairingInvite, name_overri
     });
 }
 
-const INVALID_PAIRING_INPUT_HINT: &str = "Enter a Tailscale address (host.ts.net or 100.x.y.z) or a `canban://<addr>?name=...#<secret>` pairing link.";
+const INVALID_PAIRING_INPUT_HINT: &str = "Enter a Tailscale address (host.ts.net or 100.x.y.z) or a `canban://<addr>?pk=<key>#pair_...` pairing link.";
 
 fn parse_pairing_input(raw: &str) -> Option<PairingInvite> {
     parse_pairing_invite(raw).or_else(|| parse_tailscale_host_input(raw))
@@ -255,76 +250,85 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
         .w_full()
         .gap_4()
         .child(
-            when(move || !has_invite.get(), move || {
-                view()
-                    .w_full()
-                    .gap_3()
-                    .child(
-                        when(
-                            move || show_manual.get(),
-                            move || paste_btn("Paste Pairing Link", false),
-                        )
-                        .otherwise(move || paste_btn("Paste Pairing Link", true)),
-                    )
-                    .child(
-                        press_target()
-                            .w_full()
-                            .min_h(px(40.))
-                            .items_center()
-                            .justify_center()
-                            .active(|s| s.opacity(0.65))
-                            .child(
-                                text(move || {
-                                    if show_manual.get() {
-                                        "Hide manual entry"
-                                    } else {
-                                        "Enter Tailscale address or URI"
-                                    }
-                                })
-                                .text_size(px(14.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(ACCENT),
+            when(
+                move || !has_invite.get(),
+                move || {
+                    view()
+                        .w_full()
+                        .gap_3()
+                        .child(
+                            when(
+                                move || show_manual.get(),
+                                move || paste_btn("Paste Pairing Link", false),
                             )
-                            .on_press(move |_: &()| {
-                                trigger_haptic(Haptic::Selection);
-                                show_manual.update(|v| *v = !*v);
-                            }),
-                    )
-                    .child(when(
-                        move || show_manual.get(),
-                        move || {
-                            view()
+                            .otherwise(move || paste_btn("Paste Pairing Link", true)),
+                        )
+                        .child(
+                            press_target()
                                 .w_full()
-                                .gap_2p5()
+                                .min_h(px(40.))
+                                .items_center()
+                                .justify_center()
+                                .active(|s| s.opacity(0.65))
                                 .child(
-                                    mobile_field(
-                                        manual_draft,
-                                        "host.ts.net, 100.x.y.z, or canban://...#code",
-                                    )
-                                    .keyboard_type(KeyboardType::Url)
-                                    .auto_capitalize(AutoCapitalize::None)
-                                    .auto_correct(false)
-                                    .return_key_type(ReturnKeyType::Go)
-                                    .on_submit(move |_: &str| submit_manual()),
-                                )
-                                .child(when(
-                                    move || !manual_validation_error.with(String::is_empty),
-                                    move || {
-                                        notice(
-                                            move || manual_validation_error.get(),
-                                            Tone::Attention,
-                                        )
-                                    },
-                                ))
-                                .child(
-                                    mobile_button("Check Address", Variant::Primary, move |_| {
-                                        submit_manual();
+                                    text(move || {
+                                        if show_manual.get() {
+                                            "Hide manual entry"
+                                        } else {
+                                            "Enter Tailscale address or URI"
+                                        }
                                     })
-                                    .disabled(move || manual_draft.with(|s| s.trim().is_empty())),
+                                    .text_size(px(14.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ACCENT),
                                 )
-                        },
-                    ))
-            })
+                                .on_press(move |_: &()| {
+                                    trigger_haptic(Haptic::Selection);
+                                    show_manual.update(|v| *v = !*v);
+                                }),
+                        )
+                        .child(when(
+                            move || show_manual.get(),
+                            move || {
+                                view()
+                                    .w_full()
+                                    .gap_2p5()
+                                    .child(
+                                        mobile_field(
+                                            manual_draft,
+                                            "host.ts.net, 100.x.y.z, or canban://...#code",
+                                        )
+                                        .keyboard_type(KeyboardType::Url)
+                                        .auto_capitalize(AutoCapitalize::None)
+                                        .auto_correct(false)
+                                        .return_key_type(ReturnKeyType::Go)
+                                        .on_submit(move |_: &str| submit_manual()),
+                                    )
+                                    .child(when(
+                                        move || !manual_validation_error.with(String::is_empty),
+                                        move || {
+                                            notice(
+                                                move || manual_validation_error.get(),
+                                                Tone::Attention,
+                                            )
+                                        },
+                                    ))
+                                    .child(
+                                        mobile_button(
+                                            "Check Address",
+                                            Variant::Primary,
+                                            move |_| {
+                                                submit_manual();
+                                            },
+                                        )
+                                        .disabled(
+                                            move || manual_draft.with(|s| s.trim().is_empty()),
+                                        ),
+                                    )
+                            },
+                        ))
+                },
+            )
             .otherwise(move || {
                 let summary_row = dynamic(move || {
                     let Some(invite) = parsed_invite.get() else {
@@ -334,26 +338,22 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                         .host_name
                         .clone()
                         .unwrap_or_else(|| invite.addr.clone());
+                    let fp = invite.pubkey_fingerprint();
+                    let hint = if invite.tailscale_auth {
+                        "Tailscale — automatic same-account sign-in (end-to-end encrypted)"
+                    } else {
+                        "End-to-end encrypted with pinned host key"
+                    };
                     view()
                         .w_full()
                         .px_4()
                         .py_3p5()
                         .gap_1p5()
                         .child(
-                            view()
-                                .w_full()
-                                .flex_row()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    text(display_name)
-                                        .text_size(px(MOBILE_HEADLINE))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(TEXT),
-                                )
-                                .child(security_badge(invite.security)),
+                            text(display_name)
+                                .text_size(px(MOBILE_HEADLINE))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(TEXT),
                         )
                         .child(
                             text(invite.addr)
@@ -361,11 +361,13 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                                 .font_family(MONO_FONT)
                                 .text_color(MUTED),
                         )
-                        .child(mobile_footnote(if is_tailscale_auth(&invite.secret) {
-                            "Tailscale — automatic same-account sign-in (managed in Tailscale Admin)"
-                        } else {
-                            invite.security.hint()
+                        .children(fp.map(|f| {
+                            text(format!("Key {f}"))
+                                .text_size(px(12.5))
+                                .font_family(MONO_FONT)
+                                .text_color(MUTED)
                         }))
+                        .child(mobile_footnote(hint))
                         .into_element()
                 });
 
@@ -374,8 +376,8 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                         return view().into_element();
                     };
                     let probe = state.pairing_probe.get();
+                    let is_tailscale = invite.is_tailscale();
                     let probe_addr_retry = invite.addr;
-                    let is_tailscale = invite.security == TransportSecurity::Tailscale;
                     match probe {
                         ProbeState::Idle => view()
                             .w_full()
@@ -478,13 +480,15 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(MUTED),
                     )
-                    .child(mobile_field(custom_name, "My Mac / Linux").placeholder(move || {
-                        parsed_invite.with(|inv| {
-                            inv.as_ref()
-                                .and_then(|i| i.host_name.clone())
-                                .unwrap_or_else(|| "My Mac / Linux".to_owned())
-                        })
-                    }))
+                    .child(
+                        mobile_field(custom_name, "My Mac / Linux").placeholder(move || {
+                            parsed_invite.with(|inv| {
+                                inv.as_ref()
+                                    .and_then(|i| i.host_name.clone())
+                                    .unwrap_or_else(|| "My Mac / Linux".to_owned())
+                            })
+                        }),
+                    )
                     .into_element();
 
                 view()
@@ -517,12 +521,7 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                             Variant::Primary,
                             move |_| {
                                 if let Some(invite) = parsed_invite.get_untracked() {
-                                    connect_invite(
-                                        ui,
-                                        state,
-                                        invite,
-                                        custom_name.get_untracked(),
-                                    );
+                                    connect_invite(ui, state, invite, custom_name.get_untracked());
                                 }
                             },
                         )

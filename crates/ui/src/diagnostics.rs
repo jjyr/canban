@@ -46,7 +46,8 @@ pub fn fixture_diagnostics(host_id: &str) -> (Value, Value) {
                 "socket": "/Users/demo/.canban/app.sock",
                 "listen_config": { "tailscale": false, "port": 7680 },
                 "bound_tcp": [],
-                "auth_token_configured": false,
+                "transport_encryption": "Noise_XX_25519_ChaChaPoly_BLAKE2s",
+                "server_pubkey_fingerprint": "A1B2-C3D4-E5F6",
                 "api_version": crate::backend::desktop_api(),
                 "build": {
                     "version": "20261115-1",
@@ -96,7 +97,8 @@ pub fn fixture_diagnostics(host_id: &str) -> (Value, Value) {
                 "socket": "/home/builder/.canban/app.sock",
                 "listen_config": { "tailscale": true, "port": 7680 },
                 "bound_tcp": ["100.84.0.2:7680"],
-                "auth_token_configured": true,
+                "transport_encryption": "Noise_XX_25519_ChaChaPoly_BLAKE2s",
+                "server_pubkey_fingerprint": "9F8E-7D6C-5B4A",
                 "api_version": crate::backend::desktop_api(),
                 "build": {
                     "version": "20261115-1",
@@ -370,6 +372,11 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
                 .child(kv_row("Host", h.name.clone()))
                 .child(kv_row("Transport", h.transport_label.clone()))
                 .child(kv_row("Endpoint", h.endpoint_label.clone()))
+                .children(
+                    h.server_pubkey_fingerprint
+                        .as_ref()
+                        .map(|fp| kv_row("Key fingerprint", fp.clone())),
+                )
                 .child(kv_row("Status", h.connection.short_status()));
             if let HostConnectionState::Connected {
                 rtt_ms,

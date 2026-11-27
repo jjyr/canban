@@ -3,7 +3,6 @@
 //! and haptic helpers.
 use super::{MobileSheet, MobileState, mobile_hosts};
 use crate::presenter::Ui;
-use canban_client::TransportSecurity;
 use canban_types::HostSummary;
 use canban_ui_kit::{tokens::*, *};
 use nsh_base::{alert_dialog, dialog};
@@ -327,17 +326,6 @@ pub(crate) fn confirm_destructive(
             on_confirm();
         }
     });
-}
-
-/// Renders a confidential/warning pill badge for a host or pairing link's [`TransportSecurity`].
-pub(crate) fn security_badge(sec: TransportSecurity) -> View {
-    let (prefix, label_text, tone) = match sec {
-        TransportSecurity::Local => ("🔒", "Local", Tone::Success),
-        TransportSecurity::Tailscale => ("🔒", "Tailscale", Tone::Success),
-        TransportSecurity::Ssh => ("🔒", "SSH", Tone::Success),
-        TransportSecurity::UnverifiedTcp => ("⚠", "Not Tailscale", Tone::Attention),
-    };
-    status(format!("{prefix} {label_text}"), tone)
 }
 
 /// Rounded inset offline/sync alert card shown inside mobile scroll content when relevant.
@@ -868,7 +856,8 @@ pub(crate) fn host_connection_status(summary: &HostSummary) -> (String, Tone) {
         canban_types::HostConnectionState::Connecting
         | canban_types::HostConnectionState::Updating { .. }
         | canban_types::HostConnectionState::Reconnecting { .. } => Tone::Info,
-        canban_types::HostConnectionState::AuthFailed { .. } => Tone::Danger,
+        canban_types::HostConnectionState::AuthFailed { .. }
+        | canban_types::HostConnectionState::KeyMismatch { .. } => Tone::Danger,
         canban_types::HostConnectionState::ApiMismatch { .. }
         | canban_types::HostConnectionState::Offline { .. } => Tone::Attention,
     };

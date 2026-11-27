@@ -117,7 +117,7 @@ pub trait GlobalEnvSyncProvider: Send + Sync + 'static {
     /// Returns the current local global-env state fingerprint (or `None` when no records exist).
     fn current_fingerprint(&self) -> Option<String>;
 
-    /// Builds the wire payload (`{ "records": [...] }`, sealing secrets with `tcp_token` when
-    /// sending over TCP) alongside its state fingerprint.
-    fn build_sync_payload(&self, tcp_token: Option<&str>) -> Result<(Value, Option<String>)>;
+    /// Builds the wire payload (`{ "records": [...] }`) alongside its state fingerprint.
+    /// Transport confidentiality is provided by `Noise_XX` on every TCP link.
+    fn build_sync_payload(&self) -> Result<(Value, Option<String>)>;
 }

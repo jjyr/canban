@@ -7,13 +7,12 @@ use super::{
         MOBILE_BODY, MOBILE_CAPTION, MOBILE_FOOTNOTE, MOBILE_RADIUS, MOBILE_SUBHEAD,
         confirm_destructive, disclosure_chevron, grouped_card, grouped_card_with_inset,
         host_connection_status, icon_badge, is_mobile_os, mobile_footnote, mobile_inline_button,
-        mobile_subhead, mobile_switch, mobile_title, section_header, security_badge,
-        tab_scroll_bottom_pad, trigger_haptic,
+        mobile_subhead, mobile_switch, mobile_title, section_header, tab_scroll_bottom_pad,
+        trigger_haptic,
     },
-    host_security, is_tailscale_auto_host, mobile_hosts,
+    is_tailscale_auto_host, mobile_hosts,
 };
 use crate::presenter::*;
-use canban_client::TransportSecurity;
 use canban_types::{HostConnectionState, HostSummary, SyncAction, SyncItemState, SyncItemView};
 use canban_ui_kit::{tokens::*, *};
 use nsh_base::nav_page;
@@ -106,7 +105,8 @@ fn host_error_detail(host: &HostSummary) -> Option<(String, bool)> {
         HostConnectionState::Offline { error, .. } if !error.is_empty() && error != "Disabled" => {
             Some((error.clone(), false))
         }
-        HostConnectionState::AuthFailed { error } => Some((error.clone(), true)),
+        HostConnectionState::AuthFailed { error }
+        | HostConnectionState::KeyMismatch { error, .. } => Some((error.clone(), true)),
         HostConnectionState::ApiMismatch {
             app_api,
             server_api,
@@ -146,15 +146,7 @@ fn key_value_row(title: &'static str, value: impl Into<SharedString>) -> AnyElem
 }
 
 pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
-    let hosts_memo = computed(move || {
-        mobile_hosts(ui)
-            .into_iter()
-            .map(|h| {
-                let sec = host_security(ui, &h);
-                (h, sec)
-            })
-            .collect::<Vec<_>>()
-    });
+    let hosts_memo = computed(move || mobile_hosts(ui));
 
     let sync_memo = computed(move || {
         let items = sync_items_for_ui(ui);
@@ -182,15 +174,9 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
 
                 let mut host_rows: Vec<AnyElement> = hosts
                     .into_iter()
-                    .map(|(host, sec)| {
+                    .map(|host| {
                         let (conn_label, conn_tone) = host_connection_status(&host);
                         let (badge_bg, badge_fg) = tone_colors(conn_tone);
-                        let (sec_icon, sec_color) = match sec {
-                            TransportSecurity::Local
-                            | TransportSecurity::Tailscale
-                            | TransportSecurity::Ssh => (Icon::Check, SUCCESS),
-                            TransportSecurity::UnverifiedTcp => (Icon::TriangleAlert, ATTENTION),
-                        };
                         let hid = host.id.clone();
                         let subtitle = if let Some((err, _)) = host_error_detail(&host) {
                             err
@@ -230,22 +216,11 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                                             .min_w(px(0.))
                                             .gap_0p5()
                                             .child(
-                                                view()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .child(
-                                                        text(host.name)
-                                                            .text_size(px(16.5))
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                            .text_color(TEXT)
-                                                            .truncate(),
-                                                    )
-                                                    .child(
-                                                        icon_tinted(sec_icon, sec_color)
-                                                            .w(px(14.))
-                                                            .h(px(14.)),
-                                                    ),
+                                                text(host.name)
+                                                    .text_size(px(16.5))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(TEXT)
+                                                    .truncate(),
                                             )
                                             .child(
                                                 text(subtitle)
@@ -443,20 +418,12 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
 /// Pushed secondary route displaying connection status, switch toggle, reconnect, diagnostics, and removal.
 pub(crate) fn host_detail_page(ui: Ui, state: MobileState, host_id: String) -> impl IntoElement {
     let hid_lookup = host_id.clone();
-    let host_memo = computed(move || {
-        mobile_hosts(ui)
-            .into_iter()
-            .find(|h| h.id == hid_lookup)
-            .map(|h| {
-                let sec = host_security(ui, &h);
-                (h, sec)
-            })
-    });
+    let host_memo = computed(move || mobile_hosts(ui).into_iter().find(|h| h.id == hid_lookup));
 
     let title_fn = move || {
         host_memo
             .get()
-            .map(|(h, _)| h.name)
+            .map(|h| h.name)
             .unwrap_or_else(|| "Host".to_owned())
     };
 
@@ -508,7 +475,7 @@ pub(crate) fn host_detail_page(ui: Ui, state: MobileState, host_id: String) -> i
             .size_full()
             .bg(BACKGROUND)
             .child(view().w_full().p_4().pb(px(40.)).gap_6().child(dynamic(move || {
-                let Some((host, sec)) = host_memo.get() else {
+                let Some(host) = host_memo.get() else {
                     return mobile_subhead("Host removed or unavailable.").into_element();
                 };
                 let (conn_label, conn_tone) = host_connection_status(&host);
@@ -552,12 +519,12 @@ pub(crate) fn host_detail_page(ui: Ui, state: MobileState, host_id: String) -> i
                     )
                     .into_element();
 
-                let sec_hint = if is_tailscale_auto_host(&host.id) {
-                    "Tailscale same-account sign-in · revoke access in Tailscale Admin"
+                let transport_hint = if is_tailscale_auto_host(&host.id) {
+                    "End-to-end encrypted (Noise) · automatic Tailscale same-account sign-in"
                 } else {
-                    sec.hint()
+                    "End-to-end encrypted (Noise) with pinned host key"
                 };
-                let security_row = view()
+                let transport_row = view()
                     .w_full()
                     .min_h(px(58.))
                     .px_4()
@@ -570,10 +537,14 @@ pub(crate) fn host_detail_page(ui: Ui, state: MobileState, host_id: String) -> i
                             .items_center()
                             .justify_between()
                             .gap_2()
-                            .child(text("Security").text_size(px(MOBILE_BODY)).text_color(TEXT))
-                            .child(security_badge(sec)),
+                            .child(text("Transport").text_size(px(MOBILE_BODY)).text_color(TEXT))
+                            .child(
+                                text(host.transport_label.clone())
+                                    .text_size(px(MOBILE_SUBHEAD))
+                                    .text_color(MUTED),
+                            ),
                     )
-                    .child(mobile_footnote(sec_hint))
+                    .child(mobile_footnote(transport_hint))
                     .into_element();
 
                 let workload_row = key_value_row(
@@ -584,16 +555,42 @@ pub(crate) fn host_detail_page(ui: Ui, state: MobileState, host_id: String) -> i
                     ),
                 );
 
+                let mut conn_rows = vec![status_row, address_row, transport_row];
+                if let Some(fp) = host.server_pubkey_fingerprint.clone() {
+                    conn_rows.push(
+                        view()
+                            .w_full()
+                            .min_h(px(50.))
+                            .px_4()
+                            .py_2p5()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                text("Host Key")
+                                    .text_size(px(15.5))
+                                    .text_color(TEXT)
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                text(fp)
+                                    .text_size(px(13.5))
+                                    .font_family(MONO_FONT)
+                                    .text_color(MUTED)
+                                    .truncate()
+                                    .min_w(px(0.)),
+                            )
+                            .into_element(),
+                    );
+                }
+                conn_rows.push(workload_row);
+
                 let mut col = view().w_full().gap_6().child(
                     view()
                         .w_full()
                         .child(section_header("CONNECTION", None))
-                        .child(grouped_card(vec![
-                            status_row,
-                            address_row,
-                            security_row,
-                            workload_row,
-                        ])),
+                        .child(grouped_card(conn_rows)),
                 );
 
                 if let Some((err_text, is_danger)) = err_detail {

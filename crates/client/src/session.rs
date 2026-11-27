@@ -5,8 +5,11 @@ use crate::{
     pairing::{parse_pairing_invite, parse_tailscale_host_input},
 };
 use anyhow::Result;
-use canban_transport::{ClientEndpoint, ClientTransport};
-use canban_types::{Clock, HostTransport, normalize_daemon_addr, parse_pairing_uri};
+use canban_transport::{
+    ClientEndpoint, ClientTransport, NoiseKeypair, TcpAuthMode, load_or_create_client_keypair,
+    system_noise_rng,
+};
+use canban_types::{Clock, HostTransport, is_tailscale_addr, normalize_daemon_addr};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use tokio::time::Instant;
@@ -14,56 +17,112 @@ use tokio::time::Instant;
 /// Canonical endpoint parsing shared across CLI (`CANBAN_ENDPOINT`), Desktop, and Mobile.
 ///
 /// Accepts:
-/// - Single-address pairing URIs (`canban://<addr>[?sid=...&name=...]#<secret>`, `tcp://<addr>#<secret>`, `<addr>#<secret>`)
-/// - Bare Tailscale endpoints (`host.ts.net`, `100.x.y.z`, `fd7a:115c:a1e0::1`, `canban://host.ts.net`) mapped to `ts_auto`
-/// - Explicit `tcp://<addr>` endpoints with optional `env_token` (`CANBAN_TOKEN`)
+/// - Single-address pairing URIs (`canban://<addr>?pk=<pubkey>[&sid=...&name=...]#pair_...`)
+/// - Bare Tailscale endpoints (`host.ts.net`, `100.x.y.z`, `fd7a:115c:a1e0::1`, `canban://host.ts.net`)
+/// - Explicit `canban://<addr>?pk=<pubkey>` or `tcp://<addr>?pk=<pubkey>` endpoints
 /// - Local Unix socket paths (`~/.canban/app.sock`)
-pub fn parse_endpoint(raw: &str, env_token: Option<&str>) -> ClientEndpoint {
+pub fn parse_endpoint(raw: &str) -> ClientEndpoint {
     let trimmed = raw.trim();
     if let Some(invite) = parse_pairing_invite(trimmed) {
         return ClientEndpoint::Tcp {
             addr: invite.addr,
-            token: invite.secret,
+            server_pubkey: invite.server_pubkey,
+            auth: match invite.pairing_code {
+                Some(code) => TcpAuthMode::PairingCode(code),
+                None if invite.tailscale_auth => TcpAuthMode::Tailscale,
+                None => TcpAuthMode::Key,
+            },
         };
-    }
-    if let Some((addr, token)) = parse_pairing_uri(trimmed) {
-        return ClientEndpoint::Tcp { addr, token };
     }
     if let Some(invite) = parse_tailscale_host_input(trimmed) {
         return ClientEndpoint::Tcp {
             addr: invite.addr,
-            token: invite.secret,
+            server_pubkey: None,
+            auth: TcpAuthMode::Tailscale,
         };
     }
-    if let Some(addr) = trimmed.strip_prefix("tcp://") {
-        let token = env_token
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default()
-            .to_owned();
+    if let Some(rest) = trimmed
+        .strip_prefix("tcp://")
+        .or_else(|| trimmed.strip_prefix("canban://"))
+    {
+        let (host_part, query_opt) = match rest.split_once('?') {
+            Some((h, q)) => (h.trim().trim_end_matches('/'), Some(q)),
+            None => (rest.trim().trim_end_matches('/'), None),
+        };
+        let mut server_pubkey = None;
+        if let Some(query) = query_opt {
+            for pair in query.split('&') {
+                if let Some(("pk", val)) = pair.split_once('=') {
+                    let pk = val.trim();
+                    if !pk.is_empty() {
+                        server_pubkey = Some(pk.to_owned());
+                    }
+                }
+            }
+        }
+        let addr = normalize_daemon_addr(host_part);
+        let auth = if is_tailscale_addr(&addr) && server_pubkey.is_none() {
+            TcpAuthMode::Tailscale
+        } else {
+            TcpAuthMode::Key
+        };
         return ClientEndpoint::Tcp {
-            addr: normalize_daemon_addr(addr),
-            token,
+            addr,
+            server_pubkey,
+            auth,
         };
     }
     ClientEndpoint::Unix(Path::new(trimmed).to_path_buf())
 }
 
+/// Resolves the CLI/desktop client's persistent Noise X25519 keypair from `CANBAN_CLIENT_KEY`,
+/// or `<home>/client_noise.key`.
+pub fn load_cli_client_keypair(home: Option<&Path>) -> Result<Arc<NoiseKeypair>> {
+    if let Ok(hex) = std::env::var("CANBAN_CLIENT_KEY")
+        && !hex.trim().is_empty()
+    {
+        return Ok(Arc::new(NoiseKeypair::from_private_hex(&hex)?));
+    }
+    let dir = match home {
+        Some(h) => h.to_path_buf(),
+        None => std::env::var_os("CANBAN_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".canban")))
+            .unwrap_or_else(|| std::path::PathBuf::from(".canban")),
+    };
+    Ok(Arc::new(load_or_create_client_keypair(
+        &dir,
+        true,
+        system_noise_rng().as_ref(),
+    )?))
+}
+
 /// Fast-path one-shot JSON-RPC call used by CLI commands and short-lived utilities without
 /// spawning background multi-host supervisors or offline caches.
 pub fn rpc_once(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
-    let env_token = std::env::var("CANBAN_TOKEN").ok();
-    let parsed = parse_endpoint(&endpoint.to_string_lossy(), env_token.as_deref());
-    canban_transport::rpc_once(&parsed, method, &params)
+    let parsed = parse_endpoint(&endpoint.to_string_lossy());
+    let kp = match &parsed {
+        ClientEndpoint::Unix(_) => None,
+        ClientEndpoint::Tcp { .. } => Some(load_cli_client_keypair(None)?),
+    };
+    canban_transport::rpc_once(&parsed, kp, method, &params)
 }
 
-/// Fast-path one-shot TCP JSON-RPC call to an explicit `addr` + optional auth token.
-pub fn rpc_tcp_once(addr: &str, token: Option<&str>, method: &str, params: Value) -> Result<Value> {
+/// Fast-path one-shot TCP JSON-RPC call over `Noise_XX` to an explicit endpoint.
+pub fn rpc_tcp_once(
+    addr: &str,
+    server_pubkey: Option<&str>,
+    auth: TcpAuthMode,
+    client_keypair: Arc<NoiseKeypair>,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
     let endpoint = ClientEndpoint::Tcp {
         addr: normalize_daemon_addr(addr),
-        token: token.unwrap_or_default().to_owned(),
+        server_pubkey: server_pubkey.map(str::to_owned),
+        auth,
     };
-    canban_transport::rpc_once(&endpoint, method, &params)
+    canban_transport::rpc_once(&endpoint, Some(client_keypair), method, &params)
 }
 
 /// Error returned when a remote daemon's `api_version` is older than the caller's required
@@ -95,6 +154,7 @@ pub struct HandshakeInfo {
     pub ping: Value,
     pub state: Value,
     pub server_id: Option<String>,
+    pub server_pubkey: Option<String>,
     pub hostname: Option<String>,
     pub home: String,
     pub rtt_ms: u64,
@@ -115,40 +175,58 @@ impl SingleHostSession {
         host_id: &str,
         transport: &HostTransport,
         device_name: &str,
+        pairing_code: Option<&str>,
         after: Value,
     ) -> Result<Self> {
-        Self::connect_checked_async(connector, host_id, transport, device_name, after, None).await
+        Self::connect_checked_async(
+            connector,
+            host_id,
+            transport,
+            device_name,
+            pairing_code,
+            after,
+            None,
+        )
+        .await
     }
 
     /// Connects to `transport` through `connector`, enforces `min_api_version` (returning
     /// [`ApiMismatchError`] before issuing `app.state` when the remote daemon is too old), and
     /// completes the canonical `app.ping` + `app.state` handshake.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_checked_async(
         connector: &dyn HostConnector,
         host_id: &str,
         transport: &HostTransport,
         device_name: &str,
+        pairing_code: Option<&str>,
         after: Value,
         min_api_version: Option<u32>,
     ) -> Result<Self> {
         let started = tokio::time::Instant::now();
-        let connected = connector.connect(host_id, transport, device_name).await?;
+        let connected = connector
+            .connect(host_id, transport, device_name, pairing_code)
+            .await?;
         Self::handshake_checked_async(connected, after, started, min_api_version).await
     }
 
     /// Clock-injected variant of [`Self::connect_checked_async`] that measures handshake RTT
     /// through `clock` instead of ambient clocks.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_checked_async_with_clock(
         connector: &dyn HostConnector,
         host_id: &str,
         transport: &HostTransport,
         device_name: &str,
+        pairing_code: Option<&str>,
         after: Value,
         min_api_version: Option<u32>,
         clock: &dyn Clock,
     ) -> Result<Self> {
         let started_ms = clock.now_ms();
-        let connected = connector.connect(host_id, transport, device_name).await?;
+        let connected = connector
+            .connect(host_id, transport, device_name, pairing_code)
+            .await?;
         Self::handshake_checked_async_with_clock(
             connected,
             after,
@@ -179,7 +257,8 @@ impl SingleHostSession {
         let (transport, lease, ping, state) =
             Self::handshake_exchange_async(connected, after, min_api_version).await?;
         let rtt_ms = started.elapsed().as_millis() as u64;
-        let handshake = extract_handshake_info(ping, state, rtt_ms);
+        let remote_pk = transport.remote_pubkey().map(str::to_owned);
+        let handshake = extract_handshake_info(ping, state, remote_pk, rtt_ms);
         Ok(Self {
             transport,
             lease,
@@ -198,7 +277,8 @@ impl SingleHostSession {
         let (transport, lease, ping, state) =
             Self::handshake_exchange_async(connected, after, min_api_version).await?;
         let rtt_ms = clock.now_ms().saturating_sub(started_ms);
-        let handshake = extract_handshake_info(ping, state, rtt_ms);
+        let remote_pk = transport.remote_pubkey().map(str::to_owned);
+        let handshake = extract_handshake_info(ping, state, remote_pk, rtt_ms);
         Ok(Self {
             transport,
             lease,
@@ -276,7 +356,8 @@ impl SingleHostSession {
             .call("app.state", &json!({ "after": after }))
             .inspect_err(|_| transport.close())?;
         let rtt_ms = clock.now_ms().saturating_sub(started_ms);
-        let handshake = extract_handshake_info(ping, state, rtt_ms);
+        let remote_pk = transport.remote_pubkey().map(str::to_owned);
+        let handshake = extract_handshake_info(ping, state, remote_pk, rtt_ms);
         Ok(Self {
             transport,
             lease: connected.lease,
@@ -296,8 +377,8 @@ impl SingleHostSession {
         self.handshake.server_id.as_deref()
     }
 
-    pub fn upgraded_token(&self) -> Option<&str> {
-        self.transport.upgraded_token()
+    pub fn server_pubkey(&self) -> Option<&str> {
+        self.handshake.server_pubkey.as_deref()
     }
 
     pub fn call(&self, method: &str, params: &Value) -> Result<Value> {
@@ -318,12 +399,23 @@ impl SingleHostSession {
     }
 }
 
-fn extract_handshake_info(ping: Value, state: Value, rtt_ms: u64) -> HandshakeInfo {
+fn extract_handshake_info(
+    ping: Value,
+    state: Value,
+    remote_pubkey: Option<String>,
+    rtt_ms: u64,
+) -> HandshakeInfo {
     let server_id = state["server_id"]
         .as_str()
         .or_else(|| ping["server_id"].as_str())
         .filter(|s| !s.trim().is_empty())
         .map(str::to_owned);
+    let server_pubkey = remote_pubkey.or_else(|| {
+        ping["server_pubkey"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+    });
     let hostname = ping["hostname"]
         .as_str()
         .or_else(|| state["hostname"].as_str())
@@ -338,6 +430,7 @@ fn extract_handshake_info(ping: Value, state: Value, rtt_ms: u64) -> HandshakeIn
         ping,
         state,
         server_id,
+        server_pubkey,
         hostname,
         home,
         rtt_ms,
@@ -347,43 +440,46 @@ fn extract_handshake_info(ping: Value, state: Value, rtt_ms: u64) -> HandshakeIn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canban_types::TAILSCALE_AUTH_SENTINEL;
 
     #[test]
     fn parse_endpoint_handles_pairing_uri_bare_tailscale_tcp_and_unix() {
+        let pk = NoiseKeypair::generate().unwrap().public_b64();
         assert_eq!(
-            parse_endpoint(
-                "canban://100.84.12.5:7680?name=Dev#pair_0123456789abcdef",
-                None
-            ),
+            parse_endpoint(&format!(
+                "canban://100.84.12.5:7680?pk={pk}&name=Dev#pair_0123456789abcdef"
+            )),
             ClientEndpoint::Tcp {
                 addr: "100.84.12.5:7680".into(),
-                token: "pair_0123456789abcdef".into(),
+                server_pubkey: Some(pk.clone()),
+                auth: TcpAuthMode::PairingCode("pair_0123456789abcdef".into()),
             }
         );
         assert_eq!(
-            parse_endpoint("devpc.tailc8912.ts.net", None),
+            parse_endpoint("devpc.tailc8912.ts.net"),
             ClientEndpoint::Tcp {
                 addr: "devpc.tailc8912.ts.net:7680".into(),
-                token: TAILSCALE_AUTH_SENTINEL.into(),
+                server_pubkey: None,
+                auth: TcpAuthMode::Tailscale,
             }
         );
         assert_eq!(
-            parse_endpoint("100.127.37.78", None),
+            parse_endpoint("100.127.37.78"),
             ClientEndpoint::Tcp {
                 addr: "100.127.37.78:7680".into(),
-                token: TAILSCALE_AUTH_SENTINEL.into(),
+                server_pubkey: None,
+                auth: TcpAuthMode::Tailscale,
             }
         );
         assert_eq!(
-            parse_endpoint("tcp://192.168.1.20:7680", Some("dev_secret_token")),
+            parse_endpoint(&format!("tcp://192.168.1.20:7680?pk={pk}")),
             ClientEndpoint::Tcp {
                 addr: "192.168.1.20:7680".into(),
-                token: "dev_secret_token".into(),
+                server_pubkey: Some(pk),
+                auth: TcpAuthMode::Key,
             }
         );
         assert_eq!(
-            parse_endpoint("/tmp/canban/app.sock", None),
+            parse_endpoint("/tmp/canban/app.sock"),
             ClientEndpoint::Unix(Path::new("/tmp/canban/app.sock").to_path_buf())
         );
     }

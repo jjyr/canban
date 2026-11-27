@@ -369,6 +369,7 @@ fn remote_host_display_name_and_offline_tooltip() {
             endpoint_label: "builder@home-linux".into(),
             ssh_target: Some("builder@home-linux".into()),
             server_id: None,
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Offline {
                 error: "network unreachable".into(),
                 cached_at: Some(100),

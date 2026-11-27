@@ -1,7 +1,9 @@
 //! Pluggable transport connectors turning a [`HostTransport`] specification into a ready
 //! [`ClientTransport`] plus an optional RAII [`ConnectionLease`] (e.g. an SSH tunnel guard).
 use anyhow::{Result, bail};
-use canban_transport::ClientTransport;
+use canban_transport::{
+    ClientTransport, NoiseKeypair, NoiseRngFactory, TcpAuthMode, system_noise_rng,
+};
 use canban_types::HostTransport;
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
@@ -65,19 +67,42 @@ pub trait HostConnector: Send + Sync + 'static {
     /// Returns `true` if this connector can establish links for `transport`.
     fn supports(&self, transport: &HostTransport) -> bool;
 
-    /// Connects `host_id` using `transport` and returns a ready [`ConnectedTransport`].
+    /// Connects `host_id` using `transport` and optional one-time `pairing_code`, returning a
+    /// ready [`ConnectedTransport`].
     fn connect<'a>(
         &'a self,
         host_id: &'a str,
         transport: &'a HostTransport,
         device_name: &'a str,
+        pairing_code: Option<&'a str>,
     ) -> ConnectFuture<'a>;
 }
 
-/// Built-in cross-platform TCP connector supporting `yamux/1`, Tailscale WhoIs (`ts_auto`),
-/// one-time pairing codes (`pair_...`), and per-device tokens (`dev_...`).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TcpConnector;
+/// Built-in cross-platform TCP connector supporting `Noise_XX` E2EE + `yamux/1`,
+/// public-key authentication, one-time pairing codes (`pair_...`), and Tailscale WhoIs auth.
+#[derive(Clone)]
+pub struct TcpConnector {
+    client_keypair: Arc<NoiseKeypair>,
+    noise_rng: Arc<dyn NoiseRngFactory>,
+}
+
+impl TcpConnector {
+    pub fn new(client_keypair: Arc<NoiseKeypair>) -> Self {
+        Self {
+            client_keypair,
+            noise_rng: system_noise_rng(),
+        }
+    }
+
+    pub fn with_rng(mut self, noise_rng: Arc<dyn NoiseRngFactory>) -> Self {
+        self.noise_rng = noise_rng;
+        self
+    }
+
+    pub fn client_keypair(&self) -> &Arc<NoiseKeypair> {
+        &self.client_keypair
+    }
+}
 
 impl HostConnector for TcpConnector {
     fn supports(&self, transport: &HostTransport) -> bool {
@@ -89,14 +114,33 @@ impl HostConnector for TcpConnector {
         _host_id: &'a str,
         transport: &'a HostTransport,
         device_name: &'a str,
+        pairing_code: Option<&'a str>,
     ) -> ConnectFuture<'a> {
         let transport_owned = transport.clone();
         let device = device_name.to_owned();
+        let pairing = pairing_code.map(str::to_owned);
+        let keypair = self.client_keypair.clone();
+        let rng = self.noise_rng.clone();
         Box::pin(async move {
-            let HostTransport::Tcp { addr, token } = transport_owned else {
+            let HostTransport::Tcp {
+                addr,
+                server_pubkey,
+                tailscale_auth,
+            } = transport_owned
+            else {
                 bail!("TcpConnector only supports TCP hosts");
             };
-            let client = Arc::new(ClientTransport::connect_tcp_async(addr, token, device).await?);
+            let auth = if let Some(code) = pairing.filter(|s| !s.trim().is_empty()) {
+                TcpAuthMode::PairingCode(code)
+            } else if tailscale_auth {
+                TcpAuthMode::Tailscale
+            } else {
+                TcpAuthMode::Key
+            };
+            let client = Arc::new(
+                ClientTransport::connect_tcp_async(addr, server_pubkey, auth, device, keypair, rng)
+                    .await?,
+            );
             Ok(ConnectedTransport::new(client))
         })
     }
@@ -115,10 +159,10 @@ impl CompositeConnector {
         }
     }
 
-    /// Creates a composite connector pre-populated with the built-in [`TcpConnector`].
-    pub fn with_default_tcp() -> Self {
+    /// Creates a composite connector pre-populated with a [`TcpConnector`] using `client_keypair`.
+    pub fn with_tcp(client_keypair: Arc<NoiseKeypair>) -> Self {
         Self {
-            connectors: vec![Arc::new(TcpConnector)],
+            connectors: vec![Arc::new(TcpConnector::new(client_keypair))],
         }
     }
 
@@ -146,10 +190,11 @@ impl HostConnector for CompositeConnector {
         host_id: &'a str,
         transport: &'a HostTransport,
         device_name: &'a str,
+        pairing_code: Option<&'a str>,
     ) -> ConnectFuture<'a> {
         for connector in &self.connectors {
             if connector.supports(transport) {
-                return connector.connect(host_id, transport, device_name);
+                return connector.connect(host_id, transport, device_name, pairing_code);
             }
         }
         let kind = match transport {

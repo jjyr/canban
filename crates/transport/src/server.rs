@@ -1,14 +1,16 @@
-//! Server-side transport listeners (`Unix` and `Tcp`), TCP first-frame authentication,
-//! `transport.mux` (`yamux/1`) session demultiplexing, and live device revocation enforcement.
+//! Server-side transport listeners (`Unix` and `Tcp`), `Noise_XX` E2EE handshake,
+//! public-key / pairing-code / Tailscale WhoIs authentication, `transport.mux` (`yamux/1`)
+//! session demultiplexing, and live device revocation enforcement.
 use crate::{
     auth::{
-        self, DeviceTokenStore, PairingCodeStore, RevocationBus, TailscalePeerVerifier,
-        TailscaleSessionRegistry, TcpAuthOutcome,
+        self, AuthorizedDeviceStore, NoiseAuthOutcome, PairingCodeStore, RevocationBus,
+        TailscalePeerVerifier, TailscaleSessionRegistry,
     },
     framing::{
         AsyncIo, MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line,
         write_json_line_async,
     },
+    noise::{NoiseKeypair, NoiseRngFactory, ServerHandshakeOutcome, server_handshake_xx},
 };
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -27,7 +29,9 @@ pub struct ServerTransportConfig {
     pub home: PathBuf,
     pub server_id: String,
     pub api_version: u32,
-    pub device_store: Arc<DeviceTokenStore>,
+    pub server_keypair: Arc<NoiseKeypair>,
+    pub noise_rng: Arc<dyn NoiseRngFactory>,
+    pub device_store: Arc<AuthorizedDeviceStore>,
     pub pairing_codes: Arc<PairingCodeStore>,
     pub revocations: RevocationBus,
     pub active_tcp_connections: Arc<AtomicUsize>,
@@ -43,8 +47,8 @@ pub struct AcceptedStream {
     /// True if frame 1 on a non-mux TCP stream was followed immediately by pipelined bytes.
     pub has_pipelined_bytes: bool,
     pub device_id: Option<String>,
-    /// Effective bearer token for the authenticated TCP session (or `None` on Unix sockets).
-    pub auth_token: Option<zeroize::Zeroizing<String>>,
+    /// Authenticated peer's base64url Noise X25519 static public key (`None` on Unix sockets).
+    pub client_pubkey: Option<String>,
     pub stop_rx: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -94,7 +98,7 @@ pub fn spawn_unix_listener<H, Fut>(
                                     initial_request: None,
                                     has_pipelined_bytes: false,
                                     device_id: None,
-                                    auth_token: None,
+                                    client_pubkey: None,
                                     stop_rx: conn_stop,
                                 })
                                 .await;
@@ -153,7 +157,7 @@ pub fn spawn_tcp_listener<H, Fut>(
 }
 
 async fn wait_device_revoked(
-    device_store: &Arc<DeviceTokenStore>,
+    device_store: &Arc<AuthorizedDeviceStore>,
     revoke_rx: &mut tokio::sync::broadcast::Receiver<String>,
     device_id: &str,
     inline_auth: bool,
@@ -162,7 +166,7 @@ async fn wait_device_revoked(
         match revoke_rx.recv().await {
             Ok(revoked_id) if revoked_id == device_id => return,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                if device_id != "legacy-server-token" && !device_id.starts_with("ts:") {
+                if !device_id.starts_with("ts:") {
                     let valid = if inline_auth {
                         device_store.is_valid_device_id(device_id)
                     } else {
@@ -201,7 +205,7 @@ async fn send_rpc_error<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 async fn watch_stop_and_revocation(
-    device_store: Arc<DeviceTokenStore>,
+    device_store: Arc<AuthorizedDeviceStore>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
     mut revoke_rx: tokio::sync::broadcast::Receiver<String>,
     device_id: String,
@@ -218,9 +222,9 @@ async fn watch_stop_and_revocation(
     let _ = conn_stop_tx.send(true);
 }
 
-/// Runs first-frame authentication, `transport.mux` (`yamux/1`) upgrade, and device revocation
-/// enforcement over an arbitrary async byte stream (such as `tokio::net::TcpStream` or a
-/// simulated `turmoil::net::TcpStream`).
+/// Runs `Noise_XX` E2EE handshake, public-key / pairing-code / Tailscale WhoIs authentication,
+/// `transport.mux` (`yamux/1`) upgrade, and live device revocation enforcement over an arbitrary
+/// async byte stream (such as `tokio::net::TcpStream` or a simulated `turmoil::net::TcpStream`).
 ///
 /// Set `inline_auth = true` in deterministic simulations to avoid `spawn_blocking` thread jitter.
 pub async fn serve_authenticated_stream<S, H, Fut>(
@@ -239,7 +243,25 @@ where
     if *stop_rx.borrow() {
         return Ok(());
     }
-    let (read_half, mut writer) = tokio::io::split(stream);
+
+    let noise_stream = match server_handshake_xx(
+        stream,
+        &cfg.server_keypair,
+        cfg.noise_rng.as_ref(),
+        &mut stop_rx,
+    )
+    .await?
+    {
+        ServerHandshakeOutcome::Established(ns) => *ns,
+        ServerHandshakeOutcome::RejectedLegacyPlaintext | ServerHandshakeOutcome::Closed => {
+            return Ok(());
+        }
+    };
+
+    let client_static = *noise_stream.remote_static();
+    let client_pubkey_b64 = noise_stream.remote_pubkey_b64();
+
+    let (read_half, mut writer) = tokio::io::split(noise_stream);
     let mut reader = tokio::io::BufReader::new(read_half);
     let line_opt = tokio::select! {
         biased;
@@ -263,82 +285,59 @@ where
         .ok_or_else(|| anyhow::anyhow!("Missing string field: method"))?
         .to_owned();
 
-    let home = cfg.home.clone();
     let device_store = cfg.device_store.clone();
     let pairing_codes = cfg.pairing_codes.clone();
     let ts_verifier = cfg.tailscale_verifier.clone();
     let ts_devices = cfg.tailscale_devices.clone();
-    let provided = input["auth"].as_str().unwrap_or("").to_owned();
-    let provided_auth = provided.clone();
-    let is_ts_request = canban_types::is_tailscale_auth(&provided_auth);
+    let auth_mode = input["params"]["auth_mode"]
+        .as_str()
+        .or_else(|| input["auth_mode"].as_str())
+        .unwrap_or("key")
+        .to_owned();
+    let pairing_code = input["params"]["pairing_code"]
+        .as_str()
+        .or_else(|| input["pairing_code"].as_str())
+        .map(str::to_owned);
     let device_name = input["params"]["device_name"].as_str().map(str::to_owned);
-    let allow_upgrade = method == "transport.mux";
+    let allow_pairing = method == "transport.mux";
 
     let auth_work = move || {
-        if canban_types::is_tailscale_auth(&provided_auth) {
-            if let (Some(verifier), Some(addr)) = (ts_verifier.as_deref(), peer_addr)
-                && let Some(peer) = verifier.verify_peer(addr)
-            {
-                let device_id = format!("ts:{}", peer.node_id);
-                let effective_name = device_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&peer.device_name);
-                ts_devices.record(&device_id, effective_name);
-                let session_secret = device_store.generate_ephemeral_session_token();
-                return Ok((
-                    TcpAuthOutcome::Authenticated {
-                        device_id,
-                        upgraded_token: None,
-                        deprecated_legacy: false,
-                    },
-                    Some(session_secret),
-                    true,
-                ));
-            }
-            return Ok((TcpAuthOutcome::Rejected, None, false));
-        }
-        let res = auth::authenticate_tcp_token(
-            &home,
+        auth::authenticate_noise_session(
             &device_store,
             &pairing_codes,
-            &provided_auth,
+            ts_verifier.as_deref(),
+            &ts_devices,
+            peer_addr,
+            &client_static,
+            &auth_mode,
+            pairing_code.as_deref(),
             device_name.as_deref(),
-            allow_upgrade,
-        )?;
-        Ok::<_, anyhow::Error>((res, None, false))
+            allow_pairing,
+        )
     };
 
-    let (outcome, ephemeral_session_token, is_tailscale_session) = if inline_auth {
+    let outcome = if inline_auth {
         auth_work()?
     } else {
         tokio::task::spawn_blocking(auth_work).await??
     };
 
-    let (device_id, upgraded_token, deprecated_legacy) = match outcome {
-        TcpAuthOutcome::Authenticated {
+    let (device_id, auth_kind) = match outcome {
+        NoiseAuthOutcome::Authenticated {
             device_id,
-            upgraded_token,
-            deprecated_legacy,
-        } => (device_id, upgraded_token, deprecated_legacy),
-        TcpAuthOutcome::Rejected => {
-            let msg = if is_ts_request {
+            auth_kind,
+        } => (device_id, auth_kind),
+        NoiseAuthOutcome::Rejected { is_tailscale } => {
+            let msg = if is_tailscale {
                 "Tailscale authentication failed: ensure both devices are signed into the same personal Tailscale account"
             } else {
-                "Authentication required: invalid or missing device token"
+                "Authentication required: device key is not authorized on this host"
             };
             send_rpc_error(&mut writer, &id, -32001, msg).await;
             let _ = writer.shutdown().await;
             return Ok(());
         }
     };
-    let session_token = zeroize::Zeroizing::new(
-        ephemeral_session_token
-            .clone()
-            .or_else(|| upgraded_token.clone())
-            .unwrap_or(provided),
-    );
 
     if method == "transport.mux" {
         if !reader.buffer().is_empty() {
@@ -362,27 +361,18 @@ where
             .await;
             return Ok(());
         }
-        let mut res_obj = json!({
-            "ready": true,
-            "protocol": "yamux/1",
-            "server_id": cfg.server_id,
-            "api_version": cfg.api_version,
-            "device_id": device_id,
-            "deprecated_legacy_token": deprecated_legacy,
-        });
-        if let Some(tok) = upgraded_token {
-            res_obj["upgraded_token"] = json!(tok);
-        }
-        if is_tailscale_session {
-            res_obj["auth_mode"] = json!("tailscale");
-            if let Some(st) = ephemeral_session_token {
-                res_obj["session_token"] = json!(st);
-            }
-        }
         let reply = json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": res_obj,
+            "result": {
+                "ready": true,
+                "protocol": "yamux/1",
+                "server_id": cfg.server_id,
+                "server_pubkey": cfg.server_keypair.public_b64(),
+                "api_version": cfg.api_version,
+                "device_id": device_id,
+                "auth_mode": auth_kind,
+            },
         });
         tokio::time::timeout(
             Duration::from_secs(30),
@@ -397,7 +387,7 @@ where
             leftover,
             cfg,
             device_id,
-            session_token,
+            client_pubkey_b64,
             stop_rx,
             inline_auth,
             handler,
@@ -422,7 +412,7 @@ where
         initial_request: Some(input),
         has_pipelined_bytes,
         device_id: Some(device_id),
-        auth_token: Some(session_token),
+        client_pubkey: Some(client_pubkey_b64),
         stop_rx: conn_stop_rx,
     })
     .await;
@@ -437,7 +427,7 @@ async fn handle_mux_session<S, H, Fut>(
     leftover: Vec<u8>,
     cfg: Arc<ServerTransportConfig>,
     device_id: String,
-    session_token: zeroize::Zeroizing<String>,
+    client_pubkey: String,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
     inline_auth: bool,
     handler: Arc<H>,
@@ -466,14 +456,14 @@ where
                 let h = handler.clone();
                 let child_stop = conn_stop_rx.clone();
                 let did = device_id.clone();
-                let tok = session_token.clone();
+                let cpk = client_pubkey.clone();
                 tokio::spawn(async move {
                     h(AcceptedStream {
                         stream: TransportStream::Mux(mux_stream),
                         initial_request: None,
                         has_pipelined_bytes: false,
                         device_id: Some(did),
-                        auth_token: Some(tok),
+                        client_pubkey: Some(cpk),
                         stop_rx: child_stop,
                     })
                     .await;

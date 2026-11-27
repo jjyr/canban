@@ -638,12 +638,15 @@ fn finalize_workspace(app: Arc<canban_app_server::AppClient>) -> Result<Option<(
             saved_project,
         });
     }
+    let local_home = app.home.clone();
     let client = canban_app_server::hosts::desktop_multi_host_client(app)?;
     let backend: Arc<dyn crate::backend::UiBackend> =
         Arc::new(crate::backend::ClientBackend::with_providers(
             client,
             Some(Arc::new(canban_app_server::hosts::DesktopDiscoveryProvider)),
-            Some(Arc::new(canban_app_server::hosts::DesktopSshProvider)),
+            Some(Arc::new(canban_app_server::hosts::DesktopSshProvider::new(
+                local_home,
+            ))),
         ));
     crate::drafts::persistence::start(backend.clone())?;
     let _ = crate::backend::set(backend);

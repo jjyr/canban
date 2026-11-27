@@ -12,7 +12,6 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-base64.workspace = true
 canban-context.workspace = true
 canban-notifications.workspace = true
 canban-scheduler.workspace = true
@@ -20,12 +19,9 @@ canban-sync.workspace = true
 canban-terminal = { workspace = true, default-features = false }
 canban-transport.workspace = true
 canban-types.workspace = true
-chacha20poly1305.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tokio.workspace = true
-zeroize.workspace = true
 
 [dev-dependencies]
 canban-app-server.workspace = true

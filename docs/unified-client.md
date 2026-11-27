@@ -30,14 +30,14 @@ All clients—Desktop UI (macOS/Linux), Mobile UI (iOS/Android), and CLI (`canba
                                             │
                                             ▼
                          canban-transport (pure wire layer)
-        framing · ts_auto / dev_... / pair_... auth · yamux/1 mux · PTY relay
+        Noise_XX E2EE · pubkey / pair_... / Tailscale WhoIs auth · yamux/1 mux · PTY relay
 ```
 
 ### 1. Transport vs Connector
 
-- **`canban-transport`** remains the pure wire layer (zero subprocesses, zero SQLite, zero platform-specific daemon management): framed JSON-RPC lines, authentication, revocation enforcement, and `yamux/1` stream multiplexing.
+- **`canban-transport`** remains the pure wire layer (zero subprocesses, zero SQLite, zero platform-specific daemon management): `Noise_XX_25519_ChaChaPoly_BLAKE2s` E2EE framing, X25519 public-key / pairing / Tailscale WhoIs authorization, revocation enforcement, and `yamux/1` stream multiplexing.
 - **`HostConnector`** abstracts turning a `HostTransport` specification (`Tcp`, `Local`, `Ssh`) into a ready `ClientTransport` plus an optional lifecycle `Lease`:
-  - **`TcpConnector` (built-in on all platforms):** dials TCP, negotiates `yamux/1`, handles `ts_auto` / `pair_...` / `dev_...` auth and token upgrade.
+  - **`TcpConnector` (built-in on all platforms):** dials TCP, completes `Noise_XX` with pinned host key verification (`?pk=`) or Tailscale TOFU, negotiates `yamux/1`, and authenticates via static client public key / `pair_...` / Tailscale WhoIs.
   - **`LocalUnixConnector` (desktop):** connects to `<home>/app.sock`, optionally spawns or activates the local `canban serve` daemon, and performs local version/API checks.
   - **`SshConnector` (desktop):** opens an SSH tunnel via `canban-exec`, exposes the forwarded endpoint as a `ClientTransport`, and returns a `Lease` whose `Drop` cleans up the tunnel process.
 
@@ -48,7 +48,7 @@ Once a `ClientTransport` is established, every higher-level behavior—`app.ping
 Keep compile-time Cargo features and runtime capabilities strictly separated:
 
 - **Cargo features (dependency & sandbox pruning only):**
-  - **Always built-in (no feature gate):** `TcpConnector`, `yamux/1`, Tailscale same-account protocol auth (`ts_auto`), bare Tailscale address & `canban://` URI parsing (`TransportSecurity`), `host.discover_canban`, and `canban-sync`.
+  - **Always built-in (no feature gate):** `TcpConnector`, `Noise_XX` E2EE, `yamux/1`, Tailscale same-account protocol auth, bare Tailscale address & `canban://` (`?pk=`) URI parsing, `host.discover_canban`, and `canban-sync`.
   - **Optional features (desktop / CLI only):**
     - `local-daemon`: `LocalUnixConnector`, local daemon spawn/handoff, `local` host registration.
     - `ssh`: `SshConnector`, non-interactive SSH auto-pairing, and remote host bootstrap (via `canban-exec`).

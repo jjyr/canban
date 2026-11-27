@@ -1,9 +1,11 @@
-//! Per-device revocable bearer tokens, single-use pairing codes, deprecated
-//! `server.token` auto-upgrade verification, and live device revocation broadcast.
+//! Noise public-key device authorization (`authorized_devices.json`), single-use pairing codes
+//! (`pairing_codes.json`), Tailscale WhoIs session tracking, and live device revocation broadcast.
+use crate::noise::{
+    ct_eq_bytes, decode_pubkey, encode_pubkey, pubkey_b64_fingerprint, pubkey_fingerprint,
+};
 use anyhow::Result;
 use canban_types::{
-    Clock, DEVICE_TOKEN_PREFIX, IdGen, PAIRING_CODE_PREFIX, PairedDevice, is_device_token,
-    is_pairing_code, system_clock, system_id_gen,
+    Clock, IdGen, PAIRING_CODE_PREFIX, PairedDevice, is_pairing_code, system_clock, system_id_gen,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -21,19 +23,19 @@ use std::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredDeviceToken {
+struct StoredAuthorizedDevice {
     id: String,
     name: String,
-    token_hash: String,
+    pubkey: String,
     created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_seen_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct DeviceTokensFile {
+struct AuthorizedDevicesFile {
     #[serde(default)]
-    devices: Vec<StoredDeviceToken>,
+    devices: Vec<StoredAuthorizedDevice>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,37 +98,6 @@ fn write_private_atomic(path: &Path, content: &[u8], fs_sync: bool) -> Result<()
     Ok(())
 }
 
-/// DEPRECATED: legacy static `server.token` path; retained only to auto-upgrade older hosts.
-pub fn legacy_token_path(home: &Path) -> PathBuf {
-    home.join("server.token")
-}
-
-/// DEPRECATED: read legacy static `server.token` if present.
-pub fn read_legacy_server_token(home: &Path) -> Option<String> {
-    std::fs::read_to_string(legacy_token_path(home))
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| s.len() >= 32)
-}
-
-/// DEPRECATED: generate legacy static `server.token` for backward-compatibility tests.
-pub fn ensure_legacy_server_token(home: &Path) -> Result<String> {
-    if let Some(existing) = read_legacy_server_token(home) {
-        return Ok(existing);
-    }
-    let secret = format!("{}{}", canban_types::token_id(), canban_types::token_id());
-    let path = legacy_token_path(home);
-    write_private_atomic(&path, format!("{secret}\n").as_bytes(), true)?;
-    Ok(secret)
-}
-
-/// DEPRECATED: constant-time token comparison for legacy `server.token` verification.
-pub fn verify_legacy_token(expected: &str, provided: &str) -> bool {
-    let expected = expected.trim();
-    let provided = provided.trim();
-    expected.len() >= 32 && ct_eq(expected, provided)
-}
-
 fn hash_secret(raw: &str) -> String {
     let digest = Sha256::digest(raw.trim().as_bytes());
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -139,26 +110,18 @@ fn hash_secret(raw: &str) -> String {
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
-    let ab = a.as_bytes();
-    let bb = b.as_bytes();
-    if ab.len() != bb.len() || ab.is_empty() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in ab.iter().zip(bb.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    ct_eq_bytes(a.as_bytes(), b.as_bytes())
 }
 
-impl From<&StoredDeviceToken> for PairedDevice {
-    fn from(s: &StoredDeviceToken) -> Self {
+impl From<&StoredAuthorizedDevice> for PairedDevice {
+    fn from(s: &StoredAuthorizedDevice) -> Self {
         Self {
             id: s.id.clone(),
             name: s.name.clone(),
             created_at: s.created_at,
             last_seen_at: s.last_seen_at,
-            auth_kind: String::new(),
+            auth_kind: "key".to_owned(),
+            pubkey_fingerprint: pubkey_b64_fingerprint(&s.pubkey).unwrap_or_default(),
         }
     }
 }
@@ -201,12 +164,12 @@ impl TailscaleSessionRegistry {
     }
 
     /// Records or refreshes a live Tailscale peer entry (last_seen throttled to 30s).
-    pub fn record(&self, device_id: &str, name: &str) {
-        self.record_at(device_id, name, self.clock.now_ms());
+    pub fn record(&self, device_id: &str, name: &str, pubkey_fingerprint: &str) {
+        self.record_at(device_id, name, pubkey_fingerprint, self.clock.now_ms());
     }
 
     /// Pure clock-injected variant of [`Self::record`].
-    pub fn record_at(&self, device_id: &str, name: &str, now_ms: u64) {
+    pub fn record_at(&self, device_id: &str, name: &str, pubkey_fingerprint: &str, now_ms: u64) {
         let clean = name.trim();
         let display_name = if clean.is_empty() {
             "Tailscale device"
@@ -216,6 +179,9 @@ impl TailscaleSessionRegistry {
         let mut guard = self.devices.lock().unwrap();
         if let Some(existing) = guard.get_mut(device_id) {
             existing.name = display_name.to_owned();
+            if !pubkey_fingerprint.is_empty() {
+                existing.pubkey_fingerprint = pubkey_fingerprint.to_owned();
+            }
             if existing
                 .last_seen_at
                 .is_none_or(|prev| now_ms.saturating_sub(prev) >= 30_000)
@@ -231,6 +197,7 @@ impl TailscaleSessionRegistry {
                     created_at: now_ms,
                     last_seen_at: Some(now_ms),
                     auth_kind: "tailscale".to_owned(),
+                    pubkey_fingerprint: pubkey_fingerprint.to_owned(),
                 },
             );
         }
@@ -249,17 +216,7 @@ impl TailscaleSessionRegistry {
     }
 }
 
-/// Generates an ephemeral per-session secret for `enc:v1:` Vault sealing on Tailscale connections.
-pub fn generate_ephemeral_session_token() -> String {
-    generate_ephemeral_session_token_with(&canban_types::SystemIdGen)
-}
-
-/// Deterministic / injected-`IdGen` variant of [`generate_ephemeral_session_token`].
-pub fn generate_ephemeral_session_token_with(id_gen: &dyn IdGen) -> String {
-    generate_prefixed_secret_with("ts_sess_", id_gen)
-}
-
-/// Broadcast bus notifying active transport sessions immediately when a device token is revoked.
+/// Broadcast bus notifying active transport sessions immediately when a device is revoked.
 #[derive(Clone)]
 pub struct RevocationBus {
     tx: tokio::sync::broadcast::Sender<String>,
@@ -332,22 +289,22 @@ fn generate_prefixed_secret_with(prefix: &str, id_gen: &dyn IdGen) -> String {
     format!("{prefix}{}{}", id_gen.next_token(), id_gen.next_token())
 }
 
-/// File-backed per-device revocable token store (`<home>/device_tokens.json`, SHA-256 hashes).
+/// File-backed authorized client Noise public-key registry (`<home>/authorized_devices.json`).
 /// Reloads from disk on each read/mutation so CLI commands and the running daemon stay consistent.
-pub struct DeviceTokenStore {
-    file: JsonSecretFile<DeviceTokensFile>,
+pub struct AuthorizedDeviceStore {
+    file: JsonSecretFile<AuthorizedDevicesFile>,
     clock: Arc<dyn Clock>,
     id_gen: Arc<dyn IdGen>,
 }
 
-impl DeviceTokenStore {
+impl AuthorizedDeviceStore {
     pub fn open(home: &Path) -> Self {
         Self::open_with_clock(home, system_clock())
     }
 
     pub fn open_with_clock(home: &Path, clock: Arc<dyn Clock>) -> Self {
         Self {
-            file: JsonSecretFile::new(home.join("device_tokens.json")),
+            file: JsonSecretFile::new(home.join("authorized_devices.json")),
             clock,
             id_gen: system_id_gen(),
         }
@@ -358,61 +315,80 @@ impl DeviceTokenStore {
         self
     }
 
-    /// Controls whether atomic secret-file writes call `File::sync_all()`.
+    /// Controls whether atomic file writes call `File::sync_all()`.
     /// Production defaults to `true`; ephemeral DST harnesses may disable fsync (`false`).
     pub fn with_fs_sync(mut self, fs_sync: bool) -> Self {
         self.file.fs_sync = fs_sync;
         self
     }
 
-    /// Generates an ephemeral Tailscale session token using this store's configured [`IdGen`].
-    pub fn generate_ephemeral_session_token(&self) -> String {
-        generate_ephemeral_session_token_with(self.id_gen.as_ref())
+    /// Authorizes a client's X25519 Noise public key (idempotent by public key).
+    pub fn authorize_pubkey(&self, name: &str, pubkey_b64: &str) -> Result<PairedDevice> {
+        self.authorize_pubkey_at(name, pubkey_b64, self.clock.now_ms())
     }
 
-    pub fn issue_device(&self, name: &str) -> Result<(PairedDevice, String)> {
-        self.issue_device_at(name, self.clock.now_ms())
-    }
-
-    /// Pure clock-injected variant of [`Self::issue_device`].
-    pub fn issue_device_at(&self, name: &str, now_ms: u64) -> Result<(PairedDevice, String)> {
+    /// Pure clock-injected variant of [`Self::authorize_pubkey`].
+    pub fn authorize_pubkey_at(
+        &self,
+        name: &str,
+        pubkey_b64: &str,
+        now_ms: u64,
+    ) -> Result<PairedDevice> {
+        let raw_pk = decode_pubkey(pubkey_b64)?;
+        let normalized_pk = encode_pubkey(&raw_pk);
         let clean = name.trim();
         let display_name = if clean.is_empty() {
             "Remote device"
         } else {
             clean
         };
-        let raw_token = generate_prefixed_secret_with(DEVICE_TOKEN_PREFIX, self.id_gen.as_ref());
-        let entry = StoredDeviceToken {
-            id: self.id_gen.next_id(),
-            name: display_name.to_owned(),
-            token_hash: hash_secret(&raw_token),
-            created_at: now_ms,
-            last_seen_at: None,
-        };
-        let view = PairedDevice::from(&entry);
         self.file.mutate(|data| {
+            if let Some(existing) = data
+                .devices
+                .iter_mut()
+                .find(|d| ct_eq(&d.pubkey, &normalized_pk))
+            {
+                let mut dirty = false;
+                if !clean.is_empty() && existing.name != display_name {
+                    existing.name = display_name.to_owned();
+                    dirty = true;
+                }
+                if existing
+                    .last_seen_at
+                    .is_none_or(|prev| now_ms.saturating_sub(prev) >= 30_000)
+                {
+                    existing.last_seen_at = Some(now_ms);
+                    dirty = true;
+                }
+                return Ok((dirty, PairedDevice::from(&*existing)));
+            }
+            let entry = StoredAuthorizedDevice {
+                id: self.id_gen.next_id(),
+                name: display_name.to_owned(),
+                pubkey: normalized_pk,
+                created_at: now_ms,
+                last_seen_at: None,
+            };
+            let view = PairedDevice::from(&entry);
             data.devices.push(entry);
-            Ok((true, (view, raw_token)))
+            Ok((true, view))
         })
     }
 
-    pub fn verify(&self, candidate: &str) -> Option<PairedDevice> {
-        self.verify_at(candidate, self.clock.now_ms())
+    /// Verifies that `pubkey_b64` belongs to an authorized device and refreshes `last_seen_at`.
+    pub fn verify_pubkey(&self, pubkey_b64: &str) -> Option<PairedDevice> {
+        self.verify_pubkey_at(pubkey_b64, self.clock.now_ms())
     }
 
-    /// Pure clock-injected variant of [`Self::verify`].
-    pub fn verify_at(&self, candidate: &str, now_ms: u64) -> Option<PairedDevice> {
-        let trimmed = candidate.trim();
-        if !is_device_token(trimmed) || trimmed.len() < DEVICE_TOKEN_PREFIX.len() + 32 {
-            return None;
-        }
-        let candidate_hash = hash_secret(trimmed);
+    /// Pure clock-injected variant of [`Self::verify_pubkey`].
+    pub fn verify_pubkey_at(&self, pubkey_b64: &str, now_ms: u64) -> Option<PairedDevice> {
+        let raw_pk = decode_pubkey(pubkey_b64).ok()?;
+        let normalized_pk = encode_pubkey(&raw_pk);
         let mut matched = None;
         let _ = self.file.mutate(|data| {
             let mut dirty = false;
             for entry in &mut data.devices {
-                if ct_eq(&entry.token_hash, &candidate_hash) {
+                if ct_eq(&entry.pubkey, &normalized_pk) {
                     if entry
                         .last_seen_at
                         .is_none_or(|prev| now_ms.saturating_sub(prev) >= 30_000)
@@ -537,149 +513,87 @@ impl PairingCodeStore {
     }
 }
 
-pub enum TcpAuthOutcome {
+/// Result of authenticating an already-established `Noise_XX` TCP session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoiseAuthOutcome {
     Authenticated {
         device_id: String,
-        upgraded_token: Option<String>,
-        deprecated_legacy: bool,
+        auth_kind: &'static str,
     },
-    Rejected,
+    Rejected {
+        is_tailscale: bool,
+    },
 }
 
-fn issue_upgraded_token_at(
-    device_store: &DeviceTokenStore,
-    device_name: Option<&str>,
-    fallback_name: &str,
-    deprecated_legacy: bool,
-    now_ms: Option<u64>,
-) -> Result<TcpAuthOutcome> {
-    let effective_name = device_name
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(fallback_name);
-    let (device, dev_token) = match now_ms {
-        Some(ts) => device_store.issue_device_at(effective_name, ts)?,
-        None => device_store.issue_device(effective_name)?,
-    };
-    Ok(TcpAuthOutcome::Authenticated {
-        device_id: device.id,
-        upgraded_token: Some(dev_token),
-        deprecated_legacy,
-    })
-}
-
-pub fn authenticate_tcp_token(
-    home: &Path,
-    device_store: &DeviceTokenStore,
+/// Authorizes an established `Noise_XX` peer (`client_static`) via one-time pairing code,
+/// Tailscale WhoIs same-account verification, or persistent `AuthorizedDeviceStore` membership.
+#[allow(clippy::too_many_arguments)]
+pub fn authenticate_noise_session(
+    device_store: &AuthorizedDeviceStore,
     pairing_codes: &PairingCodeStore,
-    raw_token: &str,
+    tailscale_verifier: Option<&dyn TailscalePeerVerifier>,
+    tailscale_devices: &TailscaleSessionRegistry,
+    peer_addr: Option<SocketAddr>,
+    client_static: &[u8; 32],
+    auth_mode: &str,
+    pairing_code: Option<&str>,
     device_name: Option<&str>,
-    allow_auto_upgrade: bool,
-) -> Result<TcpAuthOutcome> {
-    authenticate_tcp_token_inner(
-        home,
-        device_store,
-        pairing_codes,
-        raw_token,
-        device_name,
-        allow_auto_upgrade,
-        None,
-    )
-}
+    allow_pairing: bool,
+) -> Result<NoiseAuthOutcome> {
+    let client_pk_b64 = encode_pubkey(client_static);
+    let client_fp = pubkey_fingerprint(client_static);
 
-/// Pure clock-injected variant of [`authenticate_tcp_token`].
-pub fn authenticate_tcp_token_at(
-    home: &Path,
-    device_store: &DeviceTokenStore,
-    pairing_codes: &PairingCodeStore,
-    raw_token: &str,
-    device_name: Option<&str>,
-    allow_auto_upgrade: bool,
-    now_ms: u64,
-) -> Result<TcpAuthOutcome> {
-    authenticate_tcp_token_inner(
-        home,
-        device_store,
-        pairing_codes,
-        raw_token,
-        device_name,
-        allow_auto_upgrade,
-        Some(now_ms),
-    )
-}
-
-fn authenticate_tcp_token_inner(
-    home: &Path,
-    device_store: &DeviceTokenStore,
-    pairing_codes: &PairingCodeStore,
-    raw_token: &str,
-    device_name: Option<&str>,
-    allow_auto_upgrade: bool,
-    now_ms: Option<u64>,
-) -> Result<TcpAuthOutcome> {
-    let trimmed = raw_token.trim();
-    if trimmed.is_empty() {
-        return Ok(TcpAuthOutcome::Rejected);
-    }
-
-    if is_pairing_code(trimmed) {
-        let consumed = match now_ms {
-            Some(ts) => allow_auto_upgrade && pairing_codes.consume_code_at(trimmed, ts)?,
-            None => allow_auto_upgrade && pairing_codes.consume_code(trimmed)?,
-        };
-        if consumed {
-            return issue_upgraded_token_at(
-                device_store,
-                device_name,
-                "Remote device",
-                false,
-                now_ms,
-            );
-        }
-        return Ok(TcpAuthOutcome::Rejected);
-    }
-
-    if is_device_token(trimmed) {
-        let verified = match now_ms {
-            Some(ts) => device_store.verify_at(trimmed, ts),
-            None => device_store.verify(trimmed),
-        };
-        return Ok(match verified {
-            Some(device) => TcpAuthOutcome::Authenticated {
+    if let Some(raw_code) = pairing_code.map(str::trim).filter(|s| !s.is_empty()) {
+        if allow_pairing && is_pairing_code(raw_code) && pairing_codes.consume_code(raw_code)? {
+            let effective_name = device_name
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Remote device");
+            let device = device_store.authorize_pubkey(effective_name, &client_pk_b64)?;
+            return Ok(NoiseAuthOutcome::Authenticated {
                 device_id: device.id,
-                upgraded_token: None,
-                deprecated_legacy: false,
-            },
-            None => TcpAuthOutcome::Rejected,
-        });
-    }
-
-    // DEPRECATED: legacy shared static `server.token` fallback.
-    if let Some(expected) = read_legacy_server_token(home)
-        && verify_legacy_token(&expected, trimmed)
-    {
-        if allow_auto_upgrade {
-            return issue_upgraded_token_at(
-                device_store,
-                device_name,
-                "Upgraded legacy host",
-                true,
-                now_ms,
-            );
+                auth_kind: "key",
+            });
         }
-        return Ok(TcpAuthOutcome::Authenticated {
-            device_id: "legacy-server-token".into(),
-            upgraded_token: None,
-            deprecated_legacy: true,
+        return Ok(NoiseAuthOutcome::Rejected {
+            is_tailscale: false,
         });
     }
 
-    Ok(TcpAuthOutcome::Rejected)
+    if auth_mode == "tailscale" {
+        if let (Some(verifier), Some(addr)) = (tailscale_verifier, peer_addr)
+            && let Some(peer) = verifier.verify_peer(addr)
+        {
+            let device_id = format!("ts:{}", peer.node_id);
+            let effective_name = device_name
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&peer.device_name);
+            tailscale_devices.record(&device_id, effective_name, &client_fp);
+            return Ok(NoiseAuthOutcome::Authenticated {
+                device_id,
+                auth_kind: "tailscale",
+            });
+        }
+        return Ok(NoiseAuthOutcome::Rejected { is_tailscale: true });
+    }
+
+    if let Some(device) = device_store.verify_pubkey(&client_pk_b64) {
+        return Ok(NoiseAuthOutcome::Authenticated {
+            device_id: device.id,
+            auth_kind: "key",
+        });
+    }
+
+    Ok(NoiseAuthOutcome::Rejected {
+        is_tailscale: false,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::noise::{DeterministicNoiseRng, NoiseKeypair};
 
     #[test]
     fn clock_injected_auth_stores_and_tailscale_registry_throttle_and_expire_deterministically() {
@@ -697,21 +611,26 @@ mod tests {
         let clock = Arc::new(MockClock(AtomicU64::new(T0)));
         let dir = tempfile::tempdir().unwrap();
 
-        let devices = DeviceTokenStore::open_with_clock(dir.path(), clock.clone())
+        let devices = AuthorizedDeviceStore::open_with_clock(dir.path(), clock.clone())
             .with_id_gen(DeterministicIdGen::arc(7));
         let codes = PairingCodeStore::open_with_clock(dir.path(), clock.clone())
             .with_id_gen(DeterministicIdGen::arc(11));
         let ts = TailscaleSessionRegistry::new_with_clock(clock.clone());
+        let rng = DeterministicNoiseRng::new(DeterministicIdGen::arc(13));
+        let kp = NoiseKeypair::generate_with_rng(&rng).unwrap();
+        let pk_b64 = kp.public_b64();
+        let fp = kp.fingerprint();
 
         // Tailscale registry records created_at/last_seen_at and throttles refreshes to 30s.
-        ts.record("ts:node-1", "Laptop");
+        ts.record("ts:node-1", "Laptop", &fp);
         assert_eq!(ts.list()[0].created_at, T0);
         assert_eq!(ts.list()[0].last_seen_at, Some(T0));
+        assert_eq!(ts.list()[0].pubkey_fingerprint, fp);
         clock.0.store(T0 + 29_999, Ordering::SeqCst);
-        ts.record("ts:node-1", "Laptop");
+        ts.record("ts:node-1", "Laptop", &fp);
         assert_eq!(ts.list()[0].last_seen_at, Some(T0));
         clock.0.store(T0 + 30_000, Ordering::SeqCst);
-        ts.record("ts:node-1", "Laptop");
+        ts.record("ts:node-1", "Laptop", &fp);
         assert_eq!(ts.list()[0].last_seen_at, Some(T0 + 30_000));
 
         // Pairing code expires strictly at T0 + ttl_secs * 1000 under mock clock.
@@ -721,70 +640,60 @@ mod tests {
         assert!(!codes.consume_code_at(&code_exp, T0 + 60_000).unwrap());
 
         let (code_ok, _) = codes.create_code_at(60, T0).unwrap();
-        let upgraded_tok = match authenticate_tcp_token_at(
-            dir.path(),
-            &devices,
-            &codes,
-            &code_ok,
-            Some("Phone"),
-            true,
-            T0 + 10_000,
-        )
-        .unwrap()
-        {
-            TcpAuthOutcome::Authenticated {
-                upgraded_token: Some(tok),
-                ..
-            } => tok,
-            _ => panic!("expected upgraded token"),
-        };
+        clock.0.store(T0 + 10_000, Ordering::SeqCst);
+        assert_eq!(
+            authenticate_noise_session(
+                &devices,
+                &codes,
+                None,
+                &ts,
+                None,
+                kp.public_bytes(),
+                "key",
+                Some(&code_ok),
+                Some("Phone"),
+                true,
+            )
+            .unwrap(),
+            NoiseAuthOutcome::Authenticated {
+                device_id: devices.list()[0].id.clone(),
+                auth_kind: "key",
+            }
+        );
         let listed = devices.list();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].created_at, T0 + 10_000);
         assert_eq!(listed[0].last_seen_at, None);
+        assert_eq!(listed[0].pubkey_fingerprint, fp);
 
-        // Device token verification updates last_seen_at and enforces 30s throttle.
-        let v1 = devices.verify_at(&upgraded_tok, T0 + 12_000).unwrap();
+        // Device pubkey verification updates last_seen_at and enforces 30s throttle.
+        let v1 = devices.verify_pubkey_at(&pk_b64, T0 + 12_000).unwrap();
         assert_eq!(v1.last_seen_at, Some(T0 + 12_000));
-        let v2 = devices.verify_at(&upgraded_tok, T0 + 41_999).unwrap();
+        let v2 = devices.verify_pubkey_at(&pk_b64, T0 + 41_999).unwrap();
         assert_eq!(v2.last_seen_at, Some(T0 + 12_000));
-        let v3 = devices.verify_at(&upgraded_tok, T0 + 42_000).unwrap();
+        let v3 = devices.verify_pubkey_at(&pk_b64, T0 + 42_000).unwrap();
         assert_eq!(v3.last_seen_at, Some(T0 + 42_000));
     }
 
     #[test]
-    fn with_fs_sync_false_persists_reloads_and_revokes_device_tokens_and_pairing_codes() {
+    fn with_fs_sync_false_persists_reloads_and_revokes_authorized_devices_and_pairing_codes() {
         let dir = tempfile::tempdir().unwrap();
-        let devices = DeviceTokenStore::open(dir.path()).with_fs_sync(false);
+        let devices = AuthorizedDeviceStore::open(dir.path()).with_fs_sync(false);
         let codes = PairingCodeStore::open(dir.path()).with_fs_sync(false);
+        let kp = NoiseKeypair::generate().unwrap();
+        let pk_b64 = kp.public_b64();
 
         let (code, _) = codes.create_code(300).unwrap();
         assert!(codes.consume_code(&code).unwrap());
         assert!(!codes.consume_code(&code).unwrap());
 
-        let (dev, tok) = devices.issue_device("Sim Client").unwrap();
-        let reloaded = DeviceTokenStore::open(dir.path());
-        assert_eq!(reloaded.verify(&tok).map(|d| d.id), Some(dev.id.clone()));
+        let dev = devices.authorize_pubkey("Sim Client", &pk_b64).unwrap();
+        let reloaded = AuthorizedDeviceStore::open(dir.path());
+        assert_eq!(
+            reloaded.verify_pubkey(&pk_b64).map(|d| d.id),
+            Some(dev.id.clone())
+        );
         assert!(devices.revoke(&dev.id).unwrap());
-        assert!(reloaded.verify(&tok).is_none());
-    }
-
-    #[test]
-    fn ephemeral_tailscale_session_token_is_deterministic_with_injected_id_gen() {
-        use canban_types::DeterministicIdGen;
-
-        let dir_a = tempfile::tempdir().unwrap();
-        let dir_b = tempfile::tempdir().unwrap();
-        let store_a = DeviceTokenStore::open(dir_a.path())
-            .with_id_gen(DeterministicIdGen::arc(42))
-            .with_fs_sync(false);
-        let store_b = DeviceTokenStore::open(dir_b.path())
-            .with_id_gen(DeterministicIdGen::arc(42))
-            .with_fs_sync(false);
-
-        let tok_a = store_a.generate_ephemeral_session_token();
-        let tok_b = store_b.generate_ephemeral_session_token();
-        assert!(tok_a.starts_with("ts_sess_"));
-        assert_eq!(tok_a, tok_b);
+        assert!(reloaded.verify_pubkey(&pk_b64).is_none());
     }
 }

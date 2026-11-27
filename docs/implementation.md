@@ -21,6 +21,15 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
+## Noise_XX TCP End-to-End Encryption & Public-Key Auth (2026-11-27)
+
+`canban-transport`, `canban-types`, `canban-storage`, `canban-client`, `canban-app-server`, `canban-cli`, `canban-ui`, and `canban-sim` implement mandatory `Noise_XX_25519_ChaChaPoly_BLAKE2s` E2EE over TCP (`snow`, pure Rust, `CBN1` wire preface, zero silent plaintext downgrade; legacy plaintext clients receive JSON-RPC `-32002` and disconnect), advancing `DESKTOP_API` to **94**:
+
+- **Pure X25519 public-key authentication:** Replaces per-device bearer tokens (`dev_...`), legacy `server.token`, and ephemeral `ts_sess_...` session tokens with static Noise keypairs (`<home>/noise.key` on servers, `client_noise.key` / `CredentialStore` on clients), `<home>/authorized_devices.json`, 5-minute single-use `pair_...` pairing codes, `canban device authorize` / `canban pair --client-pubkey`, and Tailscale `WhoIs` auto-auth.
+- **Strict Option B host-key pinning:** Non-Tailscale TCP URIs require `?pk=<base64url>` and verify the server's static key before Noise Message 3 (`HostKeyMismatchError` / `HostConnectionState::KeyMismatch`, halting retries with 0 dials); Tailscale addresses allow bare-address first-time `WhoIs` TOFU and pin `server_pubkey` in `hosts.json`.
+- **Simplified transport & UI surface:** Removes the redundant `enc:v1:` TCP secret sealing wrapper (keeping at-rest `vault.key` SQLite encryption intact), removes `--allow-insecure-bind` (warning only on `0.0.0.0` / `::`), and removes legacy `🔒` / `⚠ Not Tailscale` (`TransportSecurity`) UI badges since TCP is now end-to-end encrypted.
+- **DST verification:** Injects `DeterministicNoiseRng` across all simulated servers and clients (`crates/sim`), verifying 100% seed determinism, wire-tap confidentiality (zero plaintext secrets/codes/RPCs on wire), `?pk=` pinning & pre-Msg3 abort, server key rotation -> `KeyMismatch` zero-dial halting, plaintext `-32002` rejection, and `FaultyStream` ciphertext bit-flip AEAD failure. See [Multi-host daemons](multi-host.md) and [Mobile interaction](mobile-interaction.md).
+
 ## Plain Terminal Command Status (2026-11-26)
 
 Card #176 adds a layered command status projection (`TerminalRuntime.command: Option<ShellCommand>`) for plain interactive shells (`zsh`, `bash >= 4.4`, `fish`) via `$CANBAN_HOME/shell-integration/v1/` namespaced OSC 7501 (`id=canban-shell`), unified status symbols (`status_dot(ACCENT)` while running, `Check` for `exit 0` until the next command, `TriangleAlert` + `exit N` for non-zero exits) overridden whenever an AI agent is active, and `terminal.keys` (`["ctrl+c"]`) routing for plain-shell `terminal.interrupt`, advancing `DESKTOP_API` to **92** (SQLite schema unchanged). See [Dedicated Terminal workspace](terminal-workspace.md).

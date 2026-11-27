@@ -163,6 +163,14 @@ pub trait UiBackend: Send + Sync + 'static {
         anyhow::bail!("Host management is not supported by this backend")
     }
 
+    fn add_host_with_pairing_code(
+        &self,
+        host: SavedHost,
+        _pairing_code: Option<&str>,
+    ) -> Result<HostSummary> {
+        self.add_host(host)
+    }
+
     fn remove_host(&self, _host_id: &str) -> Result<()> {
         anyhow::bail!("Host management is not supported by this backend")
     }
@@ -649,6 +657,15 @@ impl UiBackend for ClientBackend {
 
     fn add_host(&self, host: SavedHost) -> Result<HostSummary> {
         self.client.add_host(host)
+    }
+
+    fn add_host_with_pairing_code(
+        &self,
+        host: SavedHost,
+        pairing_code: Option<&str>,
+    ) -> Result<HostSummary> {
+        self.client
+            .add_host_with_pairing_code(host, pairing_code.map(str::to_owned))
     }
 
     fn remove_host(&self, host_id: &str) -> Result<()> {

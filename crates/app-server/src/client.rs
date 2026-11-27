@@ -7,12 +7,14 @@ pub use canban_transport::ClientEndpoint;
 #[cfg(test)]
 pub(crate) fn rpc_tcp(
     addr: &str,
-    token: Option<&str>,
+    server_pubkey: Option<&str>,
+    auth: canban_transport::TcpAuthMode,
+    client_keypair: Arc<canban_transport::NoiseKeypair>,
     method: &str,
     params: Value,
 ) -> Result<Value> {
     let _rpc = canban_profiler::Span::new("rpc.request");
-    canban_client::rpc_tcp_once(addr, token, method, params)
+    canban_client::rpc_tcp_once(addr, server_pubkey, auth, client_keypair, method, params)
 }
 
 pub struct AppClient {
@@ -111,21 +113,28 @@ impl AppClient {
         Self::connect_or_start_inner(home, cli, None, false, |_| {})
     }
 
-    /// Connect to a remote authenticated TCP `canband` daemon without spawning a local daemon.
-    pub fn connect_tcp(addr: String, token: String) -> Result<Arc<Self>> {
+    /// Connect to a remote Noise_XX E2EE TCP `canband` daemon without spawning a local daemon.
+    pub fn connect_tcp(
+        addr: String,
+        server_pubkey: Option<String>,
+        auth: canban_transport::TcpAuthMode,
+        client_keypair: Arc<canban_transport::NoiseKeypair>,
+    ) -> Result<Arc<Self>> {
         init_mux_relay_opener();
         let transport = Arc::new(canban_transport::ClientTransport::connect_tcp(
             addr,
-            token,
+            server_pubkey,
+            auth,
             network::hostname_string(),
+            client_keypair,
         )?);
         Self::connect_remote_transport(transport)
     }
 
     /// Connect to a remote `canband` exposed via a local SSH-forwarded Unix socket.
     pub fn connect_ssh_socket(socket_path: PathBuf) -> Result<Arc<Self>> {
-        let transport = Arc::new(canban_transport::ClientTransport::connect_direct(
-            ClientEndpoint::Unix(socket_path),
+        let transport = Arc::new(canban_transport::ClientTransport::connect_unix(
+            socket_path,
         )?);
         Self::connect_remote_transport(transport)
     }
@@ -191,12 +200,15 @@ impl AppClient {
             .flatten();
         if let Some(raw_os) = &explicit {
             let raw_str = raw_os.to_string_lossy();
-            let env_token = std::env::var("CANBAN_TOKEN").ok();
-            if let ClientEndpoint::Tcp { addr, token } =
-                canban_client::parse_endpoint(&raw_str, env_token.as_deref())
+            if let ClientEndpoint::Tcp {
+                addr,
+                server_pubkey,
+                auth,
+            } = canban_client::parse_endpoint(&raw_str)
             {
                 emit("connect", "REMOTE", format!("Connecting to {addr}…"));
-                return Self::connect_tcp(addr, token);
+                let kp = canban_client::load_cli_client_keypair(Some(&home))?;
+                return Self::connect_tcp(addr, server_pubkey, auth, kp);
             }
         }
         let sock_path = explicit
@@ -485,9 +497,8 @@ impl AppClient {
 
     pub fn config(&self) -> Config {
         let mut c = self.config.read().unwrap().clone();
-        let (relay_endpoint, relay_token) = self.transport.relay_endpoint_and_token();
-        c.relay_endpoint = Some(relay_endpoint);
-        c.relay_token = relay_token;
+        c.relay_endpoint = Some(self.transport.relay_endpoint());
+        c.relay_token = None;
         c
     }
 
@@ -612,7 +623,7 @@ fn subscribe_session(
     let stream =
         transport.open_sync_stream(Some(Duration::from_secs(45)), Some(Duration::from_secs(30)))?;
     let (read_io, mut write_io) = (stream.reader, stream.writer);
-    let mut req = json!({
+    let req = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "app.subscribe",
@@ -621,9 +632,6 @@ fn subscribe_session(
             "topics": topics,
         }
     });
-    if let Some(token) = stream.auth_token {
-        req["auth"] = json!(token);
-    }
     canban_transport::write_json_line(&mut write_io, &req)?;
 
     let mut reader = BufReader::new(read_io);

@@ -26,15 +26,11 @@ fn sanitize_host_id(raw: &str) -> String {
     format!("{base}-{}", &canban_types::id()[..6])
 }
 
-/// Parses either a `canban://...#<secret>` pairing URI or a bare Tailscale endpoint
+/// Parses either a `canban://<addr>?pk=<key>#pair_...` pairing URI or a bare Tailscale endpoint
 /// (`host.ts.net`, `100.x.y.z`, `fd7a:115c:a1e0::1`) for automatic Tailscale WhoIs sign-in.
-fn parse_desktop_connect_input(raw: &str) -> Option<(String, String, Option<String>)> {
-    if let Some(inv) = canban_client::parse_pairing_invite(raw)
+fn parse_desktop_connect_input(raw: &str) -> Option<canban_client::PairingInvite> {
+    canban_client::parse_pairing_invite(raw)
         .or_else(|| canban_client::parse_tailscale_host_input(raw))
-    {
-        return Some((inv.addr, inv.secret, inv.host_name));
-    }
-    parse_pairing_uri(raw).map(|(addr, token)| (addr, token, None))
 }
 
 pub(crate) fn sync_chip_spec(mark: SyncMark) -> (&'static str, Tone) {
@@ -85,6 +81,7 @@ pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
         endpoint_label: "~/.canban/app.sock".into(),
         ssh_target: None,
         server_id: None,
+        server_pubkey_fingerprint: None,
         connection: HostConnectionState::Connected {
             rtt_ms: 0,
             api_version: crate::backend::desktop_api(),
@@ -1256,6 +1253,7 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
 fn finish_host_registration(
     ui: Ui,
     saved: SavedHost,
+    pairing_code: Option<String>,
     busy: Signal<bool>,
     feedback: Signal<String>,
     feedback_tone: Signal<Tone>,
@@ -1269,6 +1267,7 @@ fn finish_host_registration(
             endpoint_label: saved.transport.endpoint_display(),
             ssh_target: saved.ssh_target.clone(),
             server_id: Some(format!("srv-{}", saved.id)),
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Connected {
                 rtt_ms: 14,
                 api_version: crate::backend::desktop_api(),
@@ -1302,7 +1301,7 @@ fn finish_host_registration(
     ui.spawn(async move {
         let host_name = saved.name.clone();
         let res = blocking(move || {
-            let sum = backend.add_host(saved)?;
+            let sum = backend.add_host_with_pairing_code(saved, pairing_code.as_deref())?;
             let snap = backend.merged_snapshot()?;
             let all = backend.host_summaries();
             Ok::<_, anyhow::Error>((sum, snap, all))
@@ -1634,13 +1633,15 @@ fn connect_tailscale_tab(
                                         name: peer_name,
                                         transport: HostTransport::Tcp {
                                             addr: format!("{peer_ip}:{DEFAULT_DAEMON_PORT}"),
-                                            token: TAILSCALE_AUTH_SENTINEL.into(),
+                                            server_pubkey: None,
+                                            tailscale_auth: true,
                                         },
                                         ssh_target: None,
                                         server_id: None,
                                         enabled: true,
                                         added_at: canban_types::now(),
                                     },
+                                    None,
                                     busy,
                                     feedback,
                                     feedback_tone,
@@ -1684,10 +1685,11 @@ fn connect_tailscale_tab(
                                 if let Ok(outcome) = res {
                                     match outcome.paired {
                                         Ok(paired) => {
-                                            let token = paired["token"]
+                                            let server_pubkey = paired["server_pubkey"]
                                                 .as_str()
-                                                .unwrap_or_default()
-                                                .to_owned();
+                                                .map(str::trim)
+                                                .filter(|s| !s.is_empty())
+                                                .map(str::to_owned);
                                             let addr = paired["addr"]
                                                 .as_str()
                                                 .filter(|s| !s.is_empty())
@@ -1696,13 +1698,18 @@ fn connect_tailscale_tab(
                                                     format!("{peer_ip}:{DEFAULT_DAEMON_PORT}")
                                                 });
                                             let via_ts = paired.get("via").and_then(|v| v.as_str())
-                                                == Some("tailscale_whois");
+                                                == Some("tailscale_whois")
+                                                || paired["tailscale_auth"] == true;
                                             finish_host_registration(
                                                 ui,
                                                 SavedHost {
                                                     id: sanitize_host_id(&peer_name),
                                                     name: peer_name,
-                                                    transport: HostTransport::Tcp { addr, token },
+                                                    transport: HostTransport::Tcp {
+                                                        addr,
+                                                        server_pubkey,
+                                                        tailscale_auth: via_ts,
+                                                    },
                                                     ssh_target: (!via_ts).then_some(ssh_spec),
                                                     server_id: paired["server_id"]
                                                         .as_str()
@@ -1710,6 +1717,7 @@ fn connect_tailscale_tab(
                                                     enabled: true,
                                                     added_at: canban_types::now(),
                                                 },
+                                                None,
                                                 busy,
                                                 feedback,
                                                 feedback_tone,
@@ -1822,12 +1830,10 @@ fn connect_tailscale_tab(
                                     Variant::Primary,
                                     move |_| {
                                         let raw = ts_manual_uri.get_untracked();
-                                        let Some((addr, token, parsed_name)) =
-                                            parse_desktop_connect_input(&raw)
-                                        else {
+                                        let Some(invite) = parse_desktop_connect_input(&raw) else {
                                             feedback_tone.set(Tone::Danger);
                                             feedback.set(
-                                                "Enter a Tailscale address (`host.ts.net` or `100.x.y.z`) or a `canban://host:port#token` URI."
+                                                "Enter a Tailscale address (`host.ts.net` or `100.x.y.z`) or a `canban://host:port?pk=<key>#pair_...` URI."
                                                     .into(),
                                             );
                                             return;
@@ -1836,19 +1842,27 @@ fn connect_tailscale_tab(
                                         let display = if !nm.trim().is_empty() {
                                             nm
                                         } else {
-                                            parsed_name.unwrap_or_else(|| addr.clone())
+                                            invite
+                                                .host_name
+                                                .clone()
+                                                .unwrap_or_else(|| invite.addr.clone())
                                         };
                                         finish_host_registration(
                                             ui,
                                             SavedHost {
                                                 id: sanitize_host_id(&display),
                                                 name: display,
-                                                transport: HostTransport::Tcp { addr, token },
+                                                transport: HostTransport::Tcp {
+                                                    addr: invite.addr,
+                                                    server_pubkey: invite.server_pubkey,
+                                                    tailscale_auth: invite.tailscale_auth,
+                                                },
                                                 ssh_target: None,
                                                 server_id: None,
                                                 enabled: true,
                                                 added_at: canban_types::now(),
                                             },
+                                            invite.pairing_code,
                                             busy,
                                             feedback,
                                             feedback_tone,
@@ -1982,6 +1996,7 @@ fn connect_ssh_tab(
                                 enabled: true,
                                 added_at: canban_types::now(),
                             },
+                            None,
                             busy,
                             feedback,
                             feedback_tone,
@@ -2013,14 +2028,19 @@ fn connect_ssh_tab(
                                     .map(str::trim)
                                     .filter(|s| !s.is_empty() && prefer_ts)
                                     .map(str::to_owned);
-                                let token = paired["token"]
+                                let server_pubkey = paired["server_pubkey"]
                                     .as_str()
-                                    .unwrap_or_default()
-                                    .to_owned();
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_owned);
                                 let transport = if let Some(addr) = ts_addr
-                                    && !token.is_empty()
+                                    && server_pubkey.is_some()
                                 {
-                                    HostTransport::Tcp { addr, token }
+                                    HostTransport::Tcp {
+                                        addr,
+                                        server_pubkey,
+                                        tailscale_auth: false,
+                                    }
                                 } else {
                                     HostTransport::Ssh {
                                         target: target.clone(),
@@ -2038,6 +2058,7 @@ fn connect_ssh_tab(
                                         enabled: true,
                                         added_at: canban_types::now(),
                                     },
+                                    None,
                                     busy,
                                     feedback,
                                     feedback_tone,
@@ -2109,11 +2130,10 @@ fn connect_uri_tab(
                 .child(
                     action("Connect Machine", Variant::Primary, move |_| {
                         let raw = uri_input.get_untracked();
-                        let Some((addr, token, parsed_name)) = parse_desktop_connect_input(&raw)
-                        else {
+                        let Some(invite) = parse_desktop_connect_input(&raw) else {
                             feedback_tone.set(Tone::Danger);
                             feedback.set(
-                                "Enter a Tailscale address (`host.ts.net` or `100.x.y.z`) or a pairing URI (`canban://<host>:<port>#<token>`)."
+                                "Enter a Tailscale address (`host.ts.net` or `100.x.y.z`) or a pairing URI (`canban://<host>:<port>?pk=<key>#pair_...`)."
                                     .into(),
                             );
                             return;
@@ -2122,10 +2142,10 @@ fn connect_uri_tab(
                             let custom = uri_display_name.get_untracked();
                             if !custom.trim().is_empty() {
                                 custom.trim().to_owned()
-                            } else if let Some(name) = parsed_name {
+                            } else if let Some(name) = invite.host_name.clone() {
                                 name
                             } else {
-                                extract_daemon_host(&addr).to_owned()
+                                extract_daemon_host(&invite.addr).to_owned()
                             }
                         };
                         finish_host_registration(
@@ -2133,12 +2153,17 @@ fn connect_uri_tab(
                             SavedHost {
                                 id: sanitize_host_id(&disp),
                                 name: disp,
-                                transport: HostTransport::Tcp { addr, token },
+                                transport: HostTransport::Tcp {
+                                    addr: invite.addr,
+                                    server_pubkey: invite.server_pubkey,
+                                    tailscale_auth: invite.tailscale_auth,
+                                },
                                 ssh_target: None,
                                 server_id: None,
                                 enabled: true,
                                 added_at: canban_types::now(),
                             },
+                            invite.pairing_code,
                             busy,
                             feedback,
                             feedback_tone,
@@ -2715,7 +2740,10 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     let apply_device_list_payload = move |val: serde_json::Value| {
         let devices: Vec<PairedDevice> =
             serde_json::from_value(val["devices"].clone()).unwrap_or_default();
-        let has_legacy_token = val["has_legacy_token"] == true;
+        let server_pubkey_fingerprint = val["server_pubkey_fingerprint"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let tcp_enabled = val["tcp_enabled"] == true;
         let listen_addrs: Vec<String> =
             serde_json::from_value(val["listen_addrs"].clone()).unwrap_or_default();
@@ -2726,7 +2754,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
         let trust_tailscale_self = val["trust_tailscale_self"] == true;
         update_paired_devices(devices_live, |cur| {
             cur.devices = devices;
-            cur.has_legacy_token = has_legacy_token;
+            cur.server_pubkey_fingerprint = server_pubkey_fingerprint;
             cur.tcp_enabled = tcp_enabled;
             cur.listening = listening;
             cur.listen_addrs = listen_addrs;
@@ -3019,10 +3047,16 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                                     .items_center()
                                     .gap_2()
                                     .child(label("Paired Devices").font_weight(FontWeight::SEMIBOLD))
-                                    .child(badge(format!("{}", state.devices.len()))),
+                                    .child(badge(format!("{}", state.devices.len())))
+                                    .children(
+                                        state
+                                            .server_pubkey_fingerprint
+                                            .clone()
+                                            .map(|fp| badge(format!("Key {fp}"))),
+                                    ),
                             )
                             .child(
-                                muted("Revocable device tokens authorized to connect to this machine over single-connection mux.")
+                                muted("Revocable device keys authorized to connect to this machine over Noise-encrypted mux.")
                                     .text_size(px(11.5)),
                             ),
                     )
@@ -3035,7 +3069,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                                 compact_action("Generate Pairing URI", Variant::Secondary, move |_| {
                                     if !crate::backend::is_connected() {
                                         devices_err.set(None);
-                                        let demo_uri = "canban://100.84.0.1:7680#pair_demo9f8e7d6c5b4a3210fedcba987654".to_owned();
+                                        let demo_uri = "canban://100.84.0.1:7680?pk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#pair_demo9f8e7d6c5b4a3210fedcba987654".to_owned();
                                         ui.paired_devices_preview.update(|slot| {
                                             let p = slot.get_or_insert_with(Default::default);
                                             p.generated_uri = Some(demo_uri);
@@ -3052,9 +3086,10 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                                         move |val| {
                                             let uri = val["uri"].as_str().map(str::to_owned);
                                             let code = val["code"].as_str().unwrap_or_default().to_owned();
+                                            let pk = val["server_pubkey"].as_str().unwrap_or_default();
                                             let exp = val["expires_at"].as_u64();
                                             let display_uri = uri.unwrap_or_else(|| {
-                                                format!("canban://<host-ip>:{DEFAULT_DAEMON_PORT}#{code}")
+                                                format!("canban://<host-ip>:{DEFAULT_DAEMON_PORT}?pk={pk}#{code}")
                                             });
                                             update_paired_devices(devices_live, |cur| {
                                                 cur.generated_uri = Some(display_uri);
@@ -3299,52 +3334,6 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
             );
         }
 
-        if state.has_legacy_token {
-            card = card.child(
-                view()
-                    .px_3p5()
-                    .py_2p5()
-                    .bg(ATTENTION_SURFACE)
-                    .border_b_1()
-                    .border_color(BORDER)
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        muted("Deprecated static `server.token` is still present on disk. Remove it once all saved hosts have auto-upgraded to per-device tokens.")
-                            .text_size(px(12.)),
-                    )
-                    .child(
-                        compact_action("Remove Legacy Token", Variant::Danger, move |_| {
-                            if !crate::backend::is_connected() {
-                                ui.paired_devices_preview.update(|slot| {
-                                    if let Some(p) = slot.as_mut() {
-                                        p.has_legacy_token = false;
-                                    }
-                                });
-                                return;
-                            }
-                            run_device_rpc(
-                                ui,
-                                devices_busy,
-                                devices_err,
-                                "device.remove_legacy_token",
-                                json!({}),
-                                move |_| {
-                                    update_paired_devices(devices_live, |cur| {
-                                        cur.has_legacy_token = false;
-                                    });
-                                    ui.notify("Removed deprecated legacy server.token");
-                                },
-                            );
-                        })
-                        .disabled(move || devices_busy.get()),
-                    ),
-            );
-        }
-
         if state.devices.is_empty() {
             card = card.child(
                 view().px_3p5().py_3().child(
@@ -3427,6 +3416,10 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                                     .child(live_dot(dot_color))
                                     .child(label(dev.name).font_weight(FontWeight::SEMIBOLD))
                                     .children(is_tailscale.then(|| badge("Tailscale")))
+                                    .children(
+                                        (!dev.pubkey_fingerprint.is_empty())
+                                            .then(|| badge(dev.pubkey_fingerprint)),
+                                    )
                                     .child(badge(dev.id)),
                             )
                             .child(trailing),

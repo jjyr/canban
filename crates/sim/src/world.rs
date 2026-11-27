@@ -21,7 +21,8 @@ use canban_client::{
 };
 pub use canban_storage::{StorageFaultInjector, StorageFaultKind};
 use canban_transport::{
-    ClientTransport, MAX_FRAME_BYTES, TailscalePeerIdentity, TailscalePeerVerifier,
+    ClientTransport, DeterministicNoiseRng, MAX_FRAME_BYTES, NoiseKeypair, NoiseRngFactory,
+    TailscalePeerIdentity, TailscalePeerVerifier, TcpAuthMode, load_or_create_client_keypair,
     read_bounded_line, write_json_line_async,
 };
 use canban_types::{
@@ -77,12 +78,14 @@ impl<C: HostConnector> HostConnector for CountingHostConnector<C> {
         host_id: &'a str,
         transport: &'a HostTransport,
         device_name: &'a str,
+        pairing_code: Option<&'a str>,
     ) -> ConnectFuture<'a> {
         {
             let mut counts = self.dial_counts.lock().unwrap();
             *counts.entry(host_id.to_owned()).or_insert(0) += 1;
         }
-        self.inner.connect(host_id, transport, device_name)
+        self.inner
+            .connect(host_id, transport, device_name, pairing_code)
     }
 }
 
@@ -291,15 +294,26 @@ impl SimWorldConfig {
     }
 }
 
-async fn connect_local_transport(local_tok: String) -> Result<Arc<ClientTransport>> {
+async fn connect_local_transport(
+    client_keypair: Arc<NoiseKeypair>,
+    server_pubkey: String,
+    noise_rng: Arc<dyn NoiseRngFactory>,
+) -> Result<Arc<ClientTransport>> {
     let addr = format!("local-server:{SIM_PORT}");
     let stream = turmoil::net::TcpStream::connect(addr.as_str())
         .await
         .map_err(|e| anyhow!("connect local-server: {e}"))?;
-    let transport =
-        ClientTransport::connect_stream_async(stream, addr, local_tok, "Sim Desktop".into())
-            .await
-            .map_err(|e| anyhow!("local mux: {e:#}"))?;
+    let transport = ClientTransport::connect_stream_async(
+        stream,
+        addr,
+        Some(server_pubkey),
+        TcpAuthMode::Key,
+        "Sim Desktop".into(),
+        client_keypair.as_ref(),
+        noise_rng.as_ref(),
+    )
+    .await
+    .map_err(|e| anyhow!("local mux: {e:#}"))?;
     Ok(Arc::new(transport))
 }
 
@@ -375,7 +389,9 @@ struct SimLocalHostDriver {
     home: PathBuf,
     server_slot: Arc<Mutex<Option<Arc<AppServer>>>>,
     server_boot_gen: Arc<AtomicU64>,
-    token_slot: Arc<Mutex<Option<String>>>,
+    server_pubkey_slot: Arc<Mutex<Option<String>>>,
+    client_keypair: Arc<NoiseKeypair>,
+    noise_rng: Arc<dyn NoiseRngFactory>,
     transport_state: Arc<Mutex<(u64, Arc<ClientTransport>)>>,
     reconnecting: Arc<AtomicBool>,
     framed: Option<Arc<FramedLocalState>>,
@@ -394,13 +410,18 @@ impl SimLocalHostDriver {
 
     async fn refresh_transport(&self) -> Result<()> {
         let target_gen = self.server_boot_gen.load(Ordering::SeqCst);
-        let tok = self
-            .token_slot
+        let pk = self
+            .server_pubkey_slot
             .lock()
             .unwrap()
             .clone()
-            .context("Simulated local-server token unavailable")?;
-        let fresh = connect_local_transport(tok).await?;
+            .context("Simulated local-server pubkey unavailable")?;
+        let fresh = connect_local_transport(
+            Arc::clone(&self.client_keypair),
+            pk,
+            Arc::clone(&self.noise_rng),
+        )
+        .await?;
         *self.transport_state.lock().unwrap() = (target_gen, fresh);
         Ok(())
     }
@@ -740,7 +761,9 @@ impl LocalHostDriver for SimLocalHostDriver {
             && !self.reconnecting.swap(true, Ordering::SeqCst)
         {
             let server_boot_gen = Arc::clone(&self.server_boot_gen);
-            let token_slot = Arc::clone(&self.token_slot);
+            let server_pubkey_slot = Arc::clone(&self.server_pubkey_slot);
+            let client_keypair = Arc::clone(&self.client_keypair);
+            let noise_rng = Arc::clone(&self.noise_rng);
             let transport_state = Arc::clone(&self.transport_state);
             let reconnecting = Arc::clone(&self.reconnecting);
             rt.spawn(async move {
@@ -752,10 +775,10 @@ impl LocalHostDriver for SimLocalHostDriver {
                 }
                 let _reset = ResetFlag(reconnecting);
                 let target_gen = server_boot_gen.load(Ordering::SeqCst);
-                let Some(tok) = token_slot.lock().unwrap().clone() else {
+                let Some(pk) = server_pubkey_slot.lock().unwrap().clone() else {
                     return;
                 };
-                if let Ok(fresh) = connect_local_transport(tok).await {
+                if let Ok(fresh) = connect_local_transport(client_keypair, pk, noise_rng).await {
                     *transport_state.lock().unwrap() = (target_gen, fresh);
                 }
             });
@@ -884,7 +907,7 @@ pub struct SimServerHandle {
     pub desktop_api_override: Arc<Mutex<Option<u32>>>,
     pub server_slot: Arc<Mutex<Option<Arc<AppServer>>>>,
     pub abrupt_crash: Arc<Mutex<Option<Arc<AtomicBool>>>>,
-    pub token: Arc<Mutex<Option<String>>>,
+    pub server_pubkey: Arc<Mutex<Option<String>>>,
     pub crashed: Arc<AtomicBool>,
     pub ever_bounced: Arc<AtomicBool>,
     pub boot_generation: Arc<AtomicU64>,
@@ -895,8 +918,8 @@ impl SimServerHandle {
         self.server_slot.lock().unwrap().clone()
     }
 
-    pub fn token(&self) -> Option<String> {
-        self.token.lock().unwrap().clone()
+    pub fn server_pubkey(&self) -> Option<String> {
+        self.server_pubkey.lock().unwrap().clone()
     }
 }
 
@@ -904,6 +927,7 @@ impl SimServerHandle {
 pub struct SimClientHandle {
     pub name: String,
     pub data_dir: PathBuf,
+    pub client_keypair: Arc<NoiseKeypair>,
     pub failpoints: Arc<Failpoints>,
     pub dial_counts: Arc<Mutex<BTreeMap<String, u64>>>,
     pub client_slot: Arc<Mutex<Option<Arc<MultiHostClient>>>>,
@@ -1045,7 +1069,7 @@ impl SimWorld {
             ));
             let server_slot: Arc<Mutex<Option<Arc<AppServer>>>> = Arc::new(Mutex::new(None));
             let abrupt_slot: Arc<Mutex<Option<Arc<AtomicBool>>>> = Arc::new(Mutex::new(None));
-            let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let server_pubkey_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let crashed = Arc::new(AtomicBool::new(false));
             let ever_bounced = Arc::new(AtomicBool::new(false));
             let boot_generation = Arc::new(AtomicU64::new(0));
@@ -1061,7 +1085,7 @@ impl SimWorld {
             let h_api_override = Arc::clone(&desktop_api_override_slot);
             let h_slot = Arc::clone(&server_slot);
             let h_abrupt = Arc::clone(&abrupt_slot);
-            let h_token = Arc::clone(&token_slot);
+            let h_pubkey = Arc::clone(&server_pubkey_slot);
             let h_boot_gen = Arc::clone(&boot_generation);
             let h_name = host_name.clone();
             let h_seed = config.seed;
@@ -1092,13 +1116,16 @@ impl SimWorld {
                 let api_override_slot = Arc::clone(&h_api_override);
                 let slot = Arc::clone(&h_slot);
                 let abrupt_slot = Arc::clone(&h_abrupt);
-                let token_slot = Arc::clone(&h_token);
+                let pubkey_slot = Arc::clone(&h_pubkey);
                 let boot_gen = h_boot_gen.fetch_add(1, Ordering::SeqCst);
                 let host_label = h_name.clone();
                 let id_gen = canban_types::deterministic_id_gen(derive_host_seed(
                     h_seed,
                     &host_label,
                     boot_gen,
+                ));
+                let noise_rng = DeterministicNoiseRng::arc(canban_types::deterministic_id_gen(
+                    derive_host_seed(h_seed, &format!("{host_label}:noise"), boot_gen),
                 ));
                 let stream_policy = h_stream_policy.clone();
                 async move {
@@ -1124,19 +1151,11 @@ impl SimWorld {
                         script_execution_mode: h_script_mode,
                         storage_faults: Some(storage_faults),
                         failpoints: Some(failpoints),
+                        noise_rng: Some(noise_rng),
                     };
                     let server = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env)
                         .map_err(|e| format!("open_with_env({host_label}): {e:#}"))?;
-                    // Ensure at least one valid device token exists across restarts.
-                    {
-                        let mut tok = token_slot.lock().unwrap();
-                        if tok.is_none() {
-                            let (_, issued) = server
-                                .issue_device_token(&format!("sim-client-{host_label}"))
-                                .map_err(|e| format!("issue_device_token({host_label}): {e:#}"))?;
-                            *tok = Some(issued);
-                        }
-                    }
+                    *pubkey_slot.lock().unwrap() = Some(server.server_pubkey());
                     let running = server
                         .start_in_runtime(tokio::runtime::Handle::current())
                         .map_err(|e| format!("start_in_runtime({host_label}): {e:#}"))?;
@@ -1214,7 +1233,7 @@ impl SimWorld {
                     desktop_api_override: desktop_api_override_slot,
                     server_slot,
                     abrupt_crash: abrupt_slot,
-                    token: token_slot,
+                    server_pubkey: server_pubkey_slot,
                     crashed,
                     ever_bounced,
                     boot_generation,
@@ -1228,13 +1247,13 @@ impl SimWorld {
             shared_elapsed_ms.store(sim.elapsed().as_millis() as u64, Ordering::SeqCst);
             let all_ready = servers
                 .values()
-                .all(|s| s.server().is_some() && s.token().is_some());
+                .all(|s| s.server().is_some() && s.server_pubkey().is_some());
             if all_ready {
                 break;
             }
         }
         for (name, h) in &servers {
-            if h.server().is_none() || h.token().is_none() {
+            if h.server().is_none() || h.server_pubkey().is_none() {
                 bail!("Simulated server '{name}' failed to boot within 400 steps");
             }
         }
@@ -1289,6 +1308,27 @@ impl SimWorld {
         }
         std::fs::create_dir_all(&data_dir)?;
 
+        let client_key_rng = DeterministicNoiseRng::arc(canban_types::deterministic_id_gen(
+            derive_host_seed(self.config.seed, &format!("{client_name}:noise-key"), 0),
+        ));
+        let client_keypair = Arc::new(load_or_create_client_keypair(
+            &data_dir,
+            false,
+            client_key_rng.as_ref(),
+        )?);
+        let client_pubkey_b64 = client_keypair.public_b64();
+        let auth_label = format!("sim-client-{client_name}");
+        if desktop_local
+            && let Some(srv) = self.servers.get("local-server").and_then(|s| s.server())
+        {
+            srv.authorize_device_pubkey(&auth_label, &client_pubkey_b64)?;
+        }
+        for name in &self.config.remote_hosts {
+            if let Some(srv) = self.servers.get(name).and_then(|s| s.server()) {
+                srv.authorize_device_pubkey(&auth_label, &client_pubkey_b64)?;
+            }
+        }
+
         let client_slot: Arc<Mutex<Option<Arc<MultiHostClient>>>> = Arc::new(Mutex::new(None));
         let rt_handle: Arc<Mutex<Option<tokio::runtime::Handle>>> = Arc::new(Mutex::new(None));
         let cmd_tx_slot: Arc<Mutex<Option<mpsc::UnboundedSender<ClientCommand>>>> =
@@ -1326,7 +1366,7 @@ impl SimWorld {
                     s.home.clone(),
                     Arc::clone(&s.server_slot),
                     Arc::clone(&s.boot_generation),
-                    Arc::clone(&s.token),
+                    Arc::clone(&s.server_pubkey),
                 )
             })
         } else {
@@ -1339,10 +1379,11 @@ impl SimWorld {
             .filter_map(|name| {
                 self.servers
                     .get(name)
-                    .and_then(|s| s.token())
-                    .map(|tok| (name.clone(), tok))
+                    .and_then(|s| s.server_pubkey())
+                    .map(|pk| (name.clone(), pk))
             })
             .collect();
+        let ui_client_keypair = Arc::clone(&client_keypair);
 
         self.sim.host(client_name, move || {
             let data_dir = ui_data_dir.clone();
@@ -1358,14 +1399,13 @@ impl SimWorld {
             let boot_gen = ui_boot_gen.fetch_add(1, Ordering::SeqCst);
             let client_id_gen =
                 canban_types::deterministic_id_gen(derive_host_seed(ui_seed, &ui_name, boot_gen));
-            let env_id_gen = canban_types::deterministic_id_gen(derive_host_seed(
-                ui_seed,
-                &format!("{ui_name}:global-env"),
-                boot_gen,
+            let client_noise_rng = DeterministicNoiseRng::arc(canban_types::deterministic_id_gen(
+                derive_host_seed(ui_seed, &format!("{ui_name}:noise"), boot_gen),
             ));
             let local_info = local_info.clone();
             let remotes = initial_remotes.clone();
             let policy = ui_policy.clone();
+            let client_kp = Arc::clone(&ui_client_keypair);
             let device_label = format!("Sim Client ({ui_name})");
             async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<ClientCommand>();
@@ -1376,19 +1416,25 @@ impl SimWorld {
                     Option<Arc<dyn canban_client::GlobalEnvSyncProvider>>,
                     ClientCapabilities,
                 ) = if desktop_local {
-                    let (local_home, srv_slot, srv_boot_gen, tok_slot) =
+                    let (local_home, srv_slot, srv_boot_gen, pk_slot) =
                         local_info.expect("local server info");
                     let connected_gen = srv_boot_gen.load(Ordering::SeqCst);
-                    let local_tok = tok_slot.lock().unwrap().clone().expect("local token");
-                    let transport = connect_local_transport(local_tok)
-                        .await
-                        .map_err(|e| format!("{e:#}"))?;
+                    let local_pk = pk_slot.lock().unwrap().clone().expect("local server pubkey");
+                    let transport = connect_local_transport(
+                        Arc::clone(&client_kp),
+                        local_pk,
+                        Arc::clone(&client_noise_rng),
+                    )
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
                     let framed = ui_framed_local.then(|| Arc::new(FramedLocalState::default()));
                     let concrete_driver = Arc::new(SimLocalHostDriver {
                         home: local_home.clone(),
                         server_slot: srv_slot,
                         server_boot_gen: srv_boot_gen,
-                        token_slot: tok_slot,
+                        server_pubkey_slot: pk_slot,
+                        client_keypair: Arc::clone(&client_kp),
+                        noise_rng: Arc::clone(&client_noise_rng),
                         transport_state: Arc::new(Mutex::new((connected_gen, transport))),
                         reconnecting: Arc::new(AtomicBool::new(false)),
                         framed,
@@ -1403,7 +1449,7 @@ impl SimWorld {
                     let driver: Arc<dyn LocalHostDriver> =
                         Arc::clone(&concrete_driver) as Arc<dyn LocalHostDriver>;
                     let env_provider: Arc<dyn canban_client::GlobalEnvSyncProvider> =
-                        Arc::new(DesktopGlobalEnvProvider::new(local_home).with_id_gen(env_id_gen));
+                        Arc::new(DesktopGlobalEnvProvider::new(local_home));
                     (
                         Some(concrete_driver),
                         Some(driver),
@@ -1422,7 +1468,7 @@ impl SimWorld {
                 ));
                 let rt_cur = tokio::runtime::Handle::current();
                 let connector = Arc::new(CountingHostConnector {
-                    inner: FaultyTurmoilConnector::new(policy),
+                    inner: FaultyTurmoilConnector::new(policy, client_kp, client_noise_rng),
                     dial_counts,
                 });
                 let client = MultiHostClient::from_options_with_runtime_id_gen_and_failpoints(
@@ -1453,7 +1499,7 @@ impl SimWorld {
                 // by `MultiHostClient::from_options_with_runtime` (preserving `InFlight -> Queued` recovery!).
                 let existing_ids: BTreeSet<String> =
                     client.host_summaries().into_iter().map(|s| s.id).collect();
-                for (name, token) in remotes {
+                for (name, server_pubkey) in remotes {
                     if existing_ids.contains(&name) {
                         continue;
                     }
@@ -1462,7 +1508,8 @@ impl SimWorld {
                         name: name.clone(),
                         transport: HostTransport::Tcp {
                             addr: format!("{name}:{SIM_PORT}"),
-                            token,
+                            server_pubkey: Some(server_pubkey),
+                            tailscale_auth: false,
                         },
                         ssh_target: None,
                         server_id: None,
@@ -1511,6 +1558,7 @@ impl SimWorld {
             SimClientHandle {
                 name: client_name.to_owned(),
                 data_dir,
+                client_keypair,
                 failpoints: client_failpoints,
                 dial_counts,
                 client_slot,
@@ -1897,19 +1945,45 @@ impl SimWorld {
         self.client_run_on(client_id, timeout_ms, f)
     }
 
-    /// Opens a raw authenticated `yamux/1` [`ClientTransport`] over `turmoil::net::TcpStream`
+    /// Returns the static Noise X25519 keypair of simulated client `client_id`.
+    pub fn client_keypair(&self, client_id: &str) -> Result<Arc<NoiseKeypair>> {
+        self.clients
+            .get(client_id)
+            .map(|c| Arc::clone(&c.client_keypair))
+            .with_context(|| format!("Simulated client '{client_id}' not found"))
+    }
+
+    /// Creates a deterministic Noise RNG factory derived from `(world.seed, label)`.
+    pub fn noise_rng(&self, label: &str) -> Arc<dyn NoiseRngFactory> {
+        DeterministicNoiseRng::arc(canban_types::deterministic_id_gen(derive_host_seed(
+            self.config.seed,
+            label,
+            0,
+        )))
+    }
+
+    /// Generates a fresh deterministic Noise keypair derived from `(world.seed, label)`.
+    pub fn ephemeral_keypair(&self, label: &str) -> Result<Arc<NoiseKeypair>> {
+        let rng = self.noise_rng(label);
+        Ok(Arc::new(NoiseKeypair::generate_with_rng(rng.as_ref())?))
+    }
+
+    /// Opens a raw Noise-encrypted `yamux/1` [`ClientTransport`] over `turmoil::net::TcpStream`
     /// from inside `client_id`'s Turmoil host (for `transport_auth` pairing, revocation, and
     /// Tailscale WhoIs testing).
     pub fn connect_raw_transport_on(
         &mut self,
         client_id: &str,
         addr: &str,
-        token: &str,
+        client_keypair: Arc<NoiseKeypair>,
+        server_pubkey: Option<String>,
+        auth: TcpAuthMode,
         device_name: &str,
     ) -> Result<Arc<ClientTransport>> {
         let addr_owned = canban_types::normalize_daemon_addr(addr);
-        let token_owned = token.to_owned();
         let dev_owned = device_name.to_owned();
+        let noise_rng =
+            self.noise_rng(&format!("raw:{client_id}:{addr_owned}:{}", self.step_count));
         self.trace.record_actor(
             self.step_count,
             self.elapsed_ms(),
@@ -1921,21 +1995,37 @@ impl SimWorld {
             let stream = turmoil::net::TcpStream::connect(addr_owned.as_str())
                 .await
                 .with_context(|| format!("turmoil connect {addr_owned}"))?;
-            let transport =
-                ClientTransport::connect_stream_async(stream, addr_owned, token_owned, dev_owned)
-                    .await?;
+            let transport = ClientTransport::connect_stream_async(
+                stream,
+                addr_owned,
+                server_pubkey,
+                auth,
+                dev_owned,
+                client_keypair.as_ref(),
+                noise_rng.as_ref(),
+            )
+            .await?;
             Ok(Arc::new(transport))
         })
     }
 
-    /// Opens a raw authenticated `yamux/1` [`ClientTransport`] from `"ui-client"`'s Turmoil host.
+    /// Opens a raw Noise-encrypted `yamux/1` [`ClientTransport`] from `"ui-client"`'s Turmoil host.
     pub fn connect_raw_transport(
         &mut self,
         addr: &str,
-        token: &str,
+        client_keypair: Arc<NoiseKeypair>,
+        server_pubkey: Option<String>,
+        auth: TcpAuthMode,
         device_name: &str,
     ) -> Result<Arc<ClientTransport>> {
-        self.connect_raw_transport_on(PRIMARY_CLIENT, addr, token, device_name)
+        self.connect_raw_transport_on(
+            PRIMARY_CLIENT,
+            addr,
+            client_keypair,
+            server_pubkey,
+            auth,
+            device_name,
+        )
     }
 
     /// Executes an async operation inside `"ui-client"`'s Turmoil Tokio runtime.
@@ -3186,9 +3276,9 @@ mod tests {
                 "[{host}] different seeds must produce distinct state_instances"
             );
             assert_eq!(
-                world_a.servers[host].token(),
-                world_b.servers[host].token(),
-                "[{host}] issued device token must be identical for the same seed"
+                world_a.servers[host].server_pubkey(),
+                world_b.servers[host].server_pubkey(),
+                "[{host}] server Noise pubkey must be identical for the same seed"
             );
             assert_ne!(
                 srv_a.server_id(),

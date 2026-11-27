@@ -1,20 +1,20 @@
 //! Client-side transport management over local Unix sockets, SSH-forwarded Unix sockets,
-//! and single-connection `yamux/1` multiplexed TCP links (with fallback to direct TCP on
-//! legacy daemons), plus a synchronous `mux://` socketpair bridge.
+//! and single-connection `Noise_XX` + `yamux/1` encrypted multiplexed TCP links, plus a
+//! synchronous `mux://` socketpair bridge.
 use crate::{
     framing::{
-        MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line, write_json_line,
-        write_json_line_async,
+        AsyncIo, MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line,
+        write_json_line, write_json_line_async,
     },
     mux::{MuxClient, connect_mux},
+    noise::{NoiseKeypair, NoiseRngFactory, client_handshake_xx, decode_pubkey, system_noise_rng},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     future::Future,
     io::{self, BufRead, BufReader, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
@@ -25,10 +25,25 @@ use std::{
     time::Duration,
 };
 
+/// Authentication mode presented inside an encrypted `Noise_XX` session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpAuthMode {
+    /// Authenticate via this client's authorized Noise X25519 static public key.
+    Key,
+    /// Consume a one-time `pair_...` pairing code to authorize this client's static public key.
+    PairingCode(String),
+    /// Authenticate via Tailscale WhoIs same-account verification (`trust_tailscale_self`).
+    Tailscale,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientEndpoint {
     Unix(PathBuf),
-    Tcp { addr: String, token: String },
+    Tcp {
+        addr: String,
+        server_pubkey: Option<String>,
+        auth: TcpAuthMode,
+    },
 }
 
 pub const DEFAULT_RPC_READ_TIMEOUT: Duration = Duration::from_secs(90);
@@ -45,40 +60,6 @@ pub fn rpc_read_timeout(method: &str) -> Duration {
     }
 }
 
-trait SyncRpcSocket: Read + Write + Send + Sized + 'static {
-    fn try_clone_socket(&self) -> io::Result<Self>;
-    fn set_socket_read_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
-    fn set_socket_write_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
-}
-
-impl SyncRpcSocket for UnixStream {
-    fn try_clone_socket(&self) -> io::Result<Self> {
-        self.try_clone()
-    }
-
-    fn set_socket_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.set_read_timeout(dur)
-    }
-
-    fn set_socket_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.set_write_timeout(dur)
-    }
-}
-
-impl SyncRpcSocket for TcpStream {
-    fn try_clone_socket(&self) -> io::Result<Self> {
-        self.try_clone()
-    }
-
-    fn set_socket_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.set_read_timeout(dur)
-    }
-
-    fn set_socket_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        self.set_write_timeout(dur)
-    }
-}
-
 fn connect_unix_sync(
     path: &Path,
     read_timeout: Option<Duration>,
@@ -91,27 +72,9 @@ fn connect_unix_sync(
     Ok(stream)
 }
 
-fn connect_tcp_sync(
-    addr: &str,
-    read_timeout: Option<Duration>,
-    write_timeout: Option<Duration>,
-) -> Result<TcpStream> {
-    let sock_addr = addr
-        .to_socket_addrs()
-        .with_context(|| format!("Invalid Canban TCP address {addr}"))?
-        .next()
-        .with_context(|| format!("Could not resolve Canban TCP address {addr}"))?;
-    let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
-        .with_context(|| format!("Canban is not reachable at {addr}"))?;
-    let _ = stream.set_nodelay(true);
-    stream.set_read_timeout(read_timeout)?;
-    stream.set_write_timeout(write_timeout)?;
-    Ok(stream)
-}
-
-fn send_and_read_rpc<S: SyncRpcSocket>(
-    writer: &mut S,
-    reader: &mut BufReader<S>,
+fn send_and_read_unix_rpc(
+    writer: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
     req: &Value,
     read_timeout: Duration,
     closed_label: &str,
@@ -119,18 +82,16 @@ fn send_and_read_rpc<S: SyncRpcSocket>(
     write_json_line(writer, req)?;
     let extended_timeout = read_timeout != DEFAULT_RPC_READ_TIMEOUT;
     if extended_timeout {
-        writer.set_socket_read_timeout(Some(read_timeout))?;
-        reader
-            .get_ref()
-            .set_socket_read_timeout(Some(read_timeout))?;
+        writer.set_read_timeout(Some(read_timeout))?;
+        reader.get_ref().set_read_timeout(Some(read_timeout))?;
     }
     let mut line = String::new();
     let read_res = reader.read_line(&mut line);
     if extended_timeout {
-        let _ = writer.set_socket_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
+        let _ = writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
         let _ = reader
             .get_ref()
-            .set_socket_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
+            .set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
     }
     let n = read_res?;
     if n == 0 || !line.ends_with('\n') {
@@ -144,75 +105,35 @@ fn send_and_read_rpc<S: SyncRpcSocket>(
     decode_rpc_reply(&line)
 }
 
-enum SyncClientStream {
-    Unix {
-        writer: UnixStream,
-        reader: BufReader<UnixStream>,
-    },
-    Tcp {
-        writer: TcpStream,
-        reader: BufReader<TcpStream>,
-        token: String,
-    },
-}
-
-struct RpcConn {
-    stream: SyncClientStream,
+struct UnixRpcConn {
+    writer: UnixStream,
+    reader: BufReader<UnixStream>,
     next_id: u64,
 }
 
-impl RpcConn {
-    fn connect(endpoint: &ClientEndpoint) -> Result<Self> {
+impl UnixRpcConn {
+    fn connect(path: &Path) -> Result<Self> {
         let rw = Some(DEFAULT_RPC_READ_TIMEOUT);
-        let stream = match endpoint {
-            ClientEndpoint::Unix(path) => {
-                let writer = connect_unix_sync(path, rw, rw)?;
-                let reader = BufReader::new(writer.try_clone()?);
-                SyncClientStream::Unix { writer, reader }
-            }
-            ClientEndpoint::Tcp { addr, token } => {
-                let writer = connect_tcp_sync(addr, rw, rw)?;
-                let reader = BufReader::new(writer.try_clone()?);
-                SyncClientStream::Tcp {
-                    writer,
-                    reader,
-                    token: token.clone(),
-                }
-            }
-        };
-        Ok(Self { stream, next_id: 1 })
+        let writer = connect_unix_sync(path, rw, rw)?;
+        let reader = BufReader::new(writer.try_clone()?);
+        Ok(Self {
+            writer,
+            reader,
+            next_id: 1,
+        })
     }
 
     fn call(&mut self, method: &str, params: &Value) -> Result<Value> {
         let req_id = self.next_id;
         self.next_id += 1;
         let read_timeout = rpc_read_timeout(method);
-        match &mut self.stream {
-            SyncClientStream::Unix { writer, reader } => send_and_read_rpc(
-                writer,
-                reader,
-                &json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params}),
-                read_timeout,
-                "AppServer closed RPC socket",
-            ),
-            SyncClientStream::Tcp {
-                writer,
-                reader,
-                token,
-            } => send_and_read_rpc(
-                writer,
-                reader,
-                &json!({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "method": method,
-                    "params": params,
-                    "auth": token
-                }),
-                read_timeout,
-                "Remote AppServer closed TCP socket",
-            ),
-        }
+        send_and_read_unix_rpc(
+            &mut self.writer,
+            &mut self.reader,
+            &json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params}),
+            read_timeout,
+            "AppServer closed RPC socket",
+        )
     }
 }
 
@@ -232,9 +153,139 @@ fn decode_rpc_reply(line: &str) -> Result<Value> {
         .context("Invalid Canban response")
 }
 
-pub fn rpc_once(endpoint: &ClientEndpoint, method: &str, params: &Value) -> Result<Value> {
-    let mut conn = RpcConn::connect(endpoint)?;
-    conn.call(method, params)
+fn validate_server_pubkey_policy(
+    addr: &str,
+    server_pubkey: Option<&str>,
+) -> Result<Option<[u8; 32]>> {
+    match server_pubkey.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(pk) => Ok(Some(decode_pubkey(pk)?)),
+        None => {
+            ensure!(
+                canban_types::is_tailscale_addr(addr),
+                "Non-Tailscale TCP endpoints require a pinned host public key (?pk=...)"
+            );
+            Ok(None)
+        }
+    }
+}
+
+async fn tcp_rpc_once_async(
+    addr: String,
+    server_pubkey: Option<String>,
+    auth: TcpAuthMode,
+    client_keypair: Arc<NoiseKeypair>,
+    noise_rng: Arc<dyn NoiseRngFactory>,
+    method: String,
+    params: Value,
+) -> Result<Value> {
+    let normalized = canban_types::normalize_daemon_addr(&addr);
+    let expected_pk = validate_server_pubkey_policy(&normalized, server_pubkey.as_deref())?;
+    let tcp = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::TcpStream::connect(&normalized),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("Timed out connecting to {normalized}"),
+        )
+    })?
+    .with_context(|| format!("Canban is not reachable at {normalized}"))?;
+    let _ = tcp.set_nodelay(true);
+    let noise_stream = client_handshake_xx(
+        tcp,
+        &client_keypair,
+        expected_pk.as_ref(),
+        noise_rng.as_ref(),
+    )
+    .await?;
+
+    let (read_half, mut writer) = tokio::io::split(noise_stream);
+    let mut reader = tokio::io::BufReader::new(read_half);
+    let mut req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    match auth {
+        TcpAuthMode::Key => {
+            req["auth_mode"] = json!("key");
+        }
+        TcpAuthMode::Tailscale => {
+            req["auth_mode"] = json!("tailscale");
+        }
+        TcpAuthMode::PairingCode(code) => {
+            req["auth_mode"] = json!("key");
+            req["pairing_code"] = json!(code);
+        }
+    }
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        write_json_line_async(&mut writer, &req),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("Timed out sending RPC request to {method}"),
+        )
+    })??;
+
+    let read_timeout = rpc_read_timeout(&method);
+    let line_opt = tokio::time::timeout(
+        read_timeout,
+        read_bounded_line(&mut reader, MAX_FRAME_BYTES),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("Timed out waiting for RPC reply to {method}"),
+        )
+    })??;
+    let Some(line) = line_opt else {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("Remote AppServer closed RPC stream for {method}"),
+        )
+        .into());
+    };
+    decode_rpc_reply(&line)
+}
+
+/// Runs a one-shot JSON-RPC call over a local Unix socket or a `Noise_XX` encrypted TCP socket.
+pub fn rpc_once(
+    endpoint: &ClientEndpoint,
+    client_keypair: Option<Arc<NoiseKeypair>>,
+    method: &str,
+    params: &Value,
+) -> Result<Value> {
+    match endpoint {
+        ClientEndpoint::Unix(path) => {
+            let mut conn = UnixRpcConn::connect(path)?;
+            conn.call(method, params)
+        }
+        ClientEndpoint::Tcp {
+            addr,
+            server_pubkey,
+            auth,
+        } => {
+            let kp = match client_keypair {
+                Some(k) => k,
+                None => Arc::new(NoiseKeypair::generate()?),
+            };
+            let a = addr.clone();
+            let spk = server_pubkey.clone();
+            let au = auth.clone();
+            let m = method.to_owned();
+            let p = params.clone();
+            run_on_client_rt(async move {
+                tcp_rpc_once_async(a, spk, au, kp, system_noise_rng(), m, p).await
+            })
+        }
+    }
 }
 
 fn shared_client_runtime() -> &'static tokio::runtime::Runtime {
@@ -303,72 +354,71 @@ pub fn open_mux_bridge(key: &str) -> Result<UnixStream> {
 pub struct SyncStream {
     pub reader: Box<dyn Read + Send>,
     pub writer: Box<dyn Write + Send>,
-    pub auth_token: Option<String>,
 }
 
-fn into_sync_stream<S: SyncRpcSocket>(
-    writer: S,
+fn into_sync_unix_stream(
+    writer: UnixStream,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
-    auth_token: Option<String>,
 ) -> io::Result<SyncStream> {
-    writer.set_socket_read_timeout(read_timeout)?;
-    writer.set_socket_write_timeout(write_timeout)?;
-    let reader = writer.try_clone_socket()?;
+    writer.set_read_timeout(read_timeout)?;
+    writer.set_write_timeout(write_timeout)?;
+    let reader = writer.try_clone()?;
     Ok(SyncStream {
         reader: Box::new(reader),
         writer: Box::new(writer),
-        auth_token,
     })
 }
 
 struct MuxConnectResult {
     mux: Arc<MuxClient>,
-    upgraded_token: Option<String>,
-    session_token: Option<String>,
+    remote_pubkey: String,
 }
 
-async fn try_connect_mux(
-    addr: String,
-    token: String,
-    device_name: String,
-) -> Result<Option<MuxConnectResult>> {
-    let tcp = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::net::TcpStream::connect(&addr),
-    )
-    .await
-    .map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("Timed out connecting to {addr}"),
-        )
-    })?
-    .with_context(|| format!("Canban is not reachable at {addr}"))?;
-    let _ = tcp.set_nodelay(true);
-    try_connect_mux_on_stream(tcp, token, device_name).await
-}
-
-async fn try_connect_mux_on_stream<S>(
+async fn connect_noise_mux_on_stream<S>(
     stream: S,
-    token: String,
+    expected_server_pubkey: Option<[u8; 32]>,
+    auth: TcpAuthMode,
     device_name: String,
-) -> Result<Option<MuxConnectResult>>
+    client_keypair: &NoiseKeypair,
+    noise_rng: &dyn NoiseRngFactory,
+) -> Result<MuxConnectResult>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: AsyncIo + 'static,
 {
     const HANDSHAKE_MAX_BYTES: usize = 64 * 1024;
-    let (read_half, mut writer) = tokio::io::split(stream);
+    let noise_stream = client_handshake_xx(
+        stream,
+        client_keypair,
+        expected_server_pubkey.as_ref(),
+        noise_rng,
+    )
+    .await?;
+    let remote_pubkey = noise_stream.remote_pubkey_b64();
+
+    let (read_half, mut writer) = tokio::io::split(noise_stream);
     let mut reader = tokio::io::BufReader::new(read_half);
+    let mut params = json!({
+        "protocol": "yamux/1",
+        "device_name": device_name,
+    });
+    match auth {
+        TcpAuthMode::Key => {
+            params["auth_mode"] = json!("key");
+        }
+        TcpAuthMode::Tailscale => {
+            params["auth_mode"] = json!("tailscale");
+        }
+        TcpAuthMode::PairingCode(code) => {
+            params["auth_mode"] = json!("key");
+            params["pairing_code"] = json!(code);
+        }
+    }
     let req = json!({
         "jsonrpc": "2.0",
         "id": 0,
         "method": "transport.mux",
-        "auth": token,
-        "params": {
-            "protocol": "yamux/1",
-            "device_name": device_name,
-        },
+        "params": params,
     });
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -394,32 +444,29 @@ where
         )
     })??;
     let Some(line) = line_opt else {
-        return Ok(None);
+        bail!("Remote AppServer closed connection during transport.mux handshake");
     };
-    let Ok(reply) = serde_json::from_str::<Value>(&line) else {
-        return Ok(None);
-    };
+    let reply: Value =
+        serde_json::from_str(&line).context("Invalid JSON reply during transport.mux handshake")?;
     if let Some(err) = reply.get("error") {
         let code = err["code"].as_i64().unwrap_or(-32000);
         let msg = err["message"].as_str().unwrap_or("Canban RPC error");
         if code == -32001 {
             bail!("auth_failed: {msg}");
         }
-        return Ok(None);
+        bail!("{msg}");
     }
     let result = &reply["result"];
-    if result["ready"] != true {
-        return Ok(None);
-    }
-    let upgraded_token = result["upgraded_token"].as_str().map(str::to_owned);
-    let session_token = result["session_token"].as_str().map(str::to_owned);
+    ensure!(
+        result["ready"] == true,
+        "Remote AppServer rejected transport.mux (yamux/1) upgrade"
+    );
     let leftover = reader.buffer().to_vec();
-    let tcp = reader.into_inner().unsplit(writer);
-    Ok(Some(MuxConnectResult {
-        mux: Arc::new(connect_mux(PrefixedStream::new(leftover, tcp))),
-        upgraded_token,
-        session_token,
-    }))
+    let encrypted = reader.into_inner().unsplit(writer);
+    Ok(MuxConnectResult {
+        mux: Arc::new(connect_mux(PrefixedStream::new(leftover, encrypted))),
+        remote_pubkey,
+    })
 }
 
 async fn mux_rpc_call_async(mux: Arc<MuxClient>, method: String, params: Value) -> Result<Value> {
@@ -466,13 +513,13 @@ async fn mux_rpc_call_async(mux: Arc<MuxClient>, method: String, params: Value) 
     decode_rpc_reply(&line)
 }
 
-/// Manages RPC connections, multiplexed sub-streams, and relay endpoints for a client session.
+/// Manages RPC connections, encrypted multiplexed sub-streams, and relay endpoints for a client.
 pub struct ClientTransport {
     endpoint: ClientEndpoint,
     mux: Option<Arc<MuxClient>>,
     mux_relay_key: Option<String>,
-    upgraded_token: Option<String>,
-    rpc_pool: Mutex<Vec<RpcConn>>,
+    remote_pubkey: Option<String>,
+    rpc_pool: Mutex<Vec<UnixRpcConn>>,
 }
 
 impl Drop for ClientTransport {
@@ -493,43 +540,52 @@ impl ClientTransport {
             endpoint: ClientEndpoint::Unix(path),
             mux: None,
             mux_relay_key: None,
-            upgraded_token: None,
+            remote_pubkey: None,
             rpc_pool: Mutex::new(Vec::new()),
         }
     }
 
-    /// Connects eagerly to a non-multiplexed endpoint (`Unix` or legacy `Tcp`).
-    pub fn connect_direct(endpoint: ClientEndpoint) -> Result<Self> {
-        let conn = RpcConn::connect(&endpoint)?;
+    /// Connects eagerly to a local or SSH-forwarded Unix socket endpoint.
+    pub fn connect_unix(path: PathBuf) -> Result<Self> {
+        let conn = UnixRpcConn::connect(&path)?;
         Ok(Self {
-            endpoint,
+            endpoint: ClientEndpoint::Unix(path),
             mux: None,
             mux_relay_key: None,
-            upgraded_token: None,
+            remote_pubkey: None,
             rpc_pool: Mutex::new(vec![conn]),
         })
     }
 
     /// Connects over an already-established async byte stream (e.g. a simulated `turmoil::net::TcpStream`),
-    /// running the real `transport.mux` (`yamux/1`) handshake on the current Tokio runtime.
+    /// running the real `Noise_XX` handshake and `transport.mux` (`yamux/1`) upgrade on the current runtime.
     pub async fn connect_stream_async<S>(
         stream: S,
         addr: String,
-        token: String,
+        server_pubkey: Option<String>,
+        auth: TcpAuthMode,
         device_name: String,
+        client_keypair: &NoiseKeypair,
+        noise_rng: &dyn NoiseRngFactory,
     ) -> Result<Self>
     where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+        S: AsyncIo + 'static,
     {
         let normalized = canban_types::normalize_daemon_addr(&addr);
-        let Some(res) = try_connect_mux_on_stream(stream, token.clone(), device_name).await? else {
-            bail!("Remote AppServer at {normalized} did not accept transport.mux (yamux/1)");
+        let expected_pk = validate_server_pubkey_policy(&normalized, server_pubkey.as_deref())?;
+        let res = connect_noise_mux_on_stream(
+            stream,
+            expected_pk,
+            auth.clone(),
+            device_name,
+            client_keypair,
+            noise_rng,
+        )
+        .await?;
+        let saved_auth = match auth {
+            TcpAuthMode::Tailscale => TcpAuthMode::Tailscale,
+            TcpAuthMode::Key | TcpAuthMode::PairingCode(_) => TcpAuthMode::Key,
         };
-        let effective_token = res
-            .session_token
-            .clone()
-            .or_else(|| res.upgraded_token.clone())
-            .unwrap_or(token);
         let key = next_mux_relay_key();
         mux_relay_registry()
             .lock()
@@ -538,51 +594,28 @@ impl ClientTransport {
         Ok(Self {
             endpoint: ClientEndpoint::Tcp {
                 addr: normalized,
-                token: effective_token,
+                server_pubkey: Some(res.remote_pubkey.clone()),
+                auth: saved_auth,
             },
             mux: Some(res.mux),
             mux_relay_key: Some(key),
-            upgraded_token: res.upgraded_token,
+            remote_pubkey: Some(res.remote_pubkey),
             rpc_pool: Mutex::new(Vec::new()),
         })
     }
 
-    /// Connects to a remote TCP endpoint asynchronously, upgrading to `yamux/1` multiplexing
-    /// when supported by the daemon and falling back to direct TCP RPC on older daemons.
+    /// Connects to a remote TCP endpoint asynchronously using `Noise_XX` E2EE + `yamux/1` multiplexing.
     pub async fn connect_tcp_async(
         addr: String,
-        token: String,
+        server_pubkey: Option<String>,
+        auth: TcpAuthMode,
         device_name: String,
+        client_keypair: Arc<NoiseKeypair>,
+        noise_rng: Arc<dyn NoiseRngFactory>,
     ) -> Result<Self> {
         let normalized = canban_types::normalize_daemon_addr(&addr);
-        if let Some(res) = try_connect_mux(normalized.clone(), token.clone(), device_name).await? {
-            let effective_token = res
-                .session_token
-                .clone()
-                .or_else(|| res.upgraded_token.clone())
-                .unwrap_or(token);
-            let key = next_mux_relay_key();
-            mux_relay_registry()
-                .lock()
-                .unwrap()
-                .insert(key.clone(), res.mux.clone());
-            return Ok(Self {
-                endpoint: ClientEndpoint::Tcp {
-                    addr: normalized,
-                    token: effective_token,
-                },
-                mux: Some(res.mux),
-                mux_relay_key: Some(key),
-                upgraded_token: res.upgraded_token,
-                rpc_pool: Mutex::new(Vec::new()),
-            });
-        }
-        if canban_types::is_tailscale_auth(&token) {
-            bail!(
-                "auth_failed: Remote daemon does not support Tailscale automatic sign-in. Update the remote daemon or pair with a canban:// URI."
-            );
-        }
-        let stream = tokio::time::timeout(
+        let _ = validate_server_pubkey_policy(&normalized, server_pubkey.as_deref())?;
+        let tcp = tokio::time::timeout(
             Duration::from_secs(10),
             tokio::net::TcpStream::connect(normalized.as_str()),
         )
@@ -594,58 +627,37 @@ impl ClientTransport {
             )
         })?
         .with_context(|| format!("Canban is not reachable at {normalized}"))?;
-        drop(stream);
-        Ok(Self {
-            endpoint: ClientEndpoint::Tcp {
-                addr: normalized,
-                token,
-            },
-            mux: None,
-            mux_relay_key: None,
-            upgraded_token: None,
-            rpc_pool: Mutex::new(Vec::new()),
-        })
+        let _ = tcp.set_nodelay(true);
+        Self::connect_stream_async(
+            tcp,
+            normalized,
+            server_pubkey,
+            auth,
+            device_name,
+            &client_keypair,
+            noise_rng.as_ref(),
+        )
+        .await
     }
 
-    /// Connects to a remote TCP endpoint, upgrading to `yamux/1` multiplexing when
-    /// supported by the daemon and falling back to direct TCP RPC on older daemons.
-    pub fn connect_tcp(addr: String, token: String, device_name: String) -> Result<Self> {
-        let normalized = canban_types::normalize_daemon_addr(&addr);
-        let res_opt = run_on_client_rt({
-            let a = normalized.clone();
-            let t = token.clone();
-            async move { try_connect_mux(a, t, device_name).await }
-        })?;
-        if let Some(res) = res_opt {
-            let effective_token = res
-                .session_token
-                .clone()
-                .or_else(|| res.upgraded_token.clone())
-                .unwrap_or(token);
-            let key = next_mux_relay_key();
-            mux_relay_registry()
-                .lock()
-                .unwrap()
-                .insert(key.clone(), res.mux.clone());
-            return Ok(Self {
-                endpoint: ClientEndpoint::Tcp {
-                    addr: normalized,
-                    token: effective_token,
-                },
-                mux: Some(res.mux),
-                mux_relay_key: Some(key),
-                upgraded_token: res.upgraded_token,
-                rpc_pool: Mutex::new(Vec::new()),
-            });
-        }
-        if canban_types::is_tailscale_auth(&token) {
-            bail!(
-                "auth_failed: Remote daemon does not support Tailscale automatic sign-in. Update the remote daemon or pair with a canban:// URI."
-            );
-        }
-        Self::connect_direct(ClientEndpoint::Tcp {
-            addr: normalized,
-            token,
+    /// Synchronous wrapper around [`Self::connect_tcp_async`] running on the shared client runtime.
+    pub fn connect_tcp(
+        addr: String,
+        server_pubkey: Option<String>,
+        auth: TcpAuthMode,
+        device_name: String,
+        client_keypair: Arc<NoiseKeypair>,
+    ) -> Result<Self> {
+        run_on_client_rt(async move {
+            Self::connect_tcp_async(
+                addr,
+                server_pubkey,
+                auth,
+                device_name,
+                client_keypair,
+                system_noise_rng(),
+            )
+            .await
         })
     }
 
@@ -653,29 +665,22 @@ impl ClientTransport {
         &self.endpoint
     }
 
-    /// Returns the active TCP token/session secret for this transport, if any.
-    pub fn active_token(&self) -> Option<&str> {
-        match &self.endpoint {
-            ClientEndpoint::Tcp { token, .. } if !token.trim().is_empty() => Some(token.as_str()),
-            _ => None,
-        }
+    /// Returns the authenticated remote daemon's base64url Noise X25519 static public key.
+    pub fn remote_pubkey(&self) -> Option<&str> {
+        self.remote_pubkey.as_deref()
     }
 
     pub fn is_mux(&self) -> bool {
         self.mux.is_some()
     }
 
-    pub fn upgraded_token(&self) -> Option<&str> {
-        self.upgraded_token.as_deref()
-    }
-
-    pub fn relay_endpoint_and_token(&self) -> (String, Option<String>) {
+    pub fn relay_endpoint(&self) -> String {
         if let Some(key) = &self.mux_relay_key {
-            return (format!("mux://{key}"), None);
+            return format!("mux://{key}");
         }
         match &self.endpoint {
-            ClientEndpoint::Unix(path) => (path.to_string_lossy().into_owned(), None),
-            ClientEndpoint::Tcp { addr, token } => (format!("tcp://{addr}"), Some(token.clone())),
+            ClientEndpoint::Unix(path) => path.to_string_lossy().into_owned(),
+            ClientEndpoint::Tcp { addr, .. } => format!("tcp://{addr}"),
         }
     }
 
@@ -694,18 +699,15 @@ impl ClientTransport {
         if let Some(mux) = &self.mux {
             return mux_rpc_call_async(mux.clone(), method.to_owned(), params.clone()).await;
         }
-        let (stream, auth_token) = self.open_async_stream().await?;
+        let stream = self.open_async_stream().await?;
         let (read_half, mut writer) = tokio::io::split(stream);
         let mut reader = tokio::io::BufReader::new(read_half);
-        let mut req = json!({
+        let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": method,
             "params": params,
         });
-        if let Some(token) = auth_token {
-            req["auth"] = json!(token);
-        }
         tokio::time::timeout(
             Duration::from_secs(30),
             write_json_line_async(&mut writer, &req),
@@ -747,10 +749,13 @@ impl ClientTransport {
             let p = params.clone();
             return run_on_client_rt(async move { mux_rpc_call_async(m, meth, p).await });
         }
+        let ClientEndpoint::Unix(path) = &self.endpoint else {
+            bail!("TCP client transport must be established via Noise_XX + yamux/1");
+        };
         let pooled = self.rpc_pool.lock().unwrap().pop();
         let (mut conn, reused) = match pooled {
             Some(c) => (c, true),
-            None => (RpcConn::connect(&self.endpoint)?, false),
+            None => (UnixRpcConn::connect(path)?, false),
         };
         match conn.call(method, params) {
             Ok(v) => {
@@ -766,7 +771,7 @@ impl ClientTransport {
                     && (err.downcast_ref::<io::Error>().is_some()
                         || err.to_string().contains("closed")) =>
             {
-                let mut fresh = RpcConn::connect(&self.endpoint)?;
+                let mut fresh = UnixRpcConn::connect(path)?;
                 let v = fresh.call(method, params)?;
                 let mut pool = self.rpc_pool.lock().unwrap();
                 if pool.len() < 4 {
@@ -778,7 +783,7 @@ impl ClientTransport {
         }
     }
 
-    /// Opens a synchronous stream + optional legacy/direct-TCP auth token for a push subscriber.
+    /// Opens a synchronous stream for a push subscriber or bridged `mux://` relay.
     pub fn open_sync_stream(
         &self,
         read_timeout: Option<Duration>,
@@ -786,30 +791,24 @@ impl ClientTransport {
     ) -> Result<SyncStream> {
         if let Some(mux) = &self.mux {
             let writer = open_bridged_mux_unix(mux)?;
-            return Ok(into_sync_stream(writer, read_timeout, write_timeout, None)?);
+            return Ok(into_sync_unix_stream(writer, read_timeout, write_timeout)?);
         }
         match &self.endpoint {
             ClientEndpoint::Unix(path) => {
                 let writer = connect_unix_sync(path, read_timeout, write_timeout)?;
-                Ok(into_sync_stream(writer, read_timeout, write_timeout, None)?)
+                Ok(into_sync_unix_stream(writer, read_timeout, write_timeout)?)
             }
-            ClientEndpoint::Tcp { addr, token } => {
-                let writer = connect_tcp_sync(addr, read_timeout, write_timeout)?;
-                Ok(into_sync_stream(
-                    writer,
-                    read_timeout,
-                    write_timeout,
-                    Some(token.clone()),
-                )?)
+            ClientEndpoint::Tcp { .. } => {
+                bail!("TCP client transport requires an active Noise_XX + yamux/1 session")
             }
         }
     }
 
-    /// Opens an asynchronous stream + optional auth token without blocking a Tokio runtime.
-    pub async fn open_async_stream(&self) -> Result<(TransportStream, Option<String>)> {
+    /// Opens an asynchronous stream without blocking a Tokio runtime.
+    pub async fn open_async_stream(&self) -> Result<TransportStream> {
         if let Some(mux) = &self.mux {
             let stream = mux.open_stream().await?;
-            return Ok((TransportStream::Mux(stream), None));
+            return Ok(TransportStream::Mux(stream));
         }
         match &self.endpoint {
             ClientEndpoint::Unix(path) => {
@@ -825,23 +824,10 @@ impl ClientTransport {
                     )
                 })?
                 .with_context(|| format!("Canban is not running at {}", path.display()))?;
-                Ok((TransportStream::Unix(stream), None))
+                Ok(TransportStream::Unix(stream))
             }
-            ClientEndpoint::Tcp { addr, token } => {
-                let stream = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    tokio::net::TcpStream::connect(addr.as_str()),
-                )
-                .await
-                .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("Timed out connecting to {addr}"),
-                    )
-                })?
-                .with_context(|| format!("Canban is not reachable at {addr}"))?;
-                let _ = stream.set_nodelay(true);
-                Ok((TransportStream::tcp(stream), Some(token.clone())))
+            ClientEndpoint::Tcp { .. } => {
+                bail!("TCP client transport requires an active Noise_XX + yamux/1 session")
             }
         }
     }
@@ -859,10 +845,12 @@ mod tests {
         );
         assert_eq!(rpc_read_timeout("app.ping"), DEFAULT_RPC_READ_TIMEOUT);
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("rpc.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let (req_seen_tx, req_seen_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -878,17 +866,11 @@ mod tests {
             )
             .unwrap();
             stream.flush().unwrap();
+            let _ = done_rx.recv();
         });
 
-        let mut conn = RpcConn::connect(&ClientEndpoint::Tcp {
-            addr,
-            token: "test-token".into(),
-        })
-        .unwrap();
-        let probe_fd = match &conn.stream {
-            SyncClientStream::Tcp { reader, .. } => reader.get_ref().try_clone().unwrap(),
-            SyncClientStream::Unix { .. } => unreachable!(),
-        };
+        let mut conn = UnixRpcConn::connect(&sock).unwrap();
+        let probe_fd = conn.reader.get_ref().try_clone().unwrap();
         assert_eq!(
             probe_fd.read_timeout().unwrap(),
             Some(DEFAULT_RPC_READ_TIMEOUT)
@@ -896,10 +878,7 @@ mod tests {
 
         let caller = std::thread::spawn(move || {
             let res = conn.call("update.daemon", &json!({})).unwrap();
-            let after = match &conn.stream {
-                SyncClientStream::Tcp { reader, .. } => reader.get_ref().read_timeout().unwrap(),
-                SyncClientStream::Unix { .. } => unreachable!(),
-            };
+            let after = conn.reader.get_ref().read_timeout().unwrap();
             (res, after)
         });
 
@@ -912,6 +891,7 @@ mod tests {
         release_tx.send(()).unwrap();
 
         let (res, restored_timeout) = caller.join().unwrap();
+        let _ = done_tx.send(());
         server.join().unwrap();
         assert_eq!(res["updated"], true);
         assert_eq!(restored_timeout, Some(DEFAULT_RPC_READ_TIMEOUT));
@@ -919,15 +899,15 @@ mod tests {
 
     #[test]
     fn truncated_rpc_frame_returns_unexpected_eof_instead_of_json_error() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("trunc.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            // Write a partial JSON frame without trailing newline, then close.
             stream
                 .write_all(br#"{"jsonrpc":"2.0","id":1,"result":{"partial":"#)
                 .unwrap();
@@ -935,11 +915,7 @@ mod tests {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         });
 
-        let mut conn = RpcConn::connect(&ClientEndpoint::Tcp {
-            addr,
-            token: "test-token".into(),
-        })
-        .unwrap();
+        let mut conn = UnixRpcConn::connect(&sock).unwrap();
         let err = conn.call("app.state", &json!({})).unwrap_err();
         server.join().unwrap();
 

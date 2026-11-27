@@ -6,9 +6,9 @@ use super::{
         MOBILE_CAPTION, MOBILE_FOOTNOTE, MOBILE_RADIUS, disclosure_chevron, empty_state,
         grouped_card, is_mobile_os, mobile_button, mobile_field, mobile_footnote,
         mobile_inline_button, mobile_subhead, mobile_title, offline_sync_banner_inset,
-        section_header, security_badge, tab_scroll_bottom_pad, trigger_haptic,
+        section_header, tab_scroll_bottom_pad, trigger_haptic,
     },
-    host_security, mobile_hosts,
+    mobile_hosts,
 };
 use crate::{components::card_tile::CardTileModel, presenter::*};
 use canban_types::{Card, HostSummary, Project, Stage};
@@ -1018,15 +1018,8 @@ pub(crate) fn project_picker_sheet_body(ui: Ui, state: MobileState) -> impl Into
             let mut col = view().w_full().gap_5();
             for (host_opt, projects) in groups {
                 let header_el = if let Some(host) = host_opt {
-                    let sec_type = host_security(ui, &host);
                     let (conn_text, conn_tone) = super::chrome::host_connection_status(&host);
-                    let badges = view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .child(security_badge(sec_type))
-                        .child(status(conn_text, conn_tone))
-                        .into_element();
+                    let badges = status(conn_text, conn_tone).into_element();
                     section_header(host.name.to_uppercase(), Some(badges))
                 } else {
                     section_header("PROJECTS", None)

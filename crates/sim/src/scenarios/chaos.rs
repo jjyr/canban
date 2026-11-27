@@ -6770,15 +6770,10 @@ fn lookup_card_rev_on(world: &SimWorld, client_id: &str, qualified_cid: &str) ->
 }
 
 /// Pairs (or re-pairs in-place) `remote_host` on `"ui-client"` using a fresh single-use
-/// `device.invite.create` code and returns the newly minted server-side `device_id`.
+/// `device.invite.create` code and returns the server-side `device_id` matching `"ui-client"`'s
+/// Noise public key.
 fn pair_host_on_primary_client(world: &mut SimWorld, remote_host: &str) -> Result<String> {
-    let before = world.server_call(remote_host, "device.list", json!({}))?;
-    let before_ids: BTreeSet<String> = before["devices"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|d| d["id"].as_str().map(str::to_owned))
-        .collect();
+    let client_fp = world.client_keypair(PRIMARY_CLIENT)?.fingerprint();
 
     let invite = world.server_call(
         remote_host,
@@ -6789,31 +6784,46 @@ fn pair_host_on_primary_client(world: &mut SimWorld, remote_host: &str) -> Resul
         .as_str()
         .context("device.invite.create missing code")?
         .to_owned();
+    let server_pubkey = invite["server_pubkey"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| world.servers[remote_host].server_pubkey());
     let host_owned = remote_host.to_owned();
     let addr = format!("{remote_host}:{SIM_PORT}");
     let _summary = world.client_run_on(PRIMARY_CLIENT, 30_000, move |client| async move {
         client
-            .add_host_async(SavedHost {
-                id: host_owned.clone(),
-                name: host_owned,
-                transport: HostTransport::Tcp { addr, token: code },
-                ssh_target: None,
-                server_id: None,
-                enabled: true,
-                added_at: 0,
-            })
+            .add_host_with_pairing_code_async(
+                SavedHost {
+                    id: host_owned.clone(),
+                    name: host_owned,
+                    transport: HostTransport::Tcp {
+                        addr,
+                        server_pubkey,
+                        tailscale_auth: false,
+                    },
+                    ssh_target: None,
+                    server_id: None,
+                    enabled: true,
+                    added_at: 0,
+                },
+                Some(code),
+            )
             .await
     })?;
 
     let after = world.server_call(remote_host, "device.list", json!({}))?;
-    let new_dev_id = after["devices"]
+    let dev_id = after["devices"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|d| d["id"].as_str().map(str::to_owned))
-        .find(|id| !before_ids.contains(id))
-        .with_context(|| format!("No newly paired device found on {remote_host}"))?;
-    Ok(new_dev_id)
+        .find(|d| d["pubkey_fingerprint"].as_str() == Some(client_fp.as_str()))
+        .and_then(|d| d["id"].as_str().map(str::to_owned))
+        .with_context(|| {
+            format!(
+                "No paired device matching client fingerprint {client_fp} found on {remote_host}"
+            )
+        })?;
+    Ok(dev_id)
 }
 
 /// Deterministically shrink a failing `(seed, max_ops)` Chaos trace via prefix binary search

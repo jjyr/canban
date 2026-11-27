@@ -10,8 +10,7 @@ pub mod settings;
 pub mod terminals;
 
 use crate::presenter::Ui;
-use canban_client::TransportSecurity;
-use canban_types::{DiscoveredCanbanHost, HostSummary, HostTransport, is_tailscale_auth};
+use canban_types::{DiscoveredCanbanHost, HostSummary, HostTransport};
 use canban_ui_kit::{tokens::*, *};
 use nsh_base::{MenuButtonItem, menu_button, nav_page, nav_stack};
 use nsh_core::{
@@ -272,35 +271,17 @@ pub fn mobile_hosts(ui: Ui) -> Vec<HostSummary> {
     from_snap
 }
 
-/// Classifies the active transport security of a host summary for 🔒/⚠ UI badges.
-pub fn host_security(_ui: Ui, summary: &HostSummary) -> TransportSecurity {
-    if summary.is_local {
-        return TransportSecurity::Local;
-    }
-    if let Some(backend) = crate::backend::get()
-        && let Some(saved) = backend
-            .saved_hosts()
-            .into_iter()
-            .find(|h| h.id == summary.id)
-    {
-        return TransportSecurity::classify_transport(&saved.transport);
-    }
-    if summary.transport_label.eq_ignore_ascii_case("SSH")
-        || summary.transport_label.contains("SSH")
-    {
-        return TransportSecurity::Ssh;
-    }
-    TransportSecurity::classify_tcp_addr(&summary.endpoint_label)
-}
-
-/// Returns `true` when `host_id` is configured to use automatic Tailscale `WhoIs` sign-in (`ts_auto`).
+/// Returns `true` when `host_id` is configured to use automatic Tailscale `WhoIs` sign-in.
 pub(crate) fn is_tailscale_auto_host(host_id: &str) -> bool {
     crate::backend::get()
         .and_then(|b| b.saved_hosts().into_iter().find(|h| h.id == host_id))
         .is_some_and(|saved| {
             matches!(
                 &saved.transport,
-                HostTransport::Tcp { token, .. } if is_tailscale_auth(token)
+                HostTransport::Tcp {
+                    tailscale_auth: true,
+                    ..
+                }
             )
         })
 }

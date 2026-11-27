@@ -267,7 +267,7 @@ pub struct Ui {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PairedDevicesPreview {
     pub devices: Vec<PairedDevice>,
-    pub has_legacy_token: bool,
+    pub server_pubkey_fingerprint: Option<String>,
     pub tcp_enabled: bool,
     pub listening: bool,
     pub listen_addrs: Vec<String>,

@@ -22,8 +22,6 @@ pub struct ServerListenConfig {
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
-    #[serde(default)]
-    pub allow_insecure_bind: bool,
     #[serde(default = "default_trust_tailscale_self")]
     pub trust_tailscale_self: bool,
 }
@@ -34,26 +32,24 @@ impl Default for ServerListenConfig {
             tailscale: false,
             port: DEFAULT_DAEMON_PORT,
             listen: None,
-            allow_insecure_bind: false,
             trust_tailscale_self: true,
         }
     }
 }
 
 pub const PAIRING_CODE_PREFIX: &str = "pair_";
-pub const DEVICE_TOKEN_PREFIX: &str = "dev_";
-pub const TAILSCALE_AUTH_SENTINEL: &str = "ts_auto";
 
 pub fn is_pairing_code(token: &str) -> bool {
     token.trim().starts_with(PAIRING_CODE_PREFIX)
 }
 
-pub fn is_device_token(token: &str) -> bool {
-    token.trim().starts_with(DEVICE_TOKEN_PREFIX)
-}
-
-pub fn is_tailscale_auth(token: &str) -> bool {
-    token.trim() == TAILSCALE_AUTH_SENTINEL
+/// Validates syntactic form of a 32-byte unpadded base64url Noise X25519 public key (43 chars).
+pub fn is_valid_noise_pubkey_b64(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.len() == 43
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +61,8 @@ pub struct PairedDevice {
     pub last_seen_at: Option<u64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pubkey_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,7 +97,10 @@ pub enum HostTransport {
     Local,
     Tcp {
         addr: String,
-        token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_pubkey: Option<String>,
+        #[serde(default)]
+        tailscale_auth: bool,
     },
     Ssh {
         target: String,
@@ -188,6 +189,13 @@ pub enum HostConnectionState {
     AuthFailed {
         error: String,
     },
+    KeyMismatch {
+        #[serde(default)]
+        expected_fingerprint: String,
+        #[serde(default)]
+        actual_fingerprint: String,
+        error: String,
+    },
     Offline {
         error: String,
         #[serde(default)]
@@ -235,6 +243,7 @@ impl HostConnectionState {
                 ..
             } => format!("API mismatch (v{server_api} vs App v{app_api})"),
             Self::AuthFailed { .. } => "Authentication required".into(),
+            Self::KeyMismatch { .. } => "Host key changed".into(),
             Self::Offline {
                 cached_at: Some(_), ..
             } => "Offline · Cached".into(),
@@ -248,6 +257,7 @@ impl HostConnectionState {
         match self {
             Self::Reconnecting { error, .. }
             | Self::AuthFailed { error }
+            | Self::KeyMismatch { error, .. }
             | Self::Offline { error, .. }
                 if !error.is_empty() =>
             {
@@ -269,6 +279,8 @@ pub struct HostSummary {
     pub ssh_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_pubkey_fingerprint: Option<String>,
     pub connection: HostConnectionState,
     #[serde(default)]
     pub active_agents: usize,
@@ -302,7 +314,9 @@ impl HostSummary {
     pub fn needs_attention(&self) -> bool {
         matches!(
             self.connection,
-            HostConnectionState::ApiMismatch { .. } | HostConnectionState::AuthFailed { .. }
+            HostConnectionState::ApiMismatch { .. }
+                | HostConnectionState::AuthFailed { .. }
+                | HostConnectionState::KeyMismatch { .. }
         )
     }
 }
@@ -407,27 +421,66 @@ pub fn is_tailscale_addr(addr: &str) -> bool {
     host.parse::<std::net::IpAddr>().is_ok_and(is_tailscale_ip)
 }
 
-/// Format a copyable pairing URI (`canban://<addr>#<token>`).
-pub fn format_pairing_uri(addr: &str, token: &str) -> String {
-    format!("canban://{}#{}", addr.trim(), token.trim())
+/// Format a copyable pairing URI (`canban://<addr>?pk=<server_pubkey>#<pairing_code>`).
+pub fn format_pairing_uri(addr: &str, server_pubkey: &str, code: &str) -> String {
+    let norm = normalize_daemon_addr(addr);
+    let pk = server_pubkey.trim();
+    if pk.is_empty() {
+        format!("canban://{norm}#{}", code.trim())
+    } else {
+        format!("canban://{norm}?pk={pk}#{}", code.trim())
+    }
 }
 
-/// Parse `canban://host:port#token`, `tcp://host:port#token`, or `host:port#token`.
+/// Parse `canban://host:port?pk=<server_pubkey>#<pairing_code>`, `tcp://...`, or `host:port?pk=...#code`.
 /// If `:port` is omitted, defaults to `DEFAULT_DAEMON_PORT`.
-pub fn parse_pairing_uri(raw: &str) -> Option<(String, String)> {
+/// Non-Tailscale endpoints MUST include a valid `?pk=<server_pubkey>` query parameter.
+pub fn parse_pairing_uri(raw: &str) -> Option<(String, Option<String>, String)> {
     let trimmed = raw.trim();
-    let without_scheme = trimmed
-        .strip_prefix("canban://")
-        .or_else(|| trimmed.strip_prefix("tcp://"))
-        .unwrap_or(trimmed);
-    let (host_part, token_part) = without_scheme.split_once('#')?;
-    let host_part = host_part.trim().trim_end_matches('/');
-    let token = token_part.trim();
-    if host_part.is_empty() || token.len() < 16 {
+    let (before_frag, code_part) = trimmed.split_once('#')?;
+    let code = code_part.trim();
+    if !is_pairing_code(code) || code.len() < PAIRING_CODE_PREFIX.len() + 16 {
         return None;
     }
+    let without_scheme = before_frag
+        .strip_prefix("canban://")
+        .or_else(|| before_frag.strip_prefix("tcp://"))
+        .unwrap_or(before_frag);
+    let (host_part, query_opt) = match without_scheme.split_once('?') {
+        Some((h, q)) => (h.trim().trim_end_matches('/'), Some(q)),
+        None => (without_scheme.trim().trim_end_matches('/'), None),
+    };
+    if host_part.is_empty() || host_part.eq_ignore_ascii_case("pair") {
+        return None;
+    }
+    let mut server_pubkey = None;
+    if let Some(query) = query_opt {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = pair.split_once('=')?;
+            match k {
+                "pk" => {
+                    let pk = v.trim();
+                    if !is_valid_noise_pubkey_b64(pk) {
+                        return None;
+                    }
+                    server_pubkey = Some(pk.to_owned());
+                }
+                "v" | "a" => return None,
+                _ => {}
+            }
+        }
+    }
     let addr = normalize_daemon_addr(host_part);
-    Some((addr, token.to_owned()))
+    if addr.is_empty() {
+        return None;
+    }
+    if !is_tailscale_addr(&addr) && server_pubkey.is_none() {
+        return None;
+    }
+    Some((addr, server_pubkey, code.to_owned()))
 }
 
 /// Normalize `host` or `host:port` (including IPv6 `[::1]` / `[::1]:7680`) to `host:port`.
@@ -1524,16 +1577,26 @@ mod host_tests {
 
     #[test]
     fn pairing_uri_round_trips_and_normalizes_default_ports() {
-        let token = "0123456789abcdef0123456789abcdef";
-        let uri = format_pairing_uri("100.84.12.5:7680", token);
-        assert_eq!(uri, format!("canban://100.84.12.5:7680#{token}"));
+        let code = "pair_0123456789abcdef0123456789abcdef";
+        let pk = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let uri = format_pairing_uri("100.84.12.5:7680", pk, code);
+        assert_eq!(uri, format!("canban://100.84.12.5:7680?pk={pk}#{code}"));
         assert_eq!(
             parse_pairing_uri(&uri),
-            Some(("100.84.12.5:7680".into(), token.into()))
+            Some(("100.84.12.5:7680".into(), Some(pk.into()), code.into()))
         );
         assert_eq!(
-            parse_pairing_uri(&format!("100.84.12.5#{token}")),
-            Some(("100.84.12.5:7680".into(), token.into()))
+            parse_pairing_uri(&format!("100.84.12.5#{code}")),
+            Some(("100.84.12.5:7680".into(), None, code.into()))
+        );
+        // Non-Tailscale URI without `?pk=` MUST be rejected.
+        assert_eq!(
+            parse_pairing_uri(&format!("canban://192.168.1.20:7680#{code}")),
+            None
+        );
+        assert_eq!(
+            parse_pairing_uri(&format!("canban://192.168.1.20:7680?pk={pk}#{code}")),
+            Some(("192.168.1.20:7680".into(), Some(pk.into()), code.into()))
         );
         assert_eq!(parse_pairing_uri("canban://100.84.12.5#short"), None);
     }

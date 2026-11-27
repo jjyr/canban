@@ -1,7 +1,7 @@
 //! Phone-viewport (`390×844` / `412×915`) Gallery regression scenes covering every screen
 //! specified in `docs/mobile-interaction.md`.
 use crate::fixtures;
-use canban_client::{AddrProbeResult, TransportSecurity};
+use canban_client::AddrProbeResult;
 use canban_ui::{
     mobile::{CardSegment, MobileSheet, MobileState, MobileTab, pairing::ProbeState},
     presenter::Ui,
@@ -86,11 +86,11 @@ pub fn apply_scene(ui: Ui, state: MobileState, name: &str) {
         "mobile-pairing" => {
             ui.hosts.set(Vec::new());
             ui.snapshot.set(canban_types::Snapshot::default());
-            let uri = "canban://100.84.0.2:7680?sid=srv-home-linux&name=Home+Linux#pair-482913";
+            let uri = "canban://100.84.0.2:7680?pk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=srv-home-linux&name=Home+Linux#pair_482913";
             state.pairing_uri_input.set(uri.into());
             state.pairing_probe.set(ProbeState::Result(AddrProbeResult {
                 addr: "100.84.0.2:7680".into(),
-                security: TransportSecurity::Tailscale,
+                is_tailscale: true,
                 reachable: true,
                 rtt_ms: Some(14),
                 error: None,

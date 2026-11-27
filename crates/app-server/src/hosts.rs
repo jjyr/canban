@@ -166,6 +166,7 @@ impl canban_client::HostConnector for DesktopSshConnector {
         host_id: &'a str,
         transport: &'a HostTransport,
         _device_name: &'a str,
+        _pairing_code: Option<&'a str>,
     ) -> canban_client::ConnectFuture<'a> {
         let tunnels_dir = self.tunnels_dir.clone();
         let host_id = host_id.to_owned();
@@ -181,8 +182,8 @@ impl canban_client::HostConnector for DesktopSshConnector {
                 };
                 let tun =
                     SshTunnel::start(&tunnels_dir, &host_id, &target, remote_home.as_deref())?;
-                let client = Arc::new(canban_transport::ClientTransport::connect_direct(
-                    ClientEndpoint::Unix(tun.socket_path.clone()),
+                let client = Arc::new(canban_transport::ClientTransport::connect_unix(
+                    tun.socket_path.clone(),
                 )?);
                 Ok(canban_client::ConnectedTransport::with_lease(
                     client,
@@ -262,22 +263,11 @@ impl canban_client::LocalHostDriver for DesktopLocalHost {
 /// Desktop [`canban_client::GlobalEnvSyncProvider`] backed by `canban_storage::env`.
 pub struct DesktopGlobalEnvProvider {
     local_home: PathBuf,
-    id_gen: Option<Arc<dyn canban_types::IdGen>>,
 }
 
 impl DesktopGlobalEnvProvider {
     pub fn new(local_home: PathBuf) -> Self {
-        Self {
-            local_home,
-            id_gen: None,
-        }
-    }
-
-    /// Inject a deterministic [`canban_types::IdGen`] for sealing synced secrets in DST.
-    /// Production leaves this unset (`OsRng`).
-    pub fn with_id_gen(mut self, id_gen: Arc<dyn canban_types::IdGen>) -> Self {
-        self.id_gen = Some(id_gen);
-        self
+        Self { local_home }
     }
 }
 
@@ -288,15 +278,12 @@ impl canban_client::GlobalEnvSyncProvider for DesktopGlobalEnvProvider {
             .flatten()
     }
 
-    fn build_sync_payload(&self, tcp_token: Option<&str>) -> Result<(Value, Option<String>)> {
+    fn build_sync_payload(&self) -> Result<(Value, Option<String>)> {
         let (records, fp) =
             canban_storage::env::list_global_env_for_sync_with_fingerprint_from_home(
                 &self.local_home,
             )?;
-        let mut wire = Vec::with_capacity(records.len());
-        for record in records {
-            wire.push(record.to_wire_with_id_gen(tcp_token, self.id_gen.as_deref())?);
-        }
+        let wire: Vec<_> = records.into_iter().map(|r| r.to_wire()).collect();
         Ok((json!({ "records": wire }), fp))
     }
 }
@@ -312,8 +299,16 @@ impl canban_client::LocalDiscoveryProvider for DesktopDiscoveryProvider {
 }
 
 /// Desktop [`canban_client::SshCapabilityProvider`] implementing Tailscale WhoIs + SSH auto-pairing and bootstrap.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DesktopSshProvider;
+#[derive(Clone, Debug)]
+pub struct DesktopSshProvider {
+    local_home: PathBuf,
+}
+
+impl DesktopSshProvider {
+    pub fn new(local_home: PathBuf) -> Self {
+        Self { local_home }
+    }
+}
 
 impl canban_client::SshCapabilityProvider for DesktopSshProvider {
     fn connect_tailscale_peer_or_ssh(
@@ -326,27 +321,38 @@ impl canban_client::SshCapabilityProvider for DesktopSshProvider {
         let probe = network::probe_tcp_reachable(&direct_addr, Duration::from_secs(2));
         let mut tailscale_auth_error: Option<String> = None;
         let pair_res = if probe.is_ok() {
-            match AppClient::connect_tcp(
-                direct_addr.clone(),
-                canban_types::TAILSCALE_AUTH_SENTINEL.into(),
-            ) {
+            let kp = canban_transport::load_or_create_client_keypair(
+                &self.local_home,
+                true,
+                canban_transport::system_noise_rng().as_ref(),
+            );
+            match kp.and_then(|keypair| {
+                AppClient::connect_tcp(
+                    direct_addr.clone(),
+                    None,
+                    canban_transport::TcpAuthMode::Tailscale,
+                    Arc::new(keypair),
+                )
+            }) {
                 Ok(client) => {
                     let sid = client.server_id().map(str::to_owned);
+                    let pk = client.transport().remote_pubkey().map(str::to_owned);
                     drop(client);
                     Ok(json!({
                         "addr": direct_addr,
-                        "token": canban_types::TAILSCALE_AUTH_SENTINEL,
+                        "server_pubkey": pk,
+                        "tailscale_auth": true,
                         "server_id": sid,
                         "via": "tailscale_whois",
                     }))
                 }
                 Err(ts_err) => {
                     tailscale_auth_error = Some(format!("{ts_err:#}"));
-                    network::pair_via_ssh_noninteractive(ssh_target, true, port)
+                    network::pair_via_ssh_noninteractive(&self.local_home, ssh_target, true, port)
                 }
             }
         } else {
-            network::pair_via_ssh_noninteractive(ssh_target, true, port)
+            network::pair_via_ssh_noninteractive(&self.local_home, ssh_target, true, port)
         };
         canban_client::TailscalePeerConnectResult {
             tcp_reachable: probe.is_ok(),
@@ -356,7 +362,7 @@ impl canban_client::SshCapabilityProvider for DesktopSshProvider {
     }
 
     fn pair_via_ssh(&self, ssh_target: &str, prefer_tailscale: bool, port: u16) -> Result<Value> {
-        network::pair_via_ssh_noninteractive(ssh_target, prefer_tailscale, port)
+        network::pair_via_ssh_noninteractive(&self.local_home, ssh_target, prefer_tailscale, port)
     }
 
     fn build_ssh_bootstrap_command(
@@ -370,17 +376,22 @@ impl canban_client::SshCapabilityProvider for DesktopSshProvider {
     }
 }
 
-/// Builds the desktop [`canban_client::CompositeConnector`] (TCP + SSH tunnels).
-pub fn desktop_connector(local_home: &Path) -> Arc<dyn canban_client::HostConnector> {
-    Arc::new(
-        canban_client::CompositeConnector::with_default_tcp()
+/// Builds the desktop [`canban_client::CompositeConnector`] (`Noise_XX` TCP + SSH tunnels).
+pub fn desktop_connector(local_home: &Path) -> Result<Arc<dyn canban_client::HostConnector>> {
+    let client_kp = Arc::new(canban_transport::load_or_create_client_keypair(
+        local_home,
+        true,
+        canban_transport::system_noise_rng().as_ref(),
+    )?);
+    Ok(Arc::new(
+        canban_client::CompositeConnector::with_tcp(client_kp)
             .push(Arc::new(DesktopSshConnector::new(local_home))),
-    )
+    ))
 }
 
 /// Builds the unified desktop [`canban_client::MultiHostClient`] backed by `local` (`This Mac`),
-/// `<home>/config/hosts.json`, TCP + SSH connectors, global-env replication, and `API_VERSION`
-/// enforcement.
+/// `<home>/config/hosts.json`, Noise_XX TCP + SSH connectors, global-env replication, and
+/// `API_VERSION` enforcement.
 pub fn desktop_multi_host_client(
     local: Arc<AppClient>,
 ) -> Result<Arc<canban_client::MultiHostClient>> {
@@ -393,7 +404,7 @@ pub fn desktop_multi_host_client(
         host_store: Arc::new(canban_client::InlineHostsFileStore::new(hosts_path(
             &local_home,
         ))),
-        connector: desktop_connector(&local_home),
+        connector: desktop_connector(&local_home)?,
         capabilities: canban_client::ClientCapabilities::desktop(),
         local_host: Some(Arc::new(DesktopLocalHost::new(local))),
         global_env_provider: Some(Arc::new(DesktopGlobalEnvProvider::new(local_home))),
@@ -406,7 +417,6 @@ pub fn desktop_multi_host_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
 
     #[test]
     fn failed_remote_daemon_update_clears_updating_flag_and_restores_accurate_status() {
@@ -417,10 +427,107 @@ mod tests {
         let local_client =
             AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let remote_addr = format!("127.0.0.1:{port}");
-        let remote_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mock_home = dir.path().join("mock-remote-home");
+        let mock_app = AppServer::open(mock_home, PathBuf::from("/bin/echo")).unwrap();
+        let desktop_client_kp = canban_transport::load_or_create_client_keypair(
+            &local_home,
+            true,
+            canban_transport::system_noise_rng().as_ref(),
+        )
+        .unwrap();
+        mock_app
+            .authorize_device_pubkey("desktop-test", &desktop_client_kp.public_b64())
+            .unwrap();
+        let remote_pk = mock_app.server_pubkey();
+        let remote_sid = "srv-old-daemon".to_owned();
+        let transport_cfg = mock_app.transport_config().clone();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        let mock_thread = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap().to_string();
+                let _ = addr_tx.send(addr);
+                let mut stop = stop_rx.clone();
+                let mock_handler =
+                    Arc::new(|accepted: canban_transport::AcceptedStream| async move {
+                        let (r, mut w) = tokio::io::split(accepted.stream);
+                        let mut reader = tokio::io::BufReader::new(r);
+                        let mut first = accepted.initial_request;
+                        loop {
+                            let req: Value = if let Some(v) = first.take() {
+                                v
+                            } else {
+                                match canban_transport::read_bounded_line(
+                                    &mut reader,
+                                    canban_transport::MAX_FRAME_BYTES,
+                                )
+                                .await
+                                {
+                                    Ok(Some(l)) => serde_json::from_str(&l).unwrap_or_default(),
+                                    _ => break,
+                                }
+                            };
+                            let reply = if req["method"] == "update.daemon" {
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": req["id"],
+                                    "error": {"code": -32000, "message": "Release download timed out"}
+                                })
+                            } else if req["method"] == "app.ping" {
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": req["id"],
+                                    "result": {
+                                        "api_version": API_VERSION.saturating_sub(1),
+                                        "server_id": "srv-old-daemon",
+                                        "build": {"version": "20261114-1", "api": API_VERSION.saturating_sub(1)}
+                                    }
+                                })
+                            } else {
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": req["id"],
+                                    "error": {"code": -32601, "message": "Method not found"}
+                                })
+                            };
+                            if canban_transport::write_json_line_async(&mut w, &reply)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                loop {
+                    tokio::select! {
+                        _ = stop.changed() => break,
+                        res = listener.accept() => {
+                            let Ok((stream, peer)) = res else { break; };
+                            let cfg_c = transport_cfg.clone();
+                            let stop_c = stop_rx.clone();
+                            let h_c = Arc::clone(&mock_handler);
+                            tokio::spawn(async move {
+                                let _ = canban_transport::serve_authenticated_stream(
+                                    stream,
+                                    Some(peer),
+                                    cfg_c,
+                                    stop_c,
+                                    false,
+                                    h_c,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                }
+            });
+        });
+        let remote_addr = addr_rx.recv().unwrap();
 
         let hosts_file = HostsFile {
             hosts: vec![SavedHost {
@@ -428,10 +535,11 @@ mod tests {
                 name: "Home Linux".into(),
                 transport: HostTransport::Tcp {
                     addr: remote_addr,
-                    token: remote_token.into(),
+                    server_pubkey: Some(remote_pk),
+                    tailscale_auth: false,
                 },
                 ssh_target: None,
-                server_id: Some("srv-old-daemon".into()),
+                server_id: Some(remote_sid),
                 enabled: true,
                 added_at: now(),
             }],
@@ -441,53 +549,6 @@ mod tests {
             &serde_json::to_vec_pretty(&hosts_file).unwrap(),
         )
         .unwrap();
-
-        let stop_mock = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop_mock.clone();
-        let mock_thread = std::thread::spawn(move || {
-            let _ = listener.set_nonblocking(false);
-            while !stop_clone.load(Ordering::SeqCst) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                if stop_clone.load(Ordering::SeqCst) {
-                    break;
-                }
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() || line.is_empty() {
-                    continue;
-                }
-                let req: Value = serde_json::from_str(&line).unwrap_or_default();
-                if req["method"] == "update.daemon" {
-                    let _ = writeln!(
-                        stream,
-                        "{}",
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": req["id"],
-                            "error": {"code": -32000, "message": "Release download timed out"}
-                        })
-                    );
-                    let _ = stream.flush();
-                } else if req["method"] == "app.ping" {
-                    let _ = writeln!(
-                        stream,
-                        "{}",
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": req["id"],
-                            "result": {
-                                "api_version": API_VERSION.saturating_sub(1),
-                                "server_id": "srv-old-daemon",
-                                "build": {"version": "20261114-1", "api": API_VERSION.saturating_sub(1)}
-                            }
-                        })
-                    );
-                    let _ = stream.flush();
-                }
-            }
-        });
 
         let client = desktop_multi_host_client(local_client).unwrap();
         let err = client
@@ -510,9 +571,7 @@ mod tests {
             "expected host to return to ApiMismatch after failed update, got {:?}",
             restored.connection
         );
-
-        stop_mock.store(true, Ordering::SeqCst);
-        let _ = std::net::TcpStream::connect(format!("127.0.0.1:{port}"));
+        let _ = stop_tx.send(true);
         let _ = mock_thread.join();
     }
 

@@ -1,16 +1,16 @@
 //! Multi-host client (`MultiHostClient`, aliased as `RemoteClient`) driven by pluggable
-//! [`HostConnector`] adapters, Tokio async push streams, `canban-sync` outbox/read-cache replay,
-//! AEAD TCP secret sealing, and remote PTY transport.
+//! [`HostConnector`] adapters, `Noise_XX` E2EE, Tokio async push streams, `canban-sync`
+//! outbox/read-cache replay, and remote PTY transport.
 use crate::{
     capabilities::{ClientCapabilities, GlobalEnvSyncProvider, LocalHostDriver},
     connector::{ConnectionLease, HostConnector, TcpConnector},
-    pairing::{PairingInvite, TransportSecurity},
+    pairing::PairingInvite,
     push::{PushFrame, change_topic, open_async_subscribe, state_marker},
     session::{ApiMismatchError, SingleHostSession},
     store::{
         CachedHostData, CredentialHostStore, CredentialStore, HostStore, load_cache,
-        load_global_env_sync_fingerprint, outbox_path, reads_dir, save_cache_with_durability,
-        save_global_env_sync_fingerprint_with_durability, seal_params_for_tcp_with_id_gen,
+        load_global_env_sync_fingerprint, load_or_create_client_keypair_with_store, outbox_path,
+        reads_dir, save_cache_with_durability, save_global_env_sync_fingerprint_with_durability,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -24,13 +24,14 @@ use canban_sync::{
     },
 };
 use canban_terminal::{RemotePtyTransport, session::PtyTransport};
-use canban_transport::ClientTransport;
+use canban_transport::{
+    ClientTransport, HostKeyMismatchError, pubkey_b64_fingerprint, system_noise_rng,
+};
 use canban_types::{
     AppEvent, Clock, Config, DiscoveredCanbanHost, EnvEntryMeta, Failpoints,
     GlobalEnvSyncHostFailure, GlobalEnvSyncStatus, GlobalEnvSyncSummary, HostConnectionState,
     HostSummary, HostTransport, IdGen, RuntimeState, SavedHost, SchedulerSettings, Snapshot,
-    SyncAction, SyncItemState, SyncItemView, is_device_token, is_pairing_code,
-    normalize_daemon_addr, system_clock, system_id_gen,
+    SyncAction, SyncItemState, SyncItemView, normalize_daemon_addr, system_clock, system_id_gen,
 };
 use serde_json::{Value, json};
 use std::{
@@ -227,6 +228,12 @@ impl RemoteHostSlot {
     fn summary(&self, now_ms: u64) -> HostSummary {
         let outbox = self.outbox.lock().unwrap();
         let active_agents = count_active_agents(&self.cached.snapshot, now_ms);
+        let server_pubkey_fingerprint = match &self.saved.transport {
+            HostTransport::Tcp { server_pubkey, .. } => {
+                server_pubkey.as_deref().and_then(pubkey_b64_fingerprint)
+            }
+            _ => None,
+        };
         HostSummary {
             id: self.saved.id.clone(),
             name: self.saved.name.clone(),
@@ -243,6 +250,7 @@ impl RemoteHostSlot {
                     _ => None,
                 }),
             server_id: self.saved.server_id.clone(),
+            server_pubkey_fingerprint,
             connection: self.connection.clone(),
             active_agents,
             max_agents: self.cached.config.scheduler.max_agents,
@@ -251,16 +259,6 @@ impl RemoteHostSlot {
             last_synced_at: self.last_synced_at.or_else(|| self.cached_at()),
             pending_mutations: outbox.pending_count(),
             sync_conflicts: outbox.conflict_count(),
-        }
-    }
-
-    fn tcp_token(&self) -> Option<String> {
-        if let Some(active) = self.client.as_ref().and_then(|c| c.active_token()) {
-            return Some(active.to_owned());
-        }
-        match &self.saved.transport {
-            HostTransport::Tcp { token, .. } if !token.trim().is_empty() => Some(token.clone()),
-            _ => None,
         }
     }
 
@@ -379,9 +377,16 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
         || msg.contains("authentication failed")
         || msg.contains("unauthorized")
         || msg.contains("revoked")
-        || msg.contains("invalid token")
         || msg.contains("invalid pairing")
+        || msg.contains("not authorized")
         || msg.contains("-32001")
+}
+
+fn is_halted_connection_state(conn: &HostConnectionState) -> bool {
+    matches!(
+        conn,
+        HostConnectionState::AuthFailed { .. } | HostConnectionState::KeyMismatch { .. }
+    )
 }
 
 /// Identifies transient server-side SQLite lock contention or I/O faults that should
@@ -830,10 +835,14 @@ impl MultiHostClient {
     /// Creates a new [`MultiHostClient`] owning a multi-thread Tokio runtime using the built-in
     /// [`TcpConnector`] and [`ClientCapabilities::mobile()`].
     pub fn new(config: RemoteClientConfig, creds: Arc<dyn CredentialStore>) -> Result<Arc<Self>> {
+        let kp = Arc::new(load_or_create_client_keypair_with_store(
+            creds.as_ref(),
+            system_noise_rng().as_ref(),
+        )?);
         Self::with_connector(
             config,
             creds,
-            Arc::new(TcpConnector),
+            Arc::new(TcpConnector::new(kp)),
             ClientCapabilities::mobile(),
         )
     }
@@ -841,11 +850,11 @@ impl MultiHostClient {
     /// Creates a new [`MultiHostClient`] with custom transport connector(s) and runtime capabilities.
     pub fn with_connector(
         config: RemoteClientConfig,
-        creds: Arc<dyn CredentialStore>,
+        _creds: Arc<dyn CredentialStore>,
         connector: Arc<dyn HostConnector>,
         capabilities: ClientCapabilities,
     ) -> Result<Arc<Self>> {
-        let host_store = Arc::new(CredentialHostStore::new(config.data_dir.clone(), creds));
+        let host_store = Arc::new(CredentialHostStore::new(config.data_dir.clone()));
         Self::from_options(MultiHostClientOptions {
             config,
             host_store,
@@ -865,10 +874,14 @@ impl MultiHostClient {
         creds: Arc<dyn CredentialStore>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Arc<Self>> {
+        let kp = Arc::new(load_or_create_client_keypair_with_store(
+            creds.as_ref(),
+            system_noise_rng().as_ref(),
+        )?);
         Self::with_runtime_and_connector(
             config,
             creds,
-            Arc::new(TcpConnector),
+            Arc::new(TcpConnector::new(kp)),
             ClientCapabilities::mobile(),
             runtime_handle,
         )
@@ -877,12 +890,12 @@ impl MultiHostClient {
     /// Creates a new [`MultiHostClient`] bound to an existing runtime with custom connector(s) and capabilities.
     pub fn with_runtime_and_connector(
         config: RemoteClientConfig,
-        creds: Arc<dyn CredentialStore>,
+        _creds: Arc<dyn CredentialStore>,
         connector: Arc<dyn HostConnector>,
         capabilities: ClientCapabilities,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Arc<Self>> {
-        let host_store = Arc::new(CredentialHostStore::new(config.data_dir.clone(), creds));
+        let host_store = Arc::new(CredentialHostStore::new(config.data_dir.clone()));
         Self::from_options_with_runtime(
             MultiHostClientOptions {
                 config,
@@ -1111,6 +1124,9 @@ impl MultiHostClient {
         if let HostConnectionState::AuthFailed { error } = &slot.connection {
             return Err(auth_failed_error(&slot.saved.name, error));
         }
+        if let HostConnectionState::KeyMismatch { error, .. } = &slot.connection {
+            return Err(anyhow!("Host '{}': {error}", slot.saved.name));
+        }
         bail!(
             "Host '{}' is currently unavailable ({})",
             slot.saved.name,
@@ -1123,6 +1139,9 @@ impl MultiHostClient {
         guard.get(host_id).and_then(|slot| match &slot.connection {
             HostConnectionState::AuthFailed { error } if slot.client.is_none() => {
                 Some(auth_failed_error(&slot.saved.name, error))
+            }
+            HostConnectionState::KeyMismatch { error, .. } if slot.client.is_none() => {
+                Some(anyhow!("Host '{}': {error}", slot.saved.name))
             }
             _ => None,
         })
@@ -1162,6 +1181,7 @@ impl MultiHostClient {
             endpoint_label: local.endpoint_label(),
             ssh_target: None,
             server_id: local.server_id(),
+            server_pubkey_fingerprint: None,
             connection: HostConnectionState::Connected {
                 rtt_ms: 0,
                 api_version: local.api_version(),
@@ -1285,10 +1305,16 @@ impl MultiHostClient {
                 if !slot.saved.enabled || slot.updating {
                     continue;
                 }
+                if matches!(slot.connection, HostConnectionState::KeyMismatch { .. }) {
+                    continue;
+                }
                 if matches!(slot.connection, HostConnectionState::AuthFailed { .. }) {
                     let is_tailscale = matches!(
                         &slot.saved.transport,
-                        HostTransport::Tcp { token, .. } if canban_types::is_tailscale_auth(token)
+                        HostTransport::Tcp {
+                            tailscale_auth: true,
+                            ..
+                        }
                     );
                     if !is_tailscale {
                         continue;
@@ -1346,28 +1372,28 @@ impl MultiHostClient {
         }
     }
 
-    /// Wakes supervisor(s) without tearing down healthy connections or retrying `AuthFailed` hosts.
+    /// Wakes supervisor(s) without tearing down healthy connections or retrying halted hosts.
     pub fn wake_host(&self, host_id: &str) {
         if let Some(notify) = self
             .hosts
             .read()
             .unwrap()
             .get(host_id)
-            .filter(|s| !matches!(s.connection, HostConnectionState::AuthFailed { .. }))
+            .filter(|s| !is_halted_connection_state(&s.connection))
             .map(|s| Arc::clone(&s.supervisor_notify))
         {
             notify.notify_one();
         }
     }
 
-    /// Wakes all remote host supervisors without tearing down healthy connections or retrying `AuthFailed` hosts.
+    /// Wakes all remote host supervisors without tearing down healthy connections or retrying halted hosts.
     pub fn wake_all(&self) {
         let notifies: Vec<Arc<Notify>> = self
             .hosts
             .read()
             .unwrap()
             .values()
-            .filter(|s| !matches!(s.connection, HostConnectionState::AuthFailed { .. }))
+            .filter(|s| !is_halted_connection_state(&s.connection))
             .map(|s| Arc::clone(&s.supervisor_notify))
             .collect();
         for n in notifies {
@@ -1393,7 +1419,7 @@ impl MultiHostClient {
                 .filter(|s| {
                     s.saved.enabled
                         && !s.updating
-                        && !matches!(s.connection, HostConnectionState::AuthFailed { .. })
+                        && !is_halted_connection_state(&s.connection)
                         && (s.client.is_some() || now_ms >= s.next_retry_at)
                 })
                 .map(|s| s.saved.id.clone())
@@ -1520,13 +1546,15 @@ impl MultiHostClient {
 
         let tcp_transport = HostTransport::Tcp {
             addr: addr.clone(),
-            token: invite.secret.clone(),
+            server_pubkey: invite.server_pubkey.clone(),
+            tailscale_auth: invite.tailscale_auth,
         };
         let session_res = SingleHostSession::connect_checked_async_with_clock(
             self.connector.as_ref(),
             preferred_id.as_deref().unwrap_or("pairing"),
             &tcp_transport,
             &self.config.device_name,
+            invite.pairing_code.as_deref(),
             Value::Null,
             self.min_api_version,
             self.clock.as_ref(),
@@ -1554,10 +1582,19 @@ impl MultiHostClient {
                         .or_else(|| invite.host_name.as_deref().filter(|s| !s.trim().is_empty()))
                         .unwrap_or("Remote Host")
                         .to_owned();
+                    let pinned_pk = mismatch.ping["server_pubkey"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| invite.server_pubkey.clone());
                     let saved = SavedHost {
                         id: hid.clone(),
                         name: host_name,
-                        transport: tcp_transport,
+                        transport: HostTransport::Tcp {
+                            addr: addr.clone(),
+                            server_pubkey: pinned_pk,
+                            tailscale_auth: invite.tailscale_auth,
+                        },
                         ssh_target,
                         server_id,
                         enabled: true,
@@ -1597,12 +1634,16 @@ impl MultiHostClient {
                 return Err(err);
             }
         };
-        let token = session
-            .upgraded_token()
-            .map(str::to_owned)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| invite.secret.clone());
         let (transport, lease, hs) = session.into_parts();
+        let pinned_pubkey = hs
+            .server_pubkey
+            .clone()
+            .or_else(|| invite.server_pubkey.clone());
+        let saved_transport = HostTransport::Tcp {
+            addr,
+            server_pubkey: pinned_pubkey,
+            tailscale_auth: invite.tailscale_auth,
+        };
         let rtt_ms = hs.rtt_ms;
         let ping_val = hs.ping;
         let state_val = hs.state;
@@ -1663,7 +1704,7 @@ impl MultiHostClient {
                 slot.clear_connection(HostConnectionState::Connecting);
                 slot.next_retry_at = 0;
                 slot.saved.enabled = true;
-                slot.saved.transport = HostTransport::Tcp { addr, token };
+                slot.saved.transport = saved_transport;
                 if let Some(target) = ssh_target {
                     slot.saved.ssh_target = Some(target);
                 }
@@ -1698,7 +1739,7 @@ impl MultiHostClient {
                 let saved = SavedHost {
                     id: hid.clone(),
                     name: host_name,
-                    transport: HostTransport::Tcp { addr, token },
+                    transport: saved_transport,
                     ssh_target,
                     server_id,
                     enabled: true,
@@ -1786,8 +1827,29 @@ impl MultiHostClient {
         block_on_rt(&self.runtime_handle, self.add_host_async(host))
     }
 
+    /// Adds or updates a host synchronously using an optional one-time `pair_...` pairing code.
+    pub fn add_host_with_pairing_code(
+        &self,
+        host: SavedHost,
+        pairing_code: Option<String>,
+    ) -> Result<HostSummary> {
+        block_on_rt(
+            &self.runtime_handle,
+            self.add_host_with_pairing_code_async(host, pairing_code),
+        )
+    }
+
     /// Adds or updates a host asynchronously and connects immediately when `host.enabled`.
-    pub async fn add_host_async(&self, mut host: SavedHost) -> Result<HostSummary> {
+    pub async fn add_host_async(&self, host: SavedHost) -> Result<HostSummary> {
+        self.add_host_with_pairing_code_async(host, None).await
+    }
+
+    /// Adds or updates a host asynchronously using an optional one-time `pair_...` pairing code.
+    pub async fn add_host_with_pairing_code_async(
+        &self,
+        mut host: SavedHost,
+        pairing_code: Option<String>,
+    ) -> Result<HostSummary> {
         if self.local_host.is_some() {
             ensure!(host.id != "local", "Invalid remote host ID");
         }
@@ -1796,14 +1858,25 @@ impl MultiHostClient {
             "Transport {} is not supported by this client",
             host.transport.label()
         );
-        if let HostTransport::Tcp { addr, token } = &mut host.transport {
+        if let HostTransport::Tcp {
+            addr,
+            server_pubkey,
+            ..
+        } = &mut host.transport
+        {
             *addr = normalize_daemon_addr(addr);
-            *token = token.trim().to_owned();
+            *server_pubkey = server_pubkey
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
             ensure!(!addr.is_empty(), "Host address cannot be empty");
-            ensure!(
-                !token.is_empty(),
-                "TCP host requires a device token or pairing code"
-            );
+            if !canban_types::is_tailscale_addr(addr) {
+                ensure!(
+                    server_pubkey.is_some(),
+                    "Non-Tailscale TCP hosts require a pinned host public key (?pk=...)"
+                );
+            }
         }
         if host.id.trim().is_empty() {
             host.id = self.id_gen.next_id();
@@ -1814,14 +1887,19 @@ impl MultiHostClient {
 
         let reject_dup = self.local_host.is_some();
         if host.enabled
-            && let HostTransport::Tcp { addr, token } = &host.transport
+            && let HostTransport::Tcp {
+                addr,
+                server_pubkey,
+                tailscale_auth,
+            } = &host.transport
         {
             let invite = PairingInvite {
                 addr: addr.clone(),
-                security: TransportSecurity::classify_tcp_addr(addr),
+                server_pubkey: server_pubkey.clone(),
                 server_id: host.server_id.clone(),
                 host_name: (!host.name.trim().is_empty()).then(|| host.name.clone()),
-                secret: token.clone(),
+                pairing_code,
+                tailscale_auth: *tailscale_auth,
             };
             let display = (!host.name.trim().is_empty()).then_some(host.name.as_str());
             return self
@@ -1835,6 +1913,7 @@ impl MultiHostClient {
                 &host.id,
                 &host.transport,
                 &self.config.device_name,
+                None,
                 Value::Null,
                 self.min_api_version,
                 self.clock.as_ref(),
@@ -2059,9 +2138,8 @@ impl MultiHostClient {
         if let Some(slot) = guard.get(host_id) {
             let mut cfg = slot.cached.config.clone();
             if let Some(client) = &slot.client {
-                let (relay_endpoint, relay_token) = client.relay_endpoint_and_token();
-                cfg.relay_endpoint = Some(relay_endpoint);
-                cfg.relay_token = relay_token;
+                cfg.relay_endpoint = Some(client.relay_endpoint());
+                cfg.relay_token = None;
             } else if self.local_host.is_some() {
                 cfg.relay_endpoint = Some(format!("mux://offline:{host_id}"));
                 cfg.relay_token = None;
@@ -2648,7 +2726,7 @@ impl MultiHostClient {
             return Ok(fallback);
         }
 
-        let (host_name, status_str, client_opt, client_gen, token_opt, card_blocked) = {
+        let (host_name, status_str, client_opt, client_gen, card_blocked) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(&host_id)
@@ -2672,7 +2750,6 @@ impl MultiHostClient {
                 slot.connection.short_status(),
                 slot.client.clone(),
                 slot.conn_gen,
-                slot.tcp_token(),
                 blocked,
             )
         };
@@ -2682,12 +2759,6 @@ impl MultiHostClient {
         let mut res = match canban_sync::classify_remote_mutation(method, &params) {
             QueueDecision::RejectOffline(msg) => {
                 if let Some(client) = client_opt.as_ref() {
-                    seal_params_for_tcp_with_id_gen(
-                        method,
-                        &mut params,
-                        token_opt.as_deref(),
-                        self.id_gen.as_ref(),
-                    )?;
                     match client.call_async(method, &params).await {
                         Ok(val) => val,
                         Err(err) if is_auth_error(&err) => {
@@ -2716,12 +2787,6 @@ impl MultiHostClient {
             }
             QueueDecision::NotQueueable => {
                 let client = client_opt.as_ref().ok_or_else(unavailable_err)?;
-                seal_params_for_tcp_with_id_gen(
-                    method,
-                    &mut params,
-                    token_opt.as_deref(),
-                    self.id_gen.as_ref(),
-                )?;
                 match client.call_async(method, &params).await {
                     Ok(val) => val,
                     Err(err) if is_auth_error(&err) => {
@@ -2782,14 +2847,7 @@ impl MultiHostClient {
 
                 let (live_reply, sent_before_drop) =
                     if let (Some(client), false) = (client_opt.as_ref(), card_blocked) {
-                        let mut wire_params = params.clone();
-                        seal_params_for_tcp_with_id_gen(
-                            method,
-                            &mut wire_params,
-                            token_opt.as_deref(),
-                            self.id_gen.as_ref(),
-                        )?;
-                        match client.call_async(method, &wire_params).await {
+                        match client.call_async(method, &params).await {
                             Ok(val) => (Some(val), false),
                             Err(err) if is_auth_error(&err) => {
                                 self.mark_slot_disconnected(
@@ -3288,29 +3346,20 @@ impl MultiHostClient {
         method: &str,
         params: Value,
     ) -> Vec<(String, Result<Value>)> {
-        let targets: Vec<(String, Arc<ClientTransport>, Option<String>)> = {
+        let targets: Vec<(String, Arc<ClientTransport>)> = {
             let guard = self.hosts.read().unwrap();
             guard
                 .values()
                 .filter(|s| s.saved.enabled && s.connection.is_connected())
-                .filter_map(|s| Some((s.saved.id.clone(), s.client.clone()?, s.tcp_token())))
+                .filter_map(|s| Some((s.saved.id.clone(), s.client.clone()?)))
                 .collect()
         };
         let mut set = tokio::task::JoinSet::new();
-        for (host_id, client, token_opt) in targets {
+        for (host_id, client) in targets {
             let method_owned = method.to_owned();
-            let mut p = params.clone();
-            let seal_res = seal_params_for_tcp_with_id_gen(
-                &method_owned,
-                &mut p,
-                token_opt.as_deref(),
-                self.id_gen.as_ref(),
-            );
+            let p = params.clone();
             set.spawn(async move {
-                let res = match seal_res {
-                    Err(e) => Err(e),
-                    Ok(()) => client.call_async(&method_owned, &p).await,
-                };
+                let res = client.call_async(&method_owned, &p).await;
                 (host_id, res)
             });
         }
@@ -3802,6 +3851,7 @@ impl MultiHostClient {
                 &format!("{host_id}-update"),
                 &saved.transport,
                 &self.config.device_name,
+                None,
             )
             .await
         {
@@ -3879,6 +3929,7 @@ impl MultiHostClient {
                     host_id,
                     &saved.transport,
                     &self.config.device_name,
+                    None,
                     Value::Null,
                     self.min_api_version,
                     self.clock.as_ref(),
@@ -3895,10 +3946,6 @@ impl MultiHostClient {
                         .zip(new_sid)
                         .is_some_and(|(old, cur)| old != cur);
                     if target_ver.is_empty() || version == target_ver || sid_changed {
-                        let upgraded = session
-                            .upgraded_token()
-                            .filter(|t| is_device_token(t))
-                            .map(str::to_owned);
                         let (transport, lease, hs) = session.into_parts();
                         guard.active = false;
                         let entities = {
@@ -3912,11 +3959,14 @@ impl MultiHostClient {
                             slot.next_retry_at = 0;
                             slot.clear_connection(HostConnectionState::Connecting);
                             let mut persist_needed = false;
-                            if let HostTransport::Tcp { token: cur, .. } = &mut slot.saved.transport
-                                && let Some(new_tok) = upgraded
-                                && *cur != new_tok
+                            if let HostTransport::Tcp {
+                                server_pubkey: cur_pk,
+                                ..
+                            } = &mut slot.saved.transport
+                                && cur_pk.is_none()
+                                && let Some(pk) = hs.server_pubkey.clone()
                             {
-                                *cur = new_tok;
+                                *cur_pk = Some(pk);
                                 persist_needed = true;
                             }
                             if let Some(sid) = hs.server_id.clone() {
@@ -4029,16 +4079,23 @@ impl MultiHostClient {
             ensure!(slot.saved.enabled, "Host '{host_id}' is disabled");
             ensure!(!slot.updating, "Host '{host_id}' is updating");
             let spec = match &slot.saved.transport {
-                HostTransport::Tcp { addr, token } => {
+                HostTransport::Tcp {
+                    addr,
+                    server_pubkey,
+                    tailscale_auth,
+                } => {
                     let norm = normalize_daemon_addr(addr.as_str());
                     ensure!(!norm.is_empty(), "No TCP address configured for host");
-                    ensure!(
-                        !token.trim().is_empty(),
-                        "No device token found for host '{host_id}'"
-                    );
+                    if !canban_types::is_tailscale_addr(&norm) {
+                        ensure!(
+                            server_pubkey.is_some(),
+                            "No pinned host public key found for host '{host_id}'"
+                        );
+                    }
                     HostTransport::Tcp {
                         addr: norm,
-                        token: token.clone(),
+                        server_pubkey: server_pubkey.clone(),
+                        tailscale_auth: *tailscale_auth,
                     }
                 }
                 other => other.clone(),
@@ -4071,6 +4128,7 @@ impl MultiHostClient {
             host_id,
             &transport_spec,
             &self.config.device_name,
+            None,
             after,
             self.min_api_version,
             self.clock.as_ref(),
@@ -4079,6 +4137,36 @@ impl MultiHostClient {
         {
             Ok(session) => session,
             Err(err) => {
+                if let Some(km) = err.downcast_ref::<HostKeyMismatchError>() {
+                    let next_state = HostConnectionState::KeyMismatch {
+                        expected_fingerprint: km.expected_fingerprint.clone(),
+                        actual_fingerprint: km.actual_fingerprint.clone(),
+                        error: km.to_string(),
+                    };
+                    let changed = {
+                        let mut guard = self.hosts.write().unwrap();
+                        if let Some(slot) = guard.get_mut(host_id)
+                            && is_current(slot)
+                        {
+                            let prev = slot.connection.clone();
+                            slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                            slot.clear_connection(next_state);
+                            prev != slot.connection
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        self.emit_host(
+                            host_id,
+                            AppEvent::Changed {
+                                topic: "host",
+                                card_id: None,
+                            },
+                        );
+                    }
+                    return Err(err);
+                }
                 if let Some(mismatch) = err.downcast_ref::<ApiMismatchError>() {
                     let next_state = HostConnectionState::ApiMismatch {
                         server_api: mismatch.server_api,
@@ -4156,10 +4244,6 @@ impl MultiHostClient {
             }
         };
 
-        let upgraded = session
-            .upgraded_token()
-            .filter(|t| is_device_token(t))
-            .map(str::to_owned);
         let (transport, lease, hs) = session.into_parts();
 
         if let Some(expected_sid) = server_id.as_deref()
@@ -4196,11 +4280,14 @@ impl MultiHostClient {
             slot.clear_connection(HostConnectionState::Connecting);
             slot.next_retry_at = 0;
             let mut persist_needed = false;
-            if let HostTransport::Tcp { token: cur, .. } = &mut slot.saved.transport
-                && let Some(new_tok) = upgraded
-                && *cur != new_tok
+            if let HostTransport::Tcp {
+                server_pubkey: cur_pk,
+                ..
+            } = &mut slot.saved.transport
+                && cur_pk.is_none()
+                && let Some(pk) = hs.server_pubkey.clone()
             {
-                *cur = new_tok;
+                *cur_pk = Some(pk);
                 persist_needed = true;
             }
             slot.terminal = Some(Arc::new(RemotePtyTransport::new(
@@ -4412,7 +4499,7 @@ impl MultiHostClient {
                 };
                 if !slot.saved.enabled
                     || slot.updating
-                    || matches!(slot.connection, HostConnectionState::AuthFailed { .. })
+                    || is_halted_connection_state(&slot.connection)
                 {
                     break;
                 }
@@ -4421,7 +4508,6 @@ impl MultiHostClient {
                 };
                 let client_gen = slot.conn_gen;
                 active_client = Some(Arc::clone(&client));
-                let token = slot.tcp_token();
                 let mut outbox = slot.outbox.lock().unwrap();
                 let action = prepare_next_step(
                     &mut outbox,
@@ -4442,7 +4528,6 @@ impl MultiHostClient {
                     } => Some((
                         client,
                         client_gen,
-                        token,
                         mutation_id,
                         method,
                         sent_params,
@@ -4451,15 +4536,8 @@ impl MultiHostClient {
                 }
             };
 
-            let Some((
-                client,
-                client_gen,
-                token,
-                mutation_id,
-                method,
-                mut sent_params,
-                was_retry_same_params,
-            )) = step
+            let Some((client, client_gen, mutation_id, method, sent_params, was_retry_same_params)) =
+                step
             else {
                 break;
             };
@@ -4469,7 +4547,7 @@ impl MultiHostClient {
             let is_global_env_sync = method == "env.global.sync";
             let (payload, sync_fingerprint) = if is_global_env_sync {
                 if let Some(provider) = &self.global_env_provider {
-                    match provider.build_sync_payload(token.as_deref()) {
+                    match provider.build_sync_payload() {
                         Ok((wire_params, fp)) => (Ok(wire_params), fp),
                         Err(e) => (Err(e), None),
                     }
@@ -4477,15 +4555,7 @@ impl MultiHostClient {
                     (Ok(sent_params), None)
                 }
             } else {
-                match seal_params_for_tcp_with_id_gen(
-                    method,
-                    &mut sent_params,
-                    token.as_deref(),
-                    self.id_gen.as_ref(),
-                ) {
-                    Ok(()) => (Ok(sent_params), None),
-                    Err(e) => (Err(e), None),
-                }
+                (Ok(sent_params), None)
             };
             let result = match payload {
                 Ok(params_to_send) => client.call_async(method, &params_to_send).await,
@@ -4792,9 +4862,7 @@ impl MultiHostClient {
             let Some(slot) = guard.get(host_id) else {
                 return Ok(());
             };
-            if !slot.saved.enabled
-                || slot.updating
-                || matches!(slot.connection, HostConnectionState::AuthFailed { .. })
+            if !slot.saved.enabled || slot.updating || is_halted_connection_state(&slot.connection)
             {
                 return Ok(());
             }
@@ -5086,7 +5154,7 @@ async fn host_supervisor_task(
         if *shutdown_rx.borrow() || weak_client.strong_count() == 0 {
             return;
         }
-        let (enabled, epoch_matches, updating, auth_failed, next_retry_at, now_ms, token, existing) = {
+        let (enabled, epoch_matches, updating, halted, next_retry_at, now_ms, existing) = {
             let Some(rc) = weak_client.upgrade() else {
                 return;
             };
@@ -5099,10 +5167,9 @@ async fn host_supervisor_task(
                 slot.saved.enabled,
                 slot.supervisor_epoch == epoch,
                 slot.updating,
-                matches!(slot.connection, HostConnectionState::AuthFailed { .. }),
+                is_halted_connection_state(&slot.connection),
                 slot.next_retry_at,
                 now_ms,
-                slot.tcp_token(),
                 slot.client
                     .clone()
                     .map(|c| (c, slot.conn_gen, slot.last_marker.clone())),
@@ -5111,7 +5178,7 @@ async fn host_supervisor_task(
         if !enabled || !epoch_matches {
             return;
         }
-        if updating || auth_failed || token.as_deref().is_some_and(is_pairing_code) {
+        if updating || halted {
             tokio::select! {
                 biased;
                 _ = shutdown_rx.changed() => { return; }
@@ -5688,7 +5755,8 @@ mod tests {
             name: "Mono Host".into(),
             transport: HostTransport::Tcp {
                 addr: "127.0.0.1:7680".into(),
-                token: "dev_tok".into(),
+                server_pubkey: None,
+                tailscale_auth: false,
             },
             ssh_target: None,
             server_id: Some("srv-mono".into()),

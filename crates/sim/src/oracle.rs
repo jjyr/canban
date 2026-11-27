@@ -1053,7 +1053,11 @@ impl InvariantOracle {
             let summaries = world.client_host_summaries_on(&client_name);
             for summary in summaries {
                 let key = (client_name.clone(), summary.id.clone());
-                if matches!(summary.connection, HostConnectionState::AuthFailed { .. }) {
+                if matches!(
+                    summary.connection,
+                    HostConnectionState::AuthFailed { .. }
+                        | HostConnectionState::KeyMismatch { .. }
+                ) {
                     let cur_dials = world.client_dial_count(&client_name, &summary.id);
                     let cur_reconn = summary.reconnect_count;
                     if let Some(&(base_dials, base_reconn)) = self.auth_failed_baselines.get(&key) {
@@ -1099,8 +1103,11 @@ impl InvariantOracle {
                 format!("[{client_id}][{host_id}] missing from client host_summaries")
             })?;
         ensure!(
-            matches!(summary.connection, HostConnectionState::AuthFailed { .. }),
-            "[{client_id}][{host_id}] expected HostConnectionState::AuthFailed, got {:?}",
+            matches!(
+                summary.connection,
+                HostConnectionState::AuthFailed { .. } | HostConnectionState::KeyMismatch { .. }
+            ),
+            "[{client_id}][{host_id}] expected HostConnectionState::AuthFailed or KeyMismatch, got {:?}",
             summary.connection
         );
         let cur_dials = world.client_dial_count(client_id, host_id);
@@ -1146,10 +1153,13 @@ impl InvariantOracle {
         }
         if !self.auth_failed_baselines.is_empty()
             || world.client_names().iter().any(|client_name| {
-                world
-                    .client_host_summaries_on(client_name)
-                    .iter()
-                    .any(|s| matches!(s.connection, HostConnectionState::AuthFailed { .. }))
+                world.client_host_summaries_on(client_name).iter().any(|s| {
+                    matches!(
+                        s.connection,
+                        HostConnectionState::AuthFailed { .. }
+                            | HostConnectionState::KeyMismatch { .. }
+                    )
+                })
             })
         {
             self.check_auth_failed_zero_dials(world)?;

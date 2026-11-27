@@ -90,14 +90,11 @@ enum Cmd {
         /// TCP port when `--tailscale` is enabled (default: 7680).
         #[arg(long, default_value_t = canban_types::DEFAULT_DAEMON_PORT)]
         port: u16,
-        /// Explicit private/loopback TCP bind address (`ip:port`).
+        /// Explicit TCP bind address (`ip:port`). Traffic is end-to-end encrypted with Noise_XX.
         #[arg(long)]
         listen: Option<String>,
-        /// Allow binding `--listen` to non-loopback / non-Tailscale addresses (e.g. WireGuard/ZeroTier or 0.0.0.0).
-        #[arg(long)]
-        allow_insecure_bind: bool,
     },
-    /// Generate a single-use TCP pairing URI (`canban://addr:port#pair_...`) or issue a per-device token.
+    /// Generate a single-use Noise_XX pairing URI (`canban://addr:port?pk=...#pair_...`) or authorize a client public key.
     Pair {
         #[arg(long)]
         tailscale: bool,
@@ -105,9 +102,10 @@ enum Cmd {
         port: u16,
         #[arg(long)]
         listen: Option<String>,
+        /// Directly authorize this base64url client Noise X25519 public key instead of issuing a one-time pairing code.
         #[arg(long)]
-        allow_insecure_bind: bool,
-        /// Issue a permanent revocable device token directly for this device name instead of a one-time pairing code.
+        client_pubkey: Option<String>,
+        /// Friendly device name recorded alongside `--client-pubkey`.
         #[arg(long)]
         device_name: Option<String>,
         /// Time-to-live in seconds for a single-use pairing code (default: 300).
@@ -308,25 +306,28 @@ enum ServiceCmd {
         port: u16,
         #[arg(long)]
         listen: Option<String>,
-        #[arg(long)]
-        allow_insecure_bind: bool,
     },
     /// Show background service installation and active status.
     Status,
 }
 #[derive(Subcommand)]
 enum DeviceCmd {
-    /// List all paired remote devices and whether legacy `server.token` still exists.
+    /// List all authorized remote devices and this daemon's Noise public key fingerprint.
     List,
     /// Generate a single-use short-lived pairing invite URI on the running daemon.
     Invite {
         #[arg(long, default_value_t = 300)]
         ttl_secs: u64,
     },
+    /// Authorize a remote client's base64url Noise X25519 public key directly.
+    Authorize {
+        #[arg(long)]
+        pubkey: String,
+        #[arg(long, default_value = "Remote device")]
+        name: String,
+    },
     /// Immediately revoke a paired device by ID and disconnect active sessions.
     Revoke { device_id: String },
-    /// Remove the deprecated static `server.token` file once all hosts have upgraded.
-    RemoveLegacyToken,
 }
 #[derive(Subcommand)]
 enum ScheduleCmd {
@@ -761,10 +762,9 @@ fn run() -> Result<()> {
         tailscale,
         port,
         listen,
-        allow_insecure_bind,
     } = command
     {
-        let override_listen = if tailscale || listen.is_some() || allow_insecure_bind {
+        let override_listen = if tailscale || listen.is_some() {
             let mut cfg = canban_app_server::network::load_listen_config(&home);
             if tailscale {
                 cfg.tailscale = true;
@@ -775,9 +775,6 @@ fn run() -> Result<()> {
             if listen.is_some() {
                 cfg.listen = listen;
             }
-            if allow_insecure_bind {
-                cfg.allow_insecure_bind = true;
-            }
             canban_app_server::network::save_listen_config(&home, &cfg)?;
             Some(cfg)
         } else {
@@ -787,7 +784,7 @@ fn run() -> Result<()> {
         let _runtime = app.start_with_listen(override_listen)?;
         println!("Canban AppServer listening at {}", app.endpoint().display());
         for tcp in app.bound_tcp_addrs() {
-            println!("Canban TCP listener bound at {tcp}");
+            println!("Canban TCP listener bound at {tcp} (Noise_XX E2EE)");
         }
         app.wait_stopped();
         return Ok(());
@@ -796,7 +793,7 @@ fn run() -> Result<()> {
         tailscale,
         port,
         listen,
-        allow_insecure_bind,
+        client_pubkey,
         device_name,
         ttl_secs,
         json: as_json,
@@ -812,13 +809,17 @@ fn run() -> Result<()> {
         if listen.is_some() {
             cfg.listen = listen;
         }
-        if allow_insecure_bind {
-            cfg.allow_insecure_bind = true;
-        }
         if !cfg.tcp_enabled() {
             cfg.tailscale = true;
         }
         canban_app_server::network::save_listen_config(&home, &cfg)?;
+        let server_kp = canban_transport::load_or_create_server_keypair(
+            &home,
+            true,
+            canban_transport::system_noise_rng().as_ref(),
+        )?;
+        let server_pubkey = server_kp.public_b64();
+        let server_pubkey_fp = server_kp.fingerprint();
         let non_unspec = |raw: &str| {
             let norm = canban_types::normalize_daemon_addr(raw);
             norm.parse::<std::net::SocketAddr>()
@@ -833,20 +834,25 @@ fn run() -> Result<()> {
         } else {
             format!("<host-ip>:{}", cfg.port)
         };
-        let (token, kind, device_id, expires_at) = if let Some(name) = device_name
+        let (pairing_code, kind, device_id, expires_at, uri) = if let Some(cpk) = client_pubkey
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let store = canban_app_server::auth::DeviceTokenStore::open(&home);
-            let (dev, tok) = store.issue_device(name)?;
-            (tok, "device_token", Some(dev.id), None)
+            let name = device_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Remote device");
+            let store = canban_app_server::auth::AuthorizedDeviceStore::open(&home);
+            let dev = store.authorize_pubkey(name, cpk)?;
+            (None, "authorized_key", Some(dev.id), None, None)
         } else {
             let codes = canban_app_server::auth::PairingCodeStore::open(&home);
             let (code, exp) = codes.create_code(ttl_secs)?;
-            (code, "pairing_code", None, Some(exp))
+            let uri = canban_types::format_pairing_uri(&addr, &server_pubkey, &code);
+            (Some(code), "pairing_code", None, Some(exp), Some(uri))
         };
-        let uri = canban_types::format_pairing_uri(&addr, &token);
         if as_json {
             let sid = std::fs::read_to_string(home.join("server-id"))
                 .ok()
@@ -855,7 +861,9 @@ fn run() -> Result<()> {
                 "{}",
                 json!({
                     "addr": addr,
-                    "token": token,
+                    "server_pubkey": server_pubkey,
+                    "server_pubkey_fingerprint": server_pubkey_fp,
+                    "pairing_code": pairing_code,
                     "uri": uri,
                     "kind": kind,
                     "device_id": device_id,
@@ -865,8 +873,13 @@ fn run() -> Result<()> {
                     "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
                 })
             );
-        } else {
+        } else if let Some(uri) = uri {
             println!("{uri}");
+        } else {
+            println!(
+                "Authorized device {} on {addr} (server key fingerprint: {server_pubkey_fp})",
+                device_id.as_deref().unwrap_or("unknown")
+            );
         }
         return Ok(());
     }
@@ -876,7 +889,6 @@ fn run() -> Result<()> {
                 tailscale,
                 port,
                 listen,
-                allow_insecure_bind,
             } => {
                 let status = canban_app_server::network::install_user_service(
                     &home,
@@ -884,7 +896,6 @@ fn run() -> Result<()> {
                     tailscale,
                     port,
                     listen,
-                    allow_insecure_bind,
                 )?;
                 println!("{}", output.encode(&status)?);
             }
@@ -1607,10 +1618,13 @@ fn run() -> Result<()> {
                 "device.invite.create".into(),
                 json!({ "ttl_secs": ttl_secs }),
             ),
+            DeviceCmd::Authorize { pubkey, name } => (
+                "device.authorize".into(),
+                json!({ "pubkey": pubkey, "name": name }),
+            ),
             DeviceCmd::Revoke { device_id } => {
                 ("device.revoke".into(), json!({ "device_id": device_id }))
             }
-            DeviceCmd::RemoveLegacyToken => ("device.remove_legacy_token".into(), json!({})),
         },
         Cmd::Serve { .. }
         | Cmd::Pair { .. }

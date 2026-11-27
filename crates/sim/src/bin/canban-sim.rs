@@ -788,9 +788,14 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "auth.duplicate_server_rejected",
     "auth.revoke_kicks_live_stream",
     "auth.client_revoked_auth_failed",
-    "auth.tailscale_ephemeral_enc",
-    "auth.client_tailscale_autoseal",
     "auth.api_mismatch",
+    "noise.host_key_pinning",
+    "noise.wire_confidentiality",
+    "noise.unauth_client_rejected",
+    "noise.plaintext_rejected",
+    "noise.tamper_rejected",
+    "noise.tailscale_tofu_pinned",
+    "noise.key_rotation_mismatch",
     "workspaces.worktree_created",
     "workflow.script_executed",
     "workflow.script_herdr_pty",
@@ -851,7 +856,7 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "sessions.two_phase_adopt_and_cwd_rename",
     "herdr.foreground_push_and_reminders",
     "delivery.manual_deliver_gc_and_target_advanced",
-    "transport_auth.legacy_token_and_polling_fallback",
+    "transport_auth.polling_fallback_and_discovery",
     // Phase 1B: Shadow UI Projection Oracles & presenter pagination/event batch
     "oracle.ui_committed_writes_checked",
     "oracle.ui_index_checked",
@@ -904,10 +909,15 @@ const TRANSPORT_AUTH_REQUIRED_COVERAGE: &[&str] = &[
     "auth.duplicate_server_rejected",
     "auth.revoke_kicks_live_stream",
     "auth.client_revoked_auth_failed",
-    "auth.tailscale_ephemeral_enc",
-    "auth.client_tailscale_autoseal",
     "auth.api_mismatch",
-    "transport_auth.legacy_token_and_polling_fallback",
+    "noise.host_key_pinning",
+    "noise.wire_confidentiality",
+    "noise.unauth_client_rejected",
+    "noise.plaintext_rejected",
+    "noise.tamper_rejected",
+    "noise.tailscale_tofu_pinned",
+    "noise.key_rotation_mismatch",
+    "transport_auth.polling_fallback_and_discovery",
     "oracle.auth_failed_zero_dials_checked",
 ];
 
@@ -2250,8 +2260,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            115,
-            "full suite coverage gate must require 115 properties"
+            120,
+            "full suite coverage gate must require 120 properties"
         );
         assert_eq!(
             unique.len(),

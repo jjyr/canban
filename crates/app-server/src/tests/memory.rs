@@ -11,7 +11,6 @@ fn active_update_checks_push_update_changed_progress_without_ui_polling() {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
-            allow_insecure_bind: false,
             trust_tailscale_self: true,
         }))
         .unwrap();

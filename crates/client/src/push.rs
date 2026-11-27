@@ -138,7 +138,7 @@ pub async fn open_async_subscribe(
     topics: &[&str],
     heartbeat_ms: Option<u64>,
 ) -> Result<(AsyncSubscribeStream, SubscribeHandshake)> {
-    let (stream, auth_token) = transport.open_async_stream().await?;
+    let stream = transport.open_async_stream().await?;
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(read_half);
     let mut params = json!({
@@ -148,15 +148,12 @@ pub async fn open_async_subscribe(
     if let Some(ms) = heartbeat_ms {
         params["heartbeat_ms"] = json!(ms);
     }
-    let mut req = json!({
+    let req = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "app.subscribe",
         "params": params,
     });
-    if let Some(token) = auth_token {
-        req["auth"] = json!(token);
-    }
     tokio::time::timeout(
         Duration::from_secs(10),
         write_json_line_async(&mut writer, &req),

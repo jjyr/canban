@@ -108,7 +108,6 @@ impl AppServer {
         let uptime_ms = self.now_ms().saturating_sub(self.started_at);
         let listen_cfg = network::load_listen_config(&self.home);
         let bound_tcp = self.bound_tcp.lock().unwrap().clone();
-        let has_token = network::read_server_token(&self.home).is_some();
         let paired_devices_count = self.device_store.list().len();
 
         let db_path = self.home.join("canban.sqlite");
@@ -225,6 +224,9 @@ impl AppServer {
             "checked_at": self.now_ms(),
             "server": {
                 "server_id": self.identity,
+                "server_pubkey": self.server_pubkey(),
+                "server_pubkey_fingerprint": self.server_pubkey_fingerprint(),
+                "transport_encryption": canban_transport::NOISE_PATTERN,
                 "hostname": network::hostname_with(self.exec_runner.as_ref()),
                 "pid": std::process::id(),
                 "uptime_ms": uptime_ms,
@@ -232,8 +234,6 @@ impl AppServer {
                 "socket": self.endpoint(),
                 "listen_config": listen_cfg,
                 "bound_tcp": bound_tcp,
-                "auth_token_configured": has_token || paired_devices_count > 0,
-                "legacy_token_configured": has_token,
                 "paired_device_count": paired_devices_count,
                 "api_version": api_version,
                 "build": build,

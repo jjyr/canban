@@ -1,7 +1,5 @@
-//! Encrypted per-host Vault storage (`<CANBAN_HOME>/vault.key` + SQLite `vault_entries`)
-//! and TCP transport envelope helpers (`enc:v1:`).
+//! Encrypted per-host Vault storage (`<CANBAN_HOME>/vault.key` + SQLite `vault_entries`).
 use anyhow::{Context, Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use canban_types::{IdGen, secret_hint};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
@@ -18,7 +16,6 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-pub const TRANSPORT_SEAL_PREFIX: &str = "enc:v1:";
 const KEY_FILENAME: &str = "vault.key";
 const XNONCE_LEN: usize = 24;
 
@@ -235,78 +232,6 @@ fn decrypt_with_key(
     let text = String::from_utf8(plain_bytes.to_vec())
         .context("Decrypted vault value is not valid UTF-8")?;
     Ok(Zeroizing::new(text))
-}
-
-fn transport_key(server_token: &str) -> Result<Zeroizing<[u8; 32]>> {
-    let tok = server_token.trim();
-    ensure!(
-        tok.len() >= 16,
-        "Invalid server token for transport secret sealing"
-    );
-    let mut hasher = Sha256::new();
-    hasher.update(b"canban-vault-transport-v1\0");
-    hasher.update(tok.as_bytes());
-    let digest = hasher.finalize();
-    let mut key = Zeroizing::new([0u8; 32]);
-    key.copy_from_slice(&digest);
-    Ok(key)
-}
-
-fn transport_aad(key_name: &str) -> Vec<u8> {
-    format!("canban-vault-rpc-v1\0{key_name}").into_bytes()
-}
-
-pub fn seal_transport(server_token: &str, key_name: &str, plaintext: &str) -> Result<String> {
-    seal_transport_inner(server_token, key_name, plaintext, None)
-}
-
-/// Deterministic/injected-`IdGen` variant of [`seal_transport`].
-pub fn seal_transport_with_id_gen(
-    server_token: &str,
-    key_name: &str,
-    plaintext: &str,
-    id_gen: &dyn IdGen,
-) -> Result<String> {
-    seal_transport_inner(server_token, key_name, plaintext, Some(id_gen))
-}
-
-fn seal_transport_inner(
-    server_token: &str,
-    key_name: &str,
-    plaintext: &str,
-    id_gen: Option<&dyn IdGen>,
-) -> Result<String> {
-    let key = transport_key(server_token)?;
-    let (nonce, ciphertext) = encrypt_with_key(&key, &transport_aad(key_name), plaintext, id_gen)?;
-    let mut combined = Zeroizing::new(Vec::with_capacity(nonce.len() + ciphertext.len()));
-    combined.extend_from_slice(&nonce);
-    combined.extend_from_slice(&ciphertext);
-    Ok(format!(
-        "{TRANSPORT_SEAL_PREFIX}{}",
-        BASE64_STANDARD.encode(&*combined)
-    ))
-}
-
-pub fn open_transport(
-    server_token: &str,
-    key_name: &str,
-    sealed: &str,
-) -> Result<Zeroizing<String>> {
-    let encoded = sealed
-        .strip_prefix(TRANSPORT_SEAL_PREFIX)
-        .context("Missing transport secret seal prefix")?;
-    let decoded = Zeroizing::new(
-        BASE64_STANDARD
-            .decode(encoded)
-            .context("Invalid base64 in transport secret")?,
-    );
-    ensure!(
-        decoded.len() > XNONCE_LEN,
-        "Truncated transport secret envelope"
-    );
-    let (nonce, ciphertext) = decoded.split_at(XNONCE_LEN);
-    let key = transport_key(server_token)?;
-    decrypt_with_key(&key, &transport_aad(key_name), nonce, ciphertext)
 }
 
 pub fn put(
@@ -563,22 +488,6 @@ mod tests {
     }
 
     #[test]
-    fn transport_seal_and_open_round_trips_and_rejects_wrong_token_or_key() {
-        let token = "tok-0123456789abcdef0123456789abcdef";
-        let sealed = seal_transport(token, "MY_SECRET", "super-secret-value-123").unwrap();
-        assert!(sealed.starts_with(TRANSPORT_SEAL_PREFIX));
-        assert!(!sealed.contains("super-secret-value-123"));
-        assert_eq!(
-            open_transport(token, "MY_SECRET", &sealed)
-                .unwrap()
-                .as_str(),
-            "super-secret-value-123"
-        );
-        assert!(open_transport("wrong-token-0123456789", "MY_SECRET", &sealed).is_err());
-        assert!(open_transport(token, "OTHER_KEY", &sealed).is_err());
-    }
-
-    #[test]
     fn load_or_create_master_key_with_sync_false_persists_private_key_and_round_trips() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
@@ -755,21 +664,6 @@ mod tests {
                 .as_deref()
                 .map(String::as_str),
             Some("alpha-value")
-        );
-
-        let token = "tok-0123456789abcdef0123456789abcdef";
-        let seal_a1 = seal_transport_with_id_gen(token, "MY_SEC", "wire-secret", &g_a).unwrap();
-        let seal_a2 = seal_transport_with_id_gen(token, "MY_SEC", "wire-secret", &g_a).unwrap();
-        let seal_b1 = seal_transport_with_id_gen(token, "MY_SEC", "wire-secret", &g_b).unwrap();
-        assert_eq!(seal_a1, seal_b1);
-        assert_ne!(seal_a1, seal_a2);
-        assert_eq!(
-            open_transport(token, "MY_SEC", &seal_a1).unwrap().as_str(),
-            "wire-secret"
-        );
-        assert_eq!(
-            open_transport(token, "MY_SEC", &seal_a2).unwrap().as_str(),
-            "wire-secret"
         );
     }
 }

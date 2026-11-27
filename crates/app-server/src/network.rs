@@ -30,26 +30,6 @@ pub fn save_listen_config_with_durability(
     canban_context::atomic_with_durability(&path, &serde_json::to_vec_pretty(cfg)?, durability)
 }
 
-/// DEPRECATED: legacy static `server.token` path; retained only to auto-upgrade older hosts.
-pub fn token_path(home: &Path) -> PathBuf {
-    canban_transport::auth::legacy_token_path(home)
-}
-
-/// DEPRECATED: read legacy static `server.token` if present.
-pub fn read_server_token(home: &Path) -> Option<String> {
-    canban_transport::auth::read_legacy_server_token(home)
-}
-
-/// DEPRECATED: generate legacy static `server.token` for backward-compatibility tests.
-pub fn ensure_server_token(home: &Path) -> Result<String> {
-    canban_transport::auth::ensure_legacy_server_token(home)
-}
-
-/// DEPRECATED: Constant-time token comparison for legacy `server.token` verification.
-pub fn verify_token(expected: &str, provided: &str) -> bool {
-    canban_transport::auth::verify_legacy_token(expected, provided)
-}
-
 pub fn is_tailscale_ip(ip: IpAddr) -> bool {
     canban_types::is_tailscale_ip(ip)
 }
@@ -297,14 +277,9 @@ pub fn resolve_bind_addrs(cfg: &ServerListenConfig) -> Result<Vec<SocketAddr>> {
             .to_socket_addrs()
             .with_context(|| format!("Invalid listen address '{explicit}'"))?
         {
-            let is_safe_default = sa.ip().is_loopback() || is_tailscale_ip(sa.ip());
-            if !is_safe_default {
-                ensure!(
-                    cfg.allow_insecure_bind,
-                    "Refusing to bind Canban TCP listener to {sa}: by default only loopback or Tailscale addresses are permitted. Pass `--allow-insecure-bind` if this interface is protected by your own VPN (e.g. WireGuard/ZeroTier) or trusted private network."
-                );
+            if sa.ip().is_unspecified() {
                 eprintln!(
-                    "Warning: Canban TCP listener binding to {sa} (--allow-insecure-bind); ensure this network path is encrypted (e.g. WireGuard/ZeroTier/VPN) or trusted."
+                    "Warning: Canban TCP listener binding to {sa} (all interfaces). Traffic is end-to-end encrypted with Noise_XX, but ensure your firewall permits only intended networks."
                 );
             }
             if !addrs.contains(&sa) {
@@ -833,15 +808,23 @@ pub fn probe_tcp_reachable(raw_addr: &str, timeout: Duration) -> Result<u64> {
 
 /// Attempt non-interactive SSH pairing (`BatchMode=yes`) against `ssh_target`.
 /// If `canban` is already installed on the remote machine, enables `--tailscale` (when requested),
-/// ensures the user service is running, issues a revocable device token for this host, and returns
-/// `{ addr, token, server_id, hostname, platform, home }`.
+/// ensures the user service is running, authorizes this client's Noise X25519 public key on the
+/// remote daemon, and returns `{ addr, server_pubkey, server_id, hostname, platform }`.
 pub fn pair_via_ssh_noninteractive(
+    local_home: &Path,
     ssh_target: &str,
     prefer_tailscale: bool,
     port: u16,
 ) -> Result<Value> {
+    let client_kp = canban_transport::load_or_create_client_keypair(
+        local_home,
+        true,
+        canban_transport::system_noise_rng().as_ref(),
+    )?;
+    let client_pk = client_kp.public_b64();
     let mode_flag = if prefer_tailscale { "--tailscale" } else { "" };
     let device_name_quoted = shell_single_quote(&hostname_string());
+    let client_pk_quoted = shell_single_quote(&client_pk);
     let remote_script = format!(
         r#"export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH";
 if ! command -v canban >/dev/null 2>&1; then
@@ -849,7 +832,7 @@ if ! command -v canban >/dev/null 2>&1; then
   exit 0
 fi
 canban service install {mode_flag} --port {port} >/dev/null 2>&1 || true
-canban pair {mode_flag} --port {port} --device-name {device_name_quoted} --json 2>/dev/null || canban pair {mode_flag} --port {port} --json"#
+canban pair {mode_flag} --port {port} --client-pubkey {client_pk_quoted} --device-name {device_name_quoted} --json"#
     );
     let out = canban_exec::command("ssh")
         .args([
@@ -1045,13 +1028,11 @@ pub fn install_user_service(
     tailscale: bool,
     port: u16,
     listen: Option<String>,
-    allow_insecure_bind: bool,
 ) -> Result<Value> {
     let cfg = ServerListenConfig {
         tailscale,
         port,
         listen,
-        allow_insecure_bind,
         trust_tailscale_self: true,
     };
     save_listen_config(home, &cfg)?;
@@ -1171,19 +1152,6 @@ WantedBy=default.target\n",
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verify_token_checks_exact_length_and_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let tok = ensure_server_token(dir.path()).unwrap();
-        assert_eq!(tok.len(), 64);
-        assert!(verify_token(&tok, &tok));
-        assert!(verify_token(&tok, &format!("  {tok}\n")));
-        let mut wrong = tok.clone();
-        wrong.replace_range(0..1, if &tok[0..1] == "a" { "b" } else { "a" });
-        assert!(!verify_token(&tok, &wrong));
-        assert!(!verify_token(&tok, "short"));
-    }
 
     #[test]
     fn tailscale_cgnat_ip_detection_is_accurate() {
@@ -1307,55 +1275,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_bind_addrs_guards_non_tailscale_addresses_unless_allow_insecure_bind() {
-        let safe_loopback = ServerListenConfig {
-            tailscale: false,
-            port: 7680,
-            listen: Some("127.0.0.1:7680".into()),
-            allow_insecure_bind: false,
-            trust_tailscale_self: true,
-        };
-        assert_eq!(
-            resolve_bind_addrs(&safe_loopback).unwrap(),
-            vec!["127.0.0.1:7680".parse().unwrap()]
-        );
-
-        let rejected_wg = ServerListenConfig {
-            tailscale: false,
-            port: 7680,
-            listen: Some("10.10.0.2:7680".into()),
-            allow_insecure_bind: false,
-            trust_tailscale_self: true,
-        };
-        let wg_err = resolve_bind_addrs(&rejected_wg).unwrap_err();
-        assert!(wg_err.to_string().contains("--allow-insecure-bind"));
-
-        let rejected_unspec = ServerListenConfig {
-            tailscale: false,
-            port: 7680,
-            listen: Some("0.0.0.0:7680".into()),
-            allow_insecure_bind: false,
-            trust_tailscale_self: true,
-        };
-        assert!(resolve_bind_addrs(&rejected_unspec).is_err());
-
-        let allowed_wg = ServerListenConfig {
-            allow_insecure_bind: true,
-            ..rejected_wg
-        };
-        assert_eq!(
-            resolve_bind_addrs(&allowed_wg).unwrap(),
-            vec!["10.10.0.2:7680".parse().unwrap()]
-        );
-
-        let allowed_unspec = ServerListenConfig {
-            allow_insecure_bind: true,
-            ..rejected_unspec
-        };
-        assert_eq!(
-            resolve_bind_addrs(&allowed_unspec).unwrap(),
-            vec!["0.0.0.0:7680".parse().unwrap()]
-        );
+    fn resolve_bind_addrs_allows_loopback_lan_and_unspecified_addresses_under_noise_e2ee() {
+        for raw in ["127.0.0.1:7680", "10.10.0.2:7680", "0.0.0.0:7680"] {
+            let cfg = ServerListenConfig {
+                tailscale: false,
+                port: 7680,
+                listen: Some(raw.into()),
+                trust_tailscale_self: true,
+            };
+            assert_eq!(
+                resolve_bind_addrs(&cfg).unwrap(),
+                vec![raw.parse().unwrap()]
+            );
+        }
     }
 
     #[test]
@@ -1438,7 +1370,8 @@ mod tests {
             name: "Linked DNS Host".into(),
             transport: HostTransport::Tcp {
                 addr: "linked-via-dns.tailnet.ts.net:7680".into(),
-                token: "dev_token".into(),
+                server_pubkey: None,
+                tailscale_auth: true,
             },
             ssh_target: None,
             server_id: Some("srv-b".into()),

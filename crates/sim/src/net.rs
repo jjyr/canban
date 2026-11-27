@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use canban_app_server::AppServer;
 use canban_client::{ConnectFuture, ConnectedTransport, HostConnector};
-use canban_transport::ClientTransport;
+use canban_transport::{ClientTransport, NoiseKeypair, NoiseRngFactory, TcpAuthMode};
 use canban_types::HostTransport;
 use std::{
     collections::BTreeMap,
@@ -56,6 +56,12 @@ pub struct StreamFaultConfig {
     pub extra_read_latency_ms: u64,
     /// Extra deterministic virtual latency injected before each write operation.
     pub extra_write_latency_ms: u64,
+    /// Flip all bits (`^= 0xFF`) of the read byte at this exact offset (per policy generation)
+    /// to simulate wire tampering / AEAD authentication failure.
+    pub corrupt_read_byte_at: Option<u64>,
+    /// Flip all bits (`^= 0xFF`) of the written byte at this exact offset (per policy generation)
+    /// to simulate wire tampering / AEAD authentication failure.
+    pub corrupt_write_byte_at: Option<u64>,
 }
 
 impl StreamFaultConfig {
@@ -130,6 +136,7 @@ pub struct StreamFaultPolicy {
 struct PolicyState {
     default_cfg: StreamFaultConfig,
     host_cfgs: BTreeMap<String, StreamFaultConfig>,
+    wire_taps: BTreeMap<String, Arc<Mutex<Vec<u8>>>>,
     generation: u64,
     wakers: BTreeMap<u64, Waker>,
 }
@@ -167,6 +174,7 @@ impl StreamFaultPolicy {
                 state: Mutex::new(PolicyState {
                     default_cfg,
                     host_cfgs: BTreeMap::new(),
+                    wire_taps: BTreeMap::new(),
                     generation: 0,
                     wakers: BTreeMap::new(),
                 }),
@@ -248,6 +256,22 @@ impl StreamFaultPolicy {
 
     pub fn effective_config(&self, host_id: Option<&str>) -> StreamFaultConfig {
         self.inner.state.lock().unwrap().effective_config(host_id)
+    }
+
+    /// Attaches a raw byte recorder capturing every byte read/written on [`FaultyStream`]s for `host_id`.
+    pub fn set_wire_tap(&self, host_id: impl Into<String>, sink: Option<Arc<Mutex<Vec<u8>>>>) {
+        let host_id = host_id.into();
+        let mut st = self.inner.state.lock().unwrap();
+        if let Some(buf) = sink {
+            st.wire_taps.insert(host_id, buf);
+        } else {
+            st.wire_taps.remove(&host_id);
+        }
+    }
+
+    fn wire_tap_for(&self, host_id: Option<&str>) -> Option<Arc<Mutex<Vec<u8>>>> {
+        let hid = host_id?;
+        self.inner.state.lock().unwrap().wire_taps.get(hid).cloned()
     }
 
     /// Number of currently parked stream read/write wakers awaiting policy heal/change.
@@ -541,30 +565,56 @@ impl<S: AsyncRead + Unpin> AsyncRead for FaultyStream<S> {
             return Poll::Ready(Ok(()));
         }
 
-        if cap < buf.remaining() {
+        let before_total = this.bytes_read;
+        let read_res = if cap < buf.remaining() {
             let mut sub = ReadBuf::new(buf.initialize_unfilled_to(cap));
             match Pin::new(&mut this.inner).poll_read(cx, &mut sub) {
-                Poll::Pending => Poll::Pending,
+                Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(())) => {
                     let n = sub.filled().len();
+                    if let Some(tap) = this.policy.wire_tap_for(this.host_id.as_deref()) {
+                        tap.lock().unwrap().extend_from_slice(sub.filled());
+                    }
+                    if let Some(target) = cfg.corrupt_read_byte_at
+                        && target >= before_total
+                        && target < before_total.saturating_add(n as u64)
+                    {
+                        let idx = (target - before_total) as usize;
+                        sub.filled_mut()[idx] ^= 0xFF;
+                        crate::trace::record_coverage_hit("net.fault.corrupt_read");
+                    }
                     buf.advance(n);
                     this.bytes_read = this.bytes_read.saturating_add(n as u64);
-                    Poll::Ready(Ok(()))
+                    Ok(())
                 }
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => Err(e),
             }
         } else {
             let before = buf.filled().len();
             match Pin::new(&mut this.inner).poll_read(cx, buf) {
-                Poll::Pending => Poll::Pending,
+                Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(())) => {
                     let n = buf.filled().len().saturating_sub(before);
+                    if let Some(tap) = this.policy.wire_tap_for(this.host_id.as_deref()) {
+                        tap.lock()
+                            .unwrap()
+                            .extend_from_slice(&buf.filled()[before..before + n]);
+                    }
+                    if let Some(target) = cfg.corrupt_read_byte_at
+                        && target >= before_total
+                        && target < before_total.saturating_add(n as u64)
+                    {
+                        let idx = before + (target - before_total) as usize;
+                        buf.filled_mut()[idx] ^= 0xFF;
+                        crate::trace::record_coverage_hit("net.fault.corrupt_read");
+                    }
                     this.bytes_read = this.bytes_read.saturating_add(n as u64);
-                    Poll::Ready(Ok(()))
+                    Ok(())
                 }
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => Err(e),
             }
-        }
+        };
+        Poll::Ready(read_res)
     }
 }
 
@@ -625,7 +675,34 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FaultyStream<S> {
             max_len = max_len.min(rem.max(1));
         }
 
-        match Pin::new(&mut this.inner).poll_write(cx, &buf[..max_len]) {
+        let before_total = this.bytes_written;
+        let maybe_corrupt = cfg.corrupt_write_byte_at.filter(|&target| {
+            target >= before_total && target < before_total.saturating_add(max_len as u64)
+        });
+        let write_res = if let Some(target) = maybe_corrupt {
+            let mut tampered = buf[..max_len].to_vec();
+            let idx = (target - before_total) as usize;
+            tampered[idx] ^= 0xFF;
+            let res = Pin::new(&mut this.inner).poll_write(cx, &tampered);
+            if let Poll::Ready(Ok(n)) = &res {
+                if let Some(tap) = this.policy.wire_tap_for(this.host_id.as_deref()) {
+                    tap.lock().unwrap().extend_from_slice(&tampered[..*n]);
+                }
+                if *n > idx {
+                    crate::trace::record_coverage_hit("net.fault.corrupt_write");
+                }
+            }
+            res
+        } else {
+            let res = Pin::new(&mut this.inner).poll_write(cx, &buf[..max_len]);
+            if let Poll::Ready(Ok(n)) = &res
+                && let Some(tap) = this.policy.wire_tap_for(this.host_id.as_deref())
+            {
+                tap.lock().unwrap().extend_from_slice(&buf[..*n]);
+            }
+            res
+        };
+        match write_res {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(n)) => {
                 this.bytes_written = this.bytes_written.saturating_add(n as u64);
@@ -667,15 +744,19 @@ impl Drop for ActiveTcpConnGuard {
     }
 }
 
-/// Connects a framed `yamux/1` + JSON-RPC [`ClientTransport`] over `turmoil::net::TcpStream`,
+/// Connects a Noise-encrypted `yamux/1` + JSON-RPC [`ClientTransport`] over `turmoil::net::TcpStream`,
 /// optionally wrapped in [`FaultyStream`] when `policy` is provided.
 ///
 /// Both remote host connectors and local framed desktop transports (e.g. `SimLocalHostDriver`)
-/// can reuse this helper to route all JSON-RPC calls over real framed `turmoil::net` streams.
+/// can reuse this helper to route all JSON-RPC calls over real Noise-encrypted `turmoil::net` streams.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_turmoil_client_transport(
     addr: &str,
-    token: impl Into<String>,
+    client_keypair: Arc<NoiseKeypair>,
+    server_pubkey: Option<String>,
+    auth: TcpAuthMode,
     device_name: impl Into<String>,
+    noise_rng: Arc<dyn NoiseRngFactory>,
     policy: Option<StreamFaultPolicy>,
     host_id: Option<String>,
 ) -> Result<Arc<ClientTransport>> {
@@ -692,24 +773,62 @@ pub async fn connect_turmoil_client_transport(
         )
     })?
     .with_context(|| format!("Canban is not reachable at {normalized}"))?;
-    let token = token.into();
     let device_name = device_name.into();
     let client = match policy {
         Some(pol) => {
             let wrapped = FaultyStream::new(raw_stream, pol, host_id);
-            ClientTransport::connect_stream_async(wrapped, normalized, token, device_name).await?
+            ClientTransport::connect_stream_async(
+                wrapped,
+                normalized,
+                server_pubkey,
+                auth,
+                device_name,
+                client_keypair.as_ref(),
+                noise_rng.as_ref(),
+            )
+            .await?
         }
         None => {
-            ClientTransport::connect_stream_async(raw_stream, normalized, token, device_name)
-                .await?
+            ClientTransport::connect_stream_async(
+                raw_stream,
+                normalized,
+                server_pubkey,
+                auth,
+                device_name,
+                client_keypair.as_ref(),
+                noise_rng.as_ref(),
+            )
+            .await?
         }
     };
     Ok(Arc::new(client))
 }
 
-/// [`HostConnector`] establishing real `yamux/1` + JSON-RPC sessions over `turmoil::net::TcpStream`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TurmoilConnector;
+fn resolve_tcp_auth(tailscale_auth: bool, pairing_code: Option<&str>) -> TcpAuthMode {
+    if let Some(code) = pairing_code.filter(|c| !c.trim().is_empty()) {
+        TcpAuthMode::PairingCode(code.trim().to_owned())
+    } else if tailscale_auth {
+        TcpAuthMode::Tailscale
+    } else {
+        TcpAuthMode::Key
+    }
+}
+
+/// [`HostConnector`] establishing real Noise + `yamux/1` + JSON-RPC sessions over `turmoil::net::TcpStream`.
+#[derive(Clone)]
+pub struct TurmoilConnector {
+    client_keypair: Arc<NoiseKeypair>,
+    noise_rng: Arc<dyn NoiseRngFactory>,
+}
+
+impl TurmoilConnector {
+    pub fn new(client_keypair: Arc<NoiseKeypair>, noise_rng: Arc<dyn NoiseRngFactory>) -> Self {
+        Self {
+            client_keypair,
+            noise_rng,
+        }
+    }
+}
 
 impl HostConnector for TurmoilConnector {
     fn supports(&self, transport: &HostTransport) -> bool {
@@ -721,28 +840,58 @@ impl HostConnector for TurmoilConnector {
         _host_id: &'a str,
         transport: &'a HostTransport,
         device_name: &'a str,
+        pairing_code: Option<&'a str>,
     ) -> ConnectFuture<'a> {
         let transport_owned = transport.clone();
         let device = device_name.to_owned();
+        let pairing_code_owned = pairing_code.map(str::to_owned);
+        let client_keypair = Arc::clone(&self.client_keypair);
+        let noise_rng = Arc::clone(&self.noise_rng);
         Box::pin(async move {
-            let HostTransport::Tcp { addr, token } = transport_owned else {
+            let HostTransport::Tcp {
+                addr,
+                server_pubkey,
+                tailscale_auth,
+            } = transport_owned
+            else {
                 bail!("TurmoilConnector only supports TCP hosts");
             };
-            let client = connect_turmoil_client_transport(&addr, token, device, None, None).await?;
+            let auth = resolve_tcp_auth(tailscale_auth, pairing_code_owned.as_deref());
+            let client = connect_turmoil_client_transport(
+                &addr,
+                client_keypair,
+                server_pubkey,
+                auth,
+                device,
+                noise_rng,
+                None,
+                None,
+            )
+            .await?;
             Ok(ConnectedTransport::new(client))
         })
     }
 }
 
-/// [`HostConnector`] establishing real `yamux/1` + JSON-RPC sessions wrapped in [`FaultyStream`].
-#[derive(Clone, Debug, Default)]
+/// [`HostConnector`] establishing real Noise + `yamux/1` + JSON-RPC sessions wrapped in [`FaultyStream`].
+#[derive(Clone)]
 pub struct FaultyTurmoilConnector {
     policy: StreamFaultPolicy,
+    client_keypair: Arc<NoiseKeypair>,
+    noise_rng: Arc<dyn NoiseRngFactory>,
 }
 
 impl FaultyTurmoilConnector {
-    pub fn new(policy: StreamFaultPolicy) -> Self {
-        Self { policy }
+    pub fn new(
+        policy: StreamFaultPolicy,
+        client_keypair: Arc<NoiseKeypair>,
+        noise_rng: Arc<dyn NoiseRngFactory>,
+    ) -> Self {
+        Self {
+            policy,
+            client_keypair,
+            noise_rng,
+        }
     }
 
     pub fn policy(&self) -> &StreamFaultPolicy {
@@ -760,18 +909,36 @@ impl HostConnector for FaultyTurmoilConnector {
         host_id: &'a str,
         transport: &'a HostTransport,
         device_name: &'a str,
+        pairing_code: Option<&'a str>,
     ) -> ConnectFuture<'a> {
         let transport_owned = transport.clone();
         let device = device_name.to_owned();
+        let pairing_code_owned = pairing_code.map(str::to_owned);
         let host = host_id.to_owned();
         let policy = self.policy.clone();
+        let client_keypair = Arc::clone(&self.client_keypair);
+        let noise_rng = Arc::clone(&self.noise_rng);
         Box::pin(async move {
-            let HostTransport::Tcp { addr, token } = transport_owned else {
+            let HostTransport::Tcp {
+                addr,
+                server_pubkey,
+                tailscale_auth,
+            } = transport_owned
+            else {
                 bail!("FaultyTurmoilConnector only supports TCP hosts");
             };
-            let client =
-                connect_turmoil_client_transport(&addr, token, device, Some(policy), Some(host))
-                    .await?;
+            let auth = resolve_tcp_auth(tailscale_auth, pairing_code_owned.as_deref());
+            let client = connect_turmoil_client_transport(
+                &addr,
+                client_keypair,
+                server_pubkey,
+                auth,
+                device,
+                noise_rng,
+                Some(policy),
+                Some(host),
+            )
+            .await?;
             Ok(ConnectedTransport::new(client))
         })
     }
