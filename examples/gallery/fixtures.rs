@@ -2883,10 +2883,88 @@ pub fn daily_inbox(ui: canban_ui::presenter::Ui, expand_github: bool) {
             },
         );
     });
+    ui.inbox.github_item_details.update(|m| {
+        m.clear();
+        m.insert(
+            "github:thread:901".into(),
+            canban_ui::inbox::GitHubItemDetail {
+                body: "## Summary\n- Store `defer_until` as UTC epoch ms to avoid cross-timezone day cutoff drift.\n- Align left-rail Inbox badge 1:1 with `Needs Action`.\n\n```rust\nassert_eq!(inbox.actionable_count, inbox.needs_you.len());\n```"
+                    .into(),
+                author_login: Some("alice".into()),
+                author_avatar_url: None,
+                state: "open".into(),
+                merged: false,
+                draft: false,
+                head_ref: Some("feat/daily-briefing".into()),
+                base_ref: Some("main".into()),
+                additions: Some(142),
+                deletions: Some(38),
+                changed_files: Some(6),
+                comments_count: Some(4),
+                labels: vec!["ui".into(), "inbox".into()],
+                ci_state: Some("success".into()),
+                ci_passed: 12,
+                ci_total: 12,
+                failed_checks: Vec::new(),
+            },
+        );
+        m.insert(
+            "github:thread:902".into(),
+            canban_ui::inbox::GitHubItemDetail {
+                body: "After waking from 10m sleep, remote terminal scroll position jumps back to top.\n\n**Repro**:\n1. Open a remote `devpc` terminal.\n2. Sleep macOS for 10m and reconnect."
+                    .into(),
+                author_login: Some("bob".into()),
+                author_avatar_url: None,
+                state: "open".into(),
+                merged: false,
+                draft: false,
+                head_ref: None,
+                base_ref: None,
+                additions: None,
+                deletions: None,
+                changed_files: None,
+                comments_count: Some(2),
+                labels: vec!["bug".into()],
+                ci_state: None,
+                ci_passed: 0,
+                ci_total: 0,
+                failed_checks: Vec::new(),
+            },
+        );
+        m.insert(
+            "github:thread:904".into(),
+            canban_ui::inbox::GitHubItemDetail {
+                body: "Stop replaying stale announcement signatures during channel reconnect."
+                    .into(),
+                author_login: Some("quake".into()),
+                author_avatar_url: None,
+                state: "open".into(),
+                merged: false,
+                draft: false,
+                head_ref: Some("fix/announcement-replay".into()),
+                base_ref: Some("develop".into()),
+                additions: Some(54),
+                deletions: Some(19),
+                changed_files: Some(3),
+                comments_count: Some(7),
+                labels: vec!["protocol".into()],
+                ci_state: Some("failure".into()),
+                ci_passed: 10,
+                ci_total: 12,
+                failed_checks: vec!["cargo-test".into(), "clippy".into()],
+            },
+        );
+    });
+    ui.inbox.expanded_github_items.update(|s| {
+        s.clear();
+        if expand_github {
+            s.insert("github:thread:902".into());
+        }
+    });
     ui.inbox.expanded_stacks.update(|s| {
         s.clear();
         if expand_github {
-            s.insert("github-stack:gallery-project".into());
+            s.insert("github-stack:watch:repo:nervosnetwork/fiber".into());
         }
     });
     ui.navigate("inbox");

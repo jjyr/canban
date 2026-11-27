@@ -3392,12 +3392,8 @@ impl InvariantOracle {
             let gh_items: usize = inbox.github_stacks.iter().map(|s| s.items.len()).sum();
             let sched_cards: usize = inbox.schedule_stacks.iter().map(|s| s.cards.len()).sum();
             let expected_actionable = inbox.needs_you.len();
-            let expected_remaining = inbox.needs_you.len()
-                + gh_items
-                + sched_cards
-                + inbox.open_cards.len()
-                + inbox.agent_terminals.len()
-                + usize::from(!inbox.plain_shells.is_empty());
+            let expected_remaining =
+                inbox.needs_you.len() + gh_items + sched_cards + inbox.open_cards.len();
             ensure!(
                 inbox.actionable_count == expected_actionable
                     && inbox.actionable_count <= inbox.remaining_today,

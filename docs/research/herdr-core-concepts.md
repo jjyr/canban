@@ -202,7 +202,7 @@ Canban's product Session is a generic agent conversation/execution, distinct fro
 
 Use labels such as canban.project, canban.card, and canban.run as Canban conventions. A stage-entry workflow may prepare a worktree and then run a core terminal. Entering Review can schedule a review/report workflow without requiring the advanced editor.
 
-The exact runtime/process route remains a recommendation; see [integration options](herdr-core-integration.md). Current product contracts and remaining questions are in [vision](../product/vision.md), [Projects/templates](../product/workflow-engine.md), and the [product log](../product/product-log.md).
+The exact runtime/process route remains a recommendation; see [integration options](herdr-core-integration.md). Current product contracts and remaining questions are in [vision](../product/vision.md) and [Projects/templates](../product/workflow-engine.md).
 
 ## Source references
 

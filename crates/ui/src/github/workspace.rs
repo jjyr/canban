@@ -313,7 +313,7 @@ pub fn account(ui: Ui) -> impl IntoElement {
                                 action("Clear GitHub cache", Variant::Secondary, move |_| {
                                     dispatch_then(ui, "github.cache.clear", json!({}), move |_| {
                                         ui.inbox.github_notifications.set(Vec::new());
-                                        ui.inbox.github_item_bodies.set(Default::default());
+                                        ui.inbox.github_item_details.set(Default::default());
                                         ui.github.cache_bytes.set(0);
                                     })
                                 })

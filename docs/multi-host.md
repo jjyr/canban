@@ -2,7 +2,7 @@
 
 Status: **User-confirmed design and active implementation (updated 2026-11-27)**.
 
-This contract defines how one native `Canban.app` client connects simultaneously to its local `AppServer` (`canband`, invoked as `canban serve`) and one or more remote `canband` instances (such as an always-on home Linux server over Tailscale or an SSH-reachable host). See [Product discussion and decisions](product/product-log.md) for the decision history and [Multi-machine execution](multi-machine.md) for the earlier single-server remote-Herdr layer.
+This contract defines how one native `Canban.app` client connects simultaneously to its local `AppServer` (`canband`, invoked as `canban serve`) and one or more remote `canband` instances (such as an always-on home Linux server over Tailscale or an SSH-reachable host). See [Multi-machine execution](multi-machine.md) for the earlier single-server remote-Herdr layer.
 
 ---
 

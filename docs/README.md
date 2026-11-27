@@ -13,7 +13,7 @@ The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09]
 Documentation has three roles:
 
 - **Current contract:** feature documents describe the accepted behavior and ownership. Start with [implementation](implementation.md), then follow the feature references below. [Development conventions](development-conventions.md) and [UI architecture](ui-architecture.md) describe cross-cutting rules.
-- **Decision history and proposals:** [product-log](product/product-log.md), dated research and explicitly marked proposals explain alternatives and rationale. They do not override the current feature contract. When a decision changes, rewrite the affected current section and retain the old rationale as clearly dated history.
+- **Proposals and research:** Dated research and explicitly marked proposals explain alternatives and rationale. They do not override the current feature contract. When a decision changes, rewrite the affected current contract directly.
 - **Acceptance evidence:** dated verification reports in `docs/acceptance/` record the build, environment, exercised actions and limits. Keep earlier results intact and mark superseded behavior; historical evidence is not a fresh verification of today's code.
 
 The latest explicit user decision takes precedence over earlier discussion. Before changing an existing feature, check its current contract and any later superseding decision. If code and documents disagree, record the discrepancy rather than declaring a proposal implemented. Use the current code/shared types for exact RPC payloads. Documentation-only reconciliation does not constitute new runtime acceptance.
@@ -41,7 +41,6 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 | [Mobile interaction design](mobile-interaction.md) | Shared mobile UI (iOS/Android), NSH mapping, Tailscale WhoIs auto-auth & single-address pairing, on-demand Tailnet discovery, Terminals and Diff views |
 | [Offline editing and synchronization](offline-sync.md) | Proposal: cross-platform offline Card creation/editing/moves/archives, standalone `canban-sync` replay and field-level conflict merge |
 | [Cross-platform Terminal portability](terminal-portability.md) | Proposal: shared `canban-terminal` core, A+B rendering split across macOS/Linux/iOS/Android and remote `PtyTransport` |
-| [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
 | [Unified workflow engine, Studio and implementation](product/workflow-engine.md) | Canonical Workflow contract: 7 design principles, Project/Board ownership, default Queue Merge flow, graph-derived Studio options, YAML schema, CLI/RPC operations and workspaces |
 | [Board dragging and placement](board-interaction.md) | Whole-Card dragging, animated placeholders/peers, durable ordering and workflow boundary |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |

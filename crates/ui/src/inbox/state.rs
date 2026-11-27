@@ -9,8 +9,29 @@ use nsh_core::prelude::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_BODY_CACHE: usize = 64;
+const MAX_DETAIL_CACHE: usize = 128;
 const MAX_TERM_PREVIEW_CACHE: usize = 48;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitHubItemDetail {
+    pub body: String,
+    pub author_login: Option<String>,
+    pub author_avatar_url: Option<String>,
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+    pub head_ref: Option<String>,
+    pub base_ref: Option<String>,
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub changed_files: Option<u32>,
+    pub comments_count: Option<u32>,
+    pub labels: Vec<String>,
+    pub ci_state: Option<String>,
+    pub ci_passed: u32,
+    pub ci_total: u32,
+    pub failed_checks: Vec<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplyTarget {
@@ -58,7 +79,7 @@ pub struct State {
     pub github_notifications: Signal<Vec<GitHubInboxNotification>>,
     pub github_loading: Signal<bool>,
     pub github_error: Signal<String>,
-    pub github_item_bodies: Signal<BTreeMap<String, String>>,
+    pub github_item_details: Signal<BTreeMap<String, GitHubItemDetail>>,
     pub github_item_loading: Signal<BTreeSet<String>>,
     pub terminal_previews: Signal<BTreeMap<String, TerminalPreviewState>>,
     pub reply_target: Signal<Option<ReplyTarget>>,
@@ -86,7 +107,7 @@ impl State {
             github_notifications: signal(Vec::new()),
             github_loading: signal(false),
             github_error: signal(String::new()),
-            github_item_bodies: signal(BTreeMap::new()),
+            github_item_details: signal(BTreeMap::new()),
             github_item_loading: signal(BTreeSet::new()),
             terminal_previews: signal(BTreeMap::new()),
             reply_target: signal(None),
@@ -135,6 +156,19 @@ pub fn init(ui: Ui) {
                 }
             });
         }
+    });
+
+    // Prefetch structured PR/Issue metadata (avatar, CI, comment count, labels) for visible
+    // Daily Briefing GitHub items (bounded, cached by AppServer).
+    effect(move || {
+        if ui.page.get() != "inbox" || !crate::backend::is_connected() {
+            return;
+        }
+        let inbox = ui.daily_inbox.get();
+        let expanded = ui.inbox.expanded_stacks.get();
+        untracked(|| {
+            prefetch_visible_github_details(ui, &inbox, &expanded);
+        });
     });
 }
 
@@ -275,13 +309,184 @@ pub fn refresh_github_notifications(ui: Ui, refresh: bool) {
     });
 }
 
-pub fn load_github_item_body(ui: Ui, item: &GitHubStackItem) {
-    if item.body.as_ref().is_some_and(|b| !b.trim().is_empty()) {
-        return;
+fn parse_github_item_detail(overview: &Value, checks: Option<&Value>) -> GitHubItemDetail {
+    let data = &overview["data"];
+    let body = data["body"]
+        .as_str()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_owned();
+    let author_login = data["user"]["login"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let author_avatar_url = data["user"]["avatar_url"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let state = data["state"].as_str().unwrap_or("").to_owned();
+    let merged = data["merged"].as_bool().unwrap_or(false)
+        || data["merged_at"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty());
+    let draft = data["draft"].as_bool().unwrap_or(false);
+    let head_ref = data["head"]["ref"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let base_ref = data["base"]["ref"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let additions = data["additions"].as_u64().map(|n| n as u32);
+    let deletions = data["deletions"].as_u64().map(|n| n as u32);
+    let changed_files = data["changed_files"].as_u64().map(|n| n as u32);
+    let comments_count = match (data["comments"].as_u64(), data["review_comments"].as_u64()) {
+        (Some(c), Some(rc)) => Some((c + rc) as u32),
+        (Some(c), None) => Some(c as u32),
+        (None, Some(rc)) => Some(rc as u32),
+        (None, None) => None,
+    };
+    let labels = data["labels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["name"].as_str().map(str::trim))
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    let (ci_state, ci_passed, ci_total, failed_checks) =
+        if let Some(runs) = checks.and_then(|c| c["data"]["check_runs"].as_array()) {
+            let mut total = 0u32;
+            let mut passed = 0u32;
+            let mut running = 0u32;
+            let mut failed = Vec::new();
+            for run in runs {
+                total += 1;
+                let status = run["status"].as_str().unwrap_or("");
+                let conclusion = run["conclusion"].as_str().unwrap_or("");
+                if status != "completed" {
+                    running += 1;
+                } else if matches!(conclusion, "success" | "neutral" | "skipped") {
+                    passed += 1;
+                } else {
+                    let name = run["name"].as_str().unwrap_or("check").to_owned();
+                    failed.push(name);
+                }
+            }
+            let st = if !failed.is_empty() {
+                Some("failure".into())
+            } else if running > 0 {
+                Some("running".into())
+            } else if total > 0 {
+                Some("success".into())
+            } else {
+                Some("none".into())
+            };
+            (st, passed, total, failed)
+        } else {
+            (None, 0, 0, Vec::new())
+        };
+
+    GitHubItemDetail {
+        body,
+        author_login,
+        author_avatar_url,
+        state,
+        merged,
+        draft,
+        head_ref,
+        base_ref,
+        additions,
+        deletions,
+        changed_files,
+        comments_count,
+        labels,
+        ci_state,
+        ci_passed,
+        ci_total,
+        failed_checks,
     }
+}
+
+pub fn prefetch_visible_github_details(
+    ui: Ui,
+    inbox: &DailyInbox,
+    expanded_stacks: &BTreeSet<String>,
+) {
+    let mut budget = 14usize;
+    let mut try_load = |item: &GitHubStackItem| {
+        if budget == 0 || item.number.is_none() {
+            return;
+        }
+        let cached = ui
+            .inbox
+            .github_item_details
+            .with_untracked(|m| m.contains_key(&item.key));
+        let loading = ui
+            .inbox
+            .github_item_loading
+            .with_untracked(|s| s.contains(&item.key));
+        if !cached && !loading {
+            budget -= 1;
+            load_github_item_detail(ui, item);
+        }
+    };
+    for ny in &inbox.needs_you {
+        if let canban_notifications::NeedsYouKind::GitHub { item, .. } = &ny.kind {
+            try_load(item);
+        }
+    }
+    for stack in &inbox.github_stacks {
+        for item in &stack.items {
+            try_load(item);
+        }
+    }
+    for stack in &inbox.github_watching {
+        if expanded_stacks.contains(&stack.stack_id) {
+            for item in stack.items.iter().take(12) {
+                try_load(item);
+            }
+        }
+    }
+    if expanded_stacks.contains("earlier-carryover-stack") {
+        for item in inbox.earlier_github.iter().take(10) {
+            try_load(item);
+        }
+    }
+}
+
+pub fn toggle_github_item(ui: Ui, item: &GitHubStackItem) {
+    let key = item.key.clone();
+    let was_open = ui
+        .inbox
+        .expanded_github_items
+        .with_untracked(|s| s.contains(&key));
+    if was_open {
+        ui.inbox.expanded_github_items.update(|s| {
+            s.remove(&key);
+        });
+    } else {
+        ui.inbox.expanded_github_items.update(|s| {
+            s.insert(key);
+        });
+        load_github_item_detail(ui, item);
+    }
+}
+
+pub fn collapse_github_item(ui: Ui, key: &str) {
+    ui.inbox.expanded_github_items.update(|s| {
+        s.remove(key);
+    });
+}
+
+pub fn load_github_item_detail(ui: Ui, item: &GitHubStackItem) {
     if ui
         .inbox
-        .github_item_bodies
+        .github_item_details
         .with_untracked(|m| m.contains_key(&item.key))
     {
         return;
@@ -300,6 +505,7 @@ pub fn load_github_item_body(ui: Ui, item: &GitHubStackItem) {
         return;
     };
     let key = item.key.clone();
+    let is_pr = item.kind == "pr";
     let reference = GitHubReference {
         repository: item.repository.clone(),
         kind: item.kind.clone(),
@@ -312,32 +518,47 @@ pub fn load_github_item_body(ui: Ui, item: &GitHubStackItem) {
     });
     ui.spawn(async move {
         let res = blocking(move || {
-            backend.call_local(
+            let overview = backend.call_local(
                 "github.detail",
                 json!({
                     "reference": reference,
                     "section": "overview",
                     "refresh": false,
                 }),
-            )
+            )?;
+            let checks = if is_pr
+                && let Some(sha) = overview["data"]["head"]["sha"].as_str()
+                && sha.len() == 40
+                && sha.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                backend
+                    .call_local(
+                        "github.detail",
+                        json!({
+                            "reference": reference,
+                            "section": "checks",
+                            "head": sha,
+                            "refresh": false,
+                        }),
+                    )
+                    .ok()
+            } else {
+                None
+            };
+            Ok::<_, anyhow::Error>(parse_github_item_detail(&overview, checks.as_ref()))
         })
         .await;
         ui.inbox.github_item_loading.update(|s| {
             s.remove(&key);
         });
-        if let Ok(Ok(val)) = res {
-            let body = val["data"]["body"]
-                .as_str()
-                .map(str::trim)
-                .unwrap_or("")
-                .to_owned();
-            ui.inbox.github_item_bodies.update(|m| {
-                if m.len() >= MAX_BODY_CACHE
+        if let Ok(Ok(detail)) = res {
+            ui.inbox.github_item_details.update(|m| {
+                if m.len() >= MAX_DETAIL_CACHE
                     && let Some(first) = m.keys().next().cloned()
                 {
                     m.remove(&first);
                 }
-                m.insert(key, body);
+                m.insert(key, detail);
             });
         }
     });

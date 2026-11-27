@@ -15,6 +15,7 @@
 
 - Read [docs/README.md](docs/README.md), [development conventions](docs/development-conventions.md), [UI architecture](docs/ui-architecture.md), and [implementation status](docs/implementation.md) (historical specs are not acceptance evidence).
 - **English-only UI & docs**: Keep all product UI copy (labels, buttons, statuses, empty states, toasts, tooltips, and Gallery fixtures), project docs, prompts, role/session instructions, `prompts/`, and `skills/` strictly in English; get explicit user approval before modifying any prompt.
+- **UI design rules**: **No explanatory UI copy** (show data, state, and actions directly; never explain UI rules or mechanics on screen) and **flat hierarchy, no nested borders** (use 1px hairline dividers on the canvas instead of bordered containers inside bordered containers; see [UI architecture](docs/ui-architecture.md)).
 - **Crate boundaries & license**: Use `canban-xxx` in `crates/xxx` (omitting `canban-` in module/file names), separating AppServer, Kanban, Workflow Engine, Scheduler, UI (`canban-ui-kit` vs product UI), and supporting crates. Apache-2.0 (`JJy <jjyruby@gmail.com>, 2026`, `license.workspace = true`; preserve third-party notices).
 - **Runtime contracts**:
   - Route all local CLI probing and child process launches through `crates/exec` (`std::process::Command::new` is disallowed by `clippy.toml`).
