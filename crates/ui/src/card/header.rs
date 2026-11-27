@@ -900,7 +900,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             label(move || ui.current_card().map(|c| c.title).unwrap_or_default())
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(17.))
-                                .truncate(),
+                                .truncate()
+                                .select_text(),
                         ),
                 )
                 .child(when(
