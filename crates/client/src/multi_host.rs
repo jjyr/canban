@@ -2441,6 +2441,7 @@ impl MultiHostClient {
                 };
             }
             if method.starts_with("utilities.")
+                || method.starts_with("inbox.")
                 || method.starts_with("update.")
                 || method.starts_with("workflow.default.")
                 || method == "host.discover"

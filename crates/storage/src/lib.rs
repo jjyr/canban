@@ -982,10 +982,44 @@ impl Db<'_> {
             questions: self.list()?,
             note_events: self.list()?,
             review_drafts,
+            inbox_entries: self.list_inbox_entries()?,
             global_env,
             scoped_env,
             ..Default::default()
         })
+    }
+
+    pub fn list_inbox_entries(&self) -> Result<Vec<InboxEntry>> {
+        let mut q = self.conn.prepare(
+            "SELECT data FROM inbox_entries ORDER BY updated_at DESC, id ASC LIMIT 2000",
+        )?;
+        let rows = q.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    pub fn save_inbox_entry(&self, entry: &InboxEntry) -> Result<()> {
+        let data = serde_json::to_string(entry)?;
+        self.conn.execute(
+            "INSERT INTO inbox_entries(id, state, updated_at, data) VALUES(?1, ?2, ?3, ?4) \
+             ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at, data=excluded.data",
+            params![entry.id, entry.state, entry.updated_at as i64, data],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_inbox_entry(&self, id: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM inbox_entries WHERE id = ?1", [id])?;
+        Ok(changed > 0)
+    }
+
+    pub fn prune_inbox_entries(&self, older_than_ms: u64) -> Result<usize> {
+        let removed = self.conn.execute(
+            "DELETE FROM inbox_entries WHERE updated_at < ?1",
+            [older_than_ms as i64],
+        )?;
+        Ok(removed)
     }
 
     pub fn insert_activity_segments(&self, segments: &[ActivitySegment]) -> Result<usize> {

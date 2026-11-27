@@ -91,11 +91,11 @@ pub const SEND_COMMENT: Command = Command {
 pub const CATALOG: &[Command] = &[
     Command {
         id: "toggle-notifications",
-        title: "Toggle Activity & Notifications",
+        title: "Toggle Live Activity & Notifications",
         key: shortcuts::NOTIFICATIONS_KEY,
         display: shortcuts::NOTIFICATIONS_DISPLAY,
         context: "Global",
-        keywords: "overview alerts unread inbox running status slots",
+        keywords: "live activity pulse notifications overview alerts running blocked queued status slots",
     },
     Command {
         id: "toggle-hosts",
@@ -266,12 +266,20 @@ pub const CATALOG: &[Command] = &[
         keywords: "diff review compare patch branch commit",
     },
     Command {
-        id: "go-github",
-        title: "Go to GitHub",
+        id: "go-inbox",
+        title: "Go to Today Inbox",
         key: "",
-        display: "GitHub",
+        display: "Inbox",
         context: "Navigation",
-        keywords: "issues pull requests pr",
+        keywords: "inbox today daily triage github notifications schedule defer",
+    },
+    Command {
+        id: "inbox-defer-all",
+        title: "Inbox: Defer All Remaining Items…",
+        key: "",
+        display: "Inbox",
+        context: "Inbox",
+        keywords: "inbox defer postpone tomorrow end of day clear sweep",
     },
     Command {
         id: "go-insights",
@@ -850,7 +858,11 @@ pub fn execute(ui: Ui, id: &str) {
         }
         "go-terminals" => ui.navigate("terminals"),
         "go-review" => crate::review::open_compare(ui),
-        "go-github" => ui.navigate("github"),
+        "go-inbox" => ui.navigate("inbox"),
+        "inbox-defer-all" => {
+            ui.navigate("inbox");
+            crate::inbox::defer_remaining_all(ui);
+        }
         "go-insights" => ui.navigate("insights"),
         "insights-today" => {
             crate::insights::intent(ui, "today");
@@ -1032,7 +1044,7 @@ pub fn execute(ui: Ui, id: &str) {
             if ui.current_project().is_some() {
                 ui.navigate("github-repository");
             } else {
-                ui.navigate("github");
+                ui.navigate("github-account");
             }
         }
         "link-detected-github-repo" => {
@@ -1197,37 +1209,7 @@ pub fn execute(ui: Ui, id: &str) {
             }
         }
         "edit-last-comment" => {
-            if ui.page.get_untracked() == "github" && ui.github.reference.get_untracked().is_some()
-            {
-                let sec = ui.github.section.get_untracked();
-                if matches!(sec.as_str(), "discussion" | "threads" | "reviews") {
-                    let my_login = crate::github::active_login_untracked(ui);
-                    let target = ui.github.detail.with_untracked(|det| {
-                        det["data"].as_array().and_then(|arr| {
-                            arr.iter().rev().find_map(|entry| {
-                                let cid = entry["id"].as_u64().unwrap_or(0);
-                                let author = entry["user"]["login"].as_str().unwrap_or("");
-                                (cid > 0
-                                    && my_login
-                                        .as_deref()
-                                        .is_some_and(|me| author.eq_ignore_ascii_case(me)))
-                                .then(|| (cid, entry["body"].as_str().unwrap_or("").to_owned()))
-                            })
-                        })
-                    });
-                    if let Some((cid, body)) = target {
-                        batch(move || {
-                            ui.github.edit_error.set(String::new());
-                            ui.github.edit_draft.set(body);
-                            ui.github.editing_comment.set(Some((sec, cid)));
-                        });
-                    } else {
-                        ui.notify("No comments authored by you in this GitHub section");
-                    }
-                } else {
-                    ui.notify("Open Discussion, Threads, or Reviews to edit a GitHub comment");
-                }
-            } else if let Some(c) = ui.current_card().filter(|c| c.active()) {
+            if let Some(c) = ui.current_card().filter(|c| c.active()) {
                 let latest = ui.card_timelines.with_untracked(|timelines| {
                     timelines
                         .get(&c.id)
@@ -1257,39 +1239,7 @@ pub fn execute(ui: Ui, id: &str) {
             }
         }
         "delete-last-comment" => {
-            if ui.page.get_untracked() == "github" && ui.github.reference.get_untracked().is_some()
-            {
-                let sec = ui.github.section.get_untracked();
-                if matches!(sec.as_str(), "discussion" | "threads") {
-                    let my_login = crate::github::active_login_untracked(ui);
-                    let target = ui.github.detail.with_untracked(|det| {
-                        det["data"].as_array().and_then(|arr| {
-                            arr.iter().rev().find_map(|entry| {
-                                let cid = entry["id"].as_u64().unwrap_or(0);
-                                let author = entry["user"]["login"].as_str().unwrap_or("");
-                                (cid > 0
-                                    && my_login
-                                        .as_deref()
-                                        .is_some_and(|me| author.eq_ignore_ascii_case(me)))
-                                .then_some(cid)
-                            })
-                        })
-                    });
-                    if let Some(cid) = target {
-                        batch(move || {
-                            ui.github.delete_error.set(String::new());
-                            ui.github.editing_comment.set(None);
-                            ui.github.deleting_comment.set(Some((sec, cid)));
-                        });
-                    } else {
-                        ui.notify("No comments authored by you in this GitHub section");
-                    }
-                } else if sec == "reviews" {
-                    ui.notify("GitHub does not support deleting submitted pull request reviews");
-                } else {
-                    ui.notify("Open Discussion or Review threads to delete a GitHub comment");
-                }
-            } else if ui.page.get_untracked() == "review"
+            if ui.page.get_untracked() == "review"
                 && ui.review_state.mode.get_untracked() == "github_pr"
             {
                 let my_login = crate::github::active_login_untracked(ui);
@@ -1345,27 +1295,7 @@ pub fn execute(ui: Ui, id: &str) {
             }
         }
         "open-last-github-comment" => {
-            if ui.page.get_untracked() == "github"
-                && let Some(r) = ui.github.reference.get_untracked()
-            {
-                let sec = ui.github.section.get_untracked();
-                if matches!(sec.as_str(), "discussion" | "threads" | "reviews") {
-                    let url = ui.github.detail.with_untracked(|det| {
-                        det["data"].as_array().and_then(|arr| {
-                            arr.iter().rev().find_map(|entry| {
-                                crate::github::comment_web_url(entry, Some(r.url.as_str()), &sec)
-                            })
-                        })
-                    });
-                    if let Some(url) = url {
-                        crate::github::open_url(ui, url);
-                    } else {
-                        ui.notify("No GitHub comments in this section");
-                    }
-                } else {
-                    crate::github::open_url(ui, r.url);
-                }
-            } else if ui.page.get_untracked() == "review"
+            if ui.page.get_untracked() == "review"
                 && let Some(pr) = ui.review_state.pr_target.get_untracked()
             {
                 let base_url = pr["url"]

@@ -145,14 +145,12 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                 .into_element(),
             ChromeMode::Subpage(p) => match p.as_str() {
                 "insights" => crate::insights::chrome_bar(ui).into_element(),
+                "inbox" => crate::inbox::chrome_bar(ui).into_element(),
                 "schedules" => crate::schedules::chrome_bar(ui).into_element(),
-                "github" => crate::github::workspace::chrome_bar(ui).into_element(),
-                "github-account" => subpage_chrome(
-                    ui,
-                    Some(("← GitHub", "github")),
-                    "GitHub / Account & access",
-                )
-                .into_element(),
+                "github-account" => {
+                    subpage_chrome(ui, Some(("← Inbox", "inbox")), "GitHub / Account & access")
+                        .into_element()
+                }
                 "github-repository" => {
                     subpage_chrome(ui, Some(("← Board", "board")), move || {
                         ui.current_project()
@@ -284,8 +282,8 @@ fn is_workspace_page(page: &str) -> bool {
                 | "archive"
                 | "settings"
                 | "insights"
+                | "inbox"
                 | "schedules"
-                | "github"
                 | "github-account"
                 | "github-repository"
         )
@@ -327,7 +325,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             None
         } else if matches!(
             page.as_str(),
-            "agent-setup" | "new-project" | "github-account"
+            "agent-setup" | "new-project" | "github-account" | "inbox"
         ) {
             Some((page, String::new(), String::new()))
         } else {

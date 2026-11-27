@@ -1,5 +1,4 @@
-//! GitHub-specific surfaces, shared with the native Gallery.
-mod detail;
+//! GitHub integration helpers, project repository settings, and account access.
 pub mod filters;
 pub mod references;
 mod repository;
@@ -16,7 +15,7 @@ use nsh_core::prelude::*;
 pub use repository::screen as repository_screen;
 use serde_json::{Value, json};
 pub use workspace::account;
-pub use workspace::{Browser, init, open, open_section, screen};
+pub use workspace::{Browser, init};
 
 pub fn active_login_from(snapshot: &Snapshot, gh: &Value) -> Option<String> {
     snapshot

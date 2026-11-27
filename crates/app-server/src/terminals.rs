@@ -14,6 +14,46 @@ fn sanitize_command_label(raw: &str) -> String {
         .collect()
 }
 
+fn strip_ansi_sequences(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next == '\x07' {
+                            break;
+                        }
+                        if next == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+        } else if c == '\r' {
+            continue;
+        } else if c == '\n' || c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub(super) fn shell_command_from_record(
     value: &Value,
     previous: Option<&ShellCommand>,
@@ -1654,6 +1694,167 @@ impl AppServer {
         }
         Ok(())
     }
+    /// Read-only bounded tail preview of any live or finished terminal (Card Agent or standalone).
+    pub(super) fn preview_terminal(&self, p: Value) -> Result<Value> {
+        let terminal_id = strp(&p, "terminal_id")?;
+        let max_lines = p["lines"].as_u64().unwrap_or(16).clamp(1, 80) as usize;
+        let snapshot = self.snapshot()?;
+        let entry = snapshot
+            .terminals
+            .iter()
+            .find(|t| t.id == terminal_id)
+            .context("Terminal no longer exists")?;
+        let ctx = snapshot
+            .terminal_contexts
+            .iter()
+            .find(|c| c.terminal_id == entry.id);
+        let cwd = ctx
+            .and_then(|c| c.cwd.clone())
+            .or_else(|| entry.agent.as_ref().and_then(|a| a.directory.clone()));
+        let project_id = snapshot.terminal_project_id(entry).map(str::to_owned);
+        let (raw_text, source, observed_at) = if let Some(run) = &entry.agent {
+            if run.finished() {
+                if let Some(path) = run.output_path.as_deref() {
+                    let saved = self.read_resource(&run.card_id, path)?;
+                    let body = saved["body"].as_str().unwrap_or("").to_owned();
+                    (body, "saved", None)
+                } else {
+                    (String::new(), "closed", None)
+                }
+            } else {
+                let client = self.herdr_client();
+                let core_ok = client
+                    .status()
+                    .ok()
+                    .and_then(|v| v["core"]["id"].as_str().map(str::to_owned))
+                    == run.core_id;
+                if core_ok && let Some(term) = run.terminal.as_deref() {
+                    let screen = client.call(
+                        "terminal.read",
+                        json!({ "terminal": term, "lines": max_lines.saturating_mul(3).max(40) }),
+                    )?;
+                    let text = screen["text"].as_str().unwrap_or("").to_owned();
+                    (text, "live", Some(self.now_ms()))
+                } else {
+                    (String::new(), "offline", None)
+                }
+            }
+        } else if let Some(rt) = &entry.runtime {
+            if rt.state == "finished" {
+                (String::new(), "closed", None)
+            } else {
+                let client = self.herdr_client();
+                let core_ok = client
+                    .status()
+                    .ok()
+                    .and_then(|v| v["core"]["id"].as_str().map(str::to_owned))
+                    == rt.core_id;
+                if core_ok && let Some(term) = rt.terminal.as_deref() {
+                    let screen = client.call(
+                        "terminal.read",
+                        json!({ "terminal": term, "lines": max_lines.saturating_mul(3).max(40) }),
+                    )?;
+                    let text = screen["text"].as_str().unwrap_or("").to_owned();
+                    (text, "live", Some(self.now_ms()))
+                } else {
+                    (String::new(), "offline", None)
+                }
+            }
+        } else {
+            (String::new(), "unknown", None)
+        };
+
+        let cleaned = strip_ansi_sequences(&raw_text);
+        let non_empty: Vec<String> = cleaned
+            .lines()
+            .map(|l| l.trim_end().to_owned())
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        let start = non_empty.len().saturating_sub(max_lines);
+        let lines = non_empty[start..].to_vec();
+        let text = lines.join("\n");
+        Ok(json!({
+            "terminal_id": entry.id,
+            "status": entry.herdr_status().label(),
+            "cwd": cwd,
+            "project_id": project_id,
+            "source": source,
+            "observed_at": observed_at,
+            "lines": lines,
+            "text": text,
+        }))
+    }
+
+    /// Send inline user input directly to a live terminal (used by Daily Inbox quick reply).
+    pub(super) fn send_terminal_input(&self, p: Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Sending terminal input requires a user action"
+        );
+        let terminal_id = strp(&p, "terminal_id")?;
+        let text = strp(&p, "text")?;
+        ensure!(
+            !text.is_empty() && text.len() <= 16_384,
+            "text must be between 1 and 16384 bytes"
+        );
+        let submit = p["submit"].as_bool().unwrap_or(true);
+        let entry: TerminalEntry = self.store.lock().unwrap().db().get(terminal_id)?;
+        let (core, terminal, is_agent) = if let Some(run) = &entry.agent {
+            ensure!(!run.finished(), "Terminal has already finished");
+            let core = run
+                .core_id
+                .clone()
+                .context("Original Core binding unavailable")?;
+            let term = run
+                .terminal
+                .clone()
+                .context("Terminal is not attached yet")?;
+            (core, term, true)
+        } else if let Some(rt) = &entry.runtime {
+            ensure!(rt.state != "finished", "Terminal has already finished");
+            let core = rt
+                .core_id
+                .clone()
+                .context("Original Core binding unavailable")?;
+            let term = rt
+                .terminal
+                .clone()
+                .context("Terminal is not attached yet")?;
+            (core, term, false)
+        } else {
+            bail!("Terminal has no active runtime binding");
+        };
+        let verified = self.verified_core_id()?;
+        ensure!(verified == core, "Original Herdr core is unavailable");
+        let payload = if submit && !text.ends_with('\r') && !text.ends_with('\n') {
+            format!("{text}\r")
+        } else {
+            text.to_owned()
+        };
+        self.herdr_client().call(
+            "terminal.send",
+            json!({ "terminal": terminal, "text": payload }),
+        )?;
+        let now_ms = self.now_ms();
+        if is_agent {
+            let _ = self.store.lock().unwrap().write_topic("terminals", |db| {
+                let mut current: TerminalEntry = db.get(terminal_id)?;
+                if let Some(run) = &mut current.agent {
+                    run.lifecycle.last_interaction_at = Some(now_ms);
+                    run.updated_at = now_ms;
+                    db.save(&current)?;
+                }
+                Ok(())
+            });
+            self.emit("terminals", None);
+        }
+        Ok(json!({
+            "accepted": true,
+            "terminal_id": terminal_id,
+            "sent_at": now_ms,
+        }))
+    }
+
     /// Any independent terminal in this checkout protects it, regardless of origin.
     pub(super) fn terminal_retains_worktree(&self, card: &Card) -> Result<bool> {
         let Some(worktree) = &card.worktree else {

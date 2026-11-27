@@ -827,6 +827,10 @@ pub struct ReviewPreview {
 pub struct CardEventSummary {
     pub last_event_seq: u64,
     pub reply_count: u32,
+    #[serde(default)]
+    pub last_activity_at: u64,
+    #[serde(default)]
+    pub last_user_activity_at: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -838,11 +842,36 @@ pub struct ReminderEventMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_checks: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_label: Option<String>,
+}
+
+/// Durable daily Inbox triage state for an item across local and remote hosts.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboxEntry {
+    /// Stable item key: `"card:<id>"`, `"terminal:<id>"`, `"schedule:<id>"`, or `"github:<key>"`.
+    pub id: String,
+    /// Triage state: `"deferred"`, `"dismissed"`, or `"pinned_today"`.
+    pub state: String,
+    /// For `"deferred"`: UTC epoch ms when the item resurfaces in Today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_until: Option<u64>,
+    /// For `"pinned_today"` or `"dismissed"`: daily window start ms when applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day_start_ms: Option<u64>,
+    /// Optional event sequence or timestamp watermark so newer activity can resurface dismissed items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<u64>,
+    pub updated_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1463,6 +1492,8 @@ pub struct Snapshot {
     pub card_summaries: BTreeMap<String, CardEventSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reminders: Vec<Reminder>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inbox_entries: Vec<InboxEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sound_event_ids: Vec<String>,
     pub reports: Vec<Report>,

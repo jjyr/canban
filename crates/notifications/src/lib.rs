@@ -16,6 +16,8 @@ pub fn attention_at(project: &str, card: &str, message: &str, now_ms: u64) -> No
     }
 }
 
+mod inbox;
+pub use inbox::*;
 mod overview;
 pub use overview::*;
 mod reminders;

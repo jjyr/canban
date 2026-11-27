@@ -18,6 +18,8 @@ pub fn config_only(method: &str) -> bool {
             | "utilities.awake"
             | "github.notification.read"
             | "github.notification.done"
+            | "inbox.triage"
+            | "terminal.send"
             | "update.check"
             | "update.install"
     )

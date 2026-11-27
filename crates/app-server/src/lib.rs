@@ -1637,11 +1637,20 @@ impl AppServer {
         for (card_id, evs) in &by_card {
             let last_event_seq = evs.iter().map(|e| e.sequence).max().unwrap_or(0);
             let reply_count = evs.iter().filter(|e| is_narrative_event(e, evs)).count() as u32;
+            let last_activity_at = evs.iter().map(|e| e.created_at).max().unwrap_or(0);
+            let last_user_activity_at = evs
+                .iter()
+                .filter(|e| e.actor == "user" || e.kind == "card.created")
+                .map(|e| e.created_at)
+                .max()
+                .unwrap_or(0);
             snapshot.card_summaries.insert(
                 (*card_id).to_owned(),
                 CardEventSummary {
                     last_event_seq,
                     reply_count,
+                    last_activity_at,
+                    last_user_activity_at,
                 },
             );
         }
@@ -1809,6 +1818,7 @@ mod authoring;
 mod configuration;
 mod events;
 mod herdr_setup;
+mod inbox;
 mod merge_batch;
 mod project_bundle;
 mod projects;

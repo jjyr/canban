@@ -1259,6 +1259,12 @@ impl Snapshot {
             self.github_sync.entry(k).or_insert(v);
         }
 
+        for entry in remote.inbox_entries {
+            if !self.inbox_entries.iter().any(|e| e.id == entry.id) {
+                self.inbox_entries.push(entry);
+            }
+        }
+
         for (key, entries) in remote.scoped_env {
             if let Some(pid) = key.strip_prefix("project:") {
                 let target_pid = project_map.get(pid).map(String::as_str).unwrap_or(pid);

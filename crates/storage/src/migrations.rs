@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 24;
+pub const CURRENT: u32 = 25;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -93,6 +93,11 @@ const STEPS: &[Migration] = &[
         version: 24,
         up: detach_manual_terminal_project_up,
         down: detach_manual_terminal_project_down,
+    },
+    Migration {
+        version: 25,
+        up: inbox_entries_up,
+        down: inbox_entries_down,
     },
 ];
 
@@ -405,6 +410,24 @@ fn detach_manual_terminal_project_up(tx: &Transaction<'_>) -> Result<()> {
 }
 
 fn detach_manual_terminal_project_down(_tx: &Transaction<'_>) -> Result<()> {
+    Ok(())
+}
+
+fn inbox_entries_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS inbox_entries(\
+            id TEXT PRIMARY KEY,\
+            state TEXT NOT NULL,\
+            updated_at INTEGER NOT NULL,\
+            data TEXT NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS inbox_entries_updated ON inbox_entries(updated_at);",
+    )?;
+    Ok(())
+}
+
+fn inbox_entries_down(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch("DROP TABLE IF EXISTS inbox_entries;")?;
     Ok(())
 }
 

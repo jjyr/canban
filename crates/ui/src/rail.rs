@@ -24,25 +24,34 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             || 0,
             move |_| ui.show_search(false),
         ));
-    let rail = rail.child(icon_action(
-        Icon::Board,
-        "Board".into(),
-        move || {
-            matches!(
-                ui.page.get().as_str(),
-                "board"
-                    | "card"
-                    | "new-project"
-                    | "new-card"
-                    | "drafts"
-                    | "archive"
-                    | "workflows"
-                    | "project-location"
-            )
-        },
-        || 0,
-        move |_| ui.open_board(),
-    ));
+    let inbox_count = computed(move || ui.daily_inbox.with(|i| i.remaining_today));
+    let rail = rail
+        .child(icon_action(
+            Icon::Inbox,
+            "Inbox · Today".into(),
+            move || ui.page.get() == "inbox",
+            move || inbox_count.get(),
+            move |_| ui.navigate("inbox"),
+        ))
+        .child(icon_action(
+            Icon::Board,
+            "Board".into(),
+            move || {
+                matches!(
+                    ui.page.get().as_str(),
+                    "board"
+                        | "card"
+                        | "new-project"
+                        | "new-card"
+                        | "drafts"
+                        | "archive"
+                        | "workflows"
+                        | "project-location"
+                )
+            },
+            || 0,
+            move |_| ui.open_board(),
+        ));
     let terminal_attention = computed(move || {
         ui.closing_terminals.with(|closing| {
             ui.terminal_entries.with(|rows| {
@@ -72,13 +81,6 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             move |_| crate::review::open_compare(ui),
         ));
     rail.child(icon_action(
-        Icon::GitHub,
-        "GitHub".into(),
-        move || ui.page.get().starts_with("github"),
-        || 0,
-        move |_| ui.navigate("github"),
-    ))
-    .child(icon_action(
         Icon::Clock,
         "Schedules".into(),
         move || ui.page.get() == "schedules",

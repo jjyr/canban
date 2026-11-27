@@ -181,6 +181,9 @@ impl AppServer {
         if method.starts_with("utilities.") || method.starts_with("usage.") {
             return self.utility_call(method, p);
         }
+        if method.starts_with("inbox.") {
+            return self.inbox_call(method, p);
+        }
         if method.starts_with("draft.") {
             return self.draft_call(method, p);
         }
@@ -278,6 +281,8 @@ impl AppServer {
             "terminal.end" => self.control_terminal(p, true),
             "terminal.close" => self.close_terminal(p),
             "terminal.context" => self.terminal_context(p),
+            "terminal.preview" => self.preview_terminal(p),
+            "terminal.send" => self.send_terminal_input(p),
             "viewer.presence" => self.viewer_presence(p),
             "runtime.observation" => {
                 let (core, generation, connected, terminals) = {

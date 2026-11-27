@@ -2700,48 +2700,15 @@ pub fn Gallery() -> impl IntoElement {
         return canban_ui::frame::screen(ui).into_element();
     }
 
-    if matches!(
-        scene_env.as_str(),
-        "github-discussion" | "github-discussion-delete-confirm"
-    ) {
-        fixtures::github_browser(ui, true);
-        ui.github.section.set("discussion".into());
-        ui.github.detail.set(json!({
-            "data": [
-                {
-                    "id": 501,
-                    "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-501",
-                    "user": {"login": "octocat"},
-                    "author_association": "CONTRIBUTOR",
-                    "created_at": "2026-11-12T08:00:00Z",
-                    "updated_at": "2026-11-12T08:00:00Z",
-                    "body": "Ready for review — verifies external `GitHub ↗` comment anchor jump and `#1` cross-links."
-                },
-                {
-                    "id": 502,
-                    "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-502",
-                    "user": {"login": "jjy"},
-                    "author_association": "OWNER",
-                    "created_at": "2026-11-12T08:10:00Z",
-                    "updated_at": "2026-11-12T08:15:00Z",
-                    "body": "Looks great! Own comments (`@jjy`) fold **Edit** and **Delete** under `⋯`, keeping only `GitHub ↗` outside."
-                }
-            ],
-            "page": 1,
-            "has_next": false
-        }));
-        if scene_env == "github-discussion-delete-confirm" {
-            ui.github
-                .deleting_comment
-                .set(Some(("discussion".into(), 502)));
-        }
+    if matches!(scene_env.as_str(), "daily-inbox" | "daily-inbox-expanded") {
+        fixtures::daily_inbox(ui, scene_env == "daily-inbox-expanded");
         return canban_ui::frame::screen(ui).into_element();
     }
     if matches!(
         scene_env.as_str(),
         "github-pr-review" | "github-pr-review-delete-confirm" | "pr-agent-review-draft"
     ) {
-        fixtures::github_browser(ui, true);
+        fixtures::daily_inbox(ui, false);
         let mut compare = fixtures::git_compare();
         compare["compare_sha"] = json!("8f3a1c2");
         compare["threads"] = json!([
@@ -3536,45 +3503,19 @@ pub fn Gallery() -> impl IntoElement {
                     snapshot.projects[0].github=Some(canban_types::GitHubSource { pr_intake:Default::default(),authors:vec![],labels:vec![],include_drafts:false,paused:false,repository:"jjyr/canban".into(),repository_id:1,generation:"gallery".into(),intake:canban_types::GitHubIntake::All,synced_at:None,error:None });
                     scene.set("workspace".into());ui.snapshot.set(snapshot);ui.new_card();
                 }))
-                .child(action("GitHub inbox",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,false);}))
-                .child(action("GitHub onboarding",Variant::Quiet,move |_|{
+                .child(action("Today Inbox", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
-                    fixtures::github_browser(ui,false);
-                    ui.github.gh_status.set(json!({"state":"signed_out","installed":true,"message":"GitHub CLI returned no HTTP response; check gh auth status"}));
-                    ui.github.list.set(json!({"items":[]}));
-                    ui.github.error.set("GitHub CLI returned no HTTP response; check gh auth status".into());
+                    fixtures::daily_inbox(ui, false);
                 }))
-                .child(action("GitHub PR diff",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,true);}))
-                .child(action("GitHub discussion",Variant::Quiet,move |_|{
+                .child(action("Inbox · GitHub Stack", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
-                    fixtures::github_browser(ui,true);
-                    ui.github.section.set("discussion".into());
-                    ui.github.detail.set(json!({
-                        "data": [
-                            {
-                                "id": 501,
-                                "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-501",
-                                "user": {"login": "octocat"},
-                                "author_association": "CONTRIBUTOR",
-                                "created_at": "2026-11-12T08:00:00Z",
-                                "updated_at": "2026-11-12T08:00:00Z",
-                                "body": "Ready for review — verifies inline diff and `#1` cross-links."
-                            },
-                            {
-                                "id": 502,
-                                "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-502",
-                                "user": {"login": "jjy"},
-                                "author_association": "OWNER",
-                                "created_at": "2026-11-12T08:10:00Z",
-                                "updated_at": "2026-11-12T08:15:00Z",
-                                "body": "Looks great! Own comments (`@jjy`) fold **Edit** and **Delete** under `⋯`, keeping only `GitHub ↗` outside."
-                            }
-                        ],
-                        "page": 1,
-                        "has_next": false
-                    }));
+                    fixtures::daily_inbox(ui, true);
                 }))
-                .child(action("GitHub offline cache",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,false);ui.github.error.set("Offline · showing cached GitHub content".into());}))
+                .child(action("GitHub Account", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    fixtures::daily_inbox(ui, false);
+                    ui.navigate("github-account");
+                }))
                 .child(action("GitHub Card",Variant::Quiet,move |_|{
                     let mut snapshot=fixtures::workspace();
                     let source=canban_types::GitHubIssueRef{repository:"jjyr/canban".into(),repository_id:1,issue_id:186,number:186,url:"https://github.com/jjyr/canban/issues/186".into()};

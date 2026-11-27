@@ -99,6 +99,7 @@ pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
     pub owner: Owner,
     pub github: crate::github::Browser,
+    pub inbox: crate::inbox::State,
     pub insights: crate::insights::State,
     pub schedules: crate::schedules::State,
     pub workflows: crate::workflows::State,
@@ -163,6 +164,7 @@ pub struct Ui {
     pub link_lookup: Memo<Rc<crate::index::LinkLookup>>,
     pub known_tags: Memo<Rc<crate::index::KnownTagsIndex>>,
     pub overview_rows: Memo<Rc<Vec<canban_notifications::OverviewRow>>>,
+    pub daily_inbox: Memo<Rc<canban_notifications::DailyInbox>>,
     pub reminders: Memo<Vec<canban_notifications::Reminder>>,
     pub sound_items: Memo<Vec<String>>,
     pub reminder_counts: Memo<BTreeMap<String, canban_notifications::ReminderCount>>,
@@ -593,9 +595,25 @@ impl Ui {
             snapshot.with(|s| s.projects.iter().find(|p| p.id == pid).cloned())
         });
         let github_account = computed(move || snapshot.with(|s| s.github.clone()));
+        let inbox = crate::inbox::State::new();
+        let utility = signal(json!({"preferences":{"theme":"canban"},"awake":false}));
+        let utility_clock = signal(now() / 1000);
+        let daily_inbox = computed(move || {
+            let cutoff = utility.with(crate::inbox::cutoff_minutes_from_utility);
+            let now_ms = utility_clock.get().saturating_mul(1000).max(now());
+            let tz = crate::inbox::local_tz_offset_secs();
+            snapshot.with(|s| {
+                inbox.github_notifications.with(|gh| {
+                    Rc::new(canban_notifications::build_daily_inbox(
+                        s, gh, now_ms, tz, cutoff,
+                    ))
+                })
+            })
+        });
         Self {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
+            inbox,
             insights: crate::insights::State::new(),
             schedules: crate::schedules::State::new(),
             workflows: crate::workflows::State::new(),
@@ -612,7 +630,7 @@ impl Ui {
             update_busy: signal(false),
             task_submit: signal(0),
             editor_focus: signal(0),
-            utility: signal(json!({"preferences":{"theme":"canban"},"awake":false})),
+            utility,
             utility_popup: signal(String::new()),
             agent_popover: crate::components::agent_popover::AgentPopoverState::new(),
             native_modal: signal(false),
@@ -650,6 +668,7 @@ impl Ui {
             link_lookup,
             known_tags,
             overview_rows,
+            daily_inbox,
             reminders,
             sound_items,
             reminder_counts,
@@ -719,7 +738,7 @@ impl Ui {
             pending_methods: signal(BTreeSet::new()),
             merging_cards: signal(BTreeSet::new()),
             runtime_clock: signal(now()),
-            utility_clock: signal(now() / 1000),
+            utility_clock,
             refreshing: signal(false),
             refresh_pending: signal(RefreshPending::None),
             snapshot_epoch: signal(0),
@@ -1074,7 +1093,7 @@ impl Ui {
             self.card_standalone.set(
                 matches!(
                     self.page.get_untracked().as_str(),
-                    "terminals" | "overview" | "github" | "insights"
+                    "terminals" | "overview" | "inbox" | "insights"
                 ) || self.card_standalone.get_untracked()
                     && matches!(self.page.get_untracked().as_str(), "card" | "review"),
             );

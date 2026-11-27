@@ -23,6 +23,9 @@ struct Preferences {
     terminal_font_size: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_size: Option<[u16; 2]>,
+    /// Daily Inbox reset cutoff as minutes since local midnight (`0..1440`; omitted when `0` = `00:00`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inbox_cutoff_minutes: Option<u16>,
 }
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -36,6 +39,7 @@ struct SavedPreferences {
     terminal_font_family: Option<String>,
     terminal_font_size: Option<u16>,
     terminal_size: Option<[u16; 2]>,
+    inbox_cutoff_minutes: Option<u16>,
 }
 fn enabled(value: &bool) -> bool {
     *value
@@ -53,6 +57,9 @@ fn normalize_font_size(value: Option<u16>) -> Option<u16> {
 fn normalize_terminal_size(value: Option<[u16; 2]>) -> Option<[u16; 2]> {
     let [cols, rows] = value?;
     canban_herdr::TerminalSize::normalized(cols, rows).map(|sz| [sz.cols, sz.rows])
+}
+fn normalize_inbox_cutoff_minutes(value: Option<u16>) -> Option<u16> {
+    value.filter(|&m| m > 0 && m < 1440)
 }
 impl From<SavedPreferences> for Preferences {
     fn from(saved: SavedPreferences) -> Self {
@@ -80,6 +87,7 @@ impl From<SavedPreferences> for Preferences {
             terminal_font_family: normalize_font_family(saved.terminal_font_family),
             terminal_font_size: normalize_font_size(saved.terminal_font_size),
             terminal_size: normalize_terminal_size(saved.terminal_size),
+            inbox_cutoff_minutes: normalize_inbox_cutoff_minutes(saved.inbox_cutoff_minutes),
         }
     }
 }
@@ -93,6 +101,7 @@ impl Default for Preferences {
             terminal_font_family: None,
             terminal_font_size: None,
             terminal_size: None,
+            inbox_cutoff_minutes: None,
         }
     }
 }
@@ -250,8 +259,9 @@ impl AppServer {
                         || p.get("last_project").is_some()
                         || p.get("notification_sound").is_some()
                         || p.get("terminal_font_family").is_some()
-                        || p.get("terminal_font_size").is_some(),
-                    "board_filter, theme, last_project, notification_sound, terminal_font_family or terminal_font_size required"
+                        || p.get("terminal_font_size").is_some()
+                        || p.get("inbox_cutoff_minutes").is_some(),
+                    "board_filter, theme, last_project, notification_sound, terminal_font_family, terminal_font_size or inbox_cutoff_minutes required"
                 );
                 if let Some(sound) = p.get("notification_sound") {
                     ensure!(sound.is_boolean(), "notification_sound must be a boolean");
@@ -310,6 +320,12 @@ impl AppServer {
                         "terminal_font_size must be an integer between {MIN_TERMINAL_FONT_SIZE} and {MAX_TERMINAL_FONT_SIZE} or null"
                     );
                 }
+                if let Some(cutoff) = p.get("inbox_cutoff_minutes") {
+                    ensure!(
+                        cutoff.is_null() || cutoff.as_u64().is_some_and(|m| m < 1440),
+                        "inbox_cutoff_minutes must be an integer between 0 and 1439 or null"
+                    );
+                }
                 let board_filter = if let Some(patch) = p.get("board_filter") {
                     let account = patch["account"]
                         .as_str()
@@ -352,6 +368,10 @@ impl AppServer {
                 }
                 if let Some(size) = p.get("terminal_font_size") {
                     next.terminal_font_size = normalize_font_size(size.as_u64().map(|n| n as u16));
+                }
+                if let Some(cutoff) = p.get("inbox_cutoff_minutes") {
+                    next.inbox_cutoff_minutes =
+                        normalize_inbox_cutoff_minutes(cutoff.as_u64().map(|m| m as u16));
                 }
                 if let Some((account, project, filter)) = board_filter {
                     let filters = next.board_filters.entry(account.clone()).or_default();

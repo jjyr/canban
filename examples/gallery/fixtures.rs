@@ -25,11 +25,20 @@ pub fn apply_fixture_events(s: &mut Snapshot, events: &[Event]) {
                 )
             })
             .count() as u32;
+        let last_activity_at = evs.iter().map(|e| e.created_at).max().unwrap_or(0);
+        let last_user_activity_at = evs
+            .iter()
+            .filter(|e| e.actor == "user" || e.kind == "card.created")
+            .map(|e| e.created_at)
+            .max()
+            .unwrap_or(0);
         s.card_summaries.insert(
             cid,
             CardEventSummary {
                 last_event_seq,
                 reply_count,
+                last_activity_at,
+                last_user_activity_at,
             },
         );
     }
@@ -2606,9 +2615,10 @@ pub fn conversation() -> (canban_types::Snapshot, Vec<Event>) {
     (s, events)
 }
 
-/// Production GitHub surfaces with deterministic paginated and versioned fixtures.
-pub fn github_browser(ui: canban_ui::presenter::Ui, pr: bool) {
+/// Production Daily Inbox fixture with Schedules, GitHub Project Stacks, Agent Terminals, and Carry-over.
+pub fn daily_inbox(ui: canban_ui::presenter::Ui, expand_github: bool) {
     use canban_types::*;
+    let now_ms = now();
     let mut snapshot = workspace();
     snapshot.github = GitHubAccount {
         state: "disconnected".into(),
@@ -2624,137 +2634,185 @@ pub fn github_browser(ui: canban_ui::presenter::Ui, pr: bool) {
         labels: vec![],
         include_drafts: false,
         paused: false,
-        synced_at: Some(now()),
+        synced_at: Some(now_ms),
         error: None,
     });
-    snapshot.cards[0].content = CardContent::GitHubPr {
-        source: GitHubIssueRef {
-            repository: "fixture/repo".into(),
-            repository_id: 1,
-            issue_id: 102,
-            number: 2,
-            url: "https://github.com/fixture/repo/pull/2".into(),
-        },
-    };
-    snapshot.cards[0].title = "Review the native diff".into();
-    let pr_ref = GitHubReference {
-        repository: "fixture/repo".into(),
-        kind: "pr".into(),
-        number: Some(2),
-        sha: None,
-        url: "https://github.com/fixture/repo/pull/2".into(),
-    };
-    let issue_ref = GitHubReference {
-        repository: "fixture/repo".into(),
-        kind: "issue".into(),
-        number: Some(18),
-        sha: None,
-        url: "https://github.com/fixture/repo/issues/18".into(),
-    };
+    // Mark first card as touched today and last card as carry-over (2 days ago).
+    if let Some(first) = snapshot.cards.first_mut() {
+        first.created_at = now_ms.saturating_sub(3_600_000);
+    }
+    if let Some(last) = snapshot.cards.last_mut() {
+        last.created_at = now_ms.saturating_sub(3 * 86_400_000);
+        last.attention = None;
+        last.human_gate = None;
+    }
+    snapshot.scheduled_runs.push(ScheduledRun {
+        host_id: "local".into(),
+        id: "sched-run-ok".into(),
+        project_id: "gallery-project".into(),
+        schedule_id: "daily-triage".into(),
+        workflow_id: "triage".into(),
+        workflow_name: "Daily Issue Triage".into(),
+        filename: "triage.yaml".into(),
+        rule_id: "daily".into(),
+        number: 12,
+        trigger_kind: "cron".into(),
+        state: "completed".into(),
+        cron: "0 9 * * *".into(),
+        scheduled_at: now_ms.saturating_sub(7_200_000),
+        started_at: Some(now_ms.saturating_sub(7_190_000)),
+        completed_at: Some(now_ms.saturating_sub(7_100_000)),
+        close_requested_at: None,
+        updated_at: now_ms.saturating_sub(7_100_000),
+        creates_card: true,
+        card_id: snapshot.cards.get(1).map(|c| c.id.clone()),
+        card_number: snapshot.cards.get(1).map(|c| c.number),
+        workflow_run_id: None,
+        start_step: None,
+        current_step: None,
+        profile_id: None,
+        provider_session_id: None,
+        terminal_id: None,
+        cwd: String::new(),
+        report_path: None,
+        output_path: None,
+        summary: Some("Triaged 2 new issues".into()),
+        error: None,
+        steps: Vec::new(),
+    });
+    snapshot.scheduled_runs.push(ScheduledRun {
+        host_id: "local".into(),
+        id: "sched-run-fail".into(),
+        project_id: "gallery-project".into(),
+        schedule_id: "release-audit".into(),
+        workflow_id: "release-audit".into(),
+        workflow_name: "Release 巡检".into(),
+        filename: "release.yaml".into(),
+        rule_id: "daily".into(),
+        number: 8,
+        trigger_kind: "cron".into(),
+        state: "failed".into(),
+        cron: "30 10 * * *".into(),
+        scheduled_at: now_ms.saturating_sub(3_600_000),
+        started_at: Some(now_ms.saturating_sub(3_590_000)),
+        completed_at: Some(now_ms.saturating_sub(3_550_000)),
+        close_requested_at: None,
+        updated_at: now_ms.saturating_sub(3_550_000),
+        creates_card: false,
+        card_id: None,
+        card_number: None,
+        workflow_run_id: None,
+        start_step: None,
+        current_step: None,
+        profile_id: None,
+        provider_session_id: None,
+        terminal_id: None,
+        cwd: String::new(),
+        report_path: None,
+        output_path: None,
+        summary: None,
+        error: Some("exit 1: gh release list token expired".into()),
+        steps: Vec::new(),
+    });
+    snapshot.terminals.push(TerminalEntry {
+        id: "inbox-agent-term".into(),
+        conversation_id: None,
+        number: 1,
+        name: Some("Claude Code 1".into()),
+        origin_card_id: None,
+        agent_engine: Some("claude".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-claude-1".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("blocked".into()),
+            agent_turn: Some(2),
+            observed_agent: Some("claude".into()),
+            waiting: Some(RuntimeWait {
+                id: "w-1".into(),
+                kind: "confirm".into(),
+                title: "等待确认".into(),
+                message: "已更新 overview 布局，是否顺便更新 Gallery fixtures？ (y/n)".into(),
+                since: now_ms.saturating_sub(900_000),
+            }),
+            command: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(1_800_000),
+    });
+    snapshot.terminal_contexts.push(TerminalContext {
+        terminal_id: "inbox-agent-term".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-claude-1".into(),
+        cwd: Some("/Users/jjy/Workspace/canban/crates/ui".into()),
+        directory_root: Some("/Users/jjy/Workspace/canban".into()),
+        project_id: Some("gallery-project".into()),
+        branch: Some("feat/daily-inbox".into()),
+        ..Default::default()
+    });
     ui.snapshot.set(snapshot);
     ui.github
         .gh_status
         .set(json!({"state":"connected","login":"jjy","account_matches":true}));
     ui.github.cache_bytes.set(248_832);
-    ui.github
-        .tab
-        .set(if pr { "prs" } else { "notifications" }.into());
-    ui.github
-        .state
-        .set(if pr { "open" } else { "inbox" }.into());
-    ui.github
-        .relation
-        .set(if pr { "review_requested" } else { "all" }.into());
-    ui.github.list.set(json!({
-        "items": [
-            {
-                "reference": pr_ref,
-                "item": {
-                    "id": "901",
-                    "unread": !pr,
-                    "reason": "review_requested",
-                    "title": "Review the native diff",
-                    "subject": {"title": "Review the native diff", "type": "PullRequest"},
-                    "repository": {"full_name": "fixture/repo"},
-                    "state": "open",
-                    "html_url": "https://github.com/fixture/repo/pull/2",
-                    "user": {"login": "octocat"},
-                    "updated_at": "2026-11-12T08:15:00Z",
-                    "labels": [{"name": "ui"}, {"name": "review"}],
-                    "body": "### Summary\n\nUpgrades the **GitHub detail reader** and structured inline diff viewer.\n\n- Clickable `#1` Card references\n- Direct jump to Board Card"
-                }
+    ui.inbox.drawer.set("today".into());
+    ui.inbox.github_error.set(String::new());
+    ui.inbox.github_notifications.set(vec![
+        canban_notifications::GitHubInboxNotification {
+            thread_id: "901".into(),
+            repository: "fixture/repo".into(),
+            kind: "pr".into(),
+            number: Some(214),
+            title: "Daily Inbox with Google-Inbox stacks".into(),
+            reason: "请求 Review".into(),
+            unread: true,
+            updated_at_ms: now_ms.saturating_sub(480_000),
+            url: "https://github.com/fixture/repo/pull/214".into(),
+            author: Some("alice".into()),
+            body: Some("defer_until 建议直接存 UTC timestamp，避免跨时区日切错位。".into()),
+            linked_card_id: Some("card-1".into()),
+            linked_card_number: Some(1),
+        },
+        canban_notifications::GitHubInboxNotification {
+            thread_id: "902".into(),
+            repository: "fixture/repo".into(),
+            kind: "issue".into(),
+            number: Some(218),
+            title: "Remote devpc terminal scroll jump on wake".into(),
+            reason: "@提及".into(),
+            unread: true,
+            updated_at_ms: now_ms.saturating_sub(3_200_000),
+            url: "https://github.com/fixture/repo/issues/218".into(),
+            author: Some("bob".into()),
+            body: Some("合上盖子休眠 10 分钟唤醒后，远程终端滚动条偶发跳回顶部。".into()),
+            linked_card_id: None,
+            linked_card_number: None,
+        },
+    ]);
+    ui.inbox.terminal_previews.update(|m| {
+        m.insert(
+            "inbox-agent-term".into(),
+            canban_ui::inbox::state::TerminalPreviewState {
+                lines: vec![
+                    "Updated crates/ui/src/inbox.rs (+540 lines)".into(),
+                    "Waiting for confirmation: migrate gallery fixtures? (y/n)".into(),
+                ],
+                source: "live".into(),
+                cwd: Some("/Users/jjy/Workspace/canban/crates/ui".into()),
+                loading: false,
+                fetched_at: now_ms,
             },
-            {
-                "reference": issue_ref,
-                "item": {
-                    "id": "902",
-                    "unread": !pr,
-                    "reason": "mention",
-                    "title": "Borderless section group for Overview & Settings",
-                    "subject": {"title": "Borderless section group for Overview & Settings", "type": "Issue"},
-                    "repository": {"full_name": "fixture/repo"},
-                    "state": "open",
-                    "html_url": "https://github.com/fixture/repo/issues/18",
-                    "user": {"login": "designer"},
-                    "updated_at": "2026-11-11T19:30:00Z",
-                    "labels": [{"name": "design"}],
-                    "body": "Use a clean **title + subtle bottom divider** without outer card borders so hierarchy stays crisp across Overview, GitHub, and Settings."
-                }
-            },
-            {
-                "reference": serde_json::Value::Null,
-                "item": {
-                    "id": "903",
-                    "unread": false,
-                    "reason": "subscribed",
-                    "subject": {"title": "v0.9.0-rc1 desktop release published", "type": "Release"},
-                    "repository": {"full_name": "fixture/repo"},
-                    "updated_at": "2026-11-10T10:00:00Z"
-                }
-            }
-        ],
-        "page": 1,
-        "has_next": true,
-        "validated_at": now()
-    }));
-    if pr {
-        ui.github.reference.set(Some(pr_ref));
-        ui.github.section.set("files".into());
-        ui.github.overview.set(json!({
-            "number": 2,
-            "title": "Review the native diff",
-            "state": "open",
-            "user": {"login": "octocat"},
-            "updated_at": "2026-11-12T08:15:00Z",
-            "labels": [{"name": "ui"}, {"name": "review"}],
-            "body": "### Summary\n\nUpgrades the **GitHub detail reader** and structured inline diff viewer.",
-            "head": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ref": "feature/github-ux"},
-            "base": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ref": "main"}
-        }));
-        ui.github.detail.set(json!({
-            "data": [
-                {
-                    "filename": "crates/ui-kit/src/section_group.rs",
-                    "status": "added",
-                    "additions": 4,
-                    "deletions": 0,
-                    "patch": "@@ -0,0 +1,4 @@\n+pub fn section_group(title: impl IntoText) -> SectionGroup {\n+    SectionGroup::new(title)\n+}\n+// Borderless section header + divider"
-                },
-                {
-                    "filename": "crates/ui/src/github/workspace.rs",
-                    "status": "modified",
-                    "additions": 2,
-                    "deletions": 2,
-                    "patch": "@@ -231,3 +231,3 @@\n-action(\"Refresh\", Variant::Secondary, move |_| {})\n+chrome_button_disabled(Icon::Refresh, \"Refresh GitHub\", ...)\n context_line_stays_aligned();"
-                }
-            ],
-            "page": 1,
-            "has_next": false
-        }));
-    } else {
-        ui.github.reference.set(None);
-    }
-    ui.navigate("github");
+        );
+    });
+    ui.inbox.expanded_stacks.update(|s| {
+        s.clear();
+        if expand_github {
+            s.insert("github-stack:gallery-project".into());
+        }
+    });
+    ui.navigate("inbox");
 }
 
 /// Same generic viewer with planning/approval and a conditional branch.

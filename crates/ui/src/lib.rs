@@ -16,6 +16,7 @@ pub mod editor;
 pub mod frame;
 pub mod github;
 pub mod hosts;
+pub mod inbox;
 pub mod index;
 pub mod insights;
 pub mod links;
@@ -156,6 +157,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     updates::init(ui);
     github::init(ui);
     github::filters::init(ui);
+    inbox::init(ui);
     reminders::init(ui);
     projects::selection::remember(ui);
     terminals::bindings(ui);
@@ -368,6 +370,7 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
     }
     if plan.bump_github_epoch {
         ui.github.epoch.update(|v| *v += 1);
+        ui.inbox.gh_epoch.update(|v| *v += 1);
     }
     review::handle_host_events(ui, &plan.host_events);
     if plan.bump_env_sync_epoch {

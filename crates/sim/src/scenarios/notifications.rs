@@ -512,6 +512,217 @@ pub fn run(seed: u64) -> Result<u64> {
         );
         world.hit("notifications.archived_suppression");
 
+        // 5. Daily Inbox: cutoff preference, `inbox.triage` (defer -> bounce -> virtual-clock wake,
+        //    dismiss -> undo/active), GitHub project stacking, and `terminal.preview` + `terminal.send`!
+        let _ = world.client_call(
+            "utilities.configure",
+            json!({ "inbox_cutoff_minutes": 360 }),
+            None,
+        )?;
+        let util_state = world.client_call("utilities.state", json!({}), None)?;
+        ensure!(
+            util_state["preferences"]["inbox_cutoff_minutes"].as_u64() == Some(360),
+            "utilities.configure failed to save inbox_cutoff_minutes: {util_state:?}"
+        );
+
+        let defer_until = world.now_ms() + 30_000;
+        let card_key = format!("card:{cid_a1}");
+        let triage_res = world.client_call(
+            "inbox.triage",
+            json!({
+                "items": [{
+                    "id": card_key,
+                    "state": "deferred",
+                    "defer_until": defer_until,
+                }]
+            }),
+            None,
+        )?;
+        ensure!(
+            triage_res["accepted"] == true && triage_res["updated"].as_u64() == Some(1),
+            "inbox.triage defer failed: {triage_res:?}"
+        );
+
+        // Bounce local-server to verify SQLite v25 `inbox_entries` durability and cutoff persistence.
+        world.bounce_server("local-server")?;
+        world.heal_and_quiesce(15_000)?;
+        let util_after_bounce = world.client_call("utilities.state", json!({}), None)?;
+        ensure!(
+            util_after_bounce["preferences"]["inbox_cutoff_minutes"].as_u64() == Some(360),
+            "inbox_cutoff_minutes lost across local bounce: {util_after_bounce:?}"
+        );
+
+        let merged_deferred = world.client_merged_snapshot()?;
+        let now_deferred = world.now_ms();
+        let inbox_deferred = canban_notifications::build_daily_inbox(
+            &merged_deferred,
+            &[
+                canban_notifications::GitHubInboxNotification {
+                    thread_id: "th-1".into(),
+                    repository: "acme/app".into(),
+                    kind: "pr".into(),
+                    number: Some(42),
+                    title: "Fix sync".into(),
+                    reason: "review_requested".into(),
+                    unread: true,
+                    updated_at_ms: now_deferred,
+                    url: "https://github.com/acme/app/pull/42".into(),
+                    author: Some("alice".into()),
+                    body: None,
+                    linked_card_id: None,
+                    linked_card_number: None,
+                },
+                canban_notifications::GitHubInboxNotification {
+                    thread_id: "th-2".into(),
+                    repository: "acme/app".into(),
+                    kind: "issue".into(),
+                    number: Some(43),
+                    title: "Follow-up".into(),
+                    reason: "mention".into(),
+                    unread: true,
+                    updated_at_ms: now_deferred.saturating_sub(1_000),
+                    url: "https://github.com/acme/app/issues/43".into(),
+                    author: Some("bob".into()),
+                    body: None,
+                    linked_card_id: None,
+                    linked_card_number: None,
+                },
+            ],
+            now_deferred,
+            0,
+            360,
+        );
+        ensure!(
+            inbox_deferred
+                .deferred_items
+                .iter()
+                .any(|d| d.key == card_key),
+            "Deferred card missing from inbox.deferred_items after bounce"
+        );
+        ensure!(
+            inbox_deferred.github_stacks.len() == 1
+                && inbox_deferred.github_stacks[0].items.len() == 2,
+            "Expected 2 GitHub notifications in same repo to stack into 1 bundle; got {:?}",
+            inbox_deferred.github_stacks
+        );
+
+        // Advance past defer_until -> item automatically resurfaces in Today!
+        world.advance(Duration::from_secs(35))?;
+        let inbox_woken = canban_notifications::build_daily_inbox(
+            &world.client_merged_snapshot()?,
+            &[],
+            world.now_ms(),
+            0,
+            360,
+        );
+        ensure!(
+            !inbox_woken.deferred_items.iter().any(|d| d.key == card_key),
+            "Deferred card failed to resurface after virtual clock passed defer_until"
+        );
+
+        // Dismiss then undo (`active`) -> transitions done_today -> active cleanly.
+        let _ = world.client_call(
+            "inbox.triage",
+            json!({
+                "items": [{
+                    "id": card_key,
+                    "state": "dismissed",
+                    "day_start_ms": inbox_woken.day_start_ms,
+                }]
+            }),
+            None,
+        )?;
+        world.advance(Duration::from_millis(150))?;
+        let inbox_dismissed = canban_notifications::build_daily_inbox(
+            &world.client_merged_snapshot()?,
+            &[],
+            world.now_ms(),
+            0,
+            360,
+        );
+        ensure!(
+            inbox_dismissed
+                .done_today_items
+                .iter()
+                .any(|d| d.key == card_key),
+            "Dismissed card missing from done_today_items"
+        );
+        let _ = world.client_call(
+            "inbox.triage",
+            json!({ "items": [{ "id": card_key, "state": "active" }] }),
+            None,
+        )?;
+        world.advance(Duration::from_millis(150))?;
+        world.hit("notifications.daily_inbox_triage");
+
+        // Exercise `terminal.preview` (ANSI-stripped tail) & `terminal.send` (inline reply)
+        // on a live remote terminal (`remote-a`).
+        let created_term = world.client_call(
+            "terminal.create",
+            json!({ "project_id": pid_a, "host_id": "remote-a" }),
+            Some(&pid_a),
+        )?;
+        let remote_tid = created_term["id"].as_str().unwrap().to_owned();
+        let raw_remote_tid = strip_host(&remote_tid);
+        world.wait_until(5_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == raw_remote_tid
+                    && t.runtime
+                        .as_ref()
+                        .is_some_and(|r| r.terminal.is_some() && r.state != "finished")
+            }))
+        })?;
+        let remote_herdr_addr = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .terminals
+            .into_iter()
+            .find(|t| t.id == raw_remote_tid)
+            .and_then(|t| t.runtime?.terminal)
+            .unwrap();
+        world.herdr("remote-a").unwrap().append_output(
+            &remote_herdr_addr,
+            ["\x1b[32mBuild passed\x1b[0m", "Ready for input?"],
+        );
+
+        let preview = world.client_call(
+            "terminal.preview",
+            json!({ "terminal_id": remote_tid, "lines": 8 }),
+            Some(&pid_a),
+        )?;
+        let preview_lines: Vec<&str> = preview["lines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect();
+        ensure!(
+            preview_lines.iter().any(|l| l.contains("Build passed"))
+                && !preview["text"].as_str().unwrap_or("").contains("\x1b["),
+            "terminal.preview failed to return ANSI-stripped tail lines: {preview:?}"
+        );
+
+        let sent = world.client_call(
+            "terminal.send",
+            json!({ "terminal_id": remote_tid, "text": "yes", "submit": true }),
+            Some(&pid_a),
+        )?;
+        ensure!(
+            sent["accepted"] == true,
+            "terminal.send failed on remote terminal: {sent:?}"
+        );
+        let sent_inputs = world.herdr("remote-a").unwrap().sent_inputs();
+        ensure!(
+            sent_inputs
+                .iter()
+                .any(|s| s.terminal == remote_herdr_addr && s.text.contains("yes")),
+            "SimHerdr did not observe terminal.send input: {sent_inputs:?}"
+        );
+        world.hit("notifications.daily_inbox_terminal_inline");
+        oracle.check_quiescent_invariants(world)?;
+
         Ok(finalize_digest(world))
     })
 }

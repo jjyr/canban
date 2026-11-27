@@ -772,6 +772,9 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "oracle.committed_durability_checked",
     "world.quiesce_natural",
     "notifications.non_empty_both_hosts",
+    "notifications.daily_inbox_triage",
+    "notifications.daily_inbox_terminal_inline",
+    "oracle.ui_daily_inbox_checked",
     "workflow.rework",
     "workflow.stop",
     "remote_faults.three_way_auto_merge",
@@ -2263,8 +2266,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            123,
-            "full suite coverage gate must require 123 properties"
+            126,
+            "full suite coverage gate must require 126 properties"
         );
         assert_eq!(
             unique.len(),

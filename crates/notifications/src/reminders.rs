@@ -140,12 +140,55 @@ fn build_event_meta(e: &Event) -> ReminderEventMeta {
         Some((url, label)) => (Some(url), Some(label)),
         None => (None, None),
     };
+    let repository = e.data["repository"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let body = match e.kind.as_str() {
+        "github.pr.commented" | "github.pr.reviewed" => e.data["projected_body"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if s.chars().count() > 600 {
+                    format!("{}…", s.chars().take(600).collect::<String>())
+                } else {
+                    s.to_owned()
+                }
+            }),
+        "execution.reported" | "comment.replied" => {
+            let msg = e.message.trim();
+            (!msg.is_empty()).then(|| {
+                if msg.chars().count() > 600 {
+                    format!("{}…", msg.chars().take(600).collect::<String>())
+                } else {
+                    msg.to_owned()
+                }
+            })
+        }
+        _ => None,
+    };
+    let failed_checks = if e.kind == "github.pr.ci_failed" {
+        e.data["failed_checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["name"].as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .take(8)
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
     ReminderEventMeta {
         kind: e.kind.clone(),
         actor: e.actor.clone(),
         state,
         pr_number,
+        repository,
         summary,
+        body,
+        failed_checks,
         action_url,
         action_label,
     }

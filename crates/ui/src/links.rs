@@ -234,16 +234,19 @@ pub fn open(ui: Ui, url: &str) {
             }
         }
         Destination::Web(url) => {
-            let parsed = url::Url::parse(&url).ok();
-            if parsed.as_ref().is_some_and(|u| {
-                u.fragment().is_none()
-                    && u.query().is_none()
-                    && u.path().trim_end_matches('/').split('/').count() == 5
-            }) && let Ok(reference) = canban_github::parse_reference(&url)
-                && matches!(reference.kind.as_str(), "issue" | "pr")
+            if let Ok(reference) = canban_github::parse_reference(&url)
+                && reference.kind == "pr"
+                && let Some(num) = reference.number
                 && crate::github::is_connected_untracked(ui)
             {
-                crate::github::open(ui, reference);
+                let matching = ui
+                    .snapshot
+                    .with_untracked(|s| crate::github::matching_cards(s, &reference));
+                if let Some(card) = matching.first() {
+                    ui.open_card(card.id.clone());
+                    return;
+                }
+                crate::review::open_standalone_pr(ui, reference.repository, num, reference.url);
                 return;
             }
             ui.spawn(async move {

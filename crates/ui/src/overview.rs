@@ -210,66 +210,85 @@ pub fn running_agents_count_from(
     card_running + standalone_running
 }
 
-fn attention_summary(ui: Ui) -> (usize, usize, usize) {
+fn is_triaged_out_in_inbox(s: &canban_types::Snapshot, key: &str, now_ms: u64) -> bool {
+    let Some(entry) = s.inbox_entries.iter().find(|e| e.id == key) else {
+        return false;
+    };
+    match entry.state.as_str() {
+        "deferred" => entry.defer_until.is_some_and(|t| t > now_ms),
+        "dismissed" => true,
+        _ => false,
+    }
+}
+
+fn live_pulse_summary(ui: Ui) -> (usize, usize, usize, usize) {
     let all_rows = ui.overview_rows.get();
-    let actionable_cards: std::collections::BTreeSet<&str> = all_rows
-        .iter()
-        .filter(|r| r.actionable())
-        .map(|r| r.card.id.as_str())
-        .collect();
-    let (terminal_alerts, standalone_running) = ui.snapshot.with(|s| {
+    let now_ms = ui
+        .utility_clock
+        .get()
+        .saturating_mul(1000)
+        .max(canban_types::now());
+    let (urgent, running, queued) = ui.snapshot.with(|s| {
         ui.terminal_entries.with(|entries| {
-            let alerts = entries
+            let mut urgent_cards = std::collections::BTreeSet::new();
+            for row in all_rows.iter().filter(|r| r.actionable()) {
+                let key = format!("card:{}", row.card.id);
+                if !is_triaged_out_in_inbox(s, &key, now_ms) {
+                    urgent_cards.insert(row.card.id.as_str());
+                }
+            }
+            let standalone_urgent = entries
                 .iter()
-                .filter(|e| standalone_terminal_needs_you(s, e))
-                .count();
-            let running = entries
-                .iter()
-                .filter(|e| standalone_terminal_is_running(s, e))
-                .count();
-            (alerts, running)
-        })
-    });
-    let actionable = actionable_cards.len() + terminal_alerts;
-    let card_running = all_rows
-        .iter()
-        .filter(|r| r.group == "Working" && !r.actionable())
-        .count();
-    let running = card_running + standalone_running;
-    let unread_cards = ui.snapshot.with(|s| {
-        ui.reminder_counts.with(|counts| {
-            s.cards
-                .iter()
-                .filter(|c| {
-                    counts.get(&c.id).is_some_and(|n| n.unread > 0)
-                        && !actionable_cards.contains(c.id.as_str())
+                .filter(|e| {
+                    standalone_terminal_needs_you(s, e)
+                        && !is_triaged_out_in_inbox(s, &format!("terminal:{}", e.saved.id), now_ms)
                 })
-                .count()
+                .count();
+            let running = running_agents_count_from(s, &all_rows, entries, None);
+            let queued = s
+                .terminals
+                .iter()
+                .filter(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                })
+                .count();
+            (urgent_cards.len() + standalone_urgent, running, queued)
         })
     });
-    (actionable, unread_cards, running)
+    let inbox_remaining = ui.daily_inbox.with(|i| i.remaining_today);
+    (urgent, running, queued, inbox_remaining)
 }
 
 pub fn trigger_pill(ui: Ui) -> impl IntoElement {
-    let stats = computed(move || attention_summary(ui));
+    let stats = computed(move || live_pulse_summary(ui));
     let is_open = computed(move || ui.utility_popup.get() == "notifications");
-    let has_alerts = computed(move || {
-        let (actionable, unread, _) = stats.get();
-        actionable + unread > 0
-    });
+    let has_urgent = computed(move || stats.get().0 > 0);
     view()
         .flex_shrink_0()
         .window_drag(false)
         .tooltip(
             hint_tooltip(move || {
-                let (actionable, unread, running) = stats.get();
-                format!(
-                    "Activity & Notifications · {}\n{} needs you · {} unread · {} running",
-                    crate::commands::shortcuts::NOTIFICATIONS_DISPLAY,
-                    actionable,
-                    unread,
-                    running
-                )
+                let (urgent, running, queued, inbox_rem) = stats.get();
+                if queued > 0 {
+                    format!(
+                        "Live Activity · {}\n{} running · {} queued · {} blocked/urgent\nInbox remaining: {}",
+                        crate::commands::shortcuts::NOTIFICATIONS_DISPLAY,
+                        running,
+                        queued,
+                        urgent,
+                        inbox_rem
+                    )
+                } else {
+                    format!(
+                        "Live Activity · {}\n{} running · {} blocked/urgent\nInbox remaining: {}",
+                        crate::commands::shortcuts::NOTIFICATIONS_DISPLAY,
+                        running,
+                        urgent,
+                        inbox_rem
+                    )
+                }
             })
             .placement(Placement::Bottom),
         )
@@ -303,48 +322,29 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .gap_1p5()
                 .accessibility_label(move || {
-                    let (actionable, unread, running) = stats.get();
+                    let (urgent, running, _, _) = stats.get();
                     Some(
-                        format!(
-                            "Activity & Notifications, {} alerts, {} running",
-                            actionable + unread,
-                            running
-                        )
-                        .into(),
+                        format!("Live Activity, {running} running, {urgent} urgent").into(),
                     )
                 })
                 .on_press(move |_: &()| toggle(ui))
-                .child(
-                    icon_tinted(Icon::Overview, move || {
-                        let (actionable, unread, _) = stats.get();
-                        if actionable > 0 {
-                            ATTENTION
-                        } else if unread > 0 || is_open.get() {
-                            ACCENT
-                        } else {
-                            MUTED
-                        }
-                    })
-                    .w(px(13.5))
-                    .h(px(13.5)),
-                )
                 .child(when(
-                    move || has_alerts.get(),
+                    move || has_urgent.get(),
                     move || {
                         view()
                             .flex_row()
                             .items_center()
-                            .gap_1p5()
+                            .gap_1()
                             .child(
-                                label(move || {
-                                    let (actionable, unread, _) = stats.get();
-                                    (actionable + unread).to_string()
-                                })
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || {
-                                    if stats.get().0 > 0 { ATTENTION } else { TEXT }
-                                }),
+                                icon_tinted(Icon::Zap, ATTENTION)
+                                    .w(px(12.5))
+                                    .h(px(12.5)),
+                            )
+                            .child(
+                                label(move || stats.get().0.to_string())
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(ATTENTION),
                             )
                             .child(muted("·").text_size(px(11.)))
                     },
@@ -354,146 +354,109 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                         .w(px(6.))
                         .h(px(6.))
                         .rounded_full()
-                        .bg(move || if stats.get().2 > 0 { SUCCESS } else { MUTED }),
+                        .bg(move || if stats.get().1 > 0 { SUCCESS } else { MUTED }),
                 )
                 .child(
-                    muted(move || stats.get().2.to_string())
+                    muted(move || stats.get().1.to_string())
                         .text_size(px(11.5))
                         .font_family(canban_ui_kit::tokens::MONO_FONT),
                 ),
         )
 }
 
+#[derive(Clone, PartialEq)]
+struct LivePulsePopoverModel {
+    urgent_rows: Vec<PreparedOverviewRow>,
+    urgent_standalone: Vec<PreparedStandaloneRow>,
+    overflow_urgent: usize,
+    running_rows: Vec<PreparedOverviewRow>,
+    running_standalone: Vec<PreparedStandaloneRow>,
+    queued_rows: Vec<PreparedOverviewRow>,
+}
+
+const POPOVER_MAX_URGENT: usize = 5;
+
 pub fn popover(ui: Ui) -> impl IntoElement {
-    let project_scope = signal(String::new());
-    let valid_scope = computed(move || {
-        let scope = project_scope.get();
-        if scope.is_empty() {
-            return None;
-        }
-        let known = canban_types::is_global_project_id(&scope)
-            || ui
-                .snapshot
-                .with(|s| s.projects.iter().any(|p| p.id == scope));
-        known.then_some(scope)
-    });
-    let running_count = computed(move || {
-        let scope = valid_scope.get();
+    let stats = computed(move || live_pulse_summary(ui));
+    let pulse_model = computed(move || {
+        let all_rows = ui.overview_rows.get();
+        let entries = ui.terminal_entries.get();
+        let counts = ui.reminder_counts.get();
+        let profiles = ui.profiles.get();
+        let idx = ui.index.get();
+        let now_ms = ui
+            .utility_clock
+            .get()
+            .saturating_mul(1000)
+            .max(canban_types::now());
+
         ui.snapshot.with(|s| {
-            ui.overview_rows.with(|all_rows| {
-                ui.terminal_entries.with(|entries| {
-                    running_agents_count_from(s, all_rows, entries, scope.as_deref())
-                })
-            })
-        })
-    });
-    let has_running = computed(move || running_count.get() > 0);
-    let queued_count = computed(move || {
-        let scope = valid_scope.get();
-        ui.snapshot.with(|s| {
-            s.terminals
+            let mut rows: Vec<_> = all_rows.iter().cloned().collect();
+            rows.sort_by(|a, b| {
+                (&a.project_name, a.card.number, &a.id).cmp(&(
+                    &b.project_name,
+                    b.card.number,
+                    &b.id,
+                ))
+            });
+
+            let mut all_urgent_rows: Vec<PreparedOverviewRow> = rows
                 .iter()
-                .filter(|t| {
-                    t.agent.as_ref().is_some_and(|a| {
-                        scope.as_deref().is_none_or(|pid| a.project_id == pid)
-                            && (a.state == "queued" || a.pending.is_some())
-                    })
+                .filter(|r| {
+                    r.actionable()
+                        && !is_triaged_out_in_inbox(s, &format!("card:{}", r.card.id), now_ms)
                 })
-                .count()
+                .cloned()
+                .map(|r| prepare_overview_row(ui, s, &idx, &counts, &profiles, r, true))
+                .collect();
+            let mut all_urgent_standalone: Vec<PreparedStandaloneRow> = entries
+                .iter()
+                .filter(|e| {
+                    standalone_terminal_needs_you(s, e)
+                        && !is_triaged_out_in_inbox(s, &format!("terminal:{}", e.saved.id), now_ms)
+                })
+                .map(|e| prepare_standalone_row(ui, s, e, true))
+                .collect();
+
+            let total_urgent = all_urgent_rows.len() + all_urgent_standalone.len();
+            let overflow_urgent = total_urgent.saturating_sub(POPOVER_MAX_URGENT);
+            if all_urgent_rows.len() >= POPOVER_MAX_URGENT {
+                all_urgent_rows.truncate(POPOVER_MAX_URGENT);
+                all_urgent_standalone.clear();
+            } else {
+                let left = POPOVER_MAX_URGENT - all_urgent_rows.len();
+                all_urgent_standalone.truncate(left);
+            }
+
+            let running_rows: Vec<PreparedOverviewRow> = rows
+                .iter()
+                .filter(|r| r.group == "Working" && !r.actionable())
+                .cloned()
+                .map(|r| prepare_overview_row(ui, s, &idx, &counts, &profiles, r, true))
+                .collect();
+            let running_standalone: Vec<PreparedStandaloneRow> = entries
+                .iter()
+                .filter(|e| standalone_terminal_is_running(s, e))
+                .map(|e| prepare_standalone_row(ui, s, e, true))
+                .collect();
+            let queued_rows: Vec<PreparedOverviewRow> = rows
+                .iter()
+                .filter(|r| r.group == "Queued" && !r.actionable())
+                .cloned()
+                .map(|r| prepare_overview_row(ui, s, &idx, &counts, &profiles, r, true))
+                .collect();
+
+            LivePulsePopoverModel {
+                urgent_rows: all_urgent_rows,
+                urgent_standalone: all_urgent_standalone,
+                overflow_urgent,
+                running_rows,
+                running_standalone,
+                queued_rows,
+            }
         })
     });
-    let has_queued = computed(move || queued_count.get() > 0);
-    let has_unread = computed(move || {
-        let scope = valid_scope.get();
-        ui.snapshot.with(|s| {
-            ui.reminder_counts.with(|counts| {
-                s.cards.iter().any(|c| {
-                    scope.as_deref().is_none_or(|pid| c.project_id == pid)
-                        && counts.get(&c.id).is_some_and(|n| n.unread > 0)
-                })
-            })
-        })
-    });
-    let filter_chips = computed(move || -> Option<Vec<(String, String)>> {
-        ui.snapshot.with(|s| {
-            ui.reminder_counts.with(|counts| {
-                ui.overview_rows.with(|all_rows| {
-                    ui.terminal_entries.with(|entries| {
-                        let has_global = entries.iter().any(|e| {
-                            e.listed()
-                                && e.project_id
-                                    .as_deref()
-                                    .is_some_and(canban_types::is_global_project_id)
-                        }) || s.scheduled_runs.iter().any(|r| {
-                            canban_types::is_global_project_id(&r.project_id)
-                                && (r.active() || r.state == "blocked")
-                        });
-                        if s.projects.len() <= 1 && !has_global {
-                            return None;
-                        }
-                        let mut chips = vec![(String::new(), "All".to_owned())];
-                        if has_global {
-                            let global_alerts = entries
-                                .iter()
-                                .filter(|e| {
-                                    e.project_id
-                                        .as_deref()
-                                        .is_some_and(canban_types::is_global_project_id)
-                                        && standalone_terminal_needs_you(s, e)
-                                })
-                                .count();
-                            let glabel = if global_alerts > 0 {
-                                format!("Global · {global_alerts}")
-                            } else {
-                                "Global".into()
-                            };
-                            chips.push((canban_types::GLOBAL_PROJECT_ID.into(), glabel));
-                        }
-                        for p in &s.projects {
-                            let pid = p.id.clone();
-                            let actionable_cards: std::collections::BTreeSet<_> = all_rows
-                                .iter()
-                                .filter(|r| r.card.project_id == pid && r.actionable())
-                                .map(|r| r.card.id.clone())
-                                .collect();
-                            let proj_alerts = all_rows
-                                .iter()
-                                .filter(|r| r.card.project_id == pid && r.actionable())
-                                .count()
-                                + entries
-                                    .iter()
-                                    .filter(|e| {
-                                        e.project_id.as_deref() == Some(pid.as_str())
-                                            && standalone_terminal_needs_you(s, e)
-                                    })
-                                    .count()
-                                + s.cards
-                                    .iter()
-                                    .filter(|c| {
-                                        c.project_id == pid
-                                            && counts.get(&c.id).is_some_and(|n| n.unread > 0)
-                                            && !actionable_cards.contains(&c.id)
-                                    })
-                                    .count();
-                            let hid = s.project_host(&pid);
-                            let base_name = if hid != "local" && s.has_remote_hosts() {
-                                format!("{} ({})", p.name, s.host_display_name(hid))
-                            } else {
-                                p.name.clone()
-                            };
-                            let seg_label = if proj_alerts > 0 {
-                                format!("{base_name} · {proj_alerts}")
-                            } else {
-                                base_name
-                            };
-                            chips.push((pid, seg_label));
-                        }
-                        Some(chips)
-                    })
-                })
-            })
-        })
-    });
+
     nsh_base::dialog()
         .animation(canban_ui_kit::motion::modal)
         .close_on_escape(true)
@@ -513,12 +476,12 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                     view()
                         .absolute()
                         .inset_0()
-                        .label("Dismiss Activity & Notifications")
+                        .label("Dismiss Live Activity")
                         .on_press(move || close(ui)),
                 )
                 .child(
                     panel()
-                        .w(px(520.))
+                        .w(px(440.))
                         .max_w(Percentage(0.95))
                         .p_0()
                         .gap_0()
@@ -533,120 +496,351 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                 .py_2p5()
                                 .border_b_1()
                                 .border_color(BORDER)
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
                                 .gap_2()
                                 .child(
                                     view()
                                         .flex_row()
                                         .items_center()
-                                        .justify_between()
                                         .gap_2()
+                                        .min_w(px(0.))
                                         .child(
-                                            view()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_2()
-                                                .min_w(px(0.))
-                                                .child(
-                                                    label("Activity & Notifications")
-                                                        .font_weight(FontWeight::SEMIBOLD),
-                                                )
-                                                .child(when(
-                                                    move || has_running.get(),
-                                                    move || {
-                                                        status(
-                                                            move || {
-                                                                format!(
-                                                                    "{} running",
-                                                                    running_count.get()
-                                                                )
-                                                            },
-                                                            Tone::Info,
-                                                        )
-                                                    },
-                                                ))
-                                                .child(when(
-                                                    move || !has_running.get(),
-                                                    move || status("0 running", Tone::Neutral),
-                                                ))
-                                                .child(when(
-                                                    move || has_queued.get(),
-                                                    move || {
-                                                        badge(move || {
-                                                            format!("{} queued", queued_count.get())
-                                                        })
-                                                    },
-                                                )),
+                                            label("Live Activity")
+                                                .font_weight(FontWeight::SEMIBOLD),
                                         )
-                                        .child(
-                                            view()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(when(
-                                                    move || has_unread.get(),
-                                                    move || {
-                                                        compact_action(
-                                                            "✓ Read all",
-                                                            Variant::Quiet,
-                                                            move |_| {
-                                                                mark_all_read(
-                                                                    ui,
-                                                                    valid_scope.get_untracked(),
-                                                                )
-                                                            },
-                                                        )
-                                                    },
-                                                ))
-                                                .child(chrome_button(
-                                                    Icon::Close,
-                                                    "Close Activity & Notifications",
-                                                    move |_| close(ui),
-                                                )),
-                                        ),
+                                        .child(when(
+                                            move || stats.get().1 > 0,
+                                            move || {
+                                                live_status(
+                                                    move || format!("{} running", stats.get().1),
+                                                    Tone::Info,
+                                                )
+                                            },
+                                        ))
+                                        .child(when(
+                                            move || stats.get().1 == 0,
+                                            move || status("0 running", Tone::Neutral),
+                                        ))
+                                        .child(when(
+                                            move || stats.get().2 > 0,
+                                            move || {
+                                                badge(move || format!("{} queued", stats.get().2))
+                                            },
+                                        )),
                                 )
-                                .child(when(
-                                    move || filter_chips.with(Option::is_some),
-                                    move || {
-                                        dynamic(move || {
-                                            let Some(chips) = filter_chips.get() else {
-                                                return view().into_element();
-                                            };
-                                            let mut filter_seg = segmented();
-                                            for (scope_id, seg_label) in chips {
-                                                let id_sel = scope_id.clone();
-                                                let id_press = scope_id;
-                                                filter_seg = filter_seg.child(compact_segment(
-                                                    seg_label,
-                                                    None,
-                                                    move || {
-                                                        valid_scope.with(|v| {
-                                                            if id_sel.is_empty() {
-                                                                v.is_none()
-                                                            } else {
-                                                                v.as_deref()
-                                                                    == Some(id_sel.as_str())
-                                                            }
-                                                        })
-                                                    },
-                                                    move |_| project_scope.set(id_press.clone()),
-                                                ));
-                                            }
-                                            scroll()
-                                                .horizontal()
-                                                .scrollbar(false)
-                                                .child(filter_seg)
-                                                .into_element()
-                                        })
-                                    },
+                                .child(chrome_button(
+                                    Icon::Close,
+                                    "Close Live Activity",
+                                    move |_| close(ui),
                                 )),
                         )
-                        .child(scroll().max_h(px(560.)).p_3p5().child(activity_panel(
-                            ui,
-                            project_scope,
-                            stored(true),
-                            true,
-                        ))),
+                        .child(scroll().max_h(px(480.)).p_3p5().child(dynamic(move || {
+                            let m = pulse_model.get();
+                            let urgent_count = m.urgent_rows.len() + m.urgent_standalone.len();
+                            let running_count = m.running_rows.len() + m.running_standalone.len();
+                            let queued_count = m.queued_rows.len();
+
+                            if urgent_count == 0 && running_count == 0 && queued_count == 0 {
+                                return crate::components::activity::empty(
+                                    "此刻安静运行",
+                                    "当前没有运行中、排队中或阻塞等待的 Agent。",
+                                )
+                                .into_element();
+                            }
+
+                            let mut body = view().gap_4().min_w(px(0.));
+
+                            if urgent_count > 0 {
+                                let mut urgent_list = view().min_w(px(0.));
+                                for row in m.urgent_rows {
+                                    urgent_list =
+                                        urgent_list.child(render_pulse_urgent_card(ui, row));
+                                }
+                                for entry in m.urgent_standalone {
+                                    urgent_list = urgent_list
+                                        .child(render_pulse_urgent_standalone(ui, entry));
+                                }
+                                if m.overflow_urgent > 0 {
+                                    let extra = m.overflow_urgent;
+                                    urgent_list = urgent_list.child(
+                                        view().pt_1p5().flex_row().justify_end().child(
+                                            compact_action(
+                                                format!("+{extra} 更多紧急项，在 Inbox 中处理 →"),
+                                                Variant::Quiet,
+                                                move |_| {
+                                                    close(ui);
+                                                    ui.navigate("inbox");
+                                                },
+                                            ),
+                                        ),
+                                    );
+                                }
+                                body = body.child(
+                                    section_group("此刻阻塞 / 待确认")
+                                        .count(urgent_count + m.overflow_urgent)
+                                        .tone(Tone::Attention)
+                                        .child(urgent_list),
+                                );
+                            }
+
+                            if running_count > 0 {
+                                let mut run_list = view().min_w(px(0.));
+                                for row in m.running_rows {
+                                    run_list = run_list.child(render_prepared_overview_row(
+                                        ui,
+                                        row,
+                                        None,
+                                        stored(true),
+                                    ));
+                                }
+                                for entry in m.running_standalone {
+                                    run_list = run_list.child(render_standalone_row(ui, entry));
+                                }
+                                body = body.child(
+                                    section_group("正在运行")
+                                        .count(running_count)
+                                        .tone(Tone::Info)
+                                        .trailing(compact_action(
+                                            "Terminals ↗",
+                                            Variant::Quiet,
+                                            move |_| {
+                                                close(ui);
+                                                ui.navigate("terminals");
+                                            },
+                                        ))
+                                        .child(run_list),
+                                );
+                            }
+
+                            if queued_count > 0 {
+                                let mut q_list = view().min_w(px(0.));
+                                for row in m.queued_rows {
+                                    q_list = q_list.child(render_prepared_overview_row(
+                                        ui,
+                                        row,
+                                        None,
+                                        stored(true),
+                                    ));
+                                }
+                                body = body.child(
+                                    section_group("排队中")
+                                        .count(queued_count)
+                                        .tone(Tone::Neutral)
+                                        .child(q_list),
+                                );
+                            }
+
+                            body.into_element()
+                        })))
+                        .child(
+                            view()
+                                .flex_shrink_0()
+                                .px_3p5()
+                                .py_2p5()
+                                .border_t_1()
+                                .border_color(BORDER)
+                                .bg(INSET)
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    muted(move || {
+                                        let rem = stats.get().3;
+                                        if rem == 0 {
+                                            "今日 Inbox 已清零 ✓".into()
+                                        } else {
+                                            format!("今日 Inbox 剩余 {rem} 项")
+                                        }
+                                    })
+                                    .text_size(px(12.)),
+                                )
+                                .child(compact_action(
+                                    "打开 Inbox →",
+                                    Variant::Secondary,
+                                    move |_| {
+                                        close(ui);
+                                        ui.navigate("inbox");
+                                    },
+                                )),
+                        ),
                 ),
+        )
+}
+
+fn render_pulse_urgent_card(ui: Ui, prepared: PreparedOverviewRow) -> impl IntoElement {
+    let card_id = prepared.row.card.id.clone();
+    let card_num = prepared.row.card.number;
+    let card_title = prepared.row.card.title.clone();
+    let key_defer = format!("card:{card_id}");
+    let key_dismiss = key_defer.clone();
+    let defer_label = format!("#{card_num} {card_title}");
+    let dismiss_label = format!("已处理 #{card_num} {card_title}");
+    let cid_read = card_id.clone();
+    let activate_row = prepared.row.clone();
+    let top_trailing = waiting_status_pill(ui, prepared.waiting_since);
+
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .py_1()
+        .min_w(px(0.))
+        .border_b_1()
+        .border_color(BORDER)
+        .child(
+            canban_ui_kit::press_target()
+                .flex_1()
+                .min_w(px(0.))
+                .items_center()
+                .flex_row()
+                .gap_2()
+                .py_1p5()
+                .px_1p5()
+                .rounded(px(RADIUS))
+                .bg(CLEAR)
+                .hover(|s| s.bg(CARD_HOVER))
+                .on_press(move |_: &()| activate(ui, &activate_row))
+                .child(tone_icon_badge(
+                    prepared.event.icon,
+                    prepared.event.tone,
+                    prepared.event.live,
+                ))
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .gap_0p5()
+                        .child(event_headline_row(
+                            prepared.event.headline,
+                            prepared.event.tone,
+                            prepared.event.detail,
+                            top_trailing,
+                        ))
+                        .child(card_context_row(
+                            card_num,
+                            card_title,
+                            Some(prepared.row.project_name),
+                            prepared.profile_tag,
+                            Vec::new(),
+                        )),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
+                    crate::inbox::state::open_defer_menu(
+                        ui,
+                        vec![(key_defer.clone(), None)],
+                        defer_label.clone(),
+                    );
+                }))
+                .child(compact_action("✓", Variant::Quiet, move |_| {
+                    let max_seq = ui.snapshot.with_untracked(|s| {
+                        s.card_summaries
+                            .get(&cid_read)
+                            .map(|c| c.last_event_seq)
+                            .unwrap_or(0)
+                    });
+                    if max_seq > 0 {
+                        mark_card_read(ui, cid_read.clone(), max_seq);
+                    }
+                    crate::inbox::state::dismiss_items(
+                        ui,
+                        vec![(key_dismiss.clone(), Some(max_seq))],
+                        dismiss_label.clone(),
+                    );
+                })),
+        )
+}
+
+fn render_pulse_urgent_standalone(ui: Ui, row: PreparedStandaloneRow) -> impl IntoElement {
+    let tid = row.id.clone();
+    let tid_press = tid.clone();
+    let card_dest = row.card_dest.clone();
+    let key_defer = format!("terminal:{tid}");
+    let key_dismiss = key_defer.clone();
+    let title_defer = row.title.clone();
+    let title_dismiss = format!("已忽略 {}", row.title);
+    let top_trailing = waiting_status_pill(ui, row.waiting_since);
+
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .py_1()
+        .min_w(px(0.))
+        .border_b_1()
+        .border_color(BORDER)
+        .child(
+            canban_ui_kit::press_target()
+                .flex_1()
+                .min_w(px(0.))
+                .items_center()
+                .flex_row()
+                .gap_2()
+                .py_1p5()
+                .px_1p5()
+                .rounded(px(RADIUS))
+                .bg(CLEAR)
+                .hover(|s| s.bg(CARD_HOVER))
+                .on_press(move |_: &()| {
+                    close(ui);
+                    if let Some(cid) = &card_dest {
+                        ui.open_card_with_terminal(cid.clone(), Some(tid_press.clone()));
+                    } else {
+                        ui.open_terminal(tid_press.clone());
+                    }
+                })
+                .child(tone_icon_badge(
+                    row.event.icon,
+                    row.event.tone,
+                    row.event.live,
+                ))
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .gap_0p5()
+                        .child(event_headline_row(
+                            row.event.headline,
+                            row.event.tone,
+                            row.event.detail,
+                            top_trailing,
+                        ))
+                        .child(
+                            muted(format!("{} · {}", row.context_title, row.project_name))
+                                .text_size(px(11.5))
+                                .truncate(),
+                        ),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
+                    crate::inbox::state::open_defer_menu(
+                        ui,
+                        vec![(key_defer.clone(), None)],
+                        title_defer.clone(),
+                    );
+                }))
+                .child(compact_action("✓", Variant::Quiet, move |_| {
+                    crate::inbox::state::dismiss_items(
+                        ui,
+                        vec![(key_dismiss.clone(), None)],
+                        title_dismiss.clone(),
+                    );
+                })),
         )
 }
 

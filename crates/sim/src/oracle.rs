@@ -3379,6 +3379,70 @@ impl InvariantOracle {
                 "[{client_name}] running_agents_count_from mismatch: actual={actual_running} expected={}",
                 expected_card_running + expected_standalone_running
             );
+
+            // 4. Shadow UI Daily Inbox projection invariants (counts, non-duplication, active-only, cutoff math).
+            let inbox = canban_notifications::build_daily_inbox(&merged, &[], now_ms, 0, 0);
+            world.hit("oracle.ui_daily_inbox_checked");
+            ensure!(
+                inbox.next_cutoff_ms == inbox.day_start_ms.saturating_add(86_400_000),
+                "[{client_name}] DailyInbox window bounds mismatch: start={} next={}",
+                inbox.day_start_ms,
+                inbox.next_cutoff_ms
+            );
+            let gh_items: usize = inbox.github_stacks.iter().map(|s| s.items.len()).sum();
+            let sched_cards: usize = inbox.schedule_stacks.iter().map(|s| s.cards.len()).sum();
+            let expected_remaining = inbox.needs_you.len()
+                + gh_items
+                + sched_cards
+                + inbox.open_cards.len()
+                + inbox.agent_terminals.len()
+                + usize::from(!inbox.plain_shells.is_empty());
+            ensure!(
+                inbox.remaining_today == expected_remaining
+                    && inbox.total_today == inbox.remaining_today + inbox.completed_today,
+                "[{client_name}] DailyInbox totals mismatch: rem={} expected_rem={} done={} total={}",
+                inbox.remaining_today,
+                expected_remaining,
+                inbox.completed_today,
+                inbox.total_today
+            );
+            let mut seen_cards: BTreeSet<&str> = BTreeSet::new();
+            for ny in &inbox.needs_you {
+                if let canban_notifications::NeedsYouKind::Card { card_id, .. } = &ny.kind {
+                    ensure!(
+                        card_ids.contains(card_id.as_str())
+                            && merged.cards.iter().any(|c| c.id == *card_id && c.active()),
+                        "[{client_name}] DailyInbox needs_you references inactive/missing card {card_id}"
+                    );
+                    ensure!(
+                        seen_cards.insert(card_id.as_str()),
+                        "[{client_name}] Duplicate card {card_id} in DailyInbox needs_you"
+                    );
+                }
+            }
+            for oc in inbox.open_cards.iter().chain(inbox.carryover_cards.iter()) {
+                ensure!(
+                    merged
+                        .cards
+                        .iter()
+                        .any(|c| c.id == oc.card_id && c.active() && !c.resolved()),
+                    "[{client_name}] DailyInbox open/carryover references inactive or resolved card {}",
+                    oc.card_id
+                );
+                ensure!(
+                    seen_cards.insert(oc.card_id.as_str()),
+                    "[{client_name}] Duplicate card {} across DailyInbox sections",
+                    oc.card_id
+                );
+            }
+            for def in &inbox.deferred_items {
+                ensure!(
+                    def.defer_until > now_ms,
+                    "[{client_name}] DailyInbox deferred item {} has expired defer_until={} <= now={now_ms}",
+                    def.key,
+                    def.defer_until
+                );
+            }
         }
         Ok(())
     }

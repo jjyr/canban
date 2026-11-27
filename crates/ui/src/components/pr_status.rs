@@ -1,6 +1,6 @@
 //! Unified Pull Request + CI status pills for Board Cards, Card headers, and Gallery.
 use crate::presenter::*;
-use canban_types::{Card, GitHubPrChecks, GitHubReference, Snapshot};
+use canban_types::{Card, GitHubPrChecks, Snapshot};
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 
@@ -267,19 +267,7 @@ fn open_context_menu(ui: Ui, view_model: &CardPrView, at: Point<Points>) {
             );
         }
     }
-    if can_open_in_app {
-        let gh_ref = GitHubReference {
-            repository: repo,
-            kind: "pr".into(),
-            number: Some(number),
-            sha: None,
-            url: pr_url,
-        };
-        items.push(MenuItem::separator());
-        items.push(MenuItem::new("View Checks in Canban").on_select(move || {
-            crate::github::open_section(ui, gh_ref.clone(), "checks");
-        }));
-    }
+    let _ = (can_open_in_app, repo, number, pr_url);
     if !card_id.is_empty() {
         items.push(MenuItem::separator());
         items.push(MenuItem::new("Refresh PR & CI").on_select(move || {

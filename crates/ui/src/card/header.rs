@@ -789,22 +789,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         number,
                         state
                     )));
-                    let gh_ref = canban_types::GitHubReference {
-                        repository,
-                        kind: source_kind,
-                        number: Some(number),
-                        sha: None,
-                        url: url.clone(),
-                    };
-                    row = row.child(view().flex_1());
-                    if gh_connected {
-                        row = row.child(compact_action(
-                            "GitHub discussion",
-                            Variant::Quiet,
-                            move |_| crate::github::open_section(ui, gh_ref.clone(), "discussion"),
-                        ));
-                    }
-                    row = row.child(compact_action(
+                    let _ = (repository, source_kind, number, gh_connected);
+                    row = row.child(view().flex_1()).child(compact_action(
                         "Open in GitHub ↗",
                         Variant::Quiet,
                         move |_| crate::github::open_url(ui, url.clone()),
