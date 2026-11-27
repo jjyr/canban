@@ -1412,12 +1412,12 @@ fn choice(ui: Ui, title: &'static str, op: &'static str, selected: bool) -> impl
 
 fn render_compare_subbar(ui: Ui, dash: &Dashboard) -> View {
     let notice_text = if dash.history_start.is_none_or(|h| h > dash.selected_date) {
-        Some("No retained history for this period; unavailable counts are shown as —.")
+        Some("No retained history")
     } else if dash
         .history_start
         .is_some_and(|h| h.to_string() > dash.window_start_key)
     {
-        Some("Partial history: the selected period starts before retained records.")
+        Some("Partial history")
     } else {
         None
     };
@@ -1636,7 +1636,7 @@ fn render_summary_and_kpis(ui: Ui, dash: &Dashboard, narrow: bool) -> View {
         )
     };
     let resolved_tip = format!(
-        "{} local · {} PR · {} manual · +{} organic{} · net WIP {net_sign}{} · {pace_txt} · Click to inspect resolved Cards",
+        "{} local · {} PR · {} manual · +{} organic{} · net WIP {net_sign}{} · {pace_txt}",
         dash.local_merges,
         dash.pr_merges,
         dash.manual_resolutions,
@@ -2186,38 +2186,27 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
                 .flex_shrink_0(),
         );
 
-    let mut footer = view().flex_row().flex_wrap().items_center().gap_1p5();
-    if dash.project_stats.is_empty() {
-        footer = footer.child(note(
-            "Color = Project · Hover for card & duration · Click to open",
-        ));
-    } else {
-        footer = footer.child(note("Color = Project ("));
-        for (idx, p) in dash.project_stats.iter().take(6).enumerate() {
-            if idx > 0 {
-                footer = footer.child(note(" "));
-            }
-            let legend_name = if let Some(ref badge) = p.host_badge {
-                format!("{} · {badge}", p.name)
-            } else {
-                p.name.clone()
-            };
-            footer = footer.child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(note(legend_name))
-                    .child(
-                        view()
-                            .w(px(8.))
-                            .h(px(8.))
-                            .rounded(px(2.))
-                            .bg(project_color(Some(&p.id), project_order)),
-                    ),
-            );
-        }
-        footer = footer.child(note(") · Hover for card & duration · Click to open"));
+    let mut footer = view().flex_row().flex_wrap().items_center().gap_2p5();
+    for p in dash.project_stats.iter().take(6) {
+        let legend_name = if let Some(ref badge) = p.host_badge {
+            format!("{} · {badge}", p.name)
+        } else {
+            p.name.clone()
+        };
+        footer = footer.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    view()
+                        .w(px(7.))
+                        .h(px(7.))
+                        .rounded(px(2.))
+                        .bg(project_color(Some(&p.id), project_order)),
+                )
+                .child(note(legend_name)),
+        );
     }
 
     let has_any = tl.lanes.iter().any(|l| !l.blocks.is_empty()) || !tl.merges.is_empty();
@@ -2244,13 +2233,13 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
         )
         .child(axis_row)
         .children(lane_views)
-        .child(merges_row)
-        .child(footer);
+        .child(merges_row);
+    if !dash.project_stats.is_empty() {
+        panel = panel.child(footer);
+    }
 
     if !has_any {
-        panel = panel.child(note(
-            "No dwell segments, Agent working runs, or merges recorded on this day yet.",
-        ));
+        panel = panel.child(note("No activity"));
     }
     panel
 }
@@ -2477,12 +2466,7 @@ fn render_timeline_multi_day(ui: Ui, dash: &Dashboard) -> View {
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(
-                    view()
-                        .gap_0p5()
-                        .child(heading("Daily activity"))
-                        .child(note("Click any day to inspect its 1D activity timeline")),
-                )
+                .child(heading("Daily activity"))
                 .child(
                     row()
                         .child(legend_swatch(ACCENT, "Card"))
@@ -2932,7 +2916,7 @@ fn render_daily_output(ui: Ui, dash: &Dashboard) -> View {
                     view()
                         .gap_0p5()
                         .child(heading("Daily output"))
-                        .child(note("Created / Resolved · click bar for 1D")),
+                        .child(note("Created / Resolved")),
                 )
                 .child(
                     row()
@@ -3310,11 +3294,8 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                                                 .items_center()
                                                 .gap_2()
                                                 .flex_shrink_0()
-                                                .child(note(format!(
-                                                    "Me {}",
-                                                    format_duration_compact(p.dwell_ms)
-                                                )))
-                                                .child(bar_track),
+                                                .child(bar_track)
+                                                .child(note(right_sub)),
                                         ),
                                 )
                                 .child(
@@ -3322,13 +3303,12 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                                         .pl(px(13.))
                                         .flex_row()
                                         .items_center()
-                                        .justify_between()
                                         .gap_2()
                                         .child(note(format!(
-                                            "Agent {}",
-                                            format_duration_compact(p.agent_ms)
-                                        )))
-                                        .child(note(right_sub)),
+                                            "Me {} · Agent {}",
+                                            format_duration_compact(p.dwell_ms),
+                                            format_duration_compact(p.agent_ms),
+                                        ))),
                                 ),
                         ),
                 )
@@ -3442,7 +3422,7 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
 
     let mut body = view().gap_1p5().child(heading("Projects"));
     if rows.is_empty() {
-        body = body.child(note("No Project activity or active WIP in this period."));
+        body = body.child(note("No project activity"));
     } else {
         body = body.children(rows);
     }
@@ -3634,9 +3614,7 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
                 panel = panel.child(render_profile_agent_row(p, max_work));
             }
             if dash.profile_stats.is_empty() {
-                panel = panel.child(note(
-                    "No Agent execution or working time observed in this period.",
-                ));
+                panel = panel.child(note("No agent runs"));
             }
         }
         AgentGroup::Model => {
@@ -3651,9 +3629,7 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
                 panel = panel.child(render_model_agent_row(m, max_work));
             }
             if dash.model_stats.is_empty() {
-                panel = panel.child(note(
-                    "No Agent execution or working time observed in this period.",
-                ));
+                panel = panel.child(note("No agent runs"));
             }
         }
     }
@@ -3920,10 +3896,7 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(note(format!(
-                    "{} active days · Click a tile to inspect",
-                    dash.active_days
-                )))
+                .child(note(format!("{} active days", dash.active_days)))
                 .child(
                     row()
                         .child(note("Less"))
@@ -4110,7 +4083,7 @@ fn render_timings(ui: Ui, dash: &Dashboard) -> View {
         );
 
         if slice.is_empty() {
-            drill = drill.child(note("No samples in this period."));
+            drill = drill.child(note("No samples"));
         } else {
             for s in slice {
                 let cid = s.card_id.clone();
@@ -4230,9 +4203,7 @@ fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
         }
     }
     if ids.len() > 100 {
-        panel = panel.child(note(
-            "Showing the first 100 Cards. Select a shorter range or a Project to narrow the list.",
-        ));
+        panel = panel.child(note("First 100 cards"));
     }
     panel
 }
@@ -4363,11 +4334,11 @@ fn render_hosts(ui: Ui, dash: &Dashboard) -> View {
                                         .items_center()
                                         .gap_2()
                                         .flex_shrink_0()
+                                        .child(bar_track)
                                         .child(note(format!(
-                                            "Me {}",
-                                            format_duration_compact(h.dwell_ms)
-                                        )))
-                                        .child(bar_track),
+                                            "{} runs · {} resolved",
+                                            h.agent_runs, h.merged
+                                        ))),
                                 ),
                         )
                         .child(
@@ -4375,15 +4346,11 @@ fn render_hosts(ui: Ui, dash: &Dashboard) -> View {
                                 .pl(px(18.))
                                 .flex_row()
                                 .items_center()
-                                .justify_between()
                                 .gap_2()
                                 .child(note(format!(
-                                    "Agent {}",
-                                    format_duration_compact(h.agent_ms)
-                                )))
-                                .child(note(format!(
-                                    "{} runs · {} resolved",
-                                    h.agent_runs, h.merged
+                                    "Me {} · Agent {}",
+                                    format_duration_compact(h.dwell_ms),
+                                    format_duration_compact(h.agent_ms),
                                 ))),
                         ),
                 )
@@ -4824,62 +4791,63 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .content_offset(scroll_position(ui, &scroll_key))
                 .on_scroll(move |e: &ScrollEvent| capture_scroll(ui, capture_key.clone(), e))
                 .child(
-                    view()
-                        .w_full()
-                        .max_w(px(1240.))
-                        .min_w(px(0.))
-                        .p_5()
-                        .gap_4()
-                        .child(dynamic(move || {
-                            let narrow = ui.narrow.get();
-                            let Some(dash) = dashboard.get() else {
-                                return render_loading_skeleton(narrow).into_element();
-                            };
-                            let project_order: Vec<String> =
-                                dash.project_stats.iter().map(|p| p.id.clone()).collect();
+                    view().w_full().items_center().px_6().py_5().child(
+                        view()
+                            .w_full()
+                            .max_w(px(1240.))
+                            .min_w(px(0.))
+                            .gap_4()
+                            .child(dynamic(move || {
+                                let narrow = ui.narrow.get();
+                                let Some(dash) = dashboard.get() else {
+                                    return render_loading_skeleton(narrow).into_element();
+                                };
+                                let project_order: Vec<String> =
+                                    dash.project_stats.iter().map(|p| p.id.clone()).collect();
 
-                            let mut body = view()
-                                .gap_4()
-                                .min_w(px(0.))
-                                .child(render_summary_and_kpis(ui, &dash, narrow));
+                                let mut body = view()
+                                    .gap_4()
+                                    .min_w(px(0.))
+                                    .child(render_summary_and_kpis(ui, &dash, narrow));
 
-                            if !ui.insights.drilldown.get().is_empty() {
-                                body = body.child(render_card_drilldown(ui, &dash));
-                            }
+                                if !ui.insights.drilldown.get().is_empty() {
+                                    body = body.child(render_card_drilldown(ui, &dash));
+                                }
 
-                            body = body.child(render_timeline(ui, &dash, &project_order));
+                                body = body.child(render_timeline(ui, &dash, &project_order));
 
-                            let output_panel = if dash.range == RangeWindow::Today {
-                                render_hourly_output(ui, &dash)
-                            } else {
-                                render_daily_output(ui, &dash)
-                            };
-                            body = body.child(overview_row(
-                                narrow,
-                                output_panel,
-                                render_automation_funnel(&dash),
-                                render_projects(ui, &dash, &project_order),
-                            ));
+                                let output_panel = if dash.range == RangeWindow::Today {
+                                    render_hourly_output(ui, &dash)
+                                } else {
+                                    render_daily_output(ui, &dash)
+                                };
+                                body = body.child(overview_row(
+                                    narrow,
+                                    output_panel,
+                                    render_automation_funnel(&dash),
+                                    render_projects(ui, &dash, &project_order),
+                                ));
 
-                            let show_hosts_card = ui.insights.scope_host.get().is_empty()
-                                && dash.host_stats.len() > 1;
-                            if show_hosts_card {
-                                body = body.child(render_hosts(ui, &dash));
-                            }
+                                let show_hosts_card = ui.insights.scope_host.get().is_empty()
+                                    && dash.host_stats.len() > 1;
+                                if show_hosts_card {
+                                    body = body.child(render_hosts(ui, &dash));
+                                }
 
-                            body = body
-                                .child(render_agents(ui, &dash))
-                                .child(render_heatmap_panel(ui, &dash))
-                                .child(render_timings(ui, &dash))
-                                .child(render_footer(ui, &dash));
+                                body = body
+                                    .child(render_agents(ui, &dash))
+                                    .child(render_heatmap_panel(ui, &dash))
+                                    .child(render_timings(ui, &dash))
+                                    .child(render_footer(ui, &dash));
 
-                            view()
-                                .gap_3()
-                                .min_w(px(0.))
-                                .child(render_compare_subbar(ui, &dash))
-                                .child(body)
-                                .into_element()
-                        })),
+                                view()
+                                    .gap_3()
+                                    .min_w(px(0.))
+                                    .child(render_compare_subbar(ui, &dash))
+                                    .child(body)
+                                    .into_element()
+                            })),
+                    ),
                 ),
         )
 }

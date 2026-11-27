@@ -1631,11 +1631,15 @@ pub fn screen(ui: Ui) -> AnyElement {
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
-        .p_5()
-        .gap_3()
+        .bg(BACKGROUND)
         .child(when(
             move || !s.error.get().is_empty(),
-            move || notice(move || s.error.get(), Tone::Attention),
+            move || {
+                view()
+                    .px_5()
+                    .pt_3()
+                    .child(notice(move || s.error.get(), Tone::Attention))
+            },
         ))
         .child(render(ui))
         .into_element()
@@ -1681,7 +1685,6 @@ pub fn render(ui: Ui) -> AnyElement {
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
-        .gap_3()
         .child(when(
             move || selected_dirty.get(),
             move || {
@@ -1699,14 +1702,12 @@ pub fn render(ui: Ui) -> AnyElement {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .p_2p5()
-                    .rounded(px(RADIUS))
-                    .bg(SURFACE)
-                    .border_1()
+                    .px_5()
+                    .py_2()
+                    .bg(SELECTED)
+                    .border_b_1()
                     .border_color(ACCENT)
-                    .child(muted(format!(
-                        "Unsaved configuration edits for {scope_lbl}. Save before running."
-                    )))
+                    .child(label(format!("Unsaved changes · {scope_lbl}")).text_size(px(12.5)))
                     .child(
                         view()
                             .flex_row()
@@ -1739,7 +1740,6 @@ pub fn render(ui: Ui) -> AnyElement {
                     .min_h(px(0.))
                     .min_w(px(0.))
                     .flex_row()
-                    .gap_4()
                     .child(master_list(ui, filtered_items))
                     .child(dynamic(move || {
                         if let Some(item) = selected_item.get() {
@@ -1750,7 +1750,7 @@ pub fn render(ui: Ui) -> AnyElement {
                                 .flex_1()
                                 .items_center()
                                 .justify_center()
-                                .child(muted("Select a scheduled task"))
+                                .child(muted("Select a schedule"))
                                 .into_element()
                         }
                     }))
@@ -1836,28 +1836,18 @@ fn save_scope_draft(ui: Ui, scope_key: &str) {
 fn empty_state(ui: Ui) -> impl IntoElement {
     let scope = ui.schedules.scope.get();
     let status = ui.schedules.status_filter.get();
-    panel()
+    view()
         .flex_1()
         .min_h(px(0.))
         .items_center()
         .justify_center()
         .gap_3()
-        .border_1()
-        .border_color(BORDER)
         .child(tone_icon_badge(Icon::Clock, Tone::Info, false))
         .child(heading(if status == "attention" {
-            "No Schedules Need Attention"
+            "No schedules need attention"
         } else {
-            "No Scheduled Tasks Configured"
+            "No scheduled tasks"
         }))
-        .child(
-            muted(if status == "attention" {
-                "No scheduled runs are currently blocked waiting for input or failed."
-            } else {
-                "Create Global host automation (like 7-day merged worktree cleanup) or Project-scoped cron workflows from here."
-            })
-            .max_w(px(520.)),
-        )
         .child(
             view()
                 .flex_row()
@@ -1866,14 +1856,14 @@ fn empty_state(ui: Ui) -> impl IntoElement {
                 .gap_2()
                 .child(action_with_icon(
                     Icon::Plus,
-                    "New scheduled workflow",
+                    "New schedule",
                     Variant::Primary,
                     move |_| new_scheduled_workflow(ui),
                 ))
                 .child(when(
                     move || !scope.is_empty() && !is_global_project_id(&scope),
                     move || {
-                        compact_action("Show All Scopes", Variant::Secondary, move |_| {
+                        compact_action("All Scopes", Variant::Secondary, move |_| {
                             ui.schedules.scope.set(String::new());
                         })
                     },
@@ -1884,105 +1874,136 @@ fn empty_state(ui: Ui) -> impl IntoElement {
 fn master_list(ui: Ui, items: Memo<Vec<ScheduleItem>>) -> impl IntoElement {
     let s = ui.schedules;
     view()
-        .w(px(330.))
+        .w(px(300.))
         .flex_shrink_0()
         .min_h(px(0.))
-        .gap_2p5()
+        .border_r_1()
+        .border_color(BORDER)
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .justify_between()
                 .gap_2()
+                .px_4()
+                .py_2p5()
+                .border_b_1()
+                .border_color(BORDER)
                 .child(
-                    label(move || format!("Scheduled Tasks ({})", items.with(Vec::len)))
+                    label(move || format!("Schedules · {}", items.with(Vec::len)))
+                        .text_size(px(12.5))
                         .font_weight(FontWeight::SEMIBOLD),
                 )
-                .child(compact_action(
-                    "+ New schedule",
-                    Variant::Secondary,
-                    move |_| new_scheduled_workflow(ui),
-                )),
+                .child(compact_action("+ New", Variant::Quiet, move |_| {
+                    new_scheduled_workflow(ui)
+                })),
         )
-        .child(
-            scroll()
-                .flex_1()
-                .min_h(px(0.))
-                .child(view().gap_2().pr_1().child(each(
-                    move || items.get(),
-                    |item| {
-                        format!(
-                            "{}:{}:{}:{}",
-                            item.key,
-                            item.effective_enabled,
-                            item.active_blocked,
-                            item.latest_run.as_ref().map_or("", |r| r.state.as_str())
-                        )
-                    },
-                    move |item_sig, _| {
-                        let key = item_sig.with_untracked(|i| i.key.clone());
-                        let sid = item_sig.with_untracked(|i| i.schedule_id.clone());
-                        let lkey = item_sig.with_untracked(|i| i.legacy_key.clone());
-                        let select_key = key.clone();
-                        let card_key = key.clone();
-                        let card_sid = sid.clone();
-                        let card_lkey = lkey;
-                        let is_selected = computed(move || {
-                            let cur = s.selected.get();
-                            cur == card_key || cur == card_sid || cur == card_lkey
-                        });
-                        let item_stages =
-                            project_stages(ui, &item_sig.with_untracked(|i| i.project_id.clone()));
+        .child(scroll().flex_1().min_h(px(0.)).child(view().child(each(
+            move || items.get(),
+            |item| {
+                format!(
+                    "{}:{}:{}:{}",
+                    item.key,
+                    item.effective_enabled,
+                    item.active_blocked,
+                    item.latest_run.as_ref().map_or("", |r| r.state.as_str())
+                )
+            },
+            move |item_sig, _| {
+                let key = item_sig.with_untracked(|i| i.key.clone());
+                let sid = item_sig.with_untracked(|i| i.schedule_id.clone());
+                let lkey = item_sig.with_untracked(|i| i.legacy_key.clone());
+                let select_key = key.clone();
+                let card_key = key.clone();
+                let card_sid = sid.clone();
+                let card_lkey = lkey;
+                let is_selected = computed(move || {
+                    let cur = s.selected.get();
+                    cur == card_key || cur == card_sid || cur == card_lkey
+                });
 
-                        press_target()
-                            .w_full()
-                            .p_3()
-                            .gap_2()
-                            .rounded(px(RADIUS))
-                            .border_1()
-                            .border_color(move || if is_selected.get() { ACCENT } else { BORDER })
-                            .bg(move || if is_selected.get() { SELECTED } else { SURFACE })
-                            .hover(|st| st.border_color(ACCENT))
-                            .selected(move || is_selected.get())
-                            .accessibility_label(move || {
-                                item_sig.with(|it| {
-                                    Some(
-                                        format!(
-                                            "{} · {} · {} · {}",
-                                            it.scope_name,
-                                            it.workflow_name,
-                                            it.cron_str(),
-                                            if it.effective_enabled {
-                                                "Enabled"
-                                            } else {
-                                                "Paused"
-                                            }
-                                        )
-                                        .into(),
-                                    )
-                                })
-                            })
-                            .on_press(move || {
-                                s.confirm_delete.set(None);
-                                s.selected.set(select_key.clone());
-                            })
+                let dot_color = computed(move || {
+                    let enabled = item_sig.with(|i| i.effective_enabled);
+                    let blocked = item_sig.with(|i| i.active_blocked);
+                    let latest_failed = item_sig
+                        .with(|i| i.latest_run.as_ref().is_some_and(|r| r.state == "failed"));
+                    let active_run = ui.snapshot.with(|snap| {
+                        let s_id = item_sig.with(|i| i.schedule_id.clone());
+                        snap.scheduled_runs
+                            .iter()
+                            .any(|r| r.schedule_id == s_id && r.active())
+                    });
+                    if blocked {
+                        ATTENTION
+                    } else if active_run {
+                        ACCENT
+                    } else if latest_failed {
+                        DANGER
+                    } else if enabled {
+                        SUCCESS
+                    } else {
+                        MUTED
+                    }
+                });
+
+                press_target()
+                    .w_full()
+                    .flex_row()
+                    .items_stretch()
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .bg(move || if is_selected.get() { SELECTED } else { CLEAR })
+                    .hover(|st| st.bg(CARD_HOVER))
+                    .selected(move || is_selected.get())
+                    .accessibility_label(move || {
+                        item_sig.with(|it| {
+                            Some(
+                                format!(
+                                    "{} · {} · {} · {}",
+                                    it.scope_name,
+                                    it.workflow_name,
+                                    it.cron_str(),
+                                    if it.effective_enabled {
+                                        "Enabled"
+                                    } else {
+                                        "Paused"
+                                    }
+                                )
+                                .into(),
+                            )
+                        })
+                    })
+                    .on_press(move || {
+                        s.confirm_delete.set(None);
+                        s.selected.set(select_key.clone());
+                    })
+                    .child(
+                        view()
+                            .w(px(3.))
+                            .flex_shrink_0()
+                            .bg(move || if is_selected.get() { ACCENT } else { CLEAR }),
+                    )
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .px_3p5()
+                            .py_2p5()
+                            .gap_1()
                             .child(
                                 view()
                                     .flex_row()
                                     .items_center()
-                                    .gap_1p5()
+                                    .gap_2()
                                     .min_w(px(0.))
-                                    .child(badge(move || {
-                                        let has_remote =
-                                            ui.snapshot.with(|snap| snap.has_remote_hosts());
-                                        item_sig.with(|i| {
-                                            if i.is_global() && !has_remote {
-                                                "Global".to_owned()
-                                            } else {
-                                                i.scope_name.clone()
-                                            }
-                                        })
-                                    }))
+                                    .child(
+                                        view()
+                                            .w(px(7.))
+                                            .h(px(7.))
+                                            .rounded_full()
+                                            .flex_shrink_0()
+                                            .bg(move || dot_color.get()),
+                                    )
                                     .child(
                                         label(move || {
                                             item_sig.with(|i| {
@@ -1997,107 +2018,51 @@ fn master_list(ui: Ui, items: Memo<Vec<ScheduleItem>>) -> impl IntoElement {
                                                 }
                                             })
                                         })
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::MEDIUM)
                                         .truncate()
                                         .flex_1()
                                         .min_w(px(0.)),
                                     )
-                                    .child({
-                                        #[derive(Clone, Copy, PartialEq, Eq)]
-                                        enum RowStatus {
-                                            NeedsYou,
-                                            Running,
-                                            Failed,
-                                            Active,
-                                            Paused,
-                                        }
-                                        let row_status = computed(move || {
-                                            let enabled = item_sig.with(|i| i.effective_enabled);
-                                            let blocked = item_sig.with(|i| i.active_blocked);
-                                            let latest_failed = item_sig.with(|i| {
-                                                i.latest_run
-                                                    .as_ref()
-                                                    .is_some_and(|r| r.state == "failed")
-                                            });
-                                            let active_run = ui.snapshot.with(|snap| {
-                                                let s_id = item_sig.with(|i| i.schedule_id.clone());
-                                                snap.scheduled_runs
-                                                    .iter()
-                                                    .any(|r| r.schedule_id == s_id && r.active())
-                                            });
-                                            if blocked {
-                                                RowStatus::NeedsYou
-                                            } else if active_run {
-                                                RowStatus::Running
-                                            } else if latest_failed {
-                                                RowStatus::Failed
-                                            } else if enabled {
-                                                RowStatus::Active
-                                            } else {
-                                                RowStatus::Paused
-                                            }
-                                        });
-                                        dynamic(move || match row_status.get() {
-                                            RowStatus::NeedsYou => {
-                                                live_status("Needs you", Tone::Attention)
-                                                    .into_element()
-                                            }
-                                            RowStatus::Running => {
-                                                live_status("Running", Tone::Info).into_element()
-                                            }
-                                            RowStatus::Failed => {
-                                                status("Failed", Tone::Danger).into_element()
-                                            }
-                                            RowStatus::Active => {
-                                                status("Active", Tone::Success).into_element()
-                                            }
-                                            RowStatus::Paused => {
-                                                status("Paused", Tone::Neutral).into_element()
-                                            }
+                                    .child(
+                                        muted(move || {
+                                            let has_remote =
+                                                ui.snapshot.with(|snap| snap.has_remote_hosts());
+                                            item_sig.with(|i| {
+                                                if i.is_global() && !has_remote {
+                                                    "Global".to_owned()
+                                                } else {
+                                                    i.scope_name.clone()
+                                                }
+                                            })
                                         })
-                                    }),
-                            )
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(badge(move || {
-                                        item_sig.with(|i| {
-                                            let c = i.cron_str();
-                                            if c.is_empty() {
-                                                "(no cron)".into()
-                                            } else {
-                                                c.to_owned()
-                                            }
-                                        })
-                                    }))
-                                    .child(badge({
-                                        let stg = item_stages.clone();
-                                        move || item_sig.with(|i| i.mode_badge_text(&stg))
-                                    })),
+                                        .text_size(px(11.))
+                                        .flex_shrink_0(),
+                                    ),
                             )
                             .child(
                                 muted(move || {
                                     item_sig.with(|i| {
-                                        let desc = describe_cron(i.cron_str());
+                                        let cron = i.cron_str();
+                                        let expr = if cron.is_empty() { "—" } else { cron };
                                         if let Some(next_ms) = i.next_run_at {
                                             let next_str =
                                                 format_run_ts(next_ms, i.rule.timezone.as_deref());
-                                            format!("{desc} · Next: {next_str}")
+                                            format!("{expr} · Next {next_str}")
                                         } else if !i.effective_enabled {
-                                            format!("{desc} · Paused")
+                                            format!("{expr} · Paused")
                                         } else {
-                                            desc
+                                            expr.to_owned()
                                         }
                                     })
                                 })
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.))
                                 .truncate(),
-                            )
-                    },
-                ))),
-        )
+                            ),
+                    )
+            },
+        ))))
 }
 
 fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> AnyElement {
@@ -2170,120 +2135,148 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
         .min_h(px(0.))
         .min_w(px(0.))
         .child(
-            view()
-                .gap_3()
-                .pb_4()
-                .child(detail_header_card(
-                    ui,
-                    &item,
-                    item_for_toggle,
-                    item_for_run,
-                    item_for_del,
-                    active_terminal_id,
-                    &cron_desc,
-                    next_preview.as_deref(),
-                ))
-                .child(if let Some(br) = blocked_run {
-                    let msg = br.summary.clone().unwrap_or_else(|| {
-                        "This scheduled run is waiting for your input in Terminal.".into()
-                    });
-                    let tid = br.terminal_id.unwrap_or_else(|| br.id.clone());
-                    panel()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .border_1()
-                        .border_color(ACCENT)
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .min_w(px(0.))
-                                .flex_1()
-                                .child(tone_icon_badge(Icon::CirclePause, Tone::Attention, true))
-                                .child(
-                                    view()
-                                        .gap_0p5()
-                                        .min_w(px(0.))
-                                        .flex_1()
-                                        .child(
-                                            label(format!("Run #{} needs your input", br.number))
-                                                .font_weight(FontWeight::SEMIBOLD),
-                                        )
-                                        .child(muted(msg)),
-                                ),
-                        )
-                        .child(action_with_icon(
-                            Icon::Terminal,
-                            "Open Live Terminal →",
-                            Variant::Primary,
-                            move |_| ui.open_terminal(tid.clone()),
-                        ))
-                        .into_element()
-                } else {
-                    view().into_element()
-                })
-                .child(history_panel_section(ui, &item, runs))
-                .child(
-                    view()
-                        .gap_2()
-                        .child(
-                            press_target()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .p_2p5()
-                                .rounded(px(RADIUS))
-                                .bg(SURFACE)
-                                .border_1()
-                                .border_color(BORDER)
-                                .hover(|st| st.border_color(ACCENT))
-                                .on_press(move || {
-                                    ui.schedules
-                                        .config_expanded
-                                        .set(!ui.schedules.config_expanded.get_untracked());
-                                })
-                                .child(
-                                    view()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(icon(Icon::Edit).w(px(14.)).h(px(14.)))
-                                        .child(
-                                            label("Configuration & Schedule Rules")
-                                                .font_weight(FontWeight::SEMIBOLD),
-                                        )
-                                        .child(muted(cfg_cron_label)),
-                                )
-                                .child(label(move || {
-                                    if ui.schedules.config_expanded.get() {
-                                        "▾ Hide"
-                                    } else {
-                                        "▸ Edit"
-                                    }
-                                })),
-                        )
-                        .child(when(move || ui.schedules.config_expanded.get(), {
-                            let item_inner = item_cfg.clone();
-                            let stages_inner = stages.clone();
-                            let err_inner = cron_error.clone();
-                            let desc_inner = cfg_desc.clone();
-                            let next_inner = cfg_next.clone();
-                            move || {
-                                config_panel(
-                                    ui,
-                                    &item_inner,
-                                    &stages_inner,
-                                    err_inner.clone(),
-                                    desc_inner.clone(),
-                                    next_inner.clone(),
-                                )
-                            }
-                        })),
-                ),
+            view().w_full().items_center().px_6().py_5().child(
+                view()
+                    .w_full()
+                    .max_w(px(960.))
+                    .gap_5()
+                    .pb_4()
+                    .child(detail_header_card(
+                        ui,
+                        &item,
+                        item_for_toggle,
+                        item_for_run,
+                        item_for_del,
+                        active_terminal_id,
+                        &cron_desc,
+                        next_preview.as_deref(),
+                    ))
+                    .child(if let Some(br) = blocked_run {
+                        let msg = br
+                            .summary
+                            .clone()
+                            .unwrap_or_else(|| "Waiting for input".into());
+                        let tid = br.terminal_id.unwrap_or_else(|| br.id.clone());
+                        view()
+                            .flex_row()
+                            .items_stretch()
+                            .bg(SURFACE)
+                            .border_b_1()
+                            .border_color(BORDER)
+                            .child(view().w(px(3.)).flex_shrink_0().bg(ATTENTION))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .px_3p5()
+                                    .py_2p5()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        view()
+                                            .gap_0p5()
+                                            .min_w(px(0.))
+                                            .flex_1()
+                                            .child(
+                                                label(format!("Run #{} · Waiting", br.number))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(ATTENTION),
+                                            )
+                                            .child(muted(msg)),
+                                    )
+                                    .child(action_with_icon(
+                                        Icon::Terminal,
+                                        "Open Terminal →",
+                                        Variant::Primary,
+                                        move |_| ui.open_terminal(tid.clone()),
+                                    )),
+                            )
+                            .into_element()
+                    } else {
+                        view().into_element()
+                    })
+                    .child(history_panel_section(ui, &item, runs))
+                    .child(
+                        view()
+                            .gap_3()
+                            .child(
+                                press_target()
+                                    .w_full()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .py_2()
+                                    .border_t_1()
+                                    .border_b_1()
+                                    .border_color(BORDER)
+                                    .bg(CLEAR)
+                                    .hover(|st| st.bg(CARD_HOVER))
+                                    .on_press(move || {
+                                        ui.schedules
+                                            .config_expanded
+                                            .set(!ui.schedules.config_expanded.get_untracked());
+                                    })
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                icon_tinted(
+                                                    if ui.schedules.config_expanded.get() {
+                                                        Icon::ChevronDown
+                                                    } else {
+                                                        Icon::Forward
+                                                    },
+                                                    MUTED,
+                                                )
+                                                .w(px(12.))
+                                                .h(px(12.)),
+                                            )
+                                            .child(
+                                                label("Configuration")
+                                                    .text_size(px(13.))
+                                                    .font_weight(FontWeight::SEMIBOLD),
+                                            )
+                                            .child(
+                                                muted(cfg_cron_label)
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(11.5)),
+                                            ),
+                                    )
+                                    .child(
+                                        muted(move || {
+                                            if ui.schedules.config_expanded.get() {
+                                                "Hide"
+                                            } else {
+                                                "Edit"
+                                            }
+                                        })
+                                        .text_size(px(11.5)),
+                                    ),
+                            )
+                            .child(when(move || ui.schedules.config_expanded.get(), {
+                                let item_inner = item_cfg.clone();
+                                let stages_inner = stages.clone();
+                                let err_inner = cron_error.clone();
+                                let desc_inner = cfg_desc.clone();
+                                let next_inner = cfg_next.clone();
+                                move || {
+                                    config_panel(
+                                        ui,
+                                        &item_inner,
+                                        &stages_inner,
+                                        err_inner.clone(),
+                                        desc_inner.clone(),
+                                        next_inner.clone(),
+                                    )
+                                }
+                            })),
+                    ),
+            ),
         )
         .into_element()
 }
@@ -2334,9 +2327,10 @@ fn detail_header_card(
         )
     };
 
-    panel()
+    view()
         .gap_2p5()
-        .border_1()
+        .pb_4()
+        .border_b_1()
         .border_color(BORDER)
         .child(
             view()
@@ -2344,52 +2338,40 @@ fn detail_header_card(
                 .flex_wrap()
                 .items_center()
                 .justify_between()
-                .gap_2()
+                .gap_3()
                 .child(
                     view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
+                        .gap_1()
                         .min_w(px(0.))
-                        .child(tone_icon_badge(
-                            Icon::Clock,
-                            if item.active_blocked {
-                                Tone::Attention
-                            } else if enabled {
-                                Tone::Info
-                            } else {
-                                Tone::Neutral
-                            },
-                            item.active_blocked,
-                        ))
                         .child(
                             view()
-                                .gap_0p5()
-                                .min_w(px(0.))
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
                                 .child(
-                                    view()
-                                        .flex_row()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(badge(item.scope_name.clone()))
-                                        .child(heading(if rule_id == "schedule" {
-                                            wf_name.clone()
-                                        } else {
-                                            format!("{wf_name} / {rule_id}")
-                                        }))
-                                        .child(badge(filename))
-                                        .child(if host_offline {
-                                            status(format!("{host_display} offline"), Tone::Attention)
-                                        } else if dirty {
-                                            status("Unsaved draft", Tone::Attention)
-                                        } else if enabled {
-                                            status("Enabled", Tone::Success)
-                                        } else {
-                                            status("Paused", Tone::Neutral)
-                                        }),
+                                    label(if rule_id == "schedule" {
+                                        wf_name.clone()
+                                    } else {
+                                        format!("{wf_name} / {rule_id}")
+                                    })
+                                    .text_size(px(17.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(TEXT),
                                 )
-                                .child(muted(subtitle)),
+                                .child(if host_offline {
+                                    status(format!("{host_display} offline"), Tone::Attention)
+                                } else if dirty {
+                                    status("Unsaved draft", Tone::Attention)
+                                } else if enabled {
+                                    status("Enabled", Tone::Success)
+                                } else {
+                                    status("Paused", Tone::Neutral)
+                                }),
+                        )
+                        .child(
+                            muted(format!("{} · {filename} · {subtitle}", item.scope_name))
+                                .text_size(px(12.)),
                         ),
                 )
                 .child(
@@ -2397,9 +2379,9 @@ fn detail_header_card(
                         .flex_row()
                         .flex_wrap()
                         .items_center()
-                        .gap_2()
+                        .gap_1p5()
                         .child(if let Some(tid) = active_terminal_id {
-                            compact_action("Live Terminal →", Variant::Secondary, move |_| {
+                            compact_action("Terminal →", Variant::Secondary, move |_| {
                                 ui.open_terminal(tid.clone());
                             })
                             .into_element()
@@ -2428,7 +2410,7 @@ fn detail_header_card(
                             }),
                         )
                         .child(
-                            compact_action("Edit YAML", Variant::Quiet, move |_| {
+                            compact_action("YAML", Variant::Quiet, move |_| {
                                 modal::open_yaml_editor(
                                     ui,
                                     scope_id_yaml.clone(),
@@ -2438,7 +2420,7 @@ fn detail_header_card(
                             .disabled(move || host_offline),
                         )
                         .child(if !is_global {
-                            compact_action("Open Studio", Variant::Quiet, move |_| {
+                            compact_action("Studio", Variant::Quiet, move |_| {
                                 ui.project.set(scope_id_studio.clone());
                                 ui.workflows.drafts.update(|d| {
                                     if let Some(dr) = d.get_mut(&scope_id_studio) {
@@ -2489,12 +2471,7 @@ fn detail_header_card(
         )
         .child(when(
             move || host_offline,
-            move || {
-                notice(
-                    format!("Machine '{host_display}' is offline. Reconnect to edit or run this schedule."),
-                    Tone::Attention,
-                )
-            },
+            move || notice(format!("{host_display} offline"), Tone::Attention),
         ))
 }
 
@@ -2551,40 +2528,35 @@ fn config_panel(
         .map(|(id, _)| id.clone())
         .unwrap_or_else(|| "backlog".into());
 
-    panel()
+    view()
         .gap_3()
-        .border_1()
-        .border_color(BORDER)
+        .pt_1()
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(label("Schedule Configuration").font_weight(FontWeight::SEMIBOLD))
-                .child(compact_action(
-                    "Remove schedule rule",
-                    Variant::Quiet,
-                    move |_| {
-                        let mut empty_doc = false;
-                        mutate_workflow_file(ui, &pid_del, &fname_del, |doc| {
-                            doc.on.remove(&rid_del);
-                            empty_doc = doc.on.is_empty();
-                        });
-                        if empty_doc {
-                            ui.workflows.drafts.update(|d| {
-                                if let Some(dr) = d.get_mut(&pid_del)
-                                    && dr.sources.len() > 1
-                                {
-                                    dr.sources.remove(&fname_del);
-                                    if dr.selected == fname_del {
-                                        dr.selected =
-                                            dr.sources.keys().next().cloned().unwrap_or_default();
-                                    }
+                .child(muted("Rule").text_size(px(11.5)))
+                .child(compact_action("Remove rule", Variant::Quiet, move |_| {
+                    let mut empty_doc = false;
+                    mutate_workflow_file(ui, &pid_del, &fname_del, |doc| {
+                        doc.on.remove(&rid_del);
+                        empty_doc = doc.on.is_empty();
+                    });
+                    if empty_doc {
+                        ui.workflows.drafts.update(|d| {
+                            if let Some(dr) = d.get_mut(&pid_del)
+                                && dr.sources.len() > 1
+                            {
+                                dr.sources.remove(&fname_del);
+                                if dr.selected == fname_del {
+                                    dr.selected =
+                                        dr.sources.keys().next().cloned().unwrap_or_default();
                                 }
-                            });
-                        }
-                    },
-                )),
+                            }
+                        });
+                    }
+                })),
         )
         .child(
             view()
@@ -2611,7 +2583,7 @@ fn config_panel(
                         .items_center()
                         .justify_between()
                         .gap_2()
-                        .child(muted("Cron Expression (minute hour day month weekday)"))
+                        .child(muted("Cron"))
                         .child(
                             view()
                                 .flex_row()
@@ -2784,18 +2756,7 @@ fn config_panel(
                                         },
                                     )
                                 }),
-                        )
-                        .child(muted(match cur_overlap {
-                            ScheduleOverlap::Skip => {
-                                "Skips the tick if a previous run of this schedule is still active."
-                            }
-                            ScheduleOverlap::Queue => {
-                                "Queues at most 1 pending run until the active run finishes."
-                            }
-                            ScheduleOverlap::Allow => {
-                                "Starts a new run even while an earlier run is still active."
-                            }
-                        })),
+                        ),
                 ),
         )
         .child(execution_mode_section(
@@ -2967,52 +2928,44 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
     let step_for_inst = step_id.clone();
 
     view()
-        .gap_2()
-        .p_3()
-        .rounded(px(RADIUS))
-        .bg(INSET)
-        .child(muted(if item.starts_with_script {
-            "Starts directly with a Script step (0 PTY / 0 Agent slot overhead when exiting 0). Escalates to the configured Agent step on non-zero failure, keeping its PTY open in Needs you on `--state blocked`."
-        } else {
-            "Launches a managed Terminal Agent without creating a Board Card. Once the Agent calls `report --state completed` and settles, its terminal reclaims cleanly."
-        }))
+        .gap_2p5()
+        .pl_3()
+        .border_l_1()
+        .border_color(BORDER)
         .child(
-            view()
-                .gap_1()
-                .child(muted("Agent Profile"))
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_1p5()
-                        .children(profiles.into_iter().map(|prof| {
-                            let prof_id = prof.id.clone();
-                            let selected = prof_id == cur_prof;
-                            let scope = pid.clone();
-                            let f = fname.clone();
-                            let st = step_id.clone();
-                            compact_action(
-                                format!("@{}", prof.id),
-                                if selected {
-                                    Variant::Primary
-                                } else {
-                                    Variant::Secondary
-                                },
-                                move |_| {
-                                    let pval = prof_id.clone();
-                                    let target_step = st.clone();
-                                    mutate_workflow_file(ui, &scope, &f, move |doc| {
-                                        if let Some(sid) = target_step
-                                            && let Some(step) =
-                                                doc.steps.iter_mut().find(|s| s.id == sid)
-                                        {
-                                            step.with.insert("profile".into(), json!(pval));
-                                        }
-                                    });
-                                },
-                            )
-                        })),
-                ),
+            view().gap_1().child(muted("Agent Profile")).child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .children(profiles.into_iter().map(|prof| {
+                        let prof_id = prof.id.clone();
+                        let selected = prof_id == cur_prof;
+                        let scope = pid.clone();
+                        let f = fname.clone();
+                        let st = step_id.clone();
+                        compact_action(
+                            format!("@{}", prof.id),
+                            if selected {
+                                Variant::Primary
+                            } else {
+                                Variant::Secondary
+                            },
+                            move |_| {
+                                let pval = prof_id.clone();
+                                let target_step = st.clone();
+                                mutate_workflow_file(ui, &scope, &f, move |doc| {
+                                    if let Some(sid) = target_step
+                                        && let Some(step) =
+                                            doc.steps.iter_mut().find(|s| s.id == sid)
+                                    {
+                                        step.with.insert("profile".into(), json!(pval));
+                                    }
+                                });
+                            },
+                        )
+                    })),
+            ),
         )
         .child(if let Some(sid) = step_for_inst {
             view()
@@ -3033,8 +2986,7 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
                 ))
                 .into_element()
         } else {
-            muted("Script-only workflow; edit step commands in Edit YAML.")
-                .into_element()
+            muted("Script step (YAML)").into_element()
         })
 }
 
@@ -3065,60 +3017,51 @@ fn card_mode_fields(
 
     view()
         .gap_2p5()
-        .p_3()
-        .rounded(px(RADIUS))
-        .bg(INSET)
-        .child(muted(
-            "Creates a Card with a Scheduled Task badge on every trigger and runs the workflow steps so logs, reports, and diffs attach directly to that Card's Timeline.",
-        ))
+        .pl_3()
+        .border_l_1()
+        .border_color(BORDER)
         .child(
-            view()
-                .gap_1()
-                .child(muted("Target Stage"))
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_1p5()
-                        .children(stages.iter().map(|(col_id, col_name)| {
-                            let cid = col_id.clone();
-                            let selected = cid == cur_col;
-                            let scope = pid.clone();
-                            let f = fname.clone();
-                            let r = rid.clone();
-                            compact_action(
-                                col_name.clone(),
-                                if selected {
-                                    Variant::Primary
-                                } else {
-                                    Variant::Secondary
-                                },
-                                move |_| {
-                                    let next_col = cid.clone();
-                                    let r_inner = r.clone();
-                                    mutate_workflow_file(ui, &scope, &f, move |doc| {
-                                        let stage_entry = doc
-                                            .column_entry(&next_col)
-                                            .map(|(_, step)| step);
-                                        if let Some(rule) = doc.on.get_mut(&r_inner) {
-                                            let cfg = rule.card.get_or_insert_with(Default::default);
-                                            cfg.column = Some(next_col);
-                                            if let Some(entry_step) = stage_entry {
-                                                rule.start_at = entry_step;
-                                            }
+            view().gap_1().child(muted("Target Stage")).child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .children(stages.iter().map(|(col_id, col_name)| {
+                        let cid = col_id.clone();
+                        let selected = cid == cur_col;
+                        let scope = pid.clone();
+                        let f = fname.clone();
+                        let r = rid.clone();
+                        compact_action(
+                            col_name.clone(),
+                            if selected {
+                                Variant::Primary
+                            } else {
+                                Variant::Secondary
+                            },
+                            move |_| {
+                                let next_col = cid.clone();
+                                let r_inner = r.clone();
+                                mutate_workflow_file(ui, &scope, &f, move |doc| {
+                                    let stage_entry =
+                                        doc.column_entry(&next_col).map(|(_, step)| step);
+                                    if let Some(rule) = doc.on.get_mut(&r_inner) {
+                                        let cfg = rule.card.get_or_insert_with(Default::default);
+                                        cfg.column = Some(next_col);
+                                        if let Some(entry_step) = stage_entry {
+                                            rule.start_at = entry_step;
                                         }
-                                    });
-                                },
-                            )
-                        })),
-                ),
+                                    }
+                                });
+                            },
+                        )
+                    })),
+            ),
         )
         .child(
             view()
                 .gap_1()
-                .child(muted(
-                    "Card Title Template (supports {{date}}, {{datetime}}, {{run_number}}, {{workflow}})",
-                ))
+                .child(muted("Card Title Template"))
                 .child(bound_field(
                     move || cur_title.clone(),
                     move |v| {
@@ -3161,33 +3104,24 @@ fn history_panel_section(
     runs: Memo<Vec<ScheduledRun>>,
 ) -> impl IntoElement {
     let tz_raw = item.rule.timezone.clone();
-    panel()
-        .gap_2p5()
-        .border_1()
-        .border_color(BORDER)
+    view()
+        .gap_2()
         .child(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    label(move || format!("Recent Runs ({})", runs.with(Vec::len)))
-                        .font_weight(FontWeight::SEMIBOLD),
-                ),
+            view().flex_row().items_center().justify_between().child(
+                label(move || format!("Recent Runs · {}", runs.with(Vec::len)))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD),
+            ),
         )
         .child(when(
             move || runs.with(Vec::is_empty),
-            move || {
-                muted(
-                    "No runs recorded yet. Click Run now to test this scheduled workflow immediately.",
-                )
-            },
+            move || muted("No runs yet").text_size(px(12.)),
         ))
         .child(when(
             move || !runs.with(Vec::is_empty),
             move || {
                 let tz_for_each = tz_raw.clone();
-                view().gap_2().child(each(
+                view().border_t_1().border_color(BORDER).child(each(
                     move || runs.get(),
                     |r| format!("{}:{}:{}", r.id, r.state, r.updated_at),
                     move |run_sig, _| {
@@ -3205,10 +3139,12 @@ fn history_panel_section(
                         let card_link = run.card_id.clone().zip(run.card_number);
                         let live_tid = run.terminal_id.clone().and_then(|tid| {
                             ui.snapshot.with_untracked(|s| {
-                                let exists = s
-                                    .terminals
-                                    .iter()
-                                    .any(|t| t.id == tid && t.runtime.as_ref().is_some_and(|rt| rt.state != "finished"));
+                                let exists = s.terminals.iter().any(|t| {
+                                    t.id == tid
+                                        && t.runtime
+                                            .as_ref()
+                                            .is_some_and(|rt| rt.state != "finished")
+                                });
                                 (exists || run.active()).then_some(tid)
                             })
                         });
@@ -3219,11 +3155,9 @@ fn history_panel_section(
                         let run_for_log = run.clone();
 
                         view()
-                            .p_2p5()
+                            .py_2p5()
                             .gap_1p5()
-                            .rounded(px(RADIUS))
-                            .bg(INSET)
-                            .border_1()
+                            .border_b_1()
                             .border_color(BORDER)
                             .child(
                                 view()
@@ -3239,36 +3173,50 @@ fn history_panel_section(
                                             .items_center()
                                             .gap_2()
                                             .child(
-                                                label(format!("#{}", run.number))
-                                                    .font_weight(FontWeight::SEMIBOLD),
+                                                muted(format!("#{}", run.number))
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(12.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(TEXT)
+                                                    .w(px(36.)),
                                             )
                                             .child(if live {
                                                 live_status(lbl, tone)
                                             } else {
                                                 status(lbl, tone)
                                             })
-                                            .child(badge(if run.trigger_kind == "manual" {
-                                                "Manual"
-                                            } else {
-                                                "Cron"
-                                            }))
+                                            .child(
+                                                muted(if run.trigger_kind == "manual" {
+                                                    "Manual"
+                                                } else {
+                                                    "Cron"
+                                                })
+                                                .text_size(px(11.5)),
+                                            )
                                             .child(if let Some(prof) = &run.profile_id {
-                                                badge(format!("@{prof}")).into_element()
+                                                muted(format!("@{prof}"))
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(11.5))
+                                                    .into_element()
                                             } else {
                                                 view().into_element()
                                             })
-                                            .child(muted(ts)),
+                                            .child(
+                                                muted(ts)
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(11.5)),
+                                            ),
                                     )
                                     .child(
                                         view()
                                             .flex_row()
                                             .flex_wrap()
                                             .items_center()
-                                            .gap_1p5()
+                                            .gap_1()
                                             .child(if let Some((cid, cnum)) = card_link {
                                                 compact_action(
                                                     format!("Card #{cnum} →"),
-                                                    Variant::Secondary,
+                                                    Variant::Quiet,
                                                     move |_| ui.open_card(cid.clone()),
                                                 )
                                                 .into_element()
@@ -3278,7 +3226,7 @@ fn history_panel_section(
                                             .child(if let Some(tid) = live_tid {
                                                 compact_action(
                                                     "Terminal →",
-                                                    Variant::Secondary,
+                                                    Variant::Quiet,
                                                     move |_| ui.open_terminal(tid.clone()),
                                                 )
                                                 .into_element()
@@ -3287,7 +3235,7 @@ fn history_panel_section(
                                             })
                                             .child(if has_report {
                                                 compact_action(
-                                                    "View Report",
+                                                    "Report",
                                                     Variant::Quiet,
                                                     move |_| {
                                                         let path =
@@ -3310,25 +3258,20 @@ fn history_panel_section(
                                                 view().into_element()
                                             })
                                             .child(if has_log {
-                                                compact_action(
-                                                    "View Log",
-                                                    Variant::Quiet,
-                                                    move |_| {
-                                                        let path =
-                                                            run_for_log.output_path.as_deref();
-                                                        let title = format!(
-                                                            "{} #{} · Output Log",
-                                                            run_for_log.workflow_name,
-                                                            run_for_log.number
-                                                        );
-                                                        open_run_artifact(
-                                                            ui,
-                                                            &run_for_log,
-                                                            path,
-                                                            title,
-                                                        );
-                                                    },
-                                                )
+                                                compact_action("Log", Variant::Quiet, move |_| {
+                                                    let path = run_for_log.output_path.as_deref();
+                                                    let title = format!(
+                                                        "{} #{} · Output Log",
+                                                        run_for_log.workflow_name,
+                                                        run_for_log.number
+                                                    );
+                                                    open_run_artifact(
+                                                        ui,
+                                                        &run_for_log,
+                                                        path,
+                                                        title,
+                                                    );
+                                                })
                                                 .into_element()
                                             } else {
                                                 view().into_element()
@@ -3337,10 +3280,11 @@ fn history_panel_section(
                             )
                             .child(if !run.steps.is_empty() {
                                 view()
+                                    .pl(px(44.))
                                     .flex_row()
                                     .flex_wrap()
                                     .items_center()
-                                    .gap_1p5()
+                                    .gap_2()
                                     .children(run.steps.iter().enumerate().map(|(idx, st)| {
                                         let prefix = if idx > 0 { "→ " } else { "" };
                                         let kind_lbl = if let Some(prof) = &st.profile_id {
@@ -3356,19 +3300,26 @@ fn history_panel_section(
                                             _ => "•",
                                         };
                                         let extra = match (st.exit_code, st.duration_ms) {
-                                            (Some(code), Some(ms)) => format!(" ({code} · {ms}ms)"),
+                                            (Some(code), Some(ms)) => {
+                                                format!(" ({code} · {ms}ms)")
+                                            }
                                             (Some(code), None) => format!(" (exit {code})"),
                                             (None, Some(ms)) => format!(" ({ms}ms)"),
                                             (None, None) => String::new(),
                                         };
-                                        badge(format!("{prefix}{state_mark} {kind_lbl}{extra}"))
+                                        muted(format!("{prefix}{state_mark} {kind_lbl}{extra}"))
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(11.))
                                     }))
                                     .into_element()
                             } else {
                                 view().into_element()
                             })
                             .child(if !summary_line.is_empty() {
-                                muted(summary_line).into_element()
+                                muted(summary_line)
+                                    .pl(px(44.))
+                                    .text_size(px(12.))
+                                    .into_element()
                             } else {
                                 view().into_element()
                             })
