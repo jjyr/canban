@@ -594,7 +594,6 @@ struct TerminalRowModel {
     row_title: String,
     lead_icon: Icon,
     managed: bool,
-    host_badge: Option<String>,
     status: Option<super::labels::SidebarStatus>,
     hint: String,
     close_label: String,
@@ -614,7 +613,6 @@ fn build_terminal_row_model(
         .card
         .as_ref()
         .is_some_and(|c| scope == WorktreeScope::CardWorktree(c.id.clone()));
-    let host_in_scope = matches!(scope, WorktreeScope::Unassigned(_));
     let host_label = if e.host_id == "local" {
         "Local".into()
     } else {
@@ -625,9 +623,6 @@ fn build_terminal_row_model(
         row_title: super::labels::sidebar_row_title(e, in_own_card_wt),
         lead_icon: super::labels::sidebar_meta_icon(e),
         managed: e.is_managed(),
-        host_badge: (wide_row && !host_in_scope)
-            .then(|| super::labels::sidebar_host_badge(e, &host_label))
-            .flatten(),
         status: super::labels::sidebar_status_model(e, wide_row),
         hint: super::labels::sidebar_hint(e, &host_label, idle_minutes),
         close_label: format!("Close terminal {}", e.title()),
@@ -645,8 +640,6 @@ fn row(ui: Ui, id: String, model: Memo<Option<TerminalRowModel>>) -> impl IntoEl
         model.with(|m| m.as_ref().map(|r| r.row_title.clone()).unwrap_or_default())
     });
     let is_managed = computed(move || model.with(|m| m.as_ref().is_some_and(|r| r.managed)));
-    let host_badge =
-        computed(move || model.with(|m| m.as_ref().and_then(|r| r.host_badge.clone())));
     let status = computed(move || model.with(|m| m.as_ref().and_then(|r| r.status.clone())));
     let hint =
         computed(move || model.with(|m| m.as_ref().map(|r| r.hint.clone()).unwrap_or_default()));
@@ -683,20 +676,6 @@ fn row(ui: Ui, id: String, model: Memo<Option<TerminalRowModel>>) -> impl IntoEl
         }))
         .child(when(move || is_managed.get(), super::labels::managed_badge))
         .child(view().flex_1().min_w(px(0.)))
-        .child(when(
-            move || !hovered.get(),
-            move || {
-                dynamic(move || {
-                    host_badge.get().map(|host| {
-                        muted(format!("· {host}"))
-                            .text_size(px(10.5))
-                            .max_w(px(72.))
-                            .truncate()
-                            .flex_shrink_0()
-                    })
-                })
-            },
-        ))
         .child(when(
             move || !hovered.get(),
             move || dynamic(move || status.get().map(super::labels::render_sidebar_status)),

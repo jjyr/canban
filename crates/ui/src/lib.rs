@@ -117,10 +117,18 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     if let Some(boot) = startup::take_initial_bootstrap() {
         batch(move || {
             ui.apply_config(&boot.config);
-            if let Some(id) = crate::projects::selection::restore(
+            let restored = crate::projects::selection::restore(
                 &boot.snapshot.projects,
                 boot.saved_project.as_deref(),
-            ) {
+            );
+            ui.pending_remote_project.replace(
+                crate::projects::selection::PendingRemoteRestore::from_bootstrap(
+                    &boot.snapshot.projects,
+                    boot.saved_project.as_deref(),
+                    restored.as_deref(),
+                ),
+            );
+            if let Some(id) = restored {
                 ui.project.set(id);
             }
             ui.runtime_clock.set(canban_types::now());

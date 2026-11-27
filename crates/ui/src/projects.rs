@@ -1,6 +1,6 @@
 //! Project creation and work location settings: host-routed directory browser,
 //! automatic project naming until explicitly edited.
-pub(crate) mod selection;
+pub mod selection;
 use crate::presenter::*;
 use canban_types::{
     DEFAULT_WORKFLOW_TEMPLATE_ID, DetectedGitHub, Project, Snapshot, WorkflowTemplateFile,
@@ -566,6 +566,8 @@ impl ProjectArchiveBlockers {
 }
 
 pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectArchiveBlockers {
+    let project_host = snapshot.project_host(project_id);
+    let raw_pid = canban_types::unqualified_entity_id(project_id);
     let card_ids: std::collections::HashSet<&str> = snapshot
         .cards
         .iter()
@@ -576,14 +578,18 @@ pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectArchiveB
         .terminals
         .iter()
         .filter(|t| {
-            t.agent
-                .as_ref()
-                .is_some_and(|a| a.project_id == project_id && !a.finished())
-                || (t.runtime.as_ref().is_some_and(|r| r.state != "finished")
-                    && (t.origin_project_id.as_deref() == Some(project_id)
-                        || t.id.starts_with(&format!("merge-queue:{project_id}:"))
-                        || t.id.starts_with(&format!("configuration:{project_id}:"))
-                        || t.id.starts_with(&format!("scheduled:{project_id}:"))))
+            snapshot.terminal_host(&t.id) == project_host
+                && (t
+                    .agent
+                    .as_ref()
+                    .is_some_and(|a| a.project_id == project_id && !a.finished())
+                    || (t.runtime.as_ref().is_some_and(|r| r.state != "finished") && {
+                        let raw_tid = canban_types::unqualified_entity_id(&t.id);
+                        t.origin_project_id.as_deref() == Some(project_id)
+                            || raw_tid.starts_with(&format!("merge-queue:{raw_pid}:"))
+                            || raw_tid.starts_with(&format!("configuration:{raw_pid}:"))
+                            || raw_tid.starts_with(&format!("scheduled:{raw_pid}:"))
+                    }))
         })
         .count();
     let active_merges = snapshot

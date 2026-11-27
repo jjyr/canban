@@ -73,16 +73,6 @@ pub fn sidebar_row_title(e: &Entry, in_own_card_worktree: bool) -> String {
         .join(" ")
 }
 
-/// Optional host badge for single-line sidebar rows: omitted for `local` terminals,
-/// returning the remote host display name otherwise.
-pub fn sidebar_host_badge(e: &Entry, machine: &str) -> Option<String> {
-    if e.host_id.is_empty() || e.host_id == "local" {
-        None
-    } else {
-        Some(machine.to_owned())
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GroupStatusSummary {
     pub total: usize,

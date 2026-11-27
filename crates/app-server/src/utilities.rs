@@ -270,7 +270,20 @@ impl AppServer {
                         "last_project must be a Project ID or null"
                     );
                     if let Some(id) = project.as_str() {
-                        let _: Project = self.store.lock().unwrap().db().get(id)?;
+                        ensure!(
+                            !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control),
+                            "Invalid last_project ID"
+                        );
+                        if id.starts_with(canban_types::QUALIFIED_HOST_PREFIX) {
+                            let valid_qualified = canban_types::split_qualified_host_id(id)
+                                .is_some_and(|(host_id, raw_id)| {
+                                    !host_id.is_empty()
+                                        && host_id != "local"
+                                        && !raw_id.is_empty()
+                                        && canban_types::split_qualified_host_id(raw_id).is_none()
+                                });
+                            ensure!(valid_qualified, "Invalid remote last_project ID");
+                        }
                     }
                 }
                 if let Some(family) = p.get("terminal_font_family") {

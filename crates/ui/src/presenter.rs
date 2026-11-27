@@ -194,6 +194,8 @@ pub struct Ui {
     pub editing_comment: Signal<Option<String>>,
     pub deleting_comment: Signal<Option<String>>,
     pub project: Signal<String>,
+    pub(crate) pending_remote_project:
+        Stored<Option<crate::projects::selection::PendingRemoteRestore>>,
     pub archive_query: Signal<String>,
     pub archive_folds: Signal<BTreeSet<String>>,
     pub card: Signal<String>,
@@ -642,6 +644,7 @@ impl Ui {
             github_account,
             notification_delivery: stored(Default::default()),
             notification_resync: stored(true),
+            pending_remote_project: stored(None),
             quick_open: signal(false),
             project_picker: signal(false),
             search_query: signal(String::new()),
@@ -1575,18 +1578,40 @@ pub fn refresh(ui: Ui) {
                 }
                 let different = ui.snapshot.with_untracked(|old| old != &snapshot);
                 batch(move || {
+                    let cur_project = ui.project.get_untracked();
+                    let restored_remote = if cur_project.is_empty() {
+                        None
+                    } else {
+                        ui.pending_remote_project.with(|slot| {
+                            crate::projects::selection::PendingRemoteRestore::resolve(
+                                slot,
+                                &cur_project,
+                                &snapshot.projects,
+                                &summaries,
+                            )
+                        })
+                    };
                     if !summaries.is_empty() {
                         ui.apply_hosts(summaries);
                     }
                     ui.apply_config(&config);
-                    let cur_project = ui.project.get_untracked();
                     if cur_project.is_empty() {
-                        if let Some(id) = crate::projects::selection::restore(
+                        let restored = crate::projects::selection::restore(
                             &snapshot.projects,
                             saved_project.as_deref(),
-                        ) {
+                        );
+                        ui.pending_remote_project.replace(
+                            crate::projects::selection::PendingRemoteRestore::from_bootstrap(
+                                &snapshot.projects,
+                                saved_project.as_deref(),
+                                restored.as_deref(),
+                            ),
+                        );
+                        if let Some(id) = restored {
                             ui.project.set(id);
                         }
+                    } else if let Some(restored_remote) = restored_remote {
+                        ui.project.set(restored_remote);
                     } else if !snapshot.projects.iter().any(|p| p.id == cur_project) {
                         let next = crate::projects::selection::restore(
                             &snapshot.projects,

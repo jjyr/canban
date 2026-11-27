@@ -877,6 +877,7 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "github.ci_fast_fail_and_cardless_issue",
     "github.intake_suppression_and_closure",
     "client_pages.insights_and_activity",
+    "client_pages.remote_last_project_preference",
     "herdr.overview_saved_output_and_activity_rules",
     // Card #180: card agent assignee & workflow default_agent/override
     "assignee.create_wake",

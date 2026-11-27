@@ -17,7 +17,8 @@ use anyhow::{Context, Result, ensure};
 use canban_types::{
     ActivityBucket, ActivityDetail, ActivityKind, ActivitySegment, AgentBucketStat, AppEvent,
     Delivery, DeliveryMode, DwellBucketTotals, DwellLane, EnvWriteEntry, Event, EventDelivery,
-    HumanGate, ProjectActivityTotals, Report, RuntimeState, Snapshot, TerminalContext,
+    HostConnectionState, HumanGate, ProjectActivityTotals, Report, RuntimeState, Snapshot,
+    TerminalContext,
 };
 use canban_ui::{
     BackendRefreshAction,
@@ -35,6 +36,7 @@ use canban_ui::{
         apply_incremental_page, apply_older_page, apply_runtime_state_to_snapshot_at,
         apply_tail_page, confirmed_max_sequence, parse_timeline_page, submission,
     },
+    projects::selection::{PendingRemoteRestore, restore as restore_project_selection},
     utilities::{should_apply_usage_push, should_apply_utilities_push},
     with_ui_projection,
 };
@@ -3016,6 +3018,238 @@ steps:
                 .finish_terminal(&open_addr, 0, "done");
 
             world.hit("client_pages.insights_and_activity");
+        }
+
+        // 13. Remote `last_project` desktop preference persistence & deferred UI restore.
+        {
+            // Both unqualified remote IDs (non-colliding) and qualified remote IDs (colliding with
+            // local) must be accepted by the local AppServer.
+            let saved_remote_unqualified = world.server_call(
+                "local-server",
+                "utilities.configure",
+                json!({ "last_project": pid_a }),
+            )?;
+            ensure!(
+                saved_remote_unqualified["preferences"]["last_project"].as_str()
+                    == Some(pid_a.as_str()),
+                "local AppServer must accept non-colliding remote last_project IDs: {saved_remote_unqualified}"
+            );
+            let qualified_remote_pid = canban_types::qualify_host_id("remote-a", &pid_local);
+            let saved_remote_qualified = world.server_call(
+                "local-server",
+                "utilities.configure",
+                json!({ "last_project": qualified_remote_pid }),
+            )?;
+            ensure!(
+                saved_remote_qualified["preferences"]["last_project"].as_str()
+                    == Some(qualified_remote_pid.as_str()),
+                "local AppServer must accept qualified remote last_project IDs: {saved_remote_qualified}"
+            );
+            let fetched_state = world.server_call("local-server", "utilities.state", json!({}))?;
+            ensure!(
+                fetched_state["preferences"]["last_project"].as_str()
+                    == Some(qualified_remote_pid.as_str()),
+                "utilities.state must reflect saved remote last_project: {fetched_state}"
+            );
+
+            // Reject empty, control-char, oversized, and malformed `host::` IDs.
+            let oversized = format!("host::remote-a::{}", "x".repeat(520));
+            for invalid in [
+                "",
+                "bad\nid",
+                "host::no-separator",
+                "host::local::abc",
+                "host::::abc",
+                "host::remote-a::",
+                "host::remote-a::host::remote-b::abc",
+                "host::remote-a::bad\nid",
+                oversized.as_str(),
+            ] {
+                let err = world.server_call(
+                    "local-server",
+                    "utilities.configure",
+                    json!({ "last_project": invalid }),
+                );
+                ensure!(
+                    err.is_err(),
+                    "utilities.configure must reject invalid last_project {invalid:?}"
+                );
+            }
+
+            // Local project ID and null clearing remain valid, then restore remote preference.
+            let saved_local = world.server_call(
+                "local-server",
+                "utilities.configure",
+                json!({ "last_project": pid_local }),
+            )?;
+            ensure!(
+                saved_local["preferences"]["last_project"].as_str() == Some(pid_local.as_str()),
+                "local last_project must still save: {saved_local}"
+            );
+            let cleared = world.server_call(
+                "local-server",
+                "utilities.configure",
+                json!({ "last_project": Value::Null }),
+            )?;
+            ensure!(
+                cleared["preferences"]["last_project"].is_null(),
+                "null last_project must clear preference: {cleared}"
+            );
+            let re_saved = world.server_call(
+                "local-server",
+                "utilities.configure",
+                json!({ "last_project": pid_a }),
+            )?;
+            ensure!(
+                re_saved["preferences"]["last_project"].as_str() == Some(pid_a.as_str()),
+                "re-saving remote last_project must succeed: {re_saved}"
+            );
+
+            // Deferred UI restore: startup sees only local projects, waits while remote-a is
+            // Connecting, and restores pid_a once remote-a connects with its merged snapshot.
+            let merged_snap = world.client_merged_snapshot()?;
+            let live_hosts = world.client_host_summaries();
+            let local_only_projects: Vec<_> = merged_snap
+                .projects
+                .iter()
+                .filter(|p| merged_snap.project_host(&p.id) == "local")
+                .cloned()
+                .collect();
+            let fallback = restore_project_selection(&local_only_projects, Some(&pid_a))
+                .context("local fallback project expected")?;
+            ensure!(fallback != pid_a);
+            let mut pending = PendingRemoteRestore::from_bootstrap(
+                &local_only_projects,
+                Some(&pid_a),
+                Some(&fallback),
+            );
+            ensure!(
+                pending.is_some(),
+                "startup with missing remote saved_project must arm PendingRemoteRestore"
+            );
+
+            let connecting_hosts: Vec<_> = live_hosts
+                .iter()
+                .cloned()
+                .map(|mut h| {
+                    if h.id == "remote-a" {
+                        h.connection = HostConnectionState::Connecting;
+                    }
+                    h
+                })
+                .collect();
+            ensure!(
+                PendingRemoteRestore::resolve(
+                    &mut pending,
+                    &fallback,
+                    &local_only_projects,
+                    &connecting_hosts,
+                )
+                .is_none()
+                    && pending.is_some(),
+                "PendingRemoteRestore must wait while remote host is still Connecting"
+            );
+
+            let restored_remote = PendingRemoteRestore::resolve(
+                &mut pending,
+                &fallback,
+                &merged_snap.projects,
+                &live_hosts,
+            );
+            ensure!(
+                restored_remote.as_deref() == Some(pid_a.as_str()) && pending.is_none(),
+                "PendingRemoteRestore must restore remote project once merged: {restored_remote:?}"
+            );
+
+            // Manual user switch before remote connects cancels deferred restore.
+            let mut pending_manual = PendingRemoteRestore::from_bootstrap(
+                &local_only_projects,
+                Some(&pid_a),
+                Some(&fallback),
+            );
+            ensure!(
+                PendingRemoteRestore::resolve(
+                    &mut pending_manual,
+                    "user-picked-other",
+                    &merged_snap.projects,
+                    &live_hosts,
+                )
+                .is_none()
+                    && pending_manual.is_none(),
+                "manual user selection must cancel PendingRemoteRestore"
+            );
+
+            // Connected remote host missing a deleted project clears PendingRemoteRestore cleanly.
+            let mut pending_deleted = PendingRemoteRestore::from_bootstrap(
+                &local_only_projects,
+                Some("host::remote-a::deleted-proj"),
+                Some(&fallback),
+            );
+            ensure!(
+                PendingRemoteRestore::resolve(
+                    &mut pending_deleted,
+                    &fallback,
+                    &merged_snap.projects,
+                    &live_hosts,
+                )
+                .is_none()
+                    && pending_deleted.is_none(),
+                "connected remote host without saved project must clear PendingRemoteRestore"
+            );
+
+            // Cross-host archive blocker scoping: a remote configuration/merge/scheduled terminal
+            // sharing the same raw project ID as a local project must ONLY block the remote host's
+            // qualified project, never the local project.
+            {
+                let mut collision_snap = merged_snap.clone();
+                let shared_raw_pid = pid_local.clone();
+                let remote_shared_pid = canban_types::qualify_host_id("remote-a", &shared_raw_pid);
+                if let Some(mut local_proj) = collision_snap
+                    .projects
+                    .iter()
+                    .find(|p| p.id == shared_raw_pid)
+                    .cloned()
+                {
+                    local_proj.id = remote_shared_pid.clone();
+                    collision_snap.projects.push(local_proj);
+                    collision_snap
+                        .entity_hosts
+                        .insert(remote_shared_pid.clone(), "remote-a".into());
+                }
+                let remote_cfg_tid = format!("configuration:{shared_raw_pid}:sess-1");
+                let remote_term: canban_types::TerminalEntry = serde_json::from_value(json!({
+                    "id": remote_cfg_tid,
+                    "conversation_id": null,
+                    "number": 1,
+                    "name": "Remote Config",
+                    "runtime": {
+                        "state": "running",
+                        "connection": "connected",
+                        "terminal": "term-remote-cfg"
+                    },
+                    "created_at": 1
+                }))?;
+                collision_snap.terminals.push(remote_term);
+                collision_snap
+                    .entity_hosts
+                    .insert(remote_cfg_tid, "remote-a".into());
+                let baseline_local =
+                    canban_ui::projects::active_blockers(&merged_snap, &shared_raw_pid);
+                let local_blockers =
+                    canban_ui::projects::active_blockers(&collision_snap, &shared_raw_pid);
+                let remote_blockers =
+                    canban_ui::projects::active_blockers(&collision_snap, &remote_shared_pid);
+                ensure!(
+                    local_blockers.live_terminals == baseline_local.live_terminals,
+                    "remote terminal with colliding raw project ID must not block local archive: before={baseline_local:?} after={local_blockers:?}"
+                );
+                ensure!(
+                    remote_blockers.live_terminals == 1,
+                    "remote terminal must block its own remote project archive: {remote_blockers:?}"
+                );
+            }
+
+            world.hit("client_pages.remote_last_project_preference");
         }
 
         world.heal_and_quiesce(20_000)?;
