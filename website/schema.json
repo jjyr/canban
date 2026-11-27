@@ -49,87 +49,87 @@
         "name": "JJy",
         "url": "https://github.com/jjyr"
       },
-      "description": "Organize with Kanban. Work with native agent CLIs. Canban is a lightweight, open-source native macOS and Linux Rust app (zero Electron) pairing local Kanban cards, a global Attention Inbox, isolated Git worktree diff review, optional local workflows, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
+      "description": "Organize with Kanban. Work with native agent CLIs. Canban is a local-first, zero-telemetry, direct end-to-end encrypted native macOS and Linux Rust app (zero Electron) pairing local Kanban cards, a global Attention Inbox, isolated Git worktree diff review, optional local workflows, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
       "featureList": [
-        "Flexible Kanban board with Markdown specs, #Card links, screenshots, @Agent discussions, isolated per-card Git worktrees, and GitHub Issue/PR sync",
+        "Flexible Kanban board with Markdown specs, #Card links, screenshots, @Agent discussions, card agent assignees, isolated per-card Git worktrees, and GitHub Issue/PR sync",
         "GitHub Actions-like YAML workflows & Visual Studio with shell scripts, agent + prompt steps, cron schedules, and serialized FIFO Queue Merge",
         "Global Attention Inbox (⌘I) across all projects, terminals, and remote hosts with one-click jump to Card and live TTY",
         "Native Agent CLI support in persistent Herdr PTY terminals (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode, and 20+ CLIs) powered by Rust, longbridge/nsh, and libghostty-vt",
-        "Built-in inline Git diff review, Timeline-first Insights, XChaCha20-Poly1305 encrypted secret vaults, and simultaneous multi-host Linux canband connections with Tailscale WhoIs auto-auth, yamux/1 per-device tokens, on-demand Tailnet discovery, SSH tunnels, and offline editing with 3-way sync"
+        "Zero data collection, no relay servers, XChaCha20-Poly1305 encrypted local secret vaults, and direct Noise_XX end-to-end encrypted multi-host Linux canband connections with X25519 public-key auth, host key pinning, optional Tailscale WhoIs auto-auth & Tailnet discovery, SSH tunnels, and offline editing with 3-way sync"
       ],
       "keywords": "Canban, Kanban, canban.dev, AI coding agent kanban, coding agents workbench, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, Attention Inbox, libghostty, Tailscale, SSH, macOS Rust app, Linux GTK4 Rust app"
     }
   ],
   "localized": {
     "en": {
-      "website_desc": "Official website for Canban — Organize with Kanban. Work with native agent CLIs. A lightweight, open-source native macOS and Linux Rust app (Canban = Kanban + Workflow + Herdr).",
-      "software_desc": "Organize with Kanban. Work with native agent CLIs. Canban is a lightweight, open-source native macOS and Linux Rust app (zero Electron) pairing local Kanban cards, a global Attention Inbox, isolated Git worktree diff review, optional local workflows, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
+      "website_desc": "Official website for Canban — Organize with Kanban. Work with native agent CLIs. A local-first, zero-telemetry, direct end-to-end encrypted open-source native Rust app (Canban = Kanban + Workflow + Herdr).",
+      "software_desc": "Organize with Kanban. Work with native agent CLIs. Canban is a local-first, zero-telemetry, direct end-to-end encrypted native macOS and Linux Rust app (zero Electron) pairing local Kanban cards, a global Attention Inbox, isolated Git worktree diff review, optional local workflows, and Herdr persistent PTY terminals across local and remote Linux canband hosts.",
       "application_sub_category": "Lightweight Kanban & Native Agent CLI App",
       "software_requirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode)",
       "feature_list": [
-        "Flexible Kanban board with Markdown specs, #Card links, screenshots, @Agent discussions, isolated per-card Git worktrees, and GitHub Issue/PR sync",
+        "Flexible Kanban board with Markdown specs, #Card links, screenshots, @Agent discussions, card agent assignees, isolated per-card Git worktrees, and GitHub Issue/PR sync",
         "GitHub Actions-like YAML workflows & Visual Studio with shell scripts, agent + prompt steps, cron schedules, and serialized FIFO Queue Merge",
         "Global Attention Inbox (⌘I) across all projects, terminals, and remote hosts with one-click jump to Card and live TTY",
         "Native Agent CLI support in persistent Herdr PTY terminals (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode, and 20+ CLIs) powered by Rust, longbridge/nsh, and libghostty-vt",
-        "Built-in inline Git diff review, Timeline-first Insights, XChaCha20-Poly1305 encrypted secret vaults, and simultaneous multi-host Linux canband connections with Tailscale WhoIs auto-auth, yamux/1 per-device tokens, on-demand Tailnet discovery, SSH tunnels, and offline editing with 3-way sync"
+        "Zero data collection, no relay servers, XChaCha20-Poly1305 encrypted local secret vaults, and direct Noise_XX end-to-end encrypted multi-host Linux canband connections with X25519 public-key auth, host key pinning, optional Tailscale WhoIs auto-auth & Tailnet discovery, SSH tunnels, and offline editing with 3-way sync"
       ],
-      "keywords": "Canban, Kanban, canban.dev, AI coding agent kanban, coding agents workbench, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, Attention Inbox, libghostty, Tailscale, SSH, macOS Rust app, Linux GTK4 Rust app"
+      "keywords": "Canban, Kanban, canban.dev, AI coding agent kanban, coding agents workbench, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, Attention Inbox, libghostty, Noise_XX, E2EE, Tailscale, SSH, macOS Rust app, Linux GTK4 Rust app"
     },
     "zh": {
-      "website_desc": "Canban（canban.dev）官方网站 — 用看板理清任务，用原生 Agent CLI 完成开发。轻量级开源原生 macOS / Linux Rust 应用（Canban = Kanban + Workflow + Herdr）。",
-      "software_desc": "用看板理清任务，用原生 Agent CLI 完成开发。Canban 是基于 Rust 与 libghostty-vt 构建的轻量级开源原生 macOS 和 Linux 应用（零 Electron），将本地 Kanban 卡片、全局注意力收件箱（⌘I）、隔离 Git Worktree Diff 审查、按需启用的本地工作流以及支持本机与远程 Linux canband 主机的 Herdr 持久化 PTY 终端融为一体。",
+      "website_desc": "Canban（canban.dev）官方网站 — 用看板理清任务，用原生 Agent CLI 完成开发。本地优先、零资料收集、无中转全程端到端加密的开源原生 Rust 应用（Canban = Kanban + Workflow + Herdr）。",
+      "software_desc": "用看板理清任务，用原生 Agent CLI 完成开发。Canban 是基于 Rust 与 libghostty-vt 构建的本地优先、零资料收集、无中转全程端到端加密的开源原生 macOS 和 Linux 应用（零 Electron），将本地 Kanban 卡片、全局注意力收件箱（⌘I）、隔离 Git Worktree Diff 审查、按需启用的本地工作流以及支持本机与远程 Linux canband 主机的 Herdr 持久化 PTY 终端融为一体。",
       "application_sub_category": "轻量级看板与原生 Agent CLI 应用",
       "software_requirements": "git、Herdr Core (hc)、Linux 桌面需 GTK4 运行库，以及任意原生 Agent CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等）",
       "feature_list": [
-        "灵活的 Kanban 看板：集成 Markdown 规格、#Card 关联、截图、@Agent 讨论、单卡隔离 Git Worktree 与 GitHub Issue/PR 同步",
+        "灵活的 Kanban 看板：集成 Markdown 规格、#Card 关联、截图、@Agent 讨论、卡片 Agent 指派、单卡隔离 Git Worktree 与 GitHub Issue/PR 同步",
         "类 GitHub Actions 的 YAML 工作流与 Visual Studio：支持 Shell 脚本、Agent 步骤、Cron 定时任务与串行 FIFO Queue Merge",
         "全局注意力收件箱（⌘I）：跨项目、本地与远程主机捕获等待输入、审批或审查的 Agent 并一键直达卡片与实时 TTY",
         "基于 Rust、longbridge/nsh、libghostty-vt 与 Herdr 持久 PTY 原生运行 Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等 24 种内置 CLI",
-        "内置行级 Git Diff 审查、时间线优先 Insights、XChaCha20-Poly1305 加密密钥库，以及通过 Tailscale WhoIs 自动认证、yamux/1 每设备 Token、按需 Tailnet 发现、SSH 隧道与离线三方同步同时连接多台远程 Linux canband 主机"
+        "零资料收集、无中转服务器、XChaCha20-Poly1305 本地加密密钥库，以及基于 Noise_XX 强制端到端加密与 X25519 公钥认证、主机公钥固定、可选 Tailscale WhoIs 自动认证与按需 Tailnet 发现、SSH 隧道和离线三方同步的多主机直连"
       ],
-      "keywords": "Canban, Kanban, 看板, AI 编程 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, 注意力收件箱, libghostty, Tailscale, SSH, Rust 桌面应用"
+      "keywords": "Canban, Kanban, 看板, AI 编程 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, 注意力收件箱, libghostty, Noise_XX, E2EE, Tailscale, SSH, Rust 桌面应用"
     },
     "zh-tw": {
-      "website_desc": "Canban（canban.dev）官方網站 — 用看板理清任務，用原生 Agent CLI 完成開發。輕量級開源原生 macOS / Linux Rust 應用（Canban = Kanban + Workflow + Herdr）。",
-      "software_desc": "用看板理清任務，用原生 Agent CLI 完成開發。Canban 是基於 Rust 與 libghostty-vt 建置的輕量級開源原生 macOS 與 Linux 應用（零 Electron），整合本地 Kanban 卡片、全域注意力收件匣（⌘I）、隔離 Git Worktree Diff 審查、可選本地工作流，以及支援本機與遠端 Linux canband 主機的 Herdr 持久化 PTY 終端機。",
+      "website_desc": "Canban（canban.dev）官方網站 — 用看板理清任務，用原生 Agent CLI 完成開發。本地優先、零資料收集、無中轉全程端對端加密的開源原生 Rust 應用（Canban = Kanban + Workflow + Herdr）。",
+      "software_desc": "用看板理清任務，用原生 Agent CLI 完成開發。Canban 是基於 Rust 與 libghostty-vt 建置的本地優先、零資料收集、無中轉全程端對端加密的開源原生 macOS 與 Linux 應用（零 Electron），整合本地 Kanban 卡片、全域注意力收件匣（⌘I）、隔離 Git Worktree Diff 審查、可選本地工作流，以及支援本機與遠端 Linux canband 主機的 Herdr 持久化 PTY 終端機。",
       "application_sub_category": "輕量級看板與原生 Agent CLI 應用",
       "software_requirements": "git、Herdr Core (hc)、Linux 桌面需 GTK4 執行庫，以及任意原生 Agent CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等）",
       "feature_list": [
-        "靈活的 Kanban 看板：整合 Markdown 規格、#Card 關聯、截圖、@Agent 討論、單卡隔離 Git Worktree 與 GitHub Issue/PR 同步",
+        "靈活的 Kanban 看板：整合 Markdown 規格、#Card 關聯、截圖、@Agent 討論、卡片 Agent 指派、單卡隔離 Git Worktree 與 GitHub Issue/PR 同步",
         "類 GitHub Actions 的 YAML 工作流與 Visual Studio：支援 Shell 腳本、Agent 步驟、Cron 排程與序列 FIFO Queue Merge",
         "全域注意力收件匣（⌘I）：跨專案、本機與遠端主機即時捕捉等待輸入或審核的 Agent 並一鍵跳轉卡片與即時 TTY",
         "透過 Rust、longbridge/nsh、libghostty-vt 與 Herdr 持久 PTY 原生執行 Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等 24 種內建 CLI",
-        "內建行級 Git Diff 審查、時間軸優先 Insights、XChaCha20-Poly1305 加密金鑰庫，以及透過 Tailscale WhoIs 自動驗證、yamux/1 每裝置權杖、按需 Tailnet 探索、SSH 通道與離線三方同步同時連線多台遠端 Linux canband 主機"
+        "零資料收集、無中轉伺服器、XChaCha20-Poly1305 本地加密金鑰庫，以及基於 Noise_XX 強制端對端加密與 X25519 公鑰驗證、主機公鑰固定、可選 Tailscale WhoIs 自動驗證與按需 Tailnet 探索、SSH 通道和離線三方同步的多主機直連"
       ],
-      "keywords": "Canban, Kanban, 看板, AI 程式設計 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust 桌面應用"
+      "keywords": "Canban, Kanban, 看板, AI 程式設計 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Noise_XX, E2EE, Tailscale, SSH, Rust 桌面應用"
     },
     "ja": {
-      "website_desc": "Canban（canban.dev）公式サイト — カンバンで整理し、ネイティブ Agent CLI で開発する。軽量なオープンソース macOS / Linux ネイティブ Rust アプリ（Canban = Kanban + Workflow + Herdr）。",
-      "software_desc": "カンバンで整理し、ネイティブ Agent CLI で開発する。Canban は Rust と libghostty-vt で構築された Electron 不使用の軽量オープンソース macOS・Linux アプリです。ローカル Kanban カード、グローバル通知インボックス（⌘I）、独立 Git Worktree Diff レビュー、オプションのローカルワークフロー、ローカルおよびリモート Linux canband ホストの永続 Herdr PTY ターミナルを統合します。",
+      "website_desc": "Canban（canban.dev）公式サイト — カンバンで整理し、ネイティブ Agent CLI で開発する。ローカル優先・データ収集ゼロ・リレーなしの完全 E2E 暗号化を備えたオープンソース Rust アプリ（Canban = Kanban + Workflow + Herdr）。",
+      "software_desc": "カンバンで整理し、ネイティブ Agent CLI で開発する。Canban は Rust と libghostty-vt で構築された、ローカル優先・データ収集ゼロ・リレーなしの完全 E2E 暗号化を備える Electron 不使用の軽量オープンソース macOS・Linux アプリです。ローカル Kanban カード、グローバル通知インボックス（⌘I）、独立 Git Worktree Diff レビュー、オプションのローカルワークフロー、ローカルおよびリモート Linux canband ホストの永続 Herdr PTY ターミナルを統合します。",
       "application_sub_category": "軽量カンバン＆ネイティブ Agent CLI アプリ",
       "software_requirements": "git、Herdr Core (hc)、Linux デスクトップでは GTK4 ランタイム、および任意のネイティブ Agent CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode など）",
       "feature_list": [
-        "柔軟な Kanban ボード：Markdown 仕様、#Card リンク、スクリーンショット、@Agent 議論、カード単位の隔離 Git Worktree、GitHub Issue/PR 同期を一元管理",
+        "柔軟な Kanban ボード：Markdown 仕様、#Card リンク、スクリーンショット、@Agent 議論、カード担当 Agent 指定、カード単位の隔離 Git Worktree、GitHub Issue/PR 同期を一元管理",
         "GitHub Actions 風 YAML ワークフロー＆ Visual Studio：シェルスクリプト、Agent ステップ、Cron スケジュール、直列 FIFO Queue Merge を自動化",
         "グローバル Attention Inbox（⌘I）：複数プロジェクト・ターミナル・リモートホストを横断して入力待ちや承認待ちの Agent を検知しワンクリックで移動",
         "Rust・longbridge/nsh・libghostty-vt と永続 Herdr PTY により Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode など 24 種のネイティブ CLI をそのまま実行",
-        "内蔵インライン Git Diff レビュー、タイムライン中心の Insights、XChaCha20-Poly1305 暗号化シークレット Vault、そして Tailscale WhoIs 自動認証・yamux/1 デバイス別トークン・オンデマンド Tailnet 検出・SSH トンネル・オフライン編集＆3-way 同期による複数リモート Linux canband ホスト同時接続"
+        "データ収集ゼロ・リレーサーバーなし・XChaCha20-Poly1305 ローカル暗号化シークレット Vault、さらに Noise_XX 強制 E2E 暗号化と X25519 公開鍵認証・ホスト鍵ピン留め・任意の Tailscale WhoIs 自動認証と Tailnet 検出・SSH トンネル・オフライン編集＆3-way 同期による複数リモート Linux canband ホスト直接接続"
       ],
-      "keywords": "Canban, Kanban, カンバン, AI コーディングエージェント, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust デスクトップアプリ"
+      "keywords": "Canban, Kanban, カンバン, AI コーディングエージェント, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Noise_XX, E2EE, Tailscale, SSH, Rust デスクトップアプリ"
     },
     "ko": {
-      "website_desc": "Canban(canban.dev) 공식 웹사이트 — 칸반으로 정리하고 네이티브 Agent CLI로 개발하세요. 가벼운 오픈소스 macOS / Linux 네이티브 Rust 앱 (Canban = Kanban + Workflow + Herdr).",
-      "software_desc": "칸반으로 정리하고 네이티브 Agent CLI로 개발하세요. Canban은 Rust와 libghostty-vt로 구축된 Electron 없는 경량 오픈소스 macOS 및 Linux 앱입니다. 로컬 Kanban 카드, 전역 주의 인박스(⌘I), 독립 Git Worktree Diff 리뷰, 선택적 로컬 워크플로우, 로컬 및 원격 Linux canband 호스트의 Herdr 영구 PTY 터미널을 하나로 통합합니다.",
+      "website_desc": "Canban(canban.dev) 공식 웹사이트 — 칸반으로 정리하고 네이티브 Agent CLI로 개발하세요. 로컬 우선·데이터 수집 제로·릴레이 없는 직접 E2E 암호화를 지원하는 오픈소스 네이티브 Rust 앱 (Canban = Kanban + Workflow + Herdr).",
+      "software_desc": "칸반으로 정리하고 네이티브 Agent CLI로 개발하세요. Canban은 Rust와 libghostty-vt로 구축된 로컬 우선·데이터 수집 제로·릴레이 없는 직접 E2E 암호화 오픈소스 macOS 및 Linux 앱(Electron 없음)입니다. 로컬 Kanban 카드, 전역 주의 인박스(⌘I), 독립 Git Worktree Diff 리뷰, 선택적 로컬 워크플로우, 로컬 및 원격 Linux canband 호스트의 Herdr 영구 PTY 터미널을 하나로 통합합니다.",
       "application_sub_category": "경량 칸반 및 네이티브 Agent CLI 앱",
       "software_requirements": "git, Herdr Core (hc), Linux 데스크톱용 GTK4 런타임 및 네이티브 Agent CLI (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode 등)",
       "feature_list": [
-        "유연한 Kanban 보드: Markdown 명세, #Card 링크, 스크린샷, @Agent 대화, 카드별 격리 Git Worktree, GitHub Issue/PR 동기화 통합",
+        "유연한 Kanban 보드: Markdown 명세, #Card 링크, 스크린샷, @Agent 대화, 카드 담당 Agent 지정, 카드별 격리 Git Worktree, GitHub Issue/PR 동기화 통합",
         "GitHub Actions 스타일 YAML 워크플로우 및 Visual Studio: 셸 스크립트, Agent 단계, Cron 스케줄, 직렬 FIFO Queue Merge 자동화",
         "전역 Attention Inbox (⌘I): 모든 프로젝트와 원격 호스트에서 승인·입력 대기 중인 에이전트를 즉시 감지하고 카드 및 실시간 TTY로 바로 이동",
         "Rust, longbridge/nsh, libghostty-vt 및 영구 Herdr PTY로 Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode 등 24종의 네이티브 CLI 무손실 실행",
-        "내장 인라인 Git Diff 리뷰, 타임라인 중심 Insights, XChaCha20-Poly1305 암호화 시크릿 Vault, 그리고 Tailscale WhoIs 자동 인증·yamux/1 기기별 토큰·온디맨드 Tailnet 탐색·SSH 터널·오프라인 편집 및 3-way 동기화를 통한 다중 원격 Linux canband 호스트 동시 연결"
+        "데이터 수집 제로·릴레이 서버 없음·XChaCha20-Poly1305 로컬 암호화 시크릿 Vault, 그리고 Noise_XX 필수 종단간 암호화(E2EE)와 X25519 공개키 인증·호스트 키 고정·선택적 Tailscale WhoIs 자동 인증 및 Tailnet 탐색·SSH 터널·오프라인 편집 및 3-way 동기화를 통한 다중 원격 Linux canband 호스트 직접 연결"
       ],
-      "keywords": "Canban, Kanban, 칸반, AI 코딩 에이전트 워크벤치, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust 데스크톱 앱"
+      "keywords": "Canban, Kanban, 칸반, AI 코딩 에이전트 워크벤치, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Noise_XX, E2EE, Tailscale, SSH, Rust 데스크톱 앱"
     }
   }
 }

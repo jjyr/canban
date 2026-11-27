@@ -12,10 +12,10 @@
     "nav_aria": "Main navigation",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-26",
+    "install_updated": "2026-11-27",
     "install_title": "Install Canban",
     "install_desc": "Install or update Canban on macOS, Linux, and Android, set up a headless server, and find answers to common questions.",
-    "install_intro": "Organize with Kanban. Work with native agent CLIs — lightweight on your desktop, persistent on your server.",
+    "install_intro": "Organize with Kanban. Work with native agent CLIs — local-first, zero data collection, direct end-to-end encrypted.",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS desktop app showing Card #2 in Develop with an isolated Git worktree, activity comments, workflow pipeline status, and a live Herdr @developer terminal running cargo test.",
@@ -34,10 +34,10 @@
     "linux_text": "Installs to ~/.local/opt/canban and adds an application launcher. GTK4 and GStreamer runtime libraries are required.",
     "linux_deps": "Linux runtime dependencies",
     "headless": "Headless Linux server",
-    "headless_text": "Install the CLI and daemon without GTK4 or a desktop session. Connect from the desktop app over SSH or Tailscale. Install Git, Herdr Core, your agent CLI, and project dependencies on the server.",
+    "headless_text": "Install the CLI and daemon without GTK4 or a desktop session. Connect directly from desktop or mobile with end-to-end encryption and no relay servers — optionally over Tailscale or SSH. Install Git, Herdr Core, your agent CLI, and project dependencies on the server.",
     "mobile": "Mobile",
     "android": "Android · arm64-v8a",
-    "android_text": "Download the signed release APK to connect to your macOS or Linux canband hosts over Tailscale (zero-QR WhoIs auto-auth and on-demand Tailnet discovery) or one-time QR pairing. Subscribe with Obtainium for automatic updates directly from GitHub Releases.",
+    "android_text": "Download the signed release APK to connect directly to your macOS or Linux canband hosts with end-to-end encryption and no relay servers — using one-time QR pairing or optionally Tailscale (zero-QR WhoIs auto-auth and on-demand Tailnet discovery). Subscribe with Obtainium for automatic updates directly from GitHub Releases.",
     "android_download": "Download Android APK",
     "android_obtainium": "Get it on Obtainium",
     "android_releases_link": "Latest release on GitHub",
@@ -66,7 +66,11 @@
       ],
       [
         "Can I run agents on a remote server?",
-        "Yes. Install Canban in headless mode on a Linux server, then connect from the desktop app over SSH or Tailscale to manage remote tasks and terminals. Install your agent CLI and development dependencies on the remote machine."
+        "Yes. Install Canban in headless mode on a Linux server, then connect directly from the desktop or mobile app with end-to-end encryption (optionally paired with Tailscale or SSH) to manage remote tasks and terminals. Install your agent CLI and development dependencies on the remote machine."
+      ],
+      [
+        "Does Canban collect data or relay my traffic?",
+        "No. Canban collects zero telemetry, analytics, or user data, requires no cloud account, and runs no relay servers. All boards, cards, and workflows stay on your own machines in local SQLite (with secrets encrypted at rest), and all desktop/mobile-to-host connections are direct and end-to-end encrypted. External traffic only goes directly to GitHub (when you enable GitHub integration or check releases) or to the model providers used by your own agent CLIs."
       ],
       [
         "Is Canban free?",
@@ -95,10 +99,10 @@
     "nav_aria": "主导航",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-26",
+    "install_updated": "2026-11-27",
     "install_title": "安装 Canban",
     "install_desc": "在 macOS、Linux 和 Android 上安装或更新 Canban，配置无桌面的远程服务器，并查看常见问题解答。",
-    "install_intro": "用看板理清任务，用原生 Agent CLI 完成开发——轻量原生桌面端，持久可靠的后台会话。",
+    "install_intro": "用看板理清任务，用原生 Agent CLI 完成开发——本地优先、零资料收集、无中转全程端到端加密。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS 桌面应用界面：Develop 列中的 Card #2 展示独立 Git Worktree、活动时间线、工作流进度条，以及右侧运行 cargo test 的实时 Herdr @developer 终端。",
@@ -117,10 +121,10 @@
     "linux_text": "安装到 ~/.local/opt/canban 并添加应用启动器。需要 GTK4 和 GStreamer 运行库。",
     "linux_deps": "Linux 运行库依赖",
     "headless": "Headless Linux 服务器",
-    "headless_text": "安装 CLI 和后台服务，无需 GTK4 或桌面环境。通过桌面端使用 SSH 或 Tailscale 连接。请在服务器上安装 Git、Herdr Core、Agent CLI 和项目开发依赖。",
+    "headless_text": "安装 CLI 和后台服务，无需 GTK4 或桌面环境。通过桌面端或移动端无中转全程端到端加密直连（可选配合 Tailscale 或 SSH）。请在服务器上安装 Git、Herdr Core、Agent CLI 和项目开发依赖。",
     "mobile": "移动端",
     "android": "Android · arm64-v8a",
-    "android_text": "下载官方签名 Release APK，通过 Tailscale（同账号 WhoIs 免扫码自动认证与按需 Tailnet 发现）或一次性二维码配对连接 macOS / Linux 上的 canband 主机。搭配 Obtainium 可直接从 GitHub Releases 自动接收更新。",
+    "android_text": "下载官方签名 Release APK，以无中转全程端到端加密直连 macOS / Linux 上的 canband 主机，支持一次性二维码配对，或可选配合 Tailscale（同账号 WhoIs 免扫码自动认证与按需 Tailnet 发现）。搭配 Obtainium 可直接从 GitHub Releases 自动接收更新。",
     "android_download": "下载 Android APK",
     "android_obtainium": "在 Obtainium 订阅更新",
     "android_releases_link": "前往 GitHub Releases 查看",
@@ -149,7 +153,11 @@
       ],
       [
         "可以在远程服务器上运行 Agent 吗？",
-        "可以。在 Linux 服务器上安装 Headless 版本，再通过 SSH 或 Tailscale 从桌面端连接，即可管理远程任务和终端。Agent 及其开发依赖需要安装在执行任务的远程机器上。"
+        "可以。在 Linux 服务器上安装 Headless 版本，再从桌面端或移动端以无中转全程端到端加密直连（可选配合 Tailscale 或 SSH），即可管理远程任务和终端。Agent 及其开发依赖需要安装在执行任务的远程机器上。"
+      ],
+      [
+        "Canban 会收集资料或中转我的流量吗？",
+        "不会。Canban 零资料收集、无遥测、无埋点统计、无需云账号，也没有任何中转服务器。所有看板、卡片与工作流数据均保留在你自己的本地 SQLite 中（密钥库静态加密），所有跨机器与移动端连接均点对点直连并强制端到端加密。仅在你主动启用 GitHub 集成、检查 GitHub Releases 更新或运行自己的 Agent CLI 时，才会直接与对应服务通信。"
       ],
       [
         "Canban 免费吗？",
@@ -178,10 +186,10 @@
     "nav_aria": "主導覽",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-26",
+    "install_updated": "2026-11-27",
     "install_title": "安裝 Canban",
     "install_desc": "在 macOS、Linux 與 Android 上安裝或更新 Canban，部署無桌面環境的遠端伺服器，並查看常見問題解答。",
-    "install_intro": "用看板理清任務，用原生 Agent CLI 完成開發——輕量原生桌面端，持久可靠的背景工作階段。",
+    "install_intro": "用看板理清任務，用原生 Agent CLI 完成開發——本地優先、零資料收集、無中轉全程端對端加密。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS 桌面應用介面：Develop 欄中的 Card #2 展示獨立 Git Worktree、活動時間軸、工作流進度條，以及右側執行 cargo test 的即時 Herdr @developer 終端機。",
@@ -200,10 +208,10 @@
     "linux_text": "安裝到 ~/.local/opt/canban 並建立應用啟動器。需要 GTK4 與 GStreamer 執行階段函式庫。",
     "linux_deps": "Linux 執行環境相依套件",
     "headless": "Headless Linux 伺服器",
-    "headless_text": "安裝 CLI 與背景服務（canband），無需 GTK4 或桌面環境。可從桌面端透過 SSH 或 Tailscale 連線，並在伺服器上安裝 Git、Herdr Core、Agent CLI 與專案開發相依套件。",
+    "headless_text": "安裝 CLI 與背景服務（canband），無需 GTK4 或桌面環境。可從桌面端或行動端以無中轉全程端對端加密直連（可選搭配 Tailscale 或 SSH），並在伺服器上安裝 Git、Herdr Core、Agent CLI 與專案開發相依套件。",
     "mobile": "行動端",
     "android": "Android · arm64-v8a",
-    "android_text": "下載官方簽章 Release APK，透過 Tailscale（同帳號 WhoIs 免掃碼自動驗證與按需 Tailnet 探索）或一次性 QR 配對連線 macOS / Linux 上的 canband 主機。搭配 Obtainium 可直接從 GitHub Releases 自動接收更新。",
+    "android_text": "下載官方簽章 Release APK，以無中轉全程端對端加密直連 macOS / Linux 上的 canband 主機，支援一次性 QR 配對，或可選搭配 Tailscale（同帳號 WhoIs 免掃碼自動驗證與按需 Tailnet 探索）。搭配 Obtainium 可直接從 GitHub Releases 自動接收更新。",
     "android_download": "下載 Android APK",
     "android_obtainium": "在 Obtainium 訂閱更新",
     "android_releases_link": "前往 GitHub Releases 查看",
@@ -232,7 +240,11 @@
       ],
       [
         "可以在遠端伺服器上執行 Agent 嗎？",
-        "可以。在 Linux 伺服器安裝 Headless 模式後，透過 Tailscale 或 SSH 從桌面端連線，即可管理遠端專案看板與即時終端機。Agent CLI 與專案建置相依套件需安裝於該遠端主機上。"
+        "可以。在 Linux 伺服器安裝 Headless 模式後，從桌面端或行動端以無中轉全程端對端加密直連（可選搭配 Tailscale 或 SSH），即可管理遠端專案看板與即時終端機。Agent CLI 與專案建置相依套件需安裝於該遠端主機上。"
+      ],
+      [
+        "Canban 會收集資料或中轉我的流量嗎？",
+        "不會。Canban 零資料收集、無遙測、無分析追蹤、無需雲端帳號，也不設任何中轉伺服器。所有看板、卡片與工作流均留在你自己的本地 SQLite 中（金鑰庫靜態加密），所有跨裝置連線皆為點對點直連並強制端對端加密。僅在你主動啟用 GitHub 整合、檢查 GitHub Releases 更新或執行自己的 Agent CLI 時，才會直接與對應服務通訊。"
       ],
       [
         "Canban 免費嗎？",
@@ -261,10 +273,10 @@
     "nav_aria": "メインナビゲーション",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-26",
+    "install_updated": "2026-11-27",
     "install_title": "Canban をインストール",
     "install_desc": "macOS、Linux、Android への Canban のインストール・更新方法、ヘッドレス Linux サーバー構築、よくある質問をまとめています。",
-    "install_intro": "カンバンで整理し、ネイティブ Agent CLI で開発する——軽量なネイティブアプリと止まらない永続セッション。",
+    "install_intro": "カンバンで整理し、ネイティブ Agent CLI で開発する——ローカル優先・データ収集ゼロ・リレーなしの完全 E2E 暗号化。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS デスクトップアプリ画面：Develop 列の Card #2 に独立 Git Worktree、アクティビティログ、ワークフロー進捗バー、右側で cargo test を実行中の Herdr @developer ターミナルが並んで表示されています。",
@@ -283,10 +295,10 @@
     "linux_text": "~/.local/opt/canban にインストールし、アプリケーションランチャーを追加します。GTK4 と GStreamer ランタイムが必要です。",
     "linux_deps": "Linux ランタイム依存パッケージ",
     "headless": "Headless Linux サーバー",
-    "headless_text": "GTK4 やデスクトップセッションなしで CLI とデーモン（canband）のみを導入します。デスクトップアプリから SSH または Tailscale 経由で接続できます。サーバー側にも Git、Herdr Core、Agent CLI、プロジェクトの依存ツールを入れておいてください。",
+    "headless_text": "GTK4 やデスクトップセッションなしで CLI とデーモン（canband）のみを導入します。デスクトップやモバイルアプリからリレーなしの完全 E2E 暗号化で直接接続できます（任意で Tailscale や SSH の併用も可能）。サーバー側にも Git、Herdr Core、Agent CLI、プロジェクトの依存ツールを入れておいてください。",
     "mobile": "モバイル",
     "android": "Android · arm64-v8a",
-    "android_text": "署名済みリリース APK をダウンロードし、Tailscale（同一アカウント WhoIs 自動認証・オンデマンド Tailnet 検出）または使い捨て QR ペアリングで macOS / Linux の canband ホストに接続できます。Obtainium に登録すると GitHub Releases から自動で更新を受け取れます。",
+    "android_text": "署名済みリリース APK をダウンロードし、リレーなしの完全 E2E 暗号化で macOS / Linux の canband ホストへ直接接続できます（使い捨て QR ペアリング、または任意の Tailscale 同一アカウント WhoIs 自動認証・オンデマンド Tailnet 検出に対応）。Obtainium に登録すると GitHub Releases から自動で更新を受け取れます。",
     "android_download": "Android APK をダウンロード",
     "android_obtainium": "Obtainium で自動更新",
     "android_releases_link": "GitHub Releases で確認",
@@ -315,7 +327,11 @@
       ],
       [
         "リモートサーバー上でエージェントを動かせますか？",
-        "はい。Linux サーバーに Headless モードで導入すれば、手元のデスクトップアプリから Tailscale や SSH 経由で接続し、複数マシンのタスクとライブターミナルを一元管理できます。Agent CLI とビルドツールは実行先サーバーへインストールしてください。"
+        "はい。Linux サーバーに Headless モードで導入すれば、手元のデスクトップやモバイルアプリからリレーなしの完全 E2E 暗号化で直接接続（任意で Tailscale や SSH を併用可能）し、複数マシンのタスクとライブターミナルを一元管理できます。Agent CLI とビルドツールは実行先サーバーへインストールしてください。"
+      ],
+      [
+        "Canban はデータを収集したり通信をリレーしたりしますか？",
+        "いいえ。Canban はテレメトリ・分析・データ収集を一切行わず、クラウドアカウントも中継（リレー）サーバーもありません。ボード・カード・ワークフローはすべて自身のマシンのローカル SQLite に保存され（シークレットは保存時暗号化）、ホスト間の通信はすべて直接かつ完全 E2E 暗号化されます。外部通信は GitHub 連携・更新確認、または利用中の Agent CLI が各モデルプロバイダへ直接接続する場合に限られます。"
       ],
       [
         "Canban は無料ですか？",
@@ -344,10 +360,10 @@
     "nav_aria": "기본 내비게이션",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-26",
+    "install_updated": "2026-11-27",
     "install_title": "Canban 설치",
     "install_desc": "macOS, Linux 및 Android에 Canban을 설치·업데이트하고, 헤드리스 Linux 서버를 구성하며, 자주 묻는 질문의 답변을 확인하세요.",
-    "install_intro": "칸반으로 정리하고 네이티브 Agent CLI로 개발하세요 — 가벼운 네이티브 앱, 끊기지 않는 영구 세션.",
+    "install_intro": "칸반으로 정리하고 네이티브 Agent CLI로 개발하세요 — 로컬 우선·데이터 수집 제로·릴레이 없는 직접 E2E 암호화.",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
       "alt": "Canban macOS 데스크톱 앱 화면: Develop 열의 Card #2에 격리된 Git Worktree, 활동 내역, 워크플로우 진행 막대 및 오른쪽에서 cargo test를 실행 중인 Herdr @developer 터미널이 나란히 표시됩니다.",
@@ -366,10 +382,10 @@
     "linux_text": "~/.local/opt/canban에 설치하고 앱 런처를 등록합니다. GTK4와 GStreamer 런타임 라이브러리가 필요합니다.",
     "linux_deps": "Linux 런타임 의존성",
     "headless": "Headless Linux 서버",
-    "headless_text": "GTK4나 데스크톱 세션 없이 CLI와 데몬(canband)만 설치합니다. 데스크톱 앱에서 SSH 또는 Tailscale로 연결할 수 있으며, 서버에 Git, Herdr Core, Agent CLI 및 프로젝트 빌드 도구를 설치해 두어야 합니다.",
+    "headless_text": "GTK4나 데스크톱 세션 없이 CLI와 데몬(canband)만 설치합니다. 데스크톱이나 모바일 앱에서 릴레이 없는 직접 종단간 암호화(E2E)로 연결할 수 있으며(선택적으로 Tailscale 또는 SSH 연동 가능), 서버에 Git, Herdr Core, Agent CLI 및 프로젝트 빌드 도구를 설치해 두어야 합니다.",
     "mobile": "모바일",
     "android": "Android · arm64-v8a",
-    "android_text": "서명된 릴리스 APK를 다운로드해 Tailscale(동일 계정 WhoIs 자동 인증 및 온디맨드 Tailnet 탐색) 또는 일회용 QR 페어링으로 macOS / Linux canband 호스트에 연결하세요. Obtainium에 등록하면 GitHub Releases에서 자동으로 업데이트를 받을 수 있습니다.",
+    "android_text": "서명된 릴리스 APK를 다운로드해 릴레이 없는 직접 종단간 암호화(E2E)로 macOS / Linux canband 호스트에 연결하세요(일회용 QR 페어링 또는 선택적 Tailscale 동일 계정 WhoIs 자동 인증·온디맨드 Tailnet 탐색 지원). Obtainium에 등록하면 GitHub Releases에서 자동으로 업데이트를 받을 수 있습니다.",
     "android_download": "Android APK 다운로드",
     "android_obtainium": "Obtainium으로 자동 업데이트",
     "android_releases_link": "GitHub Releases에서 보기",
@@ -398,7 +414,11 @@
       ],
       [
         "원격 서버에서 에이전트를 실행할 수 있나요?",
-        "네. Linux 서버에 Headless 모드로 설치한 뒤 데스크톱 앱에서 SSH 또는 Tailscale로 연결하면 원격 보드와 실시간 터미널을 함께 제어할 수 있습니다. Agent CLI와 프로젝트 의존성은 원격 머신에 설치해야 합니다."
+        "네. Linux 서버에 Headless 모드로 설치한 뒤 데스크톱이나 모바일 앱에서 릴레이 없는 직접 종단간 암호화(E2E)로 연결하면(선택적으로 Tailscale 또는 SSH 연동 가능) 원격 보드와 실시간 터미널을 함께 제어할 수 있습니다. Agent CLI와 프로젝트 의존성은 원격 머신에 설치해야 합니다."
+      ],
+      [
+        "Canban은 데이터를 수집하거나 트래픽을 중계(릴레이)하나요?",
+        "아니요. Canban은 텔레메트리·분석·사용자 데이터를 전혀 수집하지 않으며 클라우드 계정이나 중계 서버도 없습니다. 모든 보드·카드·워크플로우는 사용자의 로컬 SQLite에 저장되고(시크릿은 저장 시 암호화), 모든 호스트 간 연결은 릴레이 없이 직접 종단간 암호화(E2E)됩니다. 외부 통신은 GitHub 연동·릴리스 업데이트 확인 또는 사용자가 실행한 Agent CLI가 모델 제공자와 직접 통신할 때만 발생합니다."
       ],
       [
         "Canban은 무료인가요?",

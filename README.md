@@ -102,9 +102,9 @@ Want to automate the loop when you're ready? Opt in to GitHub Actions-like local
 <tr>
 <td width="50%" valign="middle">
 
-### Multi-Machine over SSH &amp; Tailscale
+### Multi-Machine &amp; Mobile (Direct E2E)
 
-Offload heavy builds and agent runs to remote Linux boxes. Connect your lightweight macOS/Linux desktop app to headless `canband` hosts over SSH or Tailscale and control remote boards, workflows, and live 120Hz terminals seamlessly.
+Offload heavy builds and agent runs to remote Linux boxes. Connect your lightweight desktop or mobile app directly to headless `canband` hosts with mandatory end-to-end encryption and zero relay servers — optionally paired with **Tailscale** or **SSH** — to control remote boards, workflows, and live 120Hz terminals seamlessly.
 
 [Docs →](https://canban.dev/docs/remote-hosts/)
 
@@ -114,6 +114,14 @@ Offload heavy builds and agent runs to remote Linux boxes. Connect your lightwei
 </td>
 </tr>
 </table>
+
+## Privacy &amp; Security
+
+- **Zero data collection**: No cloud account, no telemetry, no analytics, and no tracking. Your boards, cards, workflows, and credentials stay on your own machines in local SQLite (with secrets encrypted at rest).
+- **Direct end-to-end encrypted (no relay servers)**: Desktop, mobile, and remote `canband` hosts connect directly to each other with mandatory end-to-end encryption and public-key verification — traffic never passes through any third-party relay or Canban server.
+- **Optional Tailscale or SSH**: Works over direct LAN/VPN connections out of the box, or optionally pair with **Tailscale** (for private mesh networking and same-account auto-auth) or **SSH**.
+
+For cryptographic details (Noise protocol, host key pinning, and secret vault encryption), see [Privacy &amp; Security Docs →](https://canban.dev/docs/#privacy-security).
 
 ## Installation
 
@@ -132,7 +140,7 @@ Works out of the box with `git` and your existing Agent CLIs (`claude`, `codex`,
   <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"><img src="https://img.shields.io/badge/Get_it_on-Obtainium-3A7AFE?style=for-the-badge&logo=android&logoColor=white" alt="Get it on Obtainium" /></a>
 </p>
 
-Connects to your macOS or headless Linux `canband` host over Tailscale (zero-QR WhoIs auto-auth) or single-use `canban://` QR pairing for live Needs-you triage, Kanban boards, Git diffs, and persistent `libghostty-vt` terminals.
+Connects directly to your macOS or headless Linux `canband` host with end-to-end encryption and zero relay servers — using single-use `canban://` QR pairing or optionally **Tailscale** (zero-QR WhoIs auto-auth) — for live Needs-you triage, Kanban boards, Git diffs, and persistent `libghostty-vt` terminals.
 
 <details>
 <summary><strong>Linux runtime dependencies &amp; building from source</strong></summary>

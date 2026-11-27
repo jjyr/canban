@@ -144,6 +144,9 @@ class WebsiteTest(unittest.TestCase):
                     self.assertNotIn("localStorage", text)
                     self.assertNotIn("schema v11", text.lower())
                     self.assertNotIn("schema: 10", text.lower())
+                    self.assertNotIn("--allow-insecure-bind", text)
+                    self.assertNotIn("enc:v1:", text)
+                    self.assertNotIn("remove-legacy-token", text)
                     self.assertNotIn("host.probe", text.lower())
 
                     lang_links = [
@@ -307,6 +310,9 @@ class WebsiteTest(unittest.TestCase):
                     self.assertNotIn("<script", content)
                     self.assertNotIn("schema v11", content.lower())
                     self.assertNotIn("schema: 10", content.lower())
+                    self.assertNotIn("--allow-insecure-bind", content)
+                    self.assertNotIn("enc:v1:", content)
+                    self.assertNotIn("remove-legacy-token", content)
                     self.assertNotIn("host.probe", content.lower())
 
         agents_md = (self.output / "docs/agents.md").read_text()
@@ -319,7 +325,7 @@ class WebsiteTest(unittest.TestCase):
 
         workflows_doc_md = (self.output / "docs/workflows.md").read_text()
         for term in (
-            "schema: 12", "development.yaml", "admit", "script", "deliver",
+            "schema: 13", "development.yaml", "default_agent", "admit", "script", "deliver",
             "condition", "approval", "card.move", "notify", "complete",
             "external_pr", "on_changes_requested", "on_failure", "_merge_queue",
             "cardless", "exclude_self", "secrets.", "vars.", "XChaCha20-Poly1305",
@@ -331,7 +337,7 @@ class WebsiteTest(unittest.TestCase):
             "snapshot", "status", "call", "card show", "card adopt", "resolve", "reopen", "report",
             "reply", "bind-session", "review draft", "publish", "workflow sources", "schedule",
             "worktree gc", "batch report", "serve", "pair", "service", "device", "skill",
-            "build-info", "--fields", "--full", "--allow-insecure-bind", "request_key", "CANBAN_CLI",
+            "build-info", "--fields", "--full", "--client-pubkey", "authorize", "Noise_XX", "request_key", "CANBAN_CLI",
             "CANBAN_RUN_DIR", "canban skill",
             "npx skills add ~/.canban/skills --skill canban -g",
             "canban --human snapshot",
@@ -353,13 +359,15 @@ class WebsiteTest(unittest.TestCase):
         remote_md = (self.output / "docs/remote-hosts.md").read_text()
         for term in (
             "canband", "Tailscale", "SSH", "--headless", "yamux/1",
-            "canban device", "pair_", "canban-sync", "enc:v1:",
+            "canban device", "pair_", "canban-sync", "Noise_XX", "authorized_devices.json",
             "trust_tailscale_self", "host.discover_canban", "WhoIs", "Tailscale Admin",
         ):
             self.assertIn(term, remote_md)
         for lang in website.LANGUAGE_CODES:
+            docs_html = (self.output / website.route(lang, "docs").lstrip("/") / "index.html").read_text()
+            self.assertIn('id="privacy-security"', docs_html, lang)
             localized_remote_md = (self.output / website.md_route(lang, "docs/remote-hosts").lstrip("/")).read_text()
-            for term in ("trust_tailscale_self", "host.discover_canban", "WhoIs"):
+            for term in ("Noise_XX", "trust_tailscale_self", "host.discover_canban", "WhoIs"):
                 self.assertIn(term, localized_remote_md, (lang, term))
 
         parallel_md = (self.output / "guides/parallel-coding-agents.md").read_text()
@@ -367,12 +375,12 @@ class WebsiteTest(unittest.TestCase):
             self.assertIn(term, parallel_md)
 
         native_md = (self.output / "guides/native-terminal-and-multi-machine.md").read_text()
-        for term in ("libghostty-vt", "herdr-core", "tmux", "Tailscale", "canband", "yamux/1", "canban-sync"):
+        for term in ("libghostty-vt", "herdr-core", "tmux", "Noise_XX", "Tailscale", "canband", "yamux/1", "canban-sync"):
             self.assertIn(term, native_md)
 
         gc_md = (self.output / "guides/scheduled-worktree-cleanup.md").read_text()
         for term in (
-            "schema: 12", "scope: global", "worktree gc", "merge-base",
+            "schema: 13", "scope: global", "worktree gc", "merge-base",
             "_merge_queue", "DRY_RUN", "project.list", "card.create",
             "card resolve", "create_worktree: false",
             "workflow sources --global", "--revision", "Settings → Environment & Secrets",
@@ -383,7 +391,7 @@ class WebsiteTest(unittest.TestCase):
         self.assertIn('class="code-block code-block-prompt"', gc_html)
         self.assertIn('<details class="doc-details">', gc_html)
         self.assertIn('<span class="tok-key">schema</span>', gc_html)
-        self.assertIn('<span class="tok-num">12</span>', gc_html)
+        self.assertIn('<span class="tok-num">13</span>', gc_html)
         for lang in website.LANGUAGE_CODES:
             localized_gc_md = (self.output / website.md_route(lang, "guides/scheduled-worktree-cleanup").lstrip("/")).read_text()
             self.assertNotIn("canban snapshot", localized_gc_md, lang)
@@ -504,11 +512,11 @@ class WebsiteTest(unittest.TestCase):
                 # Page-scoped lastmod must reflect content metadata, not blindly mirror latest release date.
                 self.assertNotEqual(lastmod, self.releases[0]["published_at"][:10], loc)
                 self.assertEqual(lastmod, expected_lastmod[loc], loc)
-        self.assertEqual(pages_json["en"]["install_updated"], "2026-11-26")
-        self.assertEqual(locales_json["en"]["updated"], "2026-11-26")
-        self.assertEqual(docs_by_lang["en"]["docs/workflows"]["updated"], "2026-11-24")
+        self.assertEqual(pages_json["en"]["install_updated"], "2026-11-27")
+        self.assertEqual(locales_json["en"]["updated"], "2026-11-27")
+        self.assertEqual(docs_by_lang["en"]["docs/workflows"]["updated"], "2026-11-27")
         self.assertEqual(docs_by_lang["en"]["guides/parallel-coding-agents"]["updated"], "2026-11-24")
-        self.assertEqual(docs_by_lang["en"]["guides/scheduled-worktree-cleanup"]["updated"], "2026-11-24")
+        self.assertEqual(docs_by_lang["en"]["guides/scheduled-worktree-cleanup"]["updated"], "2026-11-27")
 
     def test_unpublished_release_exclusion_and_safe_markdown(self):
         release = {"tag_name": "20261118-1", "published_at": "2026-11-18T01:00:00Z", "html_url": website.REPOSITORY + "/releases/tag/20261118-1", "draft": False}

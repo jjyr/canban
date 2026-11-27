@@ -102,9 +102,9 @@
 <tr>
 <td width="50%" valign="middle">
 
-### SSH / Tailscale 多机器协同
+### 多机器协同（全程 E2E 直连）
 
-把高负载编译和 Agent 任务交给远程 Linux 主机。通过 SSH 或 Tailscale 将轻量级桌面端连接到无头 `canband` 主机，像操作本地项目一样丝滑管理远程看板、工作流与 120Hz 实时终端。
+把高负载编译和 Agent 任务交给远程 Linux 主机。通过桌面端或移动端直接连接无头 `canband` 主机，全程强制端到端加密、无任何中转服务器——可选配合 **Tailscale** 或 **SSH** 使用——像操作本地项目一样丝滑管理远程看板、工作流与 120Hz 实时终端。
 
 [文档 →](https://canban.dev/zh/docs/remote-hosts/)
 
@@ -114,6 +114,14 @@
 </td>
 </tr>
 </table>
+
+## 隐私与安全
+
+- **零资料收集**：无云账号、无遥测、无埋点统计，不收集任何使用数据。你的看板、卡片、工作流与密钥全部留在你自己的设备本地 SQLite 中（密钥库静态加密存储）。
+- **无中转、全程端到端加密（E2E）**：桌面端、移动端与远程 `canband` 主机之间完全点对点直连，所有流量默认强制端到端加密并进行公钥校验，不经过任何第三方中转或官方服务器。
+- **可选配合 Tailscale 或 SSH**：开箱即支持局域网 / 私有网络直连，也支持按需配合 **Tailscale**（免公网暴露、同账号免扫码自动认证）或 **SSH** 使用。
+
+如需查看具体加密协议、主机公钥固定与密钥库实现细节，请参阅 [隐私与安全文档 →](https://canban.dev/zh/docs/#privacy-security)。
 
 ## 安装
 
@@ -132,7 +140,7 @@ curl -fsSL https://canban.dev/install.sh | bash
   <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"><img src="https://img.shields.io/badge/Get_it_on-Obtainium-3A7AFE?style=for-the-badge&logo=android&logoColor=white" alt="Get it on Obtainium" /></a>
 </p>
 
-支持通过 Tailscale（WhoIs 同账号免扫码直连）或一次性 `canban://` 二维码连接本地 macOS 或远程 Linux `canband` 主机，随时在手机端处理 Needs you 审批、看板、Git Diff 与原生 `libghostty-vt` 实时终端。
+全程端到端加密、无中转直连你的 macOS 或远程 Linux `canband` 主机，支持一次性 `canban://` 二维码配对，或可选配合 **Tailscale**（WhoIs 同账号免扫码直连），随时在手机端处理 Needs you 审批、看板、Git Diff 与原生 `libghostty-vt` 实时终端。
 
 <details>
 <summary><strong>Linux 运行库要求与从源码构建</strong></summary>
