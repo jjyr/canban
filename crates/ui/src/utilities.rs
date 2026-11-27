@@ -11,6 +11,7 @@ pub fn close(ui: Ui) {
 }
 pub fn open(ui: Ui, name: &str) {
     ui.quick_open.set(false);
+    ui.agent_popover.close();
     ui.utility_query.set(String::new());
     let opening_usage = ui.utility_popup.get_untracked() != "usage" && name == "usage";
     ui.utility_popup

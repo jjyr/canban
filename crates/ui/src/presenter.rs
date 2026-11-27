@@ -118,6 +118,7 @@ pub struct Ui {
     pub editor_focus: Signal<u64>,
     pub utility: Signal<Value>,
     pub utility_popup: Signal<String>,
+    pub agent_popover: crate::components::agent_popover::AgentPopoverState,
     pub native_modal: Signal<bool>,
     pub utility_query: Signal<String>,
     pub theme_preview: Signal<Option<String>>,
@@ -431,6 +432,7 @@ impl Ui {
         }
         batch(move || {
             self.utility_popup.set(String::new());
+            self.agent_popover.close();
             self.quick_open.set(false);
             self.new_draft.set(format!("new-card:{}", id()));
             self.card_target.set(self.project.get_untracked());
@@ -466,6 +468,7 @@ impl Ui {
     pub fn navigate(self, page: &str) {
         let dest = page.to_owned();
         batch(move || {
+            self.agent_popover.close();
             self.card_standalone.set(false);
             if dest == "terminals" {
                 self.terminal_focus.update(|v| *v += 1);
@@ -595,6 +598,7 @@ impl Ui {
             editor_focus: signal(0),
             utility: signal(json!({"preferences":{"theme":"canban"},"awake":false})),
             utility_popup: signal(String::new()),
+            agent_popover: crate::components::agent_popover::AgentPopoverState::new(),
             native_modal: signal(false),
             utility_query: signal(String::new()),
             theme_preview: signal(None),
@@ -863,6 +867,7 @@ impl Ui {
     }
     pub fn show_search(self, projects: bool) {
         self.utility_popup.set(String::new());
+        self.agent_popover.close();
         self.search_query.set(String::new());
         self.project_picker.set(projects);
         self.quick_open.set(true);
@@ -872,6 +877,7 @@ impl Ui {
             return;
         };
         self.utility_popup.set(String::new());
+        self.agent_popover.close();
         self.project_picker.set(false);
         self.search_query.set(format!("#{tag}"));
         self.quick_open.set(true);
@@ -1039,6 +1045,7 @@ impl Ui {
         }
         let timeline_id = id.clone();
         batch(move || {
+            self.agent_popover.close();
             if self.card.get_untracked() != id {
                 self.editing_comment.set(None);
                 self.deleting_comment.set(None);

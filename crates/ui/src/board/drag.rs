@@ -787,6 +787,7 @@ impl BoardDrag {
         ) {
             return;
         }
+        self.ui.agent_popover.close();
         self.cancel_transitions(&card.id);
         self.phase.set(1);
         self.metrics.with(|m| {

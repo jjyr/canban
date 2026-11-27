@@ -166,6 +166,7 @@ pub fn go(ui: Ui, forward: bool) {
     batch(move || {
         ui.quick_open.set(false);
         ui.utility_popup.set(String::new());
+        ui.agent_popover.close();
         ui.terminal_close_confirm.set(None);
         ui.clear_output();
         ui.review_request.update(|n| *n += 1);

@@ -2312,6 +2312,89 @@ pub fn board_cards() -> canban_types::Snapshot {
     long.title="Keep a long Card title readable without repeating the stage, routing configuration or empty execution state".into();
     long.body = String::new();
     s.cards.push(long);
+    let mut multi_agent = s.cards[1].clone();
+    multi_agent.id = "multi-agent-card".into();
+    multi_agent.number = 10;
+    multi_agent.title = "Collapsed multi-agent pill with inline Board Inspector".into();
+    multi_agent.body =
+        "Two concurrent Agents (blocked workflow + interactive CLI) collapse cleanly into one pill."
+            .into();
+    multi_agent.stage = "develop".into();
+    multi_agent.branch = Some("canban/gallery/10-popover".into());
+    multi_agent.attention = None;
+    let multi_dev_profile = Config::default()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    let mut blocked_attempt = canban_scheduler::agent_run(
+        "gallery-project",
+        &multi_agent.id,
+        1,
+        "develop",
+        "stage_entry",
+        multi_dev_profile,
+        "Fix terminal scroll anchoring and verify narrow column layout".into(),
+        None,
+    );
+    blocked_attempt.state = "running".into();
+    blocked_attempt.started_at = Some(base_now.saturating_sub(12 * 60 * 1000));
+    blocked_attempt.updated_at = base_now.saturating_sub(2 * 60 * 1000);
+    blocked_attempt.core_id = Some("gallery".into());
+    blocked_attempt.terminal = Some("gallery-multi-blocked-pty".into());
+    blocked_attempt.cwd = "/preview/worktrees/card-10".into();
+    blocked_attempt.observed = Some(json!({"state": "live", "status": {"state": "blocked"}}));
+    blocked_attempt.connection_state = "connected".into();
+    blocked_attempt.lifecycle.observed_at = Some(u64::MAX);
+    blocked_attempt.lifecycle.waiting = Some(RuntimeWait {
+        id: "gallery-multi-wait".into(),
+        kind: "permission".into(),
+        title: "Allow command?".into(),
+        message: "git push origin canban/gallery/10-popover".into(),
+        since: base_now.saturating_sub(2 * 60 * 1000),
+    });
+    blocked_attempt.workflow_step = Some("agent:develop".into());
+    let mut blocked_term = TerminalEntry {
+        id: "gallery-multi-blocked-agent".into(),
+        conversation_id: Some("gallery-multi-blocked-agent".into()),
+        number: 10,
+        name: None,
+        origin_project_id: Some("gallery-project".into()),
+        origin_card_id: Some(multi_agent.id.clone()),
+        agent_engine: None,
+        runtime: None,
+        agent: Some(blocked_attempt),
+        created_at: base_now.saturating_sub(12 * 60 * 1000),
+    };
+    blocked_term.conversation_id = Some(blocked_term.id.clone());
+    s.terminals.push(blocked_term);
+    s.terminals.push(TerminalEntry {
+        id: "gallery-multi-cli-agent".into(),
+        conversation_id: None,
+        number: 11,
+        name: Some("Claude Code".into()),
+        origin_project_id: Some("gallery-project".into()),
+        origin_card_id: Some(multi_agent.id.clone()),
+        agent_engine: Some("claude".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery".into()),
+            terminal: Some("gallery-multi-claude".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(3),
+            observed_agent: Some("claude".into()),
+            waiting: None,
+            command: Some(ShellCommand {
+                label: "cargo check".into(),
+                exit_code: None,
+            }),
+        }),
+        agent: None,
+        created_at: base_now.saturating_sub(3 * 60 * 1000),
+    });
+    s.cards.push(multi_agent);
     let mut board_events = Vec::new();
     for (seq, card_id, kind, actor, message) in [
         (

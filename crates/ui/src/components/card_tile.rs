@@ -3,15 +3,18 @@ use super::*;
 ///
 /// Layout (rows appear only when they have content):
 /// ```text
-/// #16  Title wraps beside the number            (3) [>_]
+/// #16  [Needs attention]                        (3) [>_]
+/// Full-width Card title wraps cleanly across the card
 /// GitHub Issue #12 · open · by author
 /// First body line, truncated
-/// [#search] [#ux] [#agent] +1
-/// Needs review  ⎇ branch  💬 2      [((●)) ✦ @developer]
+/// [#search] [#ux] [#agent] +1  [PR #147] [✕ CI failed]
+/// ⎇ branch · 💬 2                 [(⚙)(✺) 1 blocked · 2 ▾]
 /// ```
-/// The `[>_]` button opens this Card's quick terminal split directly on the Card page
-/// (pinned with a highlighted icon when a session is running, or revealed on hover); active
-/// Agent pills pulse (or flag attention) and open that Agent tab on the Card.
+/// Top meta puts `#number`, card-level status chips, and compact actions on one row so the
+/// title gets 100% width; signals (`tags`, PR/CI, review drafts) share a dedicated row; and
+/// the single-line grounded footer pairs quiet metadata (`branch`, `replies`) on the left
+/// with a single bounded actor chip (collapsed Agent Inspector Popover or static assignee)
+/// on the right.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EphemeralAgentBadge {
     pub terminal_id: String,
@@ -294,37 +297,57 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
     if resolved {
         tile = tile.border_dashed().opacity(0.72);
     }
+    let resolved_tip = crate::card::resolve::tooltip(&card);
+    let chips: Vec<AnyElement> = status_specs
+        .into_iter()
+        .map(|(text, tone, live)| {
+            let key = format!("status:{live}:{text}");
+            if live {
+                live_status(text, tone).key(key).into_element()
+            } else if text == "Resolved"
+                && let Some(tip) = resolved_tip.clone()
+            {
+                view()
+                    .key(key)
+                    .flex_shrink_0()
+                    .tooltip(hint_tooltip(tip))
+                    .child(status(text, tone))
+                    .into_element()
+            } else {
+                status(text, tone).key(key).into_element()
+            }
+        })
+        .collect();
+    // 1. Top Meta Row: #number + primary card-level status chips on the left, actions on the right.
     tile = tile.child(
         view()
             .key("header")
             .flex_row()
-            .items_start()
+            .items_center()
+            .justify_between()
             .gap_2()
             .min_w(px(0.))
+            .min_h(px(22.))
             .child(
                 view()
                     .flex_row()
+                    .flex_wrap()
                     .flex_1()
                     .min_w(px(0.))
                     .gap_1p5()
-                    .items_start()
-                    .pt_0p5()
+                    .items_center()
                     .child(
                         muted(if card.number == 0 {
                             "Local".to_owned()
                         } else {
                             format!("#{}", card.number)
                         })
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .tabular_nums()
                         .flex_shrink_0(),
                     )
-                    .child(
-                        text(card.title.clone())
-                            .text_size(px(BODY_SIZE))
-                            .text_color(if resolved { MUTED } else { TEXT })
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .flex_1()
-                            .min_w(px(0.)),
-                    ),
+                    .children(chips),
             )
             .child(
                 view()
@@ -364,7 +387,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                             }
                         },
                     ))
-                    // Space stays reserved so hovering never rewraps the title.
+                    // Space stays reserved so hovering never shifts top meta chips.
                     .child(when(
                         move || active || has_terminal,
                         move || {
@@ -379,6 +402,16 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                         },
                     )),
             ),
+    );
+    // 2. Full-width Card title.
+    tile = tile.child(
+        text(card.title.clone())
+            .key("title")
+            .text_size(px(BODY_SIZE))
+            .text_color(if resolved { MUTED } else { TEXT })
+            .font_weight(FontWeight::SEMIBOLD)
+            .w_full()
+            .min_w(px(0.)),
     );
     if let Some(source) = card.github_issue() {
         let mut meta = view()
@@ -428,6 +461,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
             .child(badge(sched.cron.clone()));
         tile = tile.child(meta);
     }
+    // 3. Single-line body excerpt.
     let excerpt = card
         .body
         .lines()
@@ -442,9 +476,13 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                 .min_w(px(0.)),
         );
     }
-    if !tags.is_empty() {
-        let mut tag_row = view()
-            .key("tags")
+    // 4. Signals & taxonomy row: tags + PR/CI status + local review draft.
+    let pr_pill = pr_view
+        .as_ref()
+        .and_then(|info| crate::components::pr_status::pill(ui, info, true));
+    if !tags.is_empty() || pr_pill.is_some() || review_draft.is_some() {
+        let mut signals = view()
+            .key("signals")
             .flex_row()
             .flex_wrap()
             .items_center()
@@ -454,7 +492,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
             let is_active = active_tags
                 .iter()
                 .any(|t| t.to_lowercase() == tag.to_lowercase());
-            tag_row = tag_row.child(tag_pill(ui, &card.project_id, tag, is_active));
+            signals = signals.child(tag_pill(ui, &card.project_id, tag, is_active));
         }
         let extra = tags.len().saturating_sub(crate::tags::MAX_BOARD_TILE_TAGS);
         if extra > 0 {
@@ -463,7 +501,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                 .map(|t| format!("#{t}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            tag_row = tag_row.child(
+            signals = signals.child(
                 view()
                     .key("tags-extra")
                     .h(px(20.))
@@ -476,35 +514,20 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                     .child(muted(format!("+{extra}")).text_size(px(11.))),
             );
         }
-        tile = tile.child(tag_row);
+        if let Some(pr_pill) = pr_pill {
+            signals = signals.child(pr_pill.key("footer-pr-ci"));
+        }
+        if let Some(draft) = &review_draft {
+            signals = signals.child(review_draft_pill(ui, &card.id, draft));
+        }
+        tile = tile.child(signals);
     }
-    let resolved_tip = crate::card::resolve::tooltip(&card);
-    let chips: Vec<AnyElement> = status_specs
-        .into_iter()
-        .map(|(text, tone, live)| {
-            let key = format!("status:{live}:{text}");
-            if live {
-                live_status(text, tone).key(key).into_element()
-            } else if text == "Resolved"
-                && let Some(tip) = resolved_tip.clone()
-            {
-                view()
-                    .key(key)
-                    .flex_shrink_0()
-                    .tooltip(hint_tooltip(tip))
-                    .child(status(text, tone))
-                    .into_element()
-            } else {
-                status(text, tone).key(key).into_element()
-            }
-        })
-        .collect();
+    // 5. Grounded single-line footer: quiet metadata (branch, replies) on the left,
+    // single actor slot (active Agent popover chip, or static assignee when idle) on the right.
     let branch = card.branch.clone().filter(|b| !b.is_empty());
-    let pr_pill = pr_view
-        .as_ref()
-        .and_then(|info| crate::components::pr_status::pill(ui, info, true));
-    let assignee_badge = card.assignee.as_deref().and_then(|aid| {
-        (!running.iter().any(|r| r.profile_id == aid)).then(|| {
+    let has_live_agents = !running.is_empty() || !ephemeral_agents.is_empty();
+    let assignee_badge = (!has_live_agents).then_some(()).and_then(|()| {
+        card.assignee.as_deref().map(|aid| {
             let (provider_icon, provider_name) = ui
                 .profiles
                 .with(|ps| {
@@ -516,30 +539,15 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
             (aid.to_owned(), provider_icon, provider_name)
         })
     });
-    if !chips.is_empty()
-        || !running.is_empty()
-        || !ephemeral_agents.is_empty()
-        || assignee_badge.is_some()
-        || branch.is_some()
-        || pr_pill.is_some()
-        || replies > 0
-        || review_draft.is_some()
-    {
+    if branch.is_some() || replies > 0 || has_live_agents || assignee_badge.is_some() {
         let mut left = view()
             .key("footer-left")
             .flex_row()
-            .flex_wrap()
             .flex_1()
             .items_center()
-            .gap_1p5()
+            .gap_2()
             .min_w(px(0.))
-            .children(chips);
-        if let Some(pr_pill) = pr_pill {
-            left = left.child(pr_pill.key("footer-pr-ci"));
-        }
-        if let Some(draft) = &review_draft {
-            left = left.child(review_draft_pill(ui, &card.id, draft));
-        }
+            .overflow_hidden();
         if let Some(branch) = branch {
             left = left.child(
                 view()
@@ -550,7 +558,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                     .gap_1()
                     .min_w(px(0.))
                     .tooltip(hint_tooltip(branch.clone()))
-                    .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
+                    .child(icon(Icon::Branch).w(px(12.)).h(px(12.)).flex_shrink_0())
                     .child(
                         muted(crate::components::git_workspace::compact(&branch, 24))
                             .truncate()
@@ -572,54 +580,72 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                     .items_center()
                     .gap_1()
                     .tooltip(hint_tooltip(tip))
-                    .child(icon(Icon::MessageSquare).w(px(12.)).h(px(12.)))
+                    .child(
+                        icon(Icon::MessageSquare)
+                            .w(px(12.))
+                            .h(px(12.))
+                            .flex_shrink_0(),
+                    )
                     .child(muted(replies.to_string())),
             );
         }
-        let mut pills: Vec<AnyElement> = running
-            .into_iter()
-            .map(|badge| {
-                let pill_key = format!("agent:{}", badge.terminal_id);
-                agent_pill(ui, badge).key(pill_key).into_element()
-            })
-            .collect();
-        pills.extend(ephemeral_agents.into_iter().map(|badge| {
-            let pill_key = format!("ephemeral:{}", badge.terminal_id);
-            ephemeral_agent_pill(ui, &card.id, badge)
-                .key(pill_key)
-                .into_element()
-        }));
-        if let Some((profile_id, provider_icon, provider_name)) = assignee_badge {
-            let tip =
-                format!("Assigned to @{profile_id} ({provider_name}) — replies sync automatically");
-            pills.push(
+        let right_pill: Option<AnyElement> = if has_live_agents {
+            Some(
+                crate::components::agent_popover::agent_summary_popover(
+                    ui,
+                    &card.id,
+                    card.number,
+                    &running,
+                    &ephemeral_agents,
+                )
+                .into_element(),
+            )
+        } else {
+            assignee_badge.map(|(profile_id, provider_icon, provider_name)| {
+                let tip = format!(
+                    "Assigned to @{profile_id} ({provider_name}) — replies sync automatically"
+                );
                 view()
                     .key(format!("assignee:{profile_id}"))
-                    .h(px(20.))
+                    .h(px(22.))
                     .px_1p5()
+                    .max_w(px(124.))
+                    .overflow_hidden()
                     .flex_shrink_0()
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .rounded(px(999.))
+                    .rounded(px(6.))
                     .bg(INSET)
+                    .border_1()
+                    .border_color(BORDER)
                     .tooltip(hint_tooltip(tip))
-                    .child(icon_tinted(provider_icon, MUTED).w(px(11.)).h(px(11.)))
-                    .child(muted(format!("@{profile_id}")).text_size(px(11.)))
-                    .into_element(),
-            );
-        }
+                    .child(
+                        icon_tinted(provider_icon, MUTED)
+                            .w(px(11.))
+                            .h(px(11.))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        muted(format!("@{profile_id}"))
+                            .text_size(px(11.))
+                            .min_w(px(0.))
+                            .truncate(),
+                    )
+                    .into_element()
+            })
+        };
         tile = tile.child(
             view()
                 .key("footer")
                 .flex_row()
-                .flex_wrap()
                 .items_center()
                 .justify_between()
-                .gap_1p5()
+                .gap_2()
                 .min_w(px(0.))
+                .pt_0p5()
                 .child(left)
-                .children(pills),
+                .children(right_pill),
         );
     }
     tile
@@ -820,178 +846,4 @@ fn terminal_button(ui: Ui, card: String, number: u64, tint: ThemeColor) -> View 
         .window_drag(false)
         .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
         .child(btn)
-}
-
-/// A live workflow/profile Agent: Herdr-aligned mark + provider icon + profile + compact elapsed runtime. Opens Card + Agent terminal.
-fn agent_pill(ui: Ui, badge: crate::index::RunningAgentBadge) -> View {
-    let herdr = badge.herdr_status;
-    let is_blocked = herdr == canban_types::HerdrStatus::Blocked;
-    let hint = if is_blocked {
-        let reason = badge
-            .wait_detail
-            .as_deref()
-            .unwrap_or("Blocked on terminal input");
-        format!(
-            "{} · @{} · {reason} — open in Card",
-            badge.provider_name, badge.profile_id
-        )
-    } else {
-        format!(
-            "{} · @{} is {} — open in Card",
-            badge.provider_name,
-            badge.profile_id,
-            herdr.label().to_lowercase()
-        )
-    };
-    let a11y = hint.clone();
-    let tone_color = if is_blocked { ATTENTION } else { ACCENT };
-    let bg_color = if is_blocked {
-        ATTENTION_SURFACE
-    } else {
-        SELECTED
-    };
-    let id = badge.terminal_id;
-    let profile = badge.profile_id;
-    let started_at = badge.started_at;
-    let lead_mark = if is_blocked {
-        icon_tinted(Icon::ShieldAlert, ATTENTION)
-            .w(px(12.))
-            .h(px(12.))
-            .into_element()
-    } else {
-        live_dot(ACCENT).into_element()
-    };
-    view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
-        press_target()
-            .h(px(22.))
-            .px_2()
-            .flex_row()
-            .items_center()
-            .gap_1p5()
-            .rounded(px(11.))
-            .bg(bg_color)
-            .border_1()
-            .border_color(tone_color)
-            .hover(|s| s.bg(CARD_HOVER))
-            .focus(move |s| s.ring(px(1.)).ring_color(tone_color))
-            .accessibility_label(move || Some(a11y.clone().into()))
-            .child(lead_mark)
-            .child(icon(badge.provider_icon).w(px(12.)).h(px(12.)))
-            .child(
-                text(move || {
-                    if herdr.is_working()
-                        && let Some(ts) = started_at
-                    {
-                        let elapsed = crate::components::activity::compact_duration(
-                            ui.runtime_clock.get().saturating_sub(ts),
-                        );
-                        format!("@{profile} · {elapsed}")
-                    } else if is_blocked {
-                        format!("@{profile} · Blocked")
-                    } else {
-                        format!("@{profile}")
-                    }
-                })
-                .text_size(px(CAPTION_SIZE))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tone_color)
-                .truncate(),
-            )
-            .on_press(move |_: &()| crate::terminals::open_request(ui, &id)),
-    )
-}
-
-/// A live interactive CLI Agent (or manual Shell running an Agent) on this Card:
-/// opens the Card with that Agent tab selected, reflecting real-time Herdr status.
-fn ephemeral_agent_pill(ui: Ui, card_id: &str, badge: EphemeralAgentBadge) -> View {
-    let herdr = badge.herdr_status;
-    let title = badge.title;
-    let hint = match &badge.attention_reason {
-        Some(reason) => format!("{} · {reason} — open in Card", badge.provider_name),
-        None => format!(
-            "{} · {} — open in Card",
-            badge.provider_name, badge.display_status
-        ),
-    };
-    let a11y = hint.clone();
-    let (bg_color, tone_color, lead_mark) = match herdr {
-        canban_types::HerdrStatus::Blocked => (
-            ATTENTION_SURFACE,
-            ATTENTION,
-            icon_tinted(Icon::ShieldAlert, ATTENTION)
-                .w(px(12.))
-                .h(px(12.))
-                .into_element(),
-        ),
-        canban_types::HerdrStatus::Error | canban_types::HerdrStatus::Disconnected => (
-            DANGER_SURFACE,
-            DANGER,
-            icon_tinted(Icon::TriangleAlert, DANGER)
-                .w(px(12.))
-                .h(px(12.))
-                .into_element(),
-        ),
-        canban_types::HerdrStatus::Done => (
-            SUCCESS_SURFACE,
-            SUCCESS,
-            icon_tinted(Icon::Check, SUCCESS)
-                .w(px(12.))
-                .h(px(12.))
-                .into_element(),
-        ),
-        canban_types::HerdrStatus::Idle => (
-            INSET,
-            MUTED,
-            view()
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(MUTED)
-                .flex_shrink_0()
-                .into_element(),
-        ),
-        _ => (SELECTED, ACCENT, live_dot(ACCENT).into_element()),
-    };
-    let is_working = herdr.is_working();
-    let cid = card_id.to_owned();
-    let tid = badge.terminal_id;
-    let started_at = badge.started_at;
-    view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
-        press_target()
-            .h(px(22.))
-            .px_2()
-            .flex_row()
-            .items_center()
-            .gap_1p5()
-            .rounded(px(11.))
-            .bg(bg_color)
-            .border_1()
-            .border_color(tone_color)
-            .hover(|s| s.bg(CARD_HOVER))
-            .focus(move |s| s.ring(px(1.)).ring_color(tone_color))
-            .accessibility_label(move || Some(a11y.clone().into()))
-            .child(lead_mark)
-            .child(icon(badge.provider_icon).w(px(12.)).h(px(12.)))
-            .child(
-                text(move || {
-                    if is_working && let Some(ts) = started_at {
-                        let elapsed = crate::components::activity::compact_duration(
-                            ui.runtime_clock.get().saturating_sub(ts),
-                        );
-                        format!("{title} · {elapsed}")
-                    } else if herdr == canban_types::HerdrStatus::Done {
-                        format!("{title} · Done")
-                    } else if herdr == canban_types::HerdrStatus::Blocked {
-                        format!("{title} · Blocked")
-                    } else {
-                        title.clone()
-                    }
-                })
-                .text_size(px(CAPTION_SIZE))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tone_color)
-                .truncate(),
-            )
-            .on_press(move |_: &()| ui.open_card_with_terminal(cid.clone(), Some(tid.clone()))),
-    )
 }

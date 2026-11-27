@@ -1,4 +1,5 @@
 pub mod activity;
+pub(crate) mod agent_popover;
 pub mod env_table;
 pub mod git_workspace;
 pub mod pr_status;
