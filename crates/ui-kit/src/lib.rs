@@ -7,10 +7,10 @@ pub mod surface;
 pub mod tokens;
 pub use button::{
     Variant, action, action_with_icon, compact_action, compact_action_with_icon, press_target,
-    toggle,
+    switch, toggle,
 };
 pub use checkbox::checkbox;
-pub use input::{bound_field, field, secret_field};
+pub use input::{bound_field, cell_field, cell_secret_field, field, secret_field};
 pub use scrollbar::vertical_scrollbar;
 pub use surface::{badge, heading, label, muted, panel, read_text};
 
@@ -43,7 +43,10 @@ pub use directory_field::{
     parse_path_query, path_combobox,
 };
 pub mod settings;
-pub use settings::{settings_field, settings_nav_heading, settings_nav_item, settings_section};
+pub use settings::{
+    SettingsGroup, settings_field, settings_group, settings_kv_row, settings_nav_heading,
+    settings_nav_item, settings_row, settings_section,
+};
 pub mod section_group;
 pub use section_group::{SectionGroup, collapsible_section_group, section_group};
 pub mod chrome;
@@ -56,7 +59,7 @@ pub mod segmented;
 pub use segmented::{compact_segment, segment, segmented};
 
 pub mod theme_choice;
-pub use theme_choice::theme_choice;
+pub use theme_choice::{theme_choice, theme_choice_card};
 
 pub mod markdown;
 

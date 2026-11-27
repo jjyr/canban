@@ -982,9 +982,9 @@ fn controls() -> impl IntoElement {
                                 .border_color(BORDER)
                                 .bg(SURFACE)
                                 .gap_0p5()
-                                .child(settings_nav_heading("INTERFACE"))
+                                .child(settings_nav_heading("GENERAL"))
                                 .child(settings_nav_item(
-                                    "Theme & support",
+                                    "Appearance",
                                     move || nav_selected.get() == 0,
                                     move |_| nav_selected.set(0),
                                 ))
@@ -995,7 +995,7 @@ fn controls() -> impl IntoElement {
                                 ))
                                 .child(view().my_1p5().mx_2().h(px(1.)).bg(BORDER))
                                 .child(settings_nav_item(
-                                    "Acknowledgements",
+                                    "About & Licenses",
                                     move || nav_selected.get() == 2,
                                     move |_| nav_selected.set(2),
                                 )),
@@ -2614,6 +2614,33 @@ pub fn Gallery() -> impl IntoElement {
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings") {
         ui.page.set("settings".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings-terminal") {
+        ui.open_settings_section("terminal");
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings-scheduling") {
+        ui.open_settings_section("scheduling");
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings-hosts") {
+        let (snap, hosts) = fixtures::multi_host_workspace(false);
+        ui.discovery.set(fixtures::discovery_catalog());
+        ui.hosts.set(hosts);
+        ui.snapshot.set(snap);
+        ui.paired_devices_preview
+            .set(Some(fixtures::paired_devices_preview()));
+        canban_ui::hosts::open_host_settings(ui, "local".into(), "hosts");
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings-diagnostics") {
+        let (snap, hosts) = fixtures::multi_host_workspace(false);
+        ui.discovery.set(fixtures::discovery_catalog());
+        ui.hosts.set(hosts);
+        ui.snapshot.set(snap);
+        canban_ui::hosts::open_host_settings(ui, "home-linux".into(), "diagnostics");
+        canban_ui::diagnostics::refresh_diagnostics(ui);
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings-storage") {

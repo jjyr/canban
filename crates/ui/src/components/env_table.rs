@@ -458,8 +458,13 @@ pub fn env_table(ui: Ui, cfg: EnvTableConfig) -> impl IntoElement {
             move || paste_open.get(),
             move || {
                 let editor = canban_ui_kit::markdown::MarkdownInput::new();
-                panel()
+                view()
+                    .p_3()
                     .gap_2()
+                    .rounded(px(RADIUS))
+                    .border_1()
+                    .border_color(BORDER)
+                    .bg(SURFACE)
                     .child(
                         muted("Paste KEY=VALUE lines (keys matching SECRET / TOKEN / KEY / PASSWORD import into Secrets).")
                             .text_size(px(12.)),
@@ -660,8 +665,9 @@ fn env_section_panel(
     dirty: Signal<bool>,
     on_add: impl Fn(&()) + 'static,
 ) -> impl IntoElement {
-    panel()
+    view()
         .gap_2()
+        .min_w(px(0.))
         .child(
             view()
                 .flex_row()
@@ -690,7 +696,7 @@ fn env_section_panel(
                 .child(compact_action_with_icon(
                     Icon::Plus,
                     add_label,
-                    Variant::Secondary,
+                    Variant::Quiet,
                     on_add,
                 )),
         )
@@ -702,21 +708,36 @@ fn env_section_panel(
                 .collect();
             if matching.is_empty() {
                 return view()
-                    .py_1()
+                    .py_0p5()
                     .child(muted(empty_text).text_size(px(12.)))
                     .into_element();
             }
-            let mut list = view().gap_2();
-            for row in matching {
-                list = list.child(env_row_view(row, section_kind, rows, dirty));
+            let total = matching.len();
+            let mut table = view()
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(BORDER)
+                .bg(SURFACE)
+                .overflow_hidden()
+                .min_w(px(0.))
+                .gap_0();
+            for (idx, row) in matching.into_iter().enumerate() {
+                table = table.child(env_row_view(
+                    row,
+                    section_kind,
+                    idx + 1 < total,
+                    rows,
+                    dirty,
+                ));
             }
-            list.into_element()
+            table.into_element()
         }))
 }
 
 fn env_row_view(
     row: EnvRowDraft,
     section_kind: RowKind,
+    has_bottom_border: bool,
     rows: Signal<Vec<EnvRowDraft>>,
     dirty: Signal<bool>,
 ) -> impl IntoElement {
@@ -739,44 +760,72 @@ fn env_row_view(
     let value_area = match section_kind {
         RowKind::Plain => view()
             .flex_1()
-            .min_w(px(180.))
+            .min_w(px(140.))
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .pr_1p5()
             .child(
-                bound_field(
-                    move || plain_sig.get(),
-                    move |v| {
-                        plain_sig.set(v.to_owned());
-                        dirty.set(true);
-                    },
-                    "Value",
-                )
-                .font_family(MONO_FONT)
-                .label("Plain value"),
+                view().flex_1().min_w(px(80.)).child(
+                    cell_field(
+                        move || plain_sig.get(),
+                        move |v| {
+                            plain_sig.set(v.to_owned());
+                            dirty.set(true);
+                        },
+                        "Value",
+                    )
+                    .font_family(MONO_FONT)
+                    .label("Plain value"),
+                ),
             )
+            .child(when(
+                move || is_likely_secret_key(&key_sig.get()),
+                move || {
+                    compact_action("→ Secret", Variant::Quiet, move |_| {
+                        let cur = plain_sig.get_untracked();
+                        plain_sig.set(String::new());
+                        sec_sig.set(cur);
+                        has_existing_sig.set(false);
+                        replacing_sig.set(true);
+                        kind_sig.set(RowKind::Secret);
+                        dirty.set(true);
+                    })
+                },
+            ))
             .into_element(),
         RowKind::Secret => view()
             .flex_1()
-            .min_w(px(180.))
+            .min_w(px(140.))
             .child(dynamic(move || {
                 if has_existing_sig.get() && !replacing_sig.get() {
                     let configured = configured_sig.get();
                     let hint = hint_sig.get();
                     view()
+                        .px_2p5()
+                        .py_1()
                         .flex_row()
                         .items_center()
+                        .justify_between()
                         .gap_2()
                         .child(if configured {
-                            badge(if hint.is_empty() {
+                            muted(if hint.is_empty() {
                                 "••••".into()
                             } else {
                                 hint
                             })
+                            .font_family(MONO_FONT)
+                            .text_size(px(12.))
                             .into_element()
                         } else {
-                            notice("Missing on this host", Tone::Attention).into_element()
+                            text("Missing on this host")
+                                .text_size(px(12.))
+                                .text_color(ATTENTION)
+                                .into_element()
                         })
                         .child(compact_action(
                             if configured { "Replace" } else { "Set value" },
-                            Variant::Secondary,
+                            Variant::Quiet,
                             move |_| {
                                 sec_sig.set(String::new());
                                 replacing_sig.set(true);
@@ -786,12 +835,13 @@ fn env_row_view(
                         .into_element()
                 } else {
                     view()
+                        .pr_1p5()
                         .flex_row()
                         .items_center()
-                        .gap_1p5()
+                        .gap_1()
                         .child(
-                            view().flex_1().min_w(px(120.)).child(
-                                secret_field(sec_sig, rev_sig, "Enter secret value…")
+                            view().flex_1().min_w(px(100.)).child(
+                                cell_secret_field(sec_sig, rev_sig, "Enter secret value…")
                                     .on_change(move |v: &str| {
                                         sec_sig.set(v.to_owned());
                                         dirty.set(true);
@@ -819,47 +869,42 @@ fn env_row_view(
             .into_element(),
     };
 
-    view()
-        .p_2()
-        .rounded(px(RADIUS))
-        .bg(INSET)
+    let mut row_view = view()
         .flex_row()
-        .flex_wrap()
         .items_center()
-        .gap_2()
+        .min_w(px(0.))
+        .gap_0()
         .child(
-            view().w(px(210.)).min_w(px(140.)).child(
-                bound_field(
-                    move || key_sig.get(),
-                    move |v| {
-                        key_sig.set(v.to_owned());
-                        dirty.set(true);
-                    },
-                    key_placeholder,
-                )
-                .font_family(MONO_FONT)
-                .label(key_aria),
-            ),
+            view()
+                .w(px(210.))
+                .min_w(px(120.))
+                .flex_shrink_0()
+                .border_r_1()
+                .border_color(BORDER)
+                .child(
+                    cell_field(
+                        move || key_sig.get(),
+                        move |v| {
+                            key_sig.set(v.to_owned());
+                            dirty.set(true);
+                        },
+                        key_placeholder,
+                    )
+                    .font_family(MONO_FONT)
+                    .label(key_aria),
+                ),
         )
         .child(value_area)
-        .children((section_kind == RowKind::Plain).then(|| {
-            when(
-                move || is_likely_secret_key(&key_sig.get()),
-                move || {
-                    compact_action("→ Move to Secrets", Variant::Secondary, move |_| {
-                        let cur = plain_sig.get_untracked();
-                        plain_sig.set(String::new());
-                        sec_sig.set(cur);
-                        has_existing_sig.set(false);
-                        replacing_sig.set(true);
-                        kind_sig.set(RowKind::Secret);
-                        dirty.set(true);
-                    })
-                },
-            )
-        }))
-        .child(chrome_button(Icon::Close, remove_aria, move |_| {
-            rows.update(|list| list.retain(|r| r.uid != uid));
-            dirty.set(true);
-        }))
+        .child(view().px_1().flex_shrink_0().child(chrome_button(
+            Icon::Close,
+            remove_aria,
+            move |_| {
+                rows.update(|list| list.retain(|r| r.uid != uid));
+                dirty.set(true);
+            },
+        )));
+    if has_bottom_border {
+        row_view = row_view.border_b_1().border_color(BORDER);
+    }
+    row_view
 }

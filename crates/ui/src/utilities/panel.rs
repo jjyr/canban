@@ -279,38 +279,9 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
     )
 }
 fn theme_panel(ui: Ui) -> impl IntoElement {
-    view().gap_3().child(
-        view().flex_row().flex_wrap().gap_2().children(
-            canban_themes::THEMES
-                .iter()
-                .map(|theme| {
-                    theme_choice(
-                        theme,
-                        move || {
-                            ui.utility.with(|v| {
-                                v["preferences"]["theme"]
-                                    .as_str()
-                                    .unwrap_or(canban_themes::DEFAULT)
-                                    == theme.id
-                            })
-                        },
-                        move |hovered| {
-                            if hovered && ui.utility_popup.get_untracked() == "theme" {
-                                ui.theme_preview.set(Some(theme.id.into()));
-                            } else if ui
-                                .theme_preview
-                                .with_untracked(|v| v.as_deref() == Some(theme.id))
-                            {
-                                // A late leave from the previous tile cannot clear the next preview.
-                                ui.theme_preview.set(None);
-                            }
-                        },
-                        move || ui.is_method_pending("utilities.configure"),
-                        move |_| configure(ui, theme.id.into()),
-                    )
-                    .into_element()
-                })
-                .collect::<Vec<_>>(),
-        ),
-    )
+    view()
+        .gap_3()
+        .child(super::theme_palette_grid(ui, Percentage(0.48), move || {
+            ui.utility_popup.get_untracked() == "theme"
+        }))
 }

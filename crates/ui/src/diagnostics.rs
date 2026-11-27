@@ -208,75 +208,30 @@ pub fn refresh_diagnostics(ui: Ui) {
     });
 }
 
-fn kv_row(key: &'static str, val: impl Into<String>) -> View {
-    view()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .py_1()
-        .child(muted(key).text_size(px(12.)))
-        .child(
-            label(val.into())
-                .font_family(MONO_FONT)
-                .text_size(px(11.5))
-                .truncate(),
-        )
-}
-
-fn diag_card(title: &'static str, badge_el: AnyElement, body: View) -> View {
-    panel()
-        .p_0()
-        .gap_0()
-        .border_1()
-        .border_color(BORDER)
-        .overflow_hidden()
-        .min_w(px(0.))
-        .child(
-            view()
-                .px_3p5()
-                .py_2()
-                .bg(INSET)
-                .border_b_1()
-                .border_color(BORDER)
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(label(title).font_weight(FontWeight::SEMIBOLD))
-                .child(badge_el),
-        )
-        .child(view().px_3p5().py_2p5().gap_0p5().min_w(px(0.)).child(body))
+fn mono_val(val: impl Into<String>) -> Text {
+    label(val.into())
+        .font_family(MONO_FONT)
+        .text_size(px(11.5))
+        .truncate()
 }
 
 pub fn section_view(ui: Ui) -> impl IntoElement {
-    section_view_with_activation(ui, signal(true))
-}
-
-pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl IntoElement {
+    let last_inspected = stored(ui.settings_host.get_untracked());
     effect(move || {
-        if activated.get() && ui.diagnostics.with_untracked(Value::is_null) {
+        let cur = ui.settings_host.get();
+        if last_inspected.get() != cur {
+            last_inspected.replace(cur);
+            ui.diagnostics.set(Value::Null);
+            ui.diagnostics_logs.set(Value::Null);
+            refresh_diagnostics(ui);
+        } else if ui.diagnostics.with_untracked(Value::is_null) {
             refresh_diagnostics(ui);
         }
     });
 
-    let last_inspected = signal(ui.settings_host.get_untracked());
-    effect(move || {
-        let cur = ui.settings_host.get();
-        if last_inspected.get_untracked() != cur {
-            last_inspected.set(cur);
-            if activated.get_untracked() {
-                refresh_diagnostics(ui);
-            } else {
-                ui.diagnostics.set(Value::Null);
-                ui.diagnostics_logs.set(Value::Null);
-            }
-        }
-    });
-
     settings_section(
-        "Diagnostics",
-        "End-to-end inspection of transport connectivity, AppServer & SQLite health, Herdr Core supervision, toolchain binaries, and daemon logs.",
+        "Diagnostics & Runtime",
+        "Transport connectivity, AppServer & SQLite health, Herdr Core supervision, toolchain binaries, and daemon logs.",
     )
     .trailing(
         view()
@@ -293,10 +248,7 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
                     }
                 },
                 Variant::Primary,
-                move |_| {
-                    activated.set(true);
-                    refresh_diagnostics(ui);
-                },
+                move |_| refresh_diagnostics(ui),
             ))
             .child(compact_action(
                 "Open Host Terminal",
@@ -321,39 +273,6 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
             )),
     )
     .child(dynamic(move || {
-        let hosts = crate::hosts::effective_hosts(ui);
-        let selected = ui.settings_host.get();
-        if hosts.len() <= 1 {
-            return view().into_element();
-        }
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(muted("Inspecting host:"))
-            .child(
-                segmented().children(hosts.into_iter().map(|h| {
-                    let hid = h.id.clone();
-                    let hid_sel = h.id.clone();
-                    let cur_sel = selected.clone();
-                    compact_segment(
-                        h.name,
-                        Some(if h.is_local {
-                            Icon::Projects
-                        } else {
-                            Icon::Server
-                        }),
-                        move || cur_sel == hid_sel,
-                        move |_| ui.settings_host.set(hid.clone()),
-                    )
-                    .into_element()
-                })),
-            )
-            .into_element()
-    }))
-    .child(dynamic(move || {
         let host_id = ui.settings_host.get();
         let hosts = crate::hosts::effective_hosts(ui);
         let summary = hosts
@@ -361,98 +280,50 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
             .find(|h| h.id == host_id)
             .cloned()
             .or_else(|| hosts.into_iter().next());
+        let runtime = crate::config_for_host(&host_id);
         let diag = ui.diagnostics.get();
 
         let mut stack = view().gap_4().min_w(px(0.));
 
-        // Card 1: Connection & Transport
+        // Top health pills
+        let mut pills = view().flex_row().flex_wrap().items_center().gap_2();
         if let Some(h) = &summary {
-            let mut conn_rows = view()
-                .gap_0p5()
-                .child(kv_row("Host", h.name.clone()))
-                .child(kv_row("Transport", h.transport_label.clone()))
-                .child(kv_row("Endpoint", h.endpoint_label.clone()))
-                .children(
-                    h.server_pubkey_fingerprint
-                        .as_ref()
-                        .map(|fp| kv_row("Key fingerprint", fp.clone())),
-                )
-                .child(kv_row("Status", h.connection.short_status()));
-            if let HostConnectionState::Connected {
-                rtt_ms,
-                api_version,
-                version,
-                platform,
-            } = &h.connection
-            {
-                conn_rows = conn_rows
-                    .child(kv_row(
-                        "Round-trip latency",
-                        if h.is_local {
-                            "0ms (local socket)".into()
-                        } else {
-                            format!("{rtt_ms}ms")
-                        },
-                    ))
-                    .child(kv_row(
-                        "Protocol API",
-                        format!("v{api_version} (Desktop v{})", crate::backend::desktop_api()),
-                    ))
-                    .child(kv_row("Daemon build", format!("{version} ({platform})")));
-            } else if let HostConnectionState::Updating { version } = &h.connection {
-                if !version.trim().is_empty() {
-                    conn_rows = conn_rows.child(kv_row("Target release", version.clone()));
+            let conn_pill = match &h.connection {
+                HostConnectionState::Connected { rtt_ms, api_version, .. } => {
+                    let lat = if h.is_local {
+                        "Socket · 0ms".to_owned()
+                    } else {
+                        format!("{rtt_ms}ms")
+                    };
+                    live_status(format!("{lat} · API v{api_version}"), Tone::Success)
                 }
-                conn_rows = conn_rows.child(
-                    view().pt_1p5().items_start().child(
-                        compact_action("Updating…", Variant::Secondary, |_| {})
-                            .disabled(|| true),
-                    ),
-                );
-            } else if let HostConnectionState::ApiMismatch {
-                server_api,
-                app_api,
-                version,
-            } = &h.connection
-            {
-                let h_upd = h.clone();
-                conn_rows = conn_rows
-                    .child(kv_row(
-                        "Protocol API",
-                        format!("Daemon v{server_api} · Desktop v{app_api}"),
-                    ))
-                    .child(kv_row("Daemon build", version.clone()))
-                    .child(
-                        view().pt_1p5().items_start().child(compact_action(
-                            "Update Daemon",
-                            Variant::Primary,
-                            move |_| crate::hosts::update_host_daemon(ui, h_upd.clone()),
-                        )),
-                    );
-            }
-            if !h.is_local {
-                conn_rows = conn_rows.child(kv_row(
-                    "Reconnect count",
-                    h.reconnect_count.to_string(),
-                ));
-            }
-            if let Some(err) = h.connection.error_detail() {
-                conn_rows = conn_rows.child(notice(err.to_owned(), Tone::Attention));
-            }
-            stack = stack.child(diag_card(
-                "1. Connection & Transport",
-                crate::hosts::host_status_badge(h).into_element(),
-                conn_rows,
-            ));
+                _ => crate::hosts::host_status_badge(h),
+            };
+            pills = pills.child(conn_pill);
         }
 
         if let Some(err) = diag["error"].as_str() {
+            stack = stack.child(pills);
+            let mut conn_group = settings_group().title("Connection & Herdr Configuration");
+            if let Some(h) = &summary {
+                conn_group = conn_group
+                    .row(settings_kv_row("Host", mono_val(h.name.clone())))
+                    .row(settings_kv_row("Transport", mono_val(h.transport_label.clone())))
+                    .row(settings_kv_row("Endpoint", mono_val(h.endpoint_label.clone())))
+                    .row(settings_kv_row("Status", mono_val(h.connection.short_status())));
+            }
+            conn_group = conn_group
+                .row(settings_kv_row("Herdr executable", mono_val(runtime.hc)))
+                .row(settings_kv_row("Herdr session", mono_val(runtime.hc_session)));
+            stack = stack.child(conn_group);
+
             let hid_rec = host_id.clone();
             let is_updating = summary.as_ref().is_some_and(HostSummary::is_updating);
             stack = stack.child(
-                panel()
+                view()
                     .p_3p5()
                     .gap_2()
+                    .rounded(px(RADIUS))
                     .border_1()
                     .border_color(if is_updating { ACCENT } else { ATTENTION })
                     .bg(if is_updating { SELECTED } else { ATTENTION_SURFACE })
@@ -466,57 +337,161 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
                     )
                     .child(muted(err.to_owned()))
                     .child(
-                        view().items_start().child(
-                            if is_updating {
-                                compact_action("Updating…", Variant::Secondary, |_| {})
-                                    .disabled(|| true)
-                            } else {
-                                compact_action(
-                                    "Reconnect Host",
-                                    Variant::Secondary,
-                                    move |_| crate::hosts::reconnect_host(ui, Some(hid_rec.clone())),
-                                )
-                            },
-                        ),
+                        view().items_start().child(if is_updating {
+                            compact_action("Updating…", Variant::Secondary, |_| {}).disabled(|| true)
+                        } else {
+                            compact_action(
+                                "Reconnect Host",
+                                Variant::Secondary,
+                                move |_| crate::hosts::reconnect_host(ui, Some(hid_rec.clone())),
+                            )
+                        }),
                     ),
             );
             return stack;
         }
 
         if diag.is_null() {
-            if ui.diagnostics_loading.get() {
-                stack = stack.child(loading_panel(
-                    "Running host diagnostics…",
-                    "Inspecting AppServer & SQLite WAL, Herdr Core supervision, toolchain binaries, and daemon logs.",
-                ));
-            } else {
-                stack = stack.child(
-                    panel()
-                        .p_3p5()
-                        .gap_2()
-                        .bg(INSET)
-                        .border_1()
-                        .border_color(BORDER)
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .child(muted(
-                            "Diagnostics run automatically when scrolled into view, or click Run Checks.",
-                        ))
-                        .child(compact_action("Run Checks", Variant::Secondary, move |_| {
-                            activated.set(true);
-                            refresh_diagnostics(ui);
-                        })),
-                );
-            }
+            stack = stack.child(pills).child(loading_panel(
+                "Running host diagnostics…",
+                "Inspecting AppServer & SQLite WAL, Herdr Core supervision, toolchain binaries, and daemon logs.",
+            ));
             return stack;
         }
 
-        // Card 2: Canban Service & SQLite Storage
         let srv = &diag["server"];
         let stg = &diag["storage"];
         let db_ok = stg["healthy"].as_bool().unwrap_or(false);
+        let db_bytes = stg["db_size_bytes"].as_u64().unwrap_or(0);
+        let herdr = &diag["herdr"];
+        let hc_ready = herdr["check"]["ready"].as_bool().unwrap_or(false);
+        let obs_conn = herdr["observer_connected"].as_bool().unwrap_or(false);
+        let obs_ptys = herdr["observed_terminals"].as_u64().unwrap_or(0);
+        let herdr_ok = hc_ready && obs_conn;
+        let tc = &diag["toolchain"];
+        let git_ok = tc["git"]["available"].as_bool().unwrap_or(false);
+        let py_ok = tc["python3"]["available"].as_bool().unwrap_or(false);
+
+        pills = pills
+            .child(status(
+                format!(
+                    "SQLite {} · {}",
+                    stg["journal_mode"].as_str().unwrap_or("wal").to_uppercase(),
+                    format_bytes(db_bytes)
+                ),
+                if db_ok { Tone::Success } else { Tone::Danger },
+            ))
+            .child(status(
+                if obs_conn {
+                    format!("Herdr · {obs_ptys} PTYs")
+                } else if hc_ready {
+                    "Herdr · Ready".to_owned()
+                } else {
+                    "Herdr · Unavailable".to_owned()
+                },
+                if herdr_ok || hc_ready {
+                    Tone::Success
+                } else {
+                    Tone::Danger
+                },
+            ))
+            .child(status(
+                if git_ok && py_ok {
+                    "Toolchain · Ready"
+                } else {
+                    "Toolchain · Missing tools"
+                },
+                if git_ok && py_ok {
+                    Tone::Success
+                } else {
+                    Tone::Danger
+                },
+            ));
+        stack = stack.child(pills);
+
+        // Group 1: Connection, Service & Herdr Runtime
+        let mut runtime_group = settings_group().title("Connection & Runtime");
+        if let Some(h) = &summary {
+            runtime_group = runtime_group
+                .row(settings_kv_row("Host", mono_val(h.name.clone())))
+                .row(settings_kv_row(
+                    "Transport",
+                    mono_val(format!("{} · {}", h.transport_label, h.endpoint_label)),
+                ));
+            if let Some(fp) = &h.server_pubkey_fingerprint {
+                runtime_group = runtime_group.row(settings_kv_row("Key fingerprint", mono_val(fp.clone())));
+            }
+            match &h.connection {
+                HostConnectionState::Connected {
+                    rtt_ms,
+                    api_version,
+                    version,
+                    platform,
+                } => {
+                    runtime_group = runtime_group
+                        .row(settings_kv_row(
+                            "Latency & API",
+                            mono_val(format!(
+                                "{} · API v{api_version} (Desktop v{})",
+                                if h.is_local {
+                                    "0ms (local)".to_owned()
+                                } else {
+                                    format!("{rtt_ms}ms")
+                                },
+                                crate::backend::desktop_api()
+                            )),
+                        ))
+                        .row(settings_kv_row("Daemon build", mono_val(format!("{version} ({platform})"))));
+                }
+                HostConnectionState::Updating { version } => {
+                    let msg = if version.trim().is_empty() {
+                        "Updating…".to_owned()
+                    } else {
+                        format!("Updating to {version}…")
+                    };
+                    runtime_group = runtime_group.row(settings_kv_row("Daemon status", mono_val(msg)));
+                }
+                HostConnectionState::ApiMismatch {
+                    server_api,
+                    app_api,
+                    version,
+                } => {
+                    let h_upd = h.clone();
+                    runtime_group = runtime_group.row(settings_kv_row(
+                        "API mismatch",
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(mono_val(format!(
+                                "Daemon v{server_api} · Desktop v{app_api} ({version})"
+                            )))
+                            .child(compact_action(
+                                "Update Daemon",
+                                Variant::Primary,
+                                move |_| crate::hosts::update_host_daemon(ui, h_upd.clone()),
+                            )),
+                    ));
+                }
+                _ => {
+                    runtime_group =
+                        runtime_group.row(settings_kv_row("Status", mono_val(h.connection.short_status())));
+                }
+            }
+            if !h.is_local {
+                runtime_group =
+                    runtime_group.row(settings_kv_row("Reconnect count", mono_val(h.reconnect_count.to_string())));
+            }
+            if let Some(err) = h.connection.error_detail() {
+                runtime_group = runtime_group.row(
+                    view()
+                        .px_3p5()
+                        .py_2()
+                        .child(text(err.to_owned()).text_size(px(12.)).text_color(ATTENTION)),
+                );
+            }
+        }
+
         let bound_tcp = srv["bound_tcp"]
             .as_array()
             .map(|a| {
@@ -527,107 +502,74 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "None (Unix socket only)".into());
-        let srv_rows = view()
-            .gap_0p5()
-            .child(kv_row(
-                "Hostname / PID",
-                format!(
-                    "{} (pid {})",
+
+        runtime_group = runtime_group
+            .row(settings_kv_row(
+                "AppServer",
+                mono_val(format!(
+                    "{} (pid {}) · up {}",
                     srv["hostname"].as_str().unwrap_or("unknown"),
-                    srv["pid"].as_u64().unwrap_or(0)
-                ),
+                    srv["pid"].as_u64().unwrap_or(0),
+                    format_uptime(srv["uptime_ms"].as_u64().unwrap_or(0))
+                )),
             ))
-            .child(kv_row(
-                "Uptime",
-                format_uptime(srv["uptime_ms"].as_u64().unwrap_or(0)),
-            ))
-            .child(kv_row(
+            .row(settings_kv_row(
                 "Application home",
-                srv["home"].as_str().unwrap_or("").to_owned(),
+                mono_val(srv["home"].as_str().unwrap_or("").to_owned()),
             ))
-            .child(kv_row("TCP listener", bound_tcp))
-            .child(kv_row(
+            .row(settings_kv_row("TCP listener", mono_val(bound_tcp)))
+            .row(settings_kv_row(
                 "SQLite WAL",
-                format!(
+                mono_val(format!(
                     "{} · DB {} · WAL {}",
                     stg["journal_mode"].as_str().unwrap_or("wal").to_uppercase(),
-                    format_bytes(stg["db_size_bytes"].as_u64().unwrap_or(0)),
+                    format_bytes(db_bytes),
                     format_bytes(stg["wal_size_bytes"].as_u64().unwrap_or(0)),
-                ),
+                )),
             ))
-            .child(kv_row(
+            .row(settings_kv_row(
                 "Entities",
-                format!(
+                mono_val(format!(
                     "{} projects · {} active cards · {} live terminals",
                     stg["project_count"].as_u64().unwrap_or(0),
                     stg["active_card_count"].as_u64().unwrap_or(0),
                     stg["active_terminal_count"].as_u64().unwrap_or(0),
-                ),
-            ));
-        stack = stack.child(diag_card(
-            "2. Canban Service & Storage",
-            status(
-                if db_ok { "Healthy" } else { "Check DB" },
-                if db_ok { Tone::Success } else { Tone::Danger },
-            )
-            .into_element(),
-            srv_rows,
-        ));
-
-        // Card 3: Herdr Runtime
-        let herdr = &diag["herdr"];
-        let hc_ready = herdr["check"]["ready"].as_bool().unwrap_or(false);
-        let obs_conn = herdr["observer_connected"].as_bool().unwrap_or(false);
-        let herdr_ok = hc_ready && obs_conn;
-        let herdr_rows = view()
-            .gap_0p5()
-            .child(kv_row(
-                "Core ID",
-                herdr["core_id"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("unverified")
-                    .to_owned(),
+                )),
             ))
-            .child(kv_row(
-                "Session",
-                herdr["session"].as_str().unwrap_or("canban").to_owned(),
+            .row(settings_kv_row(
+                "Herdr runtime",
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .child(mono_val(format!(
+                        "{} · session `{}` · core {}",
+                        runtime.hc,
+                        herdr["session"].as_str().unwrap_or(&runtime.hc_session),
+                        herdr["core_id"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("unverified"),
+                    )))
+                    .child(compact_action(
+                        "Check connection",
+                        Variant::Secondary,
+                        move |_| dispatch(ui, "herdr.status", json!({})),
+                    )),
             ))
-            .child(kv_row(
+            .row(settings_kv_row(
                 "Observer stream",
-                if obs_conn {
-                    format!(
-                        "Connected ({} observed PTYs)",
-                        herdr["observed_terminals"].as_u64().unwrap_or(0)
-                    )
+                mono_val(if obs_conn {
+                    format!("Connected ({obs_ptys} observed PTYs)")
                 } else {
                     "Reconnecting / idle".into()
-                },
+                }),
             ));
-        stack = stack.child(diag_card(
-            "3. Herdr Runtime",
-            status(
-                if herdr_ok {
-                    "Connected"
-                } else if hc_ready {
-                    "Ready"
-                } else {
-                    "Unavailable"
-                },
-                if herdr_ok || hc_ready {
-                    Tone::Success
-                } else {
-                    Tone::Danger
-                },
-            )
-            .into_element(),
-            herdr_rows,
-        ));
+        stack = stack.child(runtime_group);
 
-        // Card 4: Toolchain & Agent Profiles
-        let tc = &diag["toolchain"];
-        let git_ok = tc["git"]["available"].as_bool().unwrap_or(false);
-        let py_ok = tc["python3"]["available"].as_bool().unwrap_or(false);
+        // Group 2: Toolchain & Agent Binaries
         let ts_ip = tc["tailscale"]["ipv4"].as_str().unwrap_or("Not connected");
         let svc_mgr = &tc["service_manager"];
         let svc_summary = format!(
@@ -647,26 +589,30 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
             }
         );
 
-        let mut tc_rows = view()
-            .gap_0p5()
-            .child(kv_row(
+        let mut tc_group = settings_group()
+            .title("Toolchain & Enabled Agent Binaries")
+            .row(settings_kv_row(
                 "git",
-                tc["git"]["version"]
-                    .as_str()
-                    .or_else(|| tc["git"]["error"].as_str())
-                    .unwrap_or("missing")
-                    .to_owned(),
+                mono_val(
+                    tc["git"]["version"]
+                        .as_str()
+                        .or_else(|| tc["git"]["error"].as_str())
+                        .unwrap_or("missing")
+                        .to_owned(),
+                ),
             ))
-            .child(kv_row(
+            .row(settings_kv_row(
                 "python3",
-                tc["python3"]["version"]
-                    .as_str()
-                    .or_else(|| tc["python3"]["error"].as_str())
-                    .unwrap_or("missing")
-                    .to_owned(),
+                mono_val(
+                    tc["python3"]["version"]
+                        .as_str()
+                        .or_else(|| tc["python3"]["error"].as_str())
+                        .unwrap_or("missing")
+                        .to_owned(),
+                ),
             ))
-            .child(kv_row("Tailscale IPv4", ts_ip.to_owned()))
-            .child(kv_row("Background service", svc_summary));
+            .row(settings_kv_row("Tailscale IPv4", mono_val(ts_ip.to_owned())))
+            .row(settings_kv_row("Background service", mono_val(svc_summary)));
 
         if let Some(profs) = tc["profiles"].as_array() {
             for p in profs {
@@ -674,22 +620,23 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
                 let cmd = p["command"].as_str().unwrap_or("");
                 let ok = p["available"].as_bool().unwrap_or(false);
                 let resolved = p["resolved_path"].as_str().unwrap_or("missing in PATH");
-                tc_rows = tc_rows.child(
+                tc_group = tc_group.row(
                     view()
+                        .px_3p5()
+                        .py_2()
                         .flex_row()
                         .items_center()
                         .justify_between()
                         .gap_3()
-                        .py_1()
+                        .min_w(px(0.))
                         .child(
                             view()
                                 .flex_row()
                                 .items_center()
                                 .gap_1p5()
+                                .flex_shrink_0()
                                 .child(live_dot(if ok { SUCCESS } else { DANGER }))
-                                .child(
-                                    label(format!("@{pid} ({cmd})")).text_size(px(12.)),
-                                ),
+                                .child(label(format!("@{pid} ({cmd})")).text_size(px(12.))),
                         )
                         .child(
                             muted(resolved.to_owned())
@@ -700,26 +647,9 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
                 );
             }
         }
+        stack = stack.child(tc_group);
 
-        stack = stack.child(diag_card(
-            "4. Toolchain & Enabled Agent Binaries",
-            status(
-                if git_ok && py_ok {
-                    "Ready"
-                } else {
-                    "Missing tools"
-                },
-                if git_ok && py_ok {
-                    Tone::Success
-                } else {
-                    Tone::Danger
-                },
-            )
-            .into_element(),
-            tc_rows,
-        ));
-
-        // Card 5: Live Log Tail
+        // Group 3: Live Log Tail (borderless header + single-border log box)
         let log_val = ui.diagnostics_logs.get();
         let cur_src = {
             let s = ui.diagnostics_log_source.get();
@@ -734,78 +664,77 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
         let src_server = cur_src.clone();
         let src_updater = cur_src;
 
+        let log_header = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(label("Daemon Logs").font_weight(FontWeight::SEMIBOLD))
+                    .child(
+                        segmented()
+                            .child(compact_segment(
+                                "server.log",
+                                None,
+                                move || src_server == "server",
+                                move |_| {
+                                    ui.diagnostics_log_source.set("server".into());
+                                    refresh_diagnostics(ui);
+                                },
+                            ))
+                            .child(compact_segment(
+                                "updater.log",
+                                None,
+                                move || src_updater == "updater",
+                                move |_| {
+                                    ui.diagnostics_log_source.set("updater".into());
+                                    refresh_diagnostics(ui);
+                                },
+                            )),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(compact_action("Refresh", Variant::Quiet, move |_| {
+                        refresh_diagnostics(ui);
+                    }))
+                    .child(compact_action("Copy Log", Variant::Quiet, move |_| {
+                        copy_text(ui, log_text_copy.clone());
+                    })),
+            );
+
         stack = stack.child(
-            panel()
-                .p_0()
-                .gap_0()
-                .border_1()
-                .border_color(BORDER)
-                .overflow_hidden()
+            view()
+                .gap_2()
                 .min_w(px(0.))
+                .child(log_header)
                 .child(
                     view()
-                        .px_3p5()
-                        .py_2()
-                        .bg(INSET)
-                        .border_b_1()
+                        .rounded(px(RADIUS))
+                        .border_1()
                         .border_color(BORDER)
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
+                        .bg(SURFACE)
+                        .overflow_hidden()
+                        .min_w(px(0.))
                         .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(label("5. Daemon Logs").font_weight(FontWeight::SEMIBOLD))
+                            scroll()
+                                .max_h(px(260.))
+                                .p_3()
                                 .child(
-                                    segmented()
-                                        .child(compact_segment(
-                                            "server.log",
-                                            None,
-                                            move || src_server == "server",
-                                            move |_| {
-                                                ui.diagnostics_log_source.set("server".into());
-                                                refresh_diagnostics(ui);
-                                            },
-                                        ))
-                                        .child(compact_segment(
-                                            "updater.log",
-                                            None,
-                                            move || src_updater == "updater",
-                                            move |_| {
-                                                ui.diagnostics_log_source.set("updater".into());
-                                                refresh_diagnostics(ui);
-                                            },
-                                        )),
+                                    text(log_text)
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(11.5))
+                                        .text_color(MUTED)
+                                        .min_w(px(0.)),
                                 ),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .child(compact_action("Refresh", Variant::Quiet, move |_| {
-                                    refresh_diagnostics(ui);
-                                }))
-                                .child(compact_action("Copy Log", Variant::Quiet, move |_| {
-                                    copy_text(ui, log_text_copy.clone());
-                                })),
-                        ),
-                )
-                .child(
-                    scroll()
-                        .max_h(px(260.))
-                        .p_3()
-                        .bg(BACKGROUND)
-                        .child(
-                            text(log_text)
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
-                                .text_color(MUTED)
-                                .min_w(px(0.)),
                         ),
                 ),
         );

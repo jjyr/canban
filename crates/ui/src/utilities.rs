@@ -62,7 +62,11 @@ pub fn init(ui: Ui) {
         let saved = v["preferences"]["theme"]
             .as_str()
             .unwrap_or(canban_themes::DEFAULT);
-        if ui.utility_popup.get() == "theme" {
+        let preview_allowed = ui.utility_popup.get() == "theme"
+            || (ui.page.get() == "settings"
+                && crate::settings::SectionId::resolve(&ui.settings_section.get())
+                    == crate::settings::SectionId::Appearance);
+        if preview_allowed {
             let preview = ui.theme_preview.get();
             set_theme(preview.as_deref().unwrap_or(saved));
         } else {
@@ -207,7 +211,7 @@ pub fn ensure_fonts_loaded(ui: Ui) {
     });
 }
 
-pub fn terminal_settings(ui: Ui) -> impl IntoElement {
+pub(crate) fn terminal_appearance_group(ui: Ui) -> impl IntoElement {
     ensure_fonts_loaded(ui);
     let adjust_size = move |delta: i32| {
         let current = ui.utility.with_untracked(|v| {
@@ -228,128 +232,179 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
         configure_preferences(ui, payload);
     };
 
-    settings_section(
-        "Terminal",
-        "Font family and size apply immediately to open Terminals without reconnecting.",
-    )
-    .trailing(badge(move || {
-        ui.utility.with(|v| {
-            let fam = v["preferences"]["terminal_font_family"]
-                .as_str()
-                .unwrap_or("")
-                .trim();
-            let sz = v["preferences"]["terminal_font_size"]
-                .as_u64()
-                .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE));
-            let name = if fam.is_empty() { "System Mono" } else { fam };
-            format!("{name} · {sz} pt")
-        })
-    }))
-    .child(settings_field(
-        "Font family",
-        "",
-        view()
-            .gap_1p5()
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        action(
-                            move || {
-                                let current = ui.utility.with(|v| {
-                                    v["preferences"]["terminal_font_family"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .trim()
-                                        .to_owned()
-                                });
-                                if current.is_empty() {
-                                    "System Mono ▾".into()
-                                } else {
-                                    format!("{current} ▾")
-                                }
-                            },
-                            Variant::Secondary,
-                            move |_| open(ui, "terminal-font"),
-                        )
-                        .accessibility_label("Choose terminal font family")
-                        .disabled(move || ui.is_method_pending("utilities.configure")),
-                    )
-                    .child(when(
+    let font_family_row = view()
+        .px_3p5()
+        .py_2p5()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .min_w(px(0.))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(200.))
+                .gap_0p5()
+                .child(label("Font family").font_weight(FontWeight::MEDIUM))
+                .child(dynamic(move || {
+                    if let Some(catalog) = ui.installed_fonts.get() {
+                        muted(format!(
+                            "Choose from {} installed monospaced families {} (or System Mono).",
+                            catalog.monospaced.len(),
+                            crate::platform::ON_THIS_MACHINE
+                        ))
+                        .text_size(px(CAPTION_SIZE))
+                        .into_element()
+                    } else {
+                        loading_indicator("Scanning installed monospaced font families…")
+                            .into_element()
+                    }
+                })),
+        )
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1p5()
+                .flex_shrink_0()
+                .child(
+                    compact_action(
                         move || {
-                            ui.utility.with(|v| {
+                            let current = ui.utility.with(|v| {
                                 v["preferences"]["terminal_font_family"]
                                     .as_str()
-                                    .is_some_and(|s| !s.trim().is_empty())
-                            })
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_owned()
+                            });
+                            if current.is_empty() {
+                                "System Mono ▾".into()
+                            } else {
+                                format!("{current} ▾")
+                            }
                         },
-                        move || {
-                            compact_action("Use System Mono", Variant::Quiet, move |_| {
-                                configure_preferences(ui, json!({"terminal_font_family":null}));
-                            })
-                            .disabled(move || ui.is_method_pending("utilities.configure"))
-                        },
-                    )),
-            )
-            .child(dynamic(move || {
-                if let Some(catalog) = ui.installed_fonts.get() {
-                    muted(format!(
-                        "Choose from {} installed monospaced font families {} (or System Mono).",
-                        catalog.monospaced.len(),
-                        crate::platform::ON_THIS_MACHINE
-                    ))
-                    .into_element()
-                } else {
-                    loading_indicator("Scanning installed monospaced font families…").into_element()
-                }
-            })),
-    ))
-    .child(settings_field(
+                        Variant::Secondary,
+                        move |_| open(ui, "terminal-font"),
+                    )
+                    .accessibility_label("Choose terminal font family")
+                    .disabled(move || ui.is_method_pending("utilities.configure")),
+                )
+                .child(when(
+                    move || {
+                        ui.utility.with(|v| {
+                            v["preferences"]["terminal_font_family"]
+                                .as_str()
+                                .is_some_and(|s| !s.trim().is_empty())
+                        })
+                    },
+                    move || {
+                        compact_action("Use System Mono", Variant::Quiet, move |_| {
+                            configure_preferences(ui, json!({"terminal_font_family":null}));
+                        })
+                        .disabled(move || ui.is_method_pending("utilities.configure"))
+                    },
+                )),
+        );
+
+    let size_stepper = view()
+        .flex_row()
+        .items_center()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(BORDER)
+        .bg(INSET)
+        .overflow_hidden()
+        .child(
+            press_target()
+                .w(px(28.))
+                .h(px(30.))
+                .items_center()
+                .justify_center()
+                .border_r_1()
+                .border_color(BORDER)
+                .hover(|s| s.bg(SURFACE))
+                .active(|s| s.opacity(0.6))
+                .focus(|s| s.bg(SELECTED))
+                .disabled(move || {
+                    ui.is_method_pending("utilities.configure")
+                        || ui.utility.with(|v| {
+                            v["preferences"]["terminal_font_size"]
+                                .as_u64()
+                                .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
+                                <= u64::from(MIN_TERMINAL_FONT_SIZE)
+                        })
+                })
+                .disabled_style(|s| s.opacity(0.4))
+                .accessibility_label("Decrease terminal font size")
+                .child(
+                    label("−")
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM),
+                )
+                .on_press(move |_: &()| adjust_size(-1)),
+        )
+        .child(
+            view()
+                .px_2p5()
+                .h(px(30.))
+                .items_center()
+                .justify_center()
+                .bg(SURFACE)
+                .child(
+                    label(move || {
+                        let sz = ui.utility.with(|v| {
+                            v["preferences"]["terminal_font_size"]
+                                .as_u64()
+                                .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
+                        });
+                        format!("{sz} pt")
+                    })
+                    .font_family(MONO_FONT)
+                    .text_size(px(CAPTION_SIZE)),
+                ),
+        )
+        .child(
+            press_target()
+                .w(px(28.))
+                .h(px(30.))
+                .items_center()
+                .justify_center()
+                .border_l_1()
+                .border_color(BORDER)
+                .hover(|s| s.bg(SURFACE))
+                .active(|s| s.opacity(0.6))
+                .focus(|s| s.bg(SELECTED))
+                .disabled(move || {
+                    ui.is_method_pending("utilities.configure")
+                        || ui.utility.with(|v| {
+                            v["preferences"]["terminal_font_size"]
+                                .as_u64()
+                                .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
+                                >= u64::from(MAX_TERMINAL_FONT_SIZE)
+                        })
+                })
+                .disabled_style(|s| s.opacity(0.4))
+                .accessibility_label("Increase terminal font size")
+                .child(
+                    label("+")
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM),
+                )
+                .on_press(move |_: &()| adjust_size(1)),
+        );
+
+    let font_size_row = settings_row(
         "Font size",
-        "Point size for terminal cells (9–32 pt).",
+        "Applies live to open Terminals (9–32 pt).",
         view()
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap_1p5()
+            .child(size_stepper)
             .child(
-                compact_action("−", Variant::Secondary, move |_| adjust_size(-1)).disabled(
-                    move || {
-                        ui.is_method_pending("utilities.configure")
-                            || ui.utility.with(|v| {
-                                v["preferences"]["terminal_font_size"]
-                                    .as_u64()
-                                    .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
-                                    <= u64::from(MIN_TERMINAL_FONT_SIZE)
-                            })
-                    },
-                ),
-            )
-            .child(label(move || {
-                let sz = ui.utility.with(|v| {
-                    v["preferences"]["terminal_font_size"]
-                        .as_u64()
-                        .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
-                });
-                format!("{sz} pt")
-            }))
-            .child(
-                compact_action("+", Variant::Secondary, move |_| adjust_size(1)).disabled(
-                    move || {
-                        ui.is_method_pending("utilities.configure")
-                            || ui.utility.with(|v| {
-                                v["preferences"]["terminal_font_size"]
-                                    .as_u64()
-                                    .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
-                                    >= u64::from(MAX_TERMINAL_FONT_SIZE)
-                            })
-                    },
-                ),
-            )
-            .child(
-                compact_action("Reset font", Variant::Quiet, move |_| {
+                compact_action("Reset", Variant::Quiet, move |_| {
                     configure_preferences(
                         ui,
                         json!({"terminal_font_family":null,"terminal_font_size":null}),
@@ -363,7 +418,33 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
                         })
                 }),
             ),
-    ))
+    );
+
+    settings_group()
+        .title("Appearance")
+        .trailing(badge(move || {
+            ui.utility.with(|v| {
+                let fam = v["preferences"]["terminal_font_family"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim();
+                let sz = v["preferences"]["terminal_font_size"]
+                    .as_u64()
+                    .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE));
+                let name = if fam.is_empty() { "System Mono" } else { fam };
+                format!("{name} · {sz} pt")
+            })
+        }))
+        .row(font_family_row)
+        .row(font_size_row)
+}
+
+pub fn terminal_settings(ui: Ui) -> impl IntoElement {
+    settings_section(
+        "Terminal",
+        "Font family and size apply immediately to open Terminals without reconnecting.",
+    )
+    .child(terminal_appearance_group(ui))
 }
 pub fn usage(ui: Ui, host_id: String, force: bool) {
     if !crate::backend::is_connected() {
@@ -625,12 +706,53 @@ fn window_summary(window: &Value, now: u64, stale: bool) -> String {
 pub fn overlay(ui: Ui) -> impl IntoElement {
     panel::overlay(ui)
 }
+pub(crate) fn theme_palette_grid(
+    ui: Ui,
+    width: impl Into<Length>,
+    allow_preview: impl Fn() -> bool + Copy + 'static,
+) -> impl IntoElement {
+    let width = width.into();
+    view().flex_row().flex_wrap().gap_2().children(
+        canban_themes::THEMES
+            .iter()
+            .map(|theme| {
+                theme_choice_card(
+                    theme,
+                    width,
+                    move || {
+                        ui.utility.with(|v| {
+                            v["preferences"]["theme"]
+                                .as_str()
+                                .unwrap_or(canban_themes::DEFAULT)
+                                == theme.id
+                        })
+                    },
+                    move |hovered| {
+                        if hovered && allow_preview() {
+                            ui.theme_preview.set(Some(theme.id.into()));
+                        } else if ui
+                            .theme_preview
+                            .with_untracked(|v| v.as_deref() == Some(theme.id))
+                        {
+                            // A late leave from the previous tile cannot clear the next preview.
+                            ui.theme_preview.set(None);
+                        }
+                    },
+                    move || ui.is_method_pending("utilities.configure"),
+                    move |_| configure(ui, theme.id.into()),
+                )
+                .into_element()
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 pub fn settings(ui: Ui) -> impl IntoElement {
     let sounds = signal(crate::reminders::sound_enabled(ui));
     effect(move || sounds.set(crate::reminders::sound_enabled(ui)));
     settings_section(
-        "Theme and support",
-        "Theme and power controls are also available from the bottom bar.",
+        "Appearance & General",
+        "Theme palette, notification sounds, shortcuts, and support.",
     )
     .trailing(badge(move || {
         ui.utility.with(|v| {
@@ -644,36 +766,84 @@ pub fn settings(ui: Ui) -> impl IntoElement {
         })
     }))
     .child(
-        checkbox("Notification sounds".into(), sounds, move |enabled| {
-            let enabled = *enabled;
-            sounds.set(enabled);
-            configure_preferences(ui, json!({"notification_sound":enabled}));
-        })
-        .disabled(move || ui.is_method_pending("utilities.configure")),
+        view()
+            .gap_2()
+            .min_w(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        label("Theme")
+                            .text_size(px(BODY_SIZE))
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(muted("Hover to preview, click to apply").text_size(px(CAPTION_SIZE))),
+            )
+            .child(dynamic(move || {
+                let w = if ui.narrow.get() {
+                    Percentage(0.48)
+                } else {
+                    Percentage(0.32)
+                };
+                theme_palette_grid(ui, w, move || {
+                    ui.page.get_untracked() == "settings"
+                        && crate::settings::SectionId::resolve(&ui.settings_section.get_untracked())
+                            == crate::settings::SectionId::Appearance
+                })
+                .into_element()
+            })),
     )
     .child(
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(action("Choose theme…", Variant::Secondary, move |_| {
-                open(ui, "theme")
-            }))
-            .child(action(
-                format!(
-                    "Commands & Shortcuts · {}",
-                    crate::commands::shortcuts::COMMANDS_DISPLAY
-                ),
-                Variant::Secondary,
-                move |_| crate::commands::execute(ui, "shortcuts"),
+        settings_group()
+            .title("Preferences & Support")
+            .row(settings_row(
+                "Notification sounds",
+                "Play an audible alert when an Agent needs attention or completes a step.",
+                switch(
+                    "Notification sounds",
+                    move || sounds.get(),
+                    move |enabled| {
+                        sounds.set(enabled);
+                        configure_preferences(ui, json!({"notification_sound": enabled}));
+                    },
+                )
+                .disabled(move || ui.is_method_pending("utilities.configure")),
             ))
-            .child(action("Report issue", Variant::Secondary, move |_| {
-                report::open(ui)
-            }))
-            .child(action("Copy diagnostics", Variant::Quiet, move |_| {
-                copy_text(ui, report::diagnostics())
-            })),
+            .row(settings_row(
+                "Commands & Shortcuts",
+                "Search keyboard shortcuts and invoke any workspace action.",
+                compact_action(
+                    format!(
+                        "Shortcuts · {}",
+                        crate::commands::shortcuts::COMMANDS_DISPLAY
+                    ),
+                    Variant::Secondary,
+                    move |_| crate::commands::execute(ui, "shortcuts"),
+                ),
+            ))
+            .row(settings_row(
+                "Support & Feedback",
+                "File a bug report or copy build diagnostics to clipboard.",
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1p5()
+                    .child(compact_action(
+                        "Report issue",
+                        Variant::Secondary,
+                        move |_| report::open(ui),
+                    ))
+                    .child(compact_action(
+                        "Copy diagnostics",
+                        Variant::Quiet,
+                        move |_| copy_text(ui, report::diagnostics()),
+                    )),
+            )),
     )
 }
 

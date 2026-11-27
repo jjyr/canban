@@ -1,204 +1,103 @@
-//! Settings workspace: middle section-jump column, single outer scroll, and
-//! Acknowledgements & Licenses section.
+//! Settings workspace: 1-of-1 section switching, unified host scope, and single-boundary groups.
 use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
 
-pub const SECTION_COUNT: usize = 12;
+pub const SECTION_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionId {
-    Theme,
+    Appearance,
     Terminal,
-    Hosts,
     Environment,
-    Diagnostics,
+    Hosts,
     Updates,
     Scheduling,
-    TerminalEnv,
     Agents,
-    Herdr,
+    Diagnostics,
     Storage,
     Acknowledgements,
 }
 
 impl SectionId {
     pub const ALL: [Self; SECTION_COUNT] = [
-        Self::Theme,
+        Self::Appearance,
         Self::Terminal,
-        Self::Hosts,
         Self::Environment,
-        Self::Diagnostics,
+        Self::Hosts,
         Self::Updates,
         Self::Scheduling,
-        Self::TerminalEnv,
         Self::Agents,
-        Self::Herdr,
+        Self::Diagnostics,
         Self::Storage,
         Self::Acknowledgements,
     ];
 
-    pub const fn index(self) -> usize {
-        match self {
-            Self::Theme => 0,
-            Self::Terminal => 1,
-            Self::Hosts => 2,
-            Self::Environment => 3,
-            Self::Diagnostics => 4,
-            Self::Updates => 5,
-            Self::Scheduling => 6,
-            Self::TerminalEnv => 7,
-            Self::Agents => 8,
-            Self::Herdr => 9,
-            Self::Storage => 10,
-            Self::Acknowledgements => 11,
-        }
-    }
-
     pub const fn id(self) -> &'static str {
         match self {
-            Self::Theme => "theme",
+            Self::Appearance => "appearance",
             Self::Terminal => "terminal",
-            Self::Hosts => "hosts",
             Self::Environment => "environment",
-            Self::Diagnostics => "diagnostics",
+            Self::Hosts => "hosts",
             Self::Updates => "updates",
             Self::Scheduling => "scheduling",
-            Self::TerminalEnv => "terminal-env",
             Self::Agents => "agents",
-            Self::Herdr => "herdr",
+            Self::Diagnostics => "diagnostics",
             Self::Storage => "storage",
             Self::Acknowledgements => "acknowledgements",
         }
     }
 
     pub fn from_id(raw: &str) -> Option<Self> {
-        let trimmed = raw.trim();
-        Self::ALL
-            .into_iter()
-            .find(|s| s.id().eq_ignore_ascii_case(trimmed))
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "appearance" | "theme" => Some(Self::Appearance),
+            "terminal" | "terminal-env" => Some(Self::Terminal),
+            "environment" => Some(Self::Environment),
+            "hosts" => Some(Self::Hosts),
+            "updates" => Some(Self::Updates),
+            "scheduling" => Some(Self::Scheduling),
+            "agents" => Some(Self::Agents),
+            "diagnostics" | "herdr" => Some(Self::Diagnostics),
+            "storage" => Some(Self::Storage),
+            "acknowledgements" | "about" | "licenses" => Some(Self::Acknowledgements),
+            _ => None,
+        }
+    }
+
+    pub fn resolve(raw: &str) -> Self {
+        Self::from_id(raw).unwrap_or(Self::Appearance)
     }
 
     pub const fn nav_label(self) -> &'static str {
         match self {
-            Self::Theme => "Theme & support",
+            Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
-            Self::Hosts => "Hosts",
             Self::Environment => "Environment & Secrets",
-            Self::Diagnostics => "Diagnostics",
+            Self::Hosts => "Hosts & Pairing",
             Self::Updates => "Updates",
-            Self::Scheduling => "Agent scheduling",
-            Self::TerminalEnv => "Terminal Environment",
+            Self::Scheduling => "Scheduling",
             Self::Agents => "Agents & Identities",
-            Self::Herdr => "Herdr",
-            Self::Storage => "Storage",
-            Self::Acknowledgements => "Acknowledgements",
+            Self::Diagnostics => "Diagnostics & Runtime",
+            Self::Storage => "Storage & Archives",
+            Self::Acknowledgements => "About & Licenses",
         }
     }
 
     pub const fn group_heading(self) -> Option<&'static str> {
         match self {
-            Self::Theme => Some("APP"),
-            Self::Scheduling => Some("HOST SETTINGS"),
-            Self::Acknowledgements => None,
+            Self::Appearance => Some("GENERAL"),
+            Self::Scheduling => Some("HOST"),
             _ => None,
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct JumpPin {
-    pub section: SectionId,
-    pub started_at_ms: u64,
-    pub last_scroll_y: f32,
-    pub reached: bool,
-}
-
-pub fn clamped_target_y(
-    section: SectionId,
-    offsets: &[f32; SECTION_COUNT],
-    content_h: f32,
-    viewport_h: f32,
-) -> f32 {
-    let raw = if section == SectionId::Theme {
-        0.0
-    } else {
-        offsets[section.index()].max(0.0)
-    };
-    if content_h > 0.0 && viewport_h > 0.0 {
-        let max_scroll = (content_h - viewport_h).max(0.0);
-        raw.clamp(0.0, max_scroll)
-    } else {
-        raw
+    pub const fn is_host_scoped(self) -> bool {
+        matches!(
+            self,
+            Self::Scheduling | Self::Agents | Self::Diagnostics | Self::Storage
+        )
     }
-}
-
-pub fn advance_jump_pin(
-    pin: JumpPin,
-    scroll_y: f32,
-    now_ms: u64,
-    offsets: &[f32; SECTION_COUNT],
-    content_h: f32,
-    viewport_h: f32,
-) -> Option<JumpPin> {
-    let target = clamped_target_y(pin.section, offsets, content_h, viewport_h);
-    let dist = (scroll_y - target).abs();
-    let prev_dist = (pin.last_scroll_y - target).abs();
-    let settled_by_time = now_ms.saturating_sub(pin.started_at_ms) > 500;
-    let reached = pin.reached || dist <= 6.0 || settled_by_time;
-    if reached {
-        if dist > 12.0 {
-            return None;
-        }
-        return Some(JumpPin {
-            last_scroll_y: scroll_y,
-            reached: true,
-            ..pin
-        });
-    }
-    if dist > prev_dist + 6.0 {
-        return None;
-    }
-    Some(JumpPin {
-        last_scroll_y: scroll_y,
-        reached,
-        ..pin
-    })
-}
-
-pub fn scroll_spy_section(
-    scroll_y: f32,
-    offsets: &[f32; SECTION_COUNT],
-    content_h: f32,
-    viewport_h: f32,
-) -> SectionId {
-    if content_h > viewport_h + 8.0 && viewport_h > 0.0 && scroll_y + viewport_h >= content_h - 12.0
-    {
-        return SectionId::Acknowledgements;
-    }
-    let reading_line = scroll_y + 72.0;
-    let mut current = SectionId::Theme;
-    for section in SectionId::ALL {
-        let y = offsets[section.index()];
-        if y <= reading_line && (section == SectionId::Theme || y > 0.0) {
-            current = section;
-        }
-    }
-    current
-}
-
-pub fn resolve_active_section(
-    pin: Option<JumpPin>,
-    scroll_y: f32,
-    offsets: &[f32; SECTION_COUNT],
-    content_h: f32,
-    viewport_h: f32,
-) -> SectionId {
-    if let Some(pin) = pin {
-        return pin.section;
-    }
-    scroll_spy_section(scroll_y, offsets, content_h, viewport_h)
 }
 
 #[derive(Clone, Copy)]
@@ -327,81 +226,64 @@ const BUNDLED_DOCS: &[BundledDoc] = &[
     },
 ];
 
-fn credit_card(ui: Ui, group_title: &'static str, entries: &'static [CreditEntry]) -> View {
-    let mut rows = view().min_w(px(0.)).gap_0();
-    for (idx, entry) in entries.iter().enumerate() {
-        let mut title_row = view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .min_w(px(0.))
-            .child(label(entry.name).font_weight(FontWeight::SEMIBOLD));
-        if !entry.subtitle.is_empty() {
-            title_row = title_row.child(
-                muted(entry.subtitle)
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.5)),
-            );
-        }
+fn credit_card(
+    ui: Ui,
+    group_title: &'static str,
+    entries: &'static [CreditEntry],
+) -> impl IntoElement {
+    settings_group()
+        .title(group_title)
+        .rows(entries.iter().map(|entry| {
+            let mut title_row = view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
+                .child(label(entry.name).font_weight(FontWeight::SEMIBOLD));
+            if !entry.subtitle.is_empty() {
+                title_row = title_row.child(
+                    muted(entry.subtitle)
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5)),
+                );
+            }
 
-        let mut actions_row = view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_1p5()
-            .child(badge(entry.license));
-        for &(link_label, url) in entry.links {
-            actions_row = actions_row.child(
-                view().tooltip(hint_tooltip(url)).child(
-                    compact_action(format!("{link_label} ↗"), Variant::Quiet, move |_| {
-                        crate::links::open(ui, url);
-                    })
-                    .accessibility_label(format!("Open {} {}", entry.name, link_label)),
-                ),
-            );
-        }
+            let mut actions_row = view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1p5()
+                .child(badge(entry.license));
+            for &(link_label, url) in entry.links {
+                actions_row = actions_row.child(
+                    view().tooltip(hint_tooltip(url)).child(
+                        compact_action(format!("{link_label} ↗"), Variant::Quiet, move |_| {
+                            crate::links::open(ui, url);
+                        })
+                        .accessibility_label(format!("Open {} {}", entry.name, link_label)),
+                    ),
+                );
+            }
 
-        let mut item = view()
-            .px_3p5()
-            .py_3()
-            .gap_1()
-            .min_w(px(0.))
-            .child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .min_w(px(0.))
-                    .child(title_row)
-                    .child(actions_row),
-            )
-            .child(muted(entry.description));
-        if idx + 1 < entries.len() {
-            item = item.border_b_1().border_color(BORDER);
-        }
-        rows = rows.child(item);
-    }
-
-    panel()
-        .p_0()
-        .gap_0()
-        .border_1()
-        .border_color(BORDER)
-        .overflow_hidden()
-        .min_w(px(0.))
-        .child(
             view()
                 .px_3p5()
-                .py_2()
-                .bg(INSET)
-                .border_b_1()
-                .border_color(BORDER)
-                .child(muted(group_title).font_weight(FontWeight::SEMIBOLD)),
-        )
-        .child(rows)
+                .py_3()
+                .gap_1()
+                .min_w(px(0.))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .min_w(px(0.))
+                        .child(title_row)
+                        .child(actions_row),
+                )
+                .child(muted(entry.description))
+        }))
 }
 
 pub fn acknowledgements_section(ui: Ui) -> impl IntoElement {
@@ -409,7 +291,7 @@ pub fn acknowledgements_section(ui: Ui) -> impl IntoElement {
     let selected_doc = signal(0_usize);
 
     settings_section(
-        "Acknowledgements & Licenses",
+        "About & Licenses",
         "Canban is Copyright 2026 JJy <jjyruby@gmail.com>, licensed under Apache-2.0. Built with and inspired by open-source software:",
     )
     .trailing(badge("Apache-2.0"))
@@ -457,8 +339,9 @@ pub fn acknowledgements_section(ui: Ui) -> impl IntoElement {
                             .min_w(px(0.))
                             .into_element()
                     };
-                    panel()
-                        .bg(INSET)
+                    view()
+                        .rounded(px(RADIUS))
+                        .bg(SURFACE)
                         .border_1()
                         .border_color(BORDER)
                         .p_3p5()
@@ -509,7 +392,7 @@ fn describe_sync_bar(
     if total == 0 {
         return SyncBarPresentation {
             status_text:
-                "Local only — connect a remote host in Hosts to replicate global env & secrets."
+                "Local only — connect a remote host in Hosts & Pairing to replicate global env & secrets."
                     .into(),
             button_label: "Sync to hosts",
             variant: Variant::Secondary,
@@ -645,12 +528,12 @@ pub fn global_env_sync_bar(
 
     let mut box_view = view()
         .flex_col()
-        .gap_2()
+        .gap_1p5()
         .p_3()
         .rounded(px(RADIUS))
         .border_1()
         .border_color(BORDER)
-        .bg(INSET)
+        .bg(SURFACE)
         .child(
             view()
                 .flex_row()
@@ -683,13 +566,14 @@ pub fn global_env_sync_bar(
         );
 
     for failure in &status.failed_hosts {
-        box_view = box_view.child(notice(
-            format!("{}: {}", failure.host_name, failure.message),
-            Tone::Danger,
-        ));
+        box_view = box_view.child(
+            text(format!("{}: {}", failure.host_name, failure.message))
+                .text_size(px(12.))
+                .text_color(DANGER),
+        );
     }
     if let Some(err) = trigger_error.filter(|s| !s.trim().is_empty()) {
-        box_view = box_view.child(notice(err.to_owned(), Tone::Danger));
+        box_view = box_view.child(text(err.to_owned()).text_size(px(12.)).text_color(DANGER));
     }
     box_view
 }
@@ -772,16 +656,35 @@ pub(crate) fn global_env_section(ui: Ui) -> impl IntoElement {
     )
 }
 
-fn terminal_env_section(ui: Ui) -> impl IntoElement {
+fn open_host_menu(ui: Ui, hosts: Vec<canban_types::HostSummary>, cur: String) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    ui.spawn(async move {
+        let items: Vec<MenuItem> = hosts
+            .into_iter()
+            .map(|h| {
+                let hid = h.id.clone();
+                let prefix = if h.id == cur { "✓ " } else { "" };
+                MenuItem::new(format!("{prefix}{}", h.name)).on_select(move || {
+                    ui.settings_host.set(hid.clone());
+                })
+            })
+            .collect();
+        if !items.is_empty() {
+            popup_menu(items).await;
+        }
+    });
+}
+
+fn terminal_section(ui: Ui) -> impl IntoElement {
     use canban_types::HostTerminalEnvMode;
 
     let save_error = signal(String::new());
     let refresh_note = signal(Option::<(String, Tone)>::None);
-    let tracked_host = signal(ui.settings_host.get_untracked());
+    let tracked_host = stored(ui.settings_host.get_untracked());
     effect(move || {
         let cur_host = ui.settings_host.get();
-        if tracked_host.get_untracked() != cur_host {
-            tracked_host.set(cur_host);
+        if tracked_host.get() != cur_host {
+            tracked_host.replace(cur_host);
             save_error.set(String::new());
             refresh_note.set(None);
         }
@@ -812,80 +715,117 @@ fn terminal_env_section(ui: Ui) -> impl IntoElement {
         );
     };
 
-    settings_section(
-        "Terminal Environment",
-        "Host login-shell environment inherited by automated Agent and Script workflow steps.",
-    )
-    .trailing(
-        compact_action(
-            move || {
-                if ui.is_method_pending("host.env.refresh") {
-                    "Refreshing…"
-                } else {
-                    "Refresh"
-                }
-            },
-            Variant::Secondary,
-            move |_| {
-                if ui.is_method_pending("host.env.refresh") {
-                    return;
-                }
-                dispatch_complete(ui, "host.env.refresh", json!({}), move |res| match res {
-                    Ok(v) => {
-                        let shell = v["shell"].as_str().unwrap_or("shell");
-                        let var_count = v["var_count"].as_u64().unwrap_or(0);
-                        let full = v["full_env_captured"].as_bool().unwrap_or(false);
-                        let (msg, tone) = if full {
-                            (
-                                format!(
-                                    "Captured {var_count} environment variables from {shell}."
-                                ),
-                                Tone::Success,
-                            )
-                        } else {
-                            (
-                                format!(
-                                    "Captured PATH from {shell}; full environment snapshot was unavailable."
-                                ),
-                                Tone::Attention,
-                            )
-                        };
-                        refresh_note.try_set(Some((msg, tone)));
+    let hosts_memo = computed(move || crate::hosts::effective_hosts(ui));
+    let env_group = settings_group()
+        .title("Automation Environment")
+        .subtitle("Host login-shell environment inherited by automated Agent and Script workflow steps.")
+        .trailing(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1p5()
+                .child(dynamic(move || {
+                    let hosts = hosts_memo.get();
+                    if hosts.len() <= 1 {
+                        return view().into_element();
                     }
-                    Err(e) => {
-                        refresh_note.try_set(Some((e, Tone::Danger)));
-                    }
-                });
-            },
+                    let cur = ui.settings_host.get();
+                    let cur_name = hosts
+                        .iter()
+                        .find(|h| h.id == cur)
+                        .map(|h| h.name.clone())
+                        .unwrap_or_else(|| crate::platform::LOCAL_HOST_NAME.into());
+                    compact_action(format!("{cur_name} ▾"), Variant::Quiet, move |_| {
+                        open_host_menu(ui, hosts.clone(), cur.clone());
+                    })
+                    .into_element()
+                }))
+                .child(
+                    compact_action_with_icon(
+                        Icon::Refresh,
+                        move || {
+                            if ui.is_method_pending("host.env.refresh") {
+                                "Refreshing…"
+                            } else {
+                                "Refresh env"
+                            }
+                        },
+                        Variant::Secondary,
+                        move |_| {
+                            if ui.is_method_pending("host.env.refresh") {
+                                return;
+                            }
+                            dispatch_complete(ui, "host.env.refresh", json!({}), move |res| {
+                                match res {
+                                    Ok(v) => {
+                                        let shell = v["shell"].as_str().unwrap_or("shell");
+                                        let var_count = v["var_count"].as_u64().unwrap_or(0);
+                                        let full =
+                                            v["full_env_captured"].as_bool().unwrap_or(false);
+                                        let (msg, tone) = if full {
+                                            (
+                                                format!(
+                                                    "Captured {var_count} environment variables from {shell}."
+                                                ),
+                                                Tone::Success,
+                                            )
+                                        } else {
+                                            (
+                                                format!(
+                                                    "Captured PATH from {shell}; full environment snapshot was unavailable."
+                                                ),
+                                                Tone::Attention,
+                                            )
+                                        };
+                                        refresh_note.try_set(Some((msg, tone)));
+                                    }
+                                    Err(e) => {
+                                        refresh_note.try_set(Some((e, Tone::Danger)));
+                                    }
+                                }
+                            });
+                        },
+                    )
+                    .disabled(move || ui.is_method_pending("host.env.refresh")),
+                ),
         )
-        .disabled(move || ui.is_method_pending("host.env.refresh")),
+        .row(settings_row(
+            "Environment mode",
+            "Trusted automated runs inherit your login-shell environment by default, or restrict to minimal PATH-only env.",
+            segmented()
+                .child(
+                    compact_segment(
+                        "Inherit Shell Env",
+                        None,
+                        move || ui.terminal_env_mode.get() == HostTerminalEnvMode::Inherit,
+                        move |_| save_mode(HostTerminalEnvMode::Inherit),
+                    )
+                    .disabled(move || ui.is_method_pending("config.agents.save")),
+                )
+                .child(
+                    compact_segment(
+                        "Minimal (PATH only)",
+                        None,
+                        move || ui.terminal_env_mode.get() == HostTerminalEnvMode::Minimal,
+                        move |_| save_mode(HostTerminalEnvMode::Minimal),
+                    )
+                    .disabled(move || ui.is_method_pending("config.agents.save")),
+                ),
+        ));
+
+    settings_section(
+        "Terminal",
+        "Font appearance for open Terminals and login-shell environment for automated workflow steps.",
     )
-    .child(settings_field(
-        "Environment mode",
-        "Trusted automated runs inherit your login-shell environment by default, or can be restricted to minimal PATH-only env.",
-        segmented()
-            .child(
-                segment(
-                    "Inherit User Terminal Environment",
-                    None,
-                    move || ui.terminal_env_mode.get() == HostTerminalEnvMode::Inherit,
-                    move |_| save_mode(HostTerminalEnvMode::Inherit),
-                )
-                .disabled(move || ui.is_method_pending("config.agents.save")),
-            )
-            .child(
-                segment(
-                    "Minimal (PATH only)",
-                    None,
-                    move || ui.terminal_env_mode.get() == HostTerminalEnvMode::Minimal,
-                    move |_| save_mode(HostTerminalEnvMode::Minimal),
-                )
-                .disabled(move || ui.is_method_pending("config.agents.save")),
-            ),
-    ))
-    .child(muted(
-        "External fork PRs (external_pr) and untrusted external cardless runs default to minimal env unless overridden in workflow/step env:. Interactive Card Terminals remain unrestricted.",
-    ))
+    .child(crate::utilities::terminal_appearance_group(ui))
+    .child(env_group)
+    .child(
+        muted(
+            "External fork PRs (external_pr) and untrusted external cardless runs default to minimal env unless overridden in workflow/step env:. Interactive Card Terminals remain unrestricted.",
+        )
+        .text_size(px(12.)),
+    )
     .child(dynamic(move || {
         let err = save_error.get();
         if !err.is_empty() {
@@ -898,267 +838,82 @@ fn terminal_env_section(ui: Ui) -> impl IntoElement {
     }))
 }
 
-pub fn screen(ui: Ui) -> impl IntoElement {
-    let active_host_home = move || {
-        let hid = ui.settings_host.get();
-        crate::backend::home_for(&hid)
-    };
-    let config_path = format!("{}/config/agents.json", untracked(active_host_home));
+fn storage_section(ui: Ui) -> impl IntoElement {
+    let home_str = move || crate::backend::home_for(&ui.settings_host.get());
 
-    let scroll_ref = element_ref();
-    let hydrated = signal(false);
-    let offsets = signal([0.0_f32; SECTION_COUNT]);
-    let viewport_h = signal(0.0_f32);
-    let content_h = signal(0.0_f32);
-    let scroll_y = signal(0.0_f32);
-    let initial_target = SectionId::from_id(&ui.settings_section.get_untracked());
-    let diagnostics_activated = signal(initial_target == Some(SectionId::Diagnostics));
-    let jump_pin = signal(initial_target.map(|section| JumpPin {
-        section,
-        started_at_ms: canban_types::now(),
-        last_scroll_y: 0.0,
-        reached: false,
-    }));
-
-    ui.spawn(async move {
-        next_frame().await;
-        let _ = hydrated.try_set(true);
-    });
-
-    let maybe_activate_diagnostics = move |y: f32, vh: f32| {
-        if diagnostics_activated.get_untracked() || vh <= 0.0 {
-            return;
-        }
-        let diag_y = offsets.get_untracked()[SectionId::Diagnostics.index()];
-        let threshold = if y > 12.0 { 40.0 } else { 180.0 };
-        if diag_y > 0.0 && y + vh >= diag_y + threshold {
-            diagnostics_activated.set(true);
-        }
-    };
-
-    let active = computed(move || {
-        resolve_active_section(
-            jump_pin.get(),
-            scroll_y.get(),
-            &offsets.get(),
-            content_h.get(),
-            viewport_h.get(),
-        )
-    });
-
-    let jump_to = move |section: SectionId, animated: bool| {
-        if section == SectionId::Diagnostics {
-            diagnostics_activated.set(true);
-        }
-        if !hydrated.get_untracked() {
-            ui.settings_section.set(section.id().into());
-            return;
-        }
-        let cur_y = scroll_y.get_untracked();
-        let offs = offsets.get_untracked();
-        let ch = content_h.get_untracked();
-        let vh = viewport_h.get_untracked();
-        let target_y = clamped_target_y(section, &offs, ch, vh);
-        jump_pin.set(Some(JumpPin {
-            section,
-            started_at_ms: canban_types::now(),
-            last_scroll_y: cur_y,
-            reached: (cur_y - target_y).abs() <= 6.0,
-        }));
-        scroll_ref.scroll_to(
-            Point::new(px(0.), px(target_y)),
-            animated && !canban_ui_kit::motion::reduced(),
-        );
-    };
-
-    effect(move || {
-        let requested = ui.settings_section.get();
-        let Some(section) = SectionId::from_id(&requested) else {
-            return;
-        };
-        if section == SectionId::Diagnostics {
-            diagnostics_activated.set(true);
-        }
-        ui.settings_section.set(String::new());
-        jump_pin.set(Some(JumpPin {
-            section,
-            started_at_ms: canban_types::now(),
-            last_scroll_y: scroll_y.get_untracked(),
-            reached: false,
-        }));
-        ui.spawn(async move {
-            while hydrated.try_get() == Some(false) {
-                next_frame().await;
-            }
-            next_frame().await;
-            next_frame().await;
-            if jump_pin.try_get().is_none() || ui.page.get_untracked() != "settings" {
-                return;
-            }
-            let offs = offsets.get_untracked();
-            let ch = content_h.get_untracked();
-            let vh = viewport_h.get_untracked();
-            let target_y = clamped_target_y(section, &offs, ch, vh);
-            let cur_y = scroll_y.get_untracked();
-            jump_pin.set(Some(JumpPin {
-                section,
-                started_at_ms: canban_types::now(),
-                last_scroll_y: cur_y,
-                reached: (cur_y - target_y).abs() <= 6.0,
-            }));
-            scroll_ref.scroll_to(Point::new(px(0.), px(target_y)), false);
-        });
-    });
-
-    let wrap_section = move |section: SectionId, body: AnyElement| -> AnyElement {
-        let idx = section.index();
-        view()
-            .min_w(px(0.))
-            .on_layout(move |b: &Bounds<Points>| {
-                let y = b.origin.y.0;
-                if (offsets.get_untracked()[idx] - y).abs() > 1.0 {
-                    offsets.update(|arr| arr[idx] = y);
-                    if section == SectionId::Diagnostics {
-                        maybe_activate_diagnostics(
-                            scroll_y.get_untracked(),
-                            viewport_h.get_untracked(),
-                        );
-                    }
-                }
-            })
-            .child(body)
-            .into_element()
-    };
-
-    let herdr_section = move || {
-        dynamic(move || {
-            let hid = ui.settings_host.get();
-            let runtime = crate::config_for_host(&hid);
-            settings_section(
-                "Herdr",
-                "Terminal runtime connection; configure it in agents.json on the selected Canban host.",
-            )
-            .trailing(compact_action(
-                "Check connection",
-                Variant::Secondary,
-                move |_| dispatch(ui, "herdr.status", json!({})),
-            ))
-            .child(
+    settings_section(
+        "Storage & Archives",
+        "Application home directory, structured persistence, and cold-archived Projects on this host.",
+    )
+    .child(
+        settings_group()
+            .title("Application Home")
+            .row(
                 view()
+                    .px_3p5()
+                    .py_2p5()
                     .flex_row()
                     .flex_wrap()
-                    .gap_6()
-                    .child(view().flex_1().min_w(px(220.)).child(settings_field(
-                        "Executable",
-                        "Used to connect to the configured runtime.",
-                        label(runtime.hc).font_family(MONO_FONT).text_size(px(12.)),
-                    )))
-                    .child(
-                        view().flex_1().min_w(px(220.)).child(settings_field(
-                            "Session",
-                            "The configured Herdr runtime session.",
-                            label(runtime.hc_session)
-                                .font_family(MONO_FONT)
-                                .text_size(px(12.)),
-                        )),
-                    ),
-            )
-        })
-    };
-
-    let storage_section = move || {
-        view()
-            .gap_5()
-            .min_w(px(0.))
-            .child(dynamic(move || {
-                let home_str = active_host_home();
-                let home_for_copy = home_str.clone();
-                view()
-                    .gap_4()
-                    .min_w(px(0.))
-                    .child(
-                        settings_section(
-                            "Storage",
-                            "Canban keeps structured data, configuration and managed artifacts in its application home.",
-                        )
-                        .trailing(compact_action(
-                            "Copy path",
-                            Variant::Quiet,
-                            move |_| copy_text(ui, home_for_copy.clone()),
-                        ))
-                        .child(settings_field(
-                            "Application home",
-                            "Configuration, documents and execution history are stored here.",
-                            label(home_str).font_family(MONO_FONT).text_size(px(12.)),
-                        )),
-                    )
-                    .child(muted(
-                        "Closing this window keeps AppServer and scheduling running. Herdr owns the terminal programs.",
-                    ))
-            }))
-            .child(archived_projects_section(ui))
-    };
-
-    let host_target_bar = move || {
-        dynamic(move || {
-            let hosts = crate::hosts::effective_hosts(ui);
-            let cur_host = ui.settings_host.get();
-            if hosts.len() <= 1 {
-                return view()
-                    .pt_2()
-                    .flex_row()
                     .items_center()
                     .justify_between()
-                    .gap_2()
-                    .child(muted(format!(
-                        "HOST SETTINGS · {}",
-                        crate::platform::LOCAL_HOST_NAME
-                    )))
-                    .child(compact_action(
-                        "+ Connect Remote Machine…",
-                        Variant::Quiet,
-                        move |_| crate::hosts::open_connect_modal(ui),
-                    ))
-                    .into_element();
-            }
-            panel()
-                .p_3()
-                .bg(INSET)
-                .border_1()
-                .border_color(BORDER)
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    view()
-                        .gap_0p5()
-                        .child(label("Target Canban Host").font_weight(FontWeight::SEMIBOLD))
-                        .child(muted(
-                            "Scheduling, Agents & Identities, Herdr, and Storage below configure this host.",
-                        )),
-                )
-                .child(
-                    segmented().children(hosts.into_iter().map(|h| {
-                        let hid = h.id.clone();
-                        let hid_sel = h.id.clone();
-                        let cur_sel = cur_host.clone();
-                        compact_segment(
-                            h.name,
-                            Some(if h.is_local {
-                                Icon::Projects
-                            } else {
-                                Icon::Server
-                            }),
-                            move || cur_sel == hid_sel,
-                            move |_| ui.settings_host.set(hid.clone()),
-                        )
-                        .into_element()
+                    .gap_3()
+                    .min_w(px(0.))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(200.))
+                            .gap_0p5()
+                            .child(label("Application home").font_weight(FontWeight::MEDIUM))
+                            .child(
+                                label(home_str)
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(12.))
+                                    .text_color(MUTED)
+                                    .truncate(),
+                            ),
+                    )
+                    .child(compact_action("Copy path", Variant::Quiet, move |_| {
+                        copy_text(ui, crate::backend::home_for(&ui.settings_host.get_untracked()));
                     })),
-                )
-                .into_element()
-        })
+            )
+            .row(
+                view().px_3p5().py_2p5().child(
+                    muted("Closing this window keeps AppServer and scheduling running. Herdr owns the terminal programs.")
+                        .text_size(px(12.)),
+                ),
+            ),
+    )
+    .child(archived_projects_section(ui))
+}
+
+pub fn screen(ui: Ui) -> impl IntoElement {
+    let scroll_ref = element_ref();
+    let active = computed(move || SectionId::resolve(&ui.settings_section.get()));
+    let hosts_memo = computed(move || crate::hosts::effective_hosts(ui));
+
+    let last_section = stored(active.get_untracked());
+    effect(move || {
+        let cur = active.get();
+        if last_section.get() != cur {
+            last_section.replace(cur);
+            scroll_ref.scroll_to(Point::new(px(0.), px(0.)), false);
+        }
+    });
+
+    let last_host = stored(ui.settings_host.get_untracked());
+    effect(move || {
+        let cur = ui.settings_host.get();
+        if last_host.get() != cur {
+            last_host.replace(cur);
+            ui.diagnostics.set(serde_json::Value::Null);
+            ui.diagnostics_logs.set(serde_json::Value::Null);
+            ui.agent_catalog.set(serde_json::Value::Null);
+        }
+    });
+
+    let select_section = move |section: SectionId| {
+        ui.settings_section.set(section.id().into());
+        scroll_ref.scroll_to(Point::new(px(0.), px(0.)), false);
     };
 
     let middle_nav = move || {
@@ -1168,7 +923,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 col = col.child(settings_nav_heading(heading_text));
                 if section == SectionId::Scheduling {
                     col = col.child(dynamic(move || {
-                        let hosts = crate::hosts::effective_hosts(ui);
+                        let hosts = hosts_memo.get();
                         if hosts.len() <= 1 {
                             return view().into_element();
                         }
@@ -1183,27 +938,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .pb_1p5()
                             .child(
                                 compact_action(
-                                    format!("Target: {cur_name} ▾"),
+                                    format!("{cur_name} ▾"),
                                     Variant::Secondary,
                                     move |_| {
-                                        use nsh_core::element::desktop::{MenuItem, popup_menu};
-                                        let list = hosts.clone();
-                                        let active_h = cur.clone();
-                                        ui.spawn(async move {
-                                            let items: Vec<MenuItem> = list
-                                                .into_iter()
-                                                .map(|h| {
-                                                    let hid = h.id.clone();
-                                                    let prefix =
-                                                        if h.id == active_h { "✓ " } else { "" };
-                                                    MenuItem::new(format!("{prefix}{}", h.name))
-                                                        .on_select(move || {
-                                                            ui.settings_host.set(hid.clone());
-                                                        })
-                                                })
-                                                .collect();
-                                            popup_menu(items).await;
-                                        });
+                                        open_host_menu(ui, hosts.clone(), cur.clone());
                                     },
                                 )
                                 .w_full(),
@@ -1218,7 +956,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             col = col.child(settings_nav_item(
                 section.nav_label(),
                 move || active.get() == section,
-                move |_| jump_to(section, true),
+                move |_| select_section(section),
             ));
         }
         view()
@@ -1241,7 +979,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 section.nav_label(),
                 None,
                 move || active.get() == section,
-                move |_| jump_to(section, true),
+                move |_| select_section(section),
             ));
         }
         view()
@@ -1251,6 +989,63 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .border_b_1()
             .border_color(BORDER)
             .child(scroll().horizontal().scrollbar(false).child(strip))
+    };
+
+    let host_scope_bar = move || {
+        dynamic(move || {
+            if !active.get().is_host_scoped() {
+                return view().into_element();
+            }
+            let hosts = hosts_memo.get();
+            if hosts.len() <= 1 {
+                return view().into_element();
+            }
+            let cur = ui.settings_host.get();
+            let cur_host = hosts.iter().find(|h| h.id == cur);
+            let cur_name = cur_host
+                .map(|h| h.name.clone())
+                .unwrap_or_else(|| crate::platform::LOCAL_HOST_NAME.into());
+            let is_local = cur_host.is_none_or(|h| h.is_local);
+
+            view()
+                .pb_2p5()
+                .border_b_1()
+                .border_color(BORDER)
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .min_w(px(0.))
+                        .child(muted("Host").text_size(px(12.)))
+                        .child(
+                            icon_tinted(
+                                if is_local {
+                                    Icon::Projects
+                                } else {
+                                    Icon::Server
+                                },
+                                TEXT,
+                            )
+                            .w(px(13.))
+                            .h(px(13.)),
+                        )
+                        .child(label(cur_name).font_weight(FontWeight::MEDIUM)),
+                )
+                .child(compact_action(
+                    "Switch host ▾",
+                    Variant::Quiet,
+                    move |_| {
+                        open_host_menu(ui, hosts.clone(), cur.clone());
+                    },
+                ))
+                .into_element()
+        })
     };
 
     view()
@@ -1270,141 +1065,46 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .flex_1()
                         .min_h(px(0.))
                         .element_ref(&scroll_ref)
-                        .on_layout(move |b: &Bounds<Points>| {
-                            let h = b.size.height.0;
-                            if (viewport_h.get_untracked() - h).abs() > 0.5 {
-                                viewport_h.set(h);
-                                maybe_activate_diagnostics(scroll_y.get_untracked(), h);
-                            }
-                        })
-                        .on_scroll(move |e: &ScrollEvent| {
-                            let y = e.offset.y.0;
-                            let vh = e.size.height.0;
-                            let ch = e.content_size.height.0;
-                            if (viewport_h.get_untracked() - vh).abs() > 0.5 {
-                                viewport_h.set(vh);
-                            }
-                            if (content_h.get_untracked() - ch).abs() > 0.5 {
-                                content_h.set(ch);
-                            }
-                            scroll_y.set(y);
-                            maybe_activate_diagnostics(y, vh);
-                            if let Some(pin) = jump_pin.get_untracked() {
-                                let offs = offsets.get_untracked();
-                                jump_pin.set(advance_jump_pin(
-                                    pin,
-                                    y,
-                                    canban_types::now(),
-                                    &offs,
-                                    ch,
-                                    vh,
-                                ));
-                            }
-                        })
-                        .child(when(
-                            move || !hydrated.get(),
-                            move || {
+                        .child(
+                            view().w_full().p_5().pb_10().child(
                                 view()
                                     .w_full()
-                                    .p_5()
-                                    .pb_10()
-                                    .child(
-                                        view()
-                                            .w_full()
-                                            .max_w(px(880.))
-                                            .min_w(px(0.))
-                                            .gap_4()
-                                            .child(muted(
-                                                "Application preferences and Agent configuration.",
-                                            ))
-                                            .child(loading_panel(
-                                                "Loading Settings…",
-                                                "Preparing preferences, connected hosts, and agent configuration.",
-                                            )),
-                                    )
-                            },
-                        )
-                        .otherwise(move || {
-                            let cfg_path = config_path.clone();
-                            view()
-                                .w_full()
-                                .p_5()
-                                .pb_10()
-                                .on_layout(move |b: &Bounds<Points>| {
-                                    let h = b.size.height.0;
-                                    if (content_h.get_untracked() - h).abs() > 0.5 {
-                                        content_h.set(h);
-                                    }
-                                })
-                                .child(
-                                    view()
-                                        .w_full()
-                                        .max_w(px(880.))
-                                        .min_w(px(0.))
-                                        .gap_7()
-                                        .child(muted(
-                                            "Application preferences and Agent configuration.",
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Theme,
-                                            crate::utilities::settings(ui).into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Terminal,
-                                            crate::utilities::terminal_settings(ui).into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Hosts,
-                                            crate::hosts::settings_section_view(ui).into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Environment,
-                                            global_env_section(ui).into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Diagnostics,
-                                            crate::diagnostics::section_view_with_activation(
-                                                ui,
-                                                diagnostics_activated,
-                                            )
-                                            .into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Updates,
-                                            crate::updates::settings(ui).into_element(),
-                                        ))
-                                        .child(host_target_bar())
-                                        .child(wrap_section(
-                                            SectionId::Scheduling,
+                                    .max_w(px(880.))
+                                    .min_w(px(0.))
+                                    .gap_5()
+                                    .child(host_scope_bar())
+                                    .child(dynamic(move || match active.get() {
+                                        SectionId::Appearance => {
+                                            crate::utilities::settings(ui).into_element()
+                                        }
+                                        SectionId::Terminal => terminal_section(ui).into_element(),
+                                        SectionId::Environment => {
+                                            global_env_section(ui).into_element()
+                                        }
+                                        SectionId::Hosts => {
+                                            crate::hosts::settings_section_view(ui).into_element()
+                                        }
+                                        SectionId::Updates => {
+                                            crate::updates::settings(ui).into_element()
+                                        }
+                                        SectionId::Scheduling => {
                                             crate::components::scheduling::settings(ui)
-                                                .into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::TerminalEnv,
-                                            terminal_env_section(ui).into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Agents,
-                                            crate::agents_setup::global_settings_section(
-                                                ui,
-                                                cfg_path,
-                                            )
-                                            .into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Herdr,
-                                            herdr_section().into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Storage,
-                                            storage_section().into_element(),
-                                        ))
-                                        .child(wrap_section(
-                                            SectionId::Acknowledgements,
-                                            acknowledgements_section(ui).into_element(),
-                                        )),
-                                )
-                        })),
+                                                .into_element()
+                                        }
+                                        SectionId::Agents => {
+                                            crate::agents_setup::global_settings_section(ui)
+                                                .into_element()
+                                        }
+                                        SectionId::Diagnostics => {
+                                            crate::diagnostics::section_view(ui).into_element()
+                                        }
+                                        SectionId::Storage => storage_section(ui).into_element(),
+                                        SectionId::Acknowledgements => {
+                                            acknowledgements_section(ui).into_element()
+                                        }
+                                    })),
+                            ),
+                        ),
                 ),
         )
 }
@@ -1521,230 +1221,151 @@ pub fn archived_projects_section(ui: Ui) -> impl IntoElement {
         });
     });
 
-    settings_section(
-        "Archived Projects",
-        "Cold-archived Projects on this host. Archived Projects use zero background polling or scheduling and can be restored anytime.",
-    )
-    .trailing(
-        compact_action(
-            move || {
-                if loading.get() {
-                    "Refreshing…"
-                } else {
-                    "Refresh"
-                }
-            },
-            Variant::Secondary,
-            move |_| {
-                ui.archived_projects_reload.update(|n| *n += 1);
-            },
-        )
-        .disabled(move || loading.get()),
-    )
-    .child(dynamic(move || {
-        let err = error.get();
-        if !err.is_empty() {
-            return notice(err, Tone::Danger).into_element();
-        }
-        let list = items.get();
-        if loading.get() && list.is_empty() {
-            return loading_panel("Loading archived Projects…", "Checking cold archive bundles on this host.")
-                .into_element();
-        }
-        if list.is_empty() {
-            return muted("No archived Projects on this host.").into_element();
-        }
-        let hid = ui.settings_host.get();
-        view()
-            .gap_2()
-            .min_w(px(0.))
-            .children(list.into_iter().map(|item| {
-                let host_for_restore = hid.clone();
-                let item_for_restore = item.clone();
-                let path_for_copy = item.archive_path.clone();
-                let cards_text = if item.archived_cards > 0 {
-                    format!(
-                        "{} active · {} archived Cards",
-                        item.active_cards, item.archived_cards
+    view()
+        .gap_2()
+        .min_w(px(0.))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(200.))
+                        .gap_0p5()
+                        .child(label("Archived Projects").font_weight(FontWeight::SEMIBOLD))
+                        .child(
+                            muted("Cold-archived Projects use zero background polling or scheduling and can be restored anytime.")
+                                .text_size(px(CAPTION_SIZE)),
+                        ),
+                )
+                .child(
+                    compact_action(
+                        move || {
+                            if loading.get() {
+                                "Refreshing…"
+                            } else {
+                                "Refresh"
+                            }
+                        },
+                        Variant::Secondary,
+                        move |_| {
+                            ui.archived_projects_reload.update(|n| *n += 1);
+                        },
                     )
-                } else if item.total_cards == 1 {
-                    "1 Card".to_owned()
-                } else {
-                    format!("{} Cards", item.total_cards)
-                };
-                let meta_text = format!(
-                    "{} · {cards_text} · archived {}",
-                    crate::diagnostics::format_bytes(item.bytes),
-                    crate::components::activity::age(item.archived_at),
-                );
-                panel()
-                    .p_3()
-                    .bg(INSET)
+                    .disabled(move || loading.get()),
+                ),
+        )
+        .child(dynamic(move || {
+            let err = error.get();
+            if !err.is_empty() {
+                return notice(err, Tone::Danger).into_element();
+            }
+            let list = items.get();
+            if loading.get() && list.is_empty() {
+                return loading_panel(
+                    "Loading archived Projects…",
+                    "Checking cold archive bundles on this host.",
+                )
+                .into_element();
+            }
+            if list.is_empty() {
+                return view()
+                    .rounded(px(RADIUS))
+                    .bg(SURFACE)
                     .border_1()
                     .border_color(BORDER)
-                    .gap_2()
-                    .min_w(px(0.))
-                    .child(
-                        view()
-                            .flex_row()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                view()
-                                    .flex_1()
-                                    .min_w(px(200.))
-                                    .gap_0p5()
-                                    .child(
-                                        view()
-                                            .flex_row()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                label(item.name.clone())
-                                                    .font_weight(FontWeight::SEMIBOLD),
-                                            )
-                                            .child(
-                                                label(item.project_id.clone())
-                                                    .font_family(MONO_FONT)
-                                                    .text_xs()
-                                                    .text_color(MUTED),
-                                            ),
-                                    )
-                                    .child(label(meta_text).text_xs().text_color(MUTED))
-                                    .child(
-                                        label(item.source_directory.clone())
-                                            .font_family(MONO_FONT)
-                                            .text_xs()
-                                            .text_color(MUTED)
-                                            .truncate(),
-                                    ),
-                            )
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(compact_action(
-                                        "Copy archive path",
-                                        Variant::Quiet,
-                                        move |_| copy_text(ui, path_for_copy.clone()),
-                                    ))
-                                    .child(compact_action(
-                                        "Restore…",
-                                        Variant::Secondary,
-                                        move |_| {
-                                            ui.project_restore_modal.set(Some((
-                                                host_for_restore.clone(),
-                                                item_for_restore.clone(),
-                                            )));
-                                        },
-                                    )),
-                            ),
-                    )
-            }))
-            .into_element()
-    }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SAMPLE_OFFSETS: [f32; SECTION_COUNT] = [
-        32.0, 220.0, 340.0, 410.0, 480.0, 600.0, 720.0, 1060.0, 1380.0, 1820.0, 2060.0, 2280.0,
-    ];
-
-    #[test]
-    fn scroll_spy_defaults_to_first_section_before_layout_and_tracks_scroll() {
-        assert_eq!(
-            scroll_spy_section(0.0, &[0.0; SECTION_COUNT], 0.0, 0.0),
-            SectionId::Theme
-        );
-        assert_eq!(
-            scroll_spy_section(0.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::Theme
-        );
-        assert_eq!(
-            scroll_spy_section(180.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::Terminal
-        );
-        assert_eq!(
-            scroll_spy_section(350.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::Environment
-        );
-        assert_eq!(
-            SectionId::from_id("environment"),
-            Some(SectionId::Environment)
-        );
-        assert_eq!(SectionId::Environment.nav_label(), "Environment & Secrets");
-        assert_eq!(
-            scroll_spy_section(680.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::Scheduling
-        );
-        assert_eq!(
-            scroll_spy_section(1020.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::TerminalEnv
-        );
-        assert_eq!(
-            SectionId::from_id("terminal-env"),
-            Some(SectionId::TerminalEnv)
-        );
-        assert_eq!(SectionId::TerminalEnv.nav_label(), "Terminal Environment");
-        assert_eq!(
-            scroll_spy_section(1760.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::Herdr
-        );
-        // Reaching the bottom of the scroll viewport highlights Acknowledgements.
-        assert_eq!(
-            scroll_spy_section(1992.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::Acknowledgements
-        );
-    }
-
-    #[test]
-    fn jump_pin_holds_clicked_section_during_animation_and_clamped_bottom_until_user_scrolls_away()
-    {
-        // Storage (2060) and Acknowledgements (2280) both clamp to max_scroll = 2000 when content=2800, viewport=800.
-        assert_eq!(
-            clamped_target_y(SectionId::Theme, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            0.0
-        );
-        assert_eq!(
-            clamped_target_y(SectionId::Storage, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            2000.0
-        );
-        assert_eq!(
-            clamped_target_y(SectionId::Acknowledgements, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            2000.0
-        );
-
-        let mut pin = Some(JumpPin {
-            section: SectionId::Storage,
-            started_at_ms: 1000,
-            last_scroll_y: 0.0,
-            reached: false,
-        });
-
-        // Mid-animation frames moving toward 2000 keep Storage highlighted rather than intermediate sections.
-        for (t, y) in [(1050, 400.0), (1120, 1100.0), (1200, 1998.0)] {
-            pin = advance_jump_pin(pin.unwrap(), y, t, &SAMPLE_OFFSETS, 2800.0, 800.0);
-            assert!(pin.is_some());
-            assert_eq!(
-                resolve_active_section(pin, y, &SAMPLE_OFFSETS, 2800.0, 800.0),
-                SectionId::Storage
-            );
-        }
-        assert!(pin.unwrap().reached);
-
-        // User scrolls upward away from 2000 -> pin releases and scroll-spy resumes.
-        pin = advance_jump_pin(pin.unwrap(), 1960.0, 1500, &SAMPLE_OFFSETS, 2800.0, 800.0);
-        assert!(pin.is_none());
-        assert_eq!(
-            resolve_active_section(pin, 1960.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
-            SectionId::Herdr
-        );
-    }
+                    .px_3p5()
+                    .py_3()
+                    .child(muted("No archived Projects on this host."))
+                    .into_element();
+            }
+            let hid = ui.settings_host.get();
+            settings_group()
+                .rows(list.into_iter().map(|item| {
+                    let host_for_restore = hid.clone();
+                    let item_for_restore = item.clone();
+                    let path_for_copy = item.archive_path.clone();
+                    let cards_text = if item.archived_cards > 0 {
+                        format!(
+                            "{} active · {} archived Cards",
+                            item.active_cards, item.archived_cards
+                        )
+                    } else if item.total_cards == 1 {
+                        "1 Card".to_owned()
+                    } else {
+                        format!("{} Cards", item.total_cards)
+                    };
+                    let meta_text = format!(
+                        "{} · {cards_text} · archived {}",
+                        crate::diagnostics::format_bytes(item.bytes),
+                        crate::components::activity::age(item.archived_at),
+                    );
+                    view()
+                        .px_3p5()
+                        .py_3()
+                        .min_w(px(0.))
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(200.))
+                                .gap_0p5()
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            label(item.name.clone())
+                                                .font_weight(FontWeight::SEMIBOLD),
+                                        )
+                                        .child(
+                                            label(item.project_id.clone())
+                                                .font_family(MONO_FONT)
+                                                .text_xs()
+                                                .text_color(MUTED),
+                                        ),
+                                )
+                                .child(label(meta_text).text_xs().text_color(MUTED))
+                                .child(
+                                    label(item.source_directory.clone())
+                                        .font_family(MONO_FONT)
+                                        .text_xs()
+                                        .text_color(MUTED)
+                                        .truncate(),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(compact_action(
+                                    "Copy archive path",
+                                    Variant::Quiet,
+                                    move |_| copy_text(ui, path_for_copy.clone()),
+                                ))
+                                .child(compact_action(
+                                    "Restore…",
+                                    Variant::Secondary,
+                                    move |_| {
+                                        ui.project_restore_modal.set(Some((
+                                            host_for_restore.clone(),
+                                            item_for_restore.clone(),
+                                        )));
+                                    },
+                                )),
+                        )
+                }))
+                .into_element()
+        }))
 }

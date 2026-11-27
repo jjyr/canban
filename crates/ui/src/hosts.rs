@@ -2736,6 +2736,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     let devices_loading = signal(false);
     let devices_busy = signal(false);
     let devices_err = signal(Option::<String>::None);
+    let cli_guide_open = signal(false);
 
     let apply_device_list_payload = move |val: serde_json::Value| {
         let devices: Vec<PairedDevice> =
@@ -2800,7 +2801,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     reload_saved();
 
     settings_section(
-        "Hosts",
+        "Hosts & Pairing",
         format!(
             "Connect Canban to remote Linux or macOS `canband` services over Tailscale or SSH while keeping {} active simultaneously.",
             crate::platform::LOCAL_HOST_NAME
@@ -2827,12 +2828,14 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
         let saved = saved_map.get();
         let editing = renaming_id.get();
 
-        let mut list = panel()
-            .p_0()
-            .gap_0()
+        let mut list = view()
+            .rounded(px(RADIUS))
+            .bg(SURFACE)
             .border_1()
             .border_color(BORDER)
-            .overflow_hidden();
+            .overflow_hidden()
+            .min_w(px(0.))
+            .gap_0();
 
         for (idx, h) in summaries.iter().enumerate() {
             let tone = status_tone(h);
@@ -3011,7 +3014,12 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
             }
             list = list.child(row);
         }
-        list
+
+        view()
+            .gap_2()
+            .min_w(px(0.))
+            .child(label("Connected Machines").font_weight(FontWeight::SEMIBOLD))
+            .child(list)
     }))
     .child(dynamic(move || {
         let state = if crate::backend::is_connected() {
@@ -3020,92 +3028,92 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
             ui.paired_devices_preview.get().unwrap_or_default()
         };
         let err_msg = devices_err.get();
-        let mut card = panel()
-            .p_0()
-            .gap_0()
-            .border_1()
-            .border_color(BORDER)
-            .overflow_hidden()
+        let header = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .min_w(px(0.))
             .child(
                 view()
-                    .px_3p5()
-                    .py_3()
-                    .bg(INSET)
-                    .border_b_1()
-                    .border_color(BORDER)
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        view()
-                            .gap_0p5()
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(label("Paired Devices").font_weight(FontWeight::SEMIBOLD))
-                                    .child(badge(format!("{}", state.devices.len())))
-                                    .children(
-                                        state
-                                            .server_pubkey_fingerprint
-                                            .clone()
-                                            .map(|fp| badge(format!("Key {fp}"))),
-                                    ),
-                            )
-                            .child(
-                                muted("Revocable device keys authorized to connect to this machine over Noise-encrypted mux.")
-                                    .text_size(px(11.5)),
-                            ),
-                    )
+                    .flex_1()
+                    .min_w(px(220.))
+                    .gap_0p5()
                     .child(
                         view()
                             .flex_row()
+                            .flex_wrap()
                             .items_center()
-                            .gap_1p5()
-                            .child(
-                                compact_action("Generate Pairing URI", Variant::Secondary, move |_| {
-                                    if !crate::backend::is_connected() {
-                                        devices_err.set(None);
-                                        let demo_uri = "canban://100.84.0.1:7680?pk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#pair_demo9f8e7d6c5b4a3210fedcba987654".to_owned();
-                                        ui.paired_devices_preview.update(|slot| {
-                                            let p = slot.get_or_insert_with(Default::default);
-                                            p.generated_uri = Some(demo_uri);
-                                            p.generated_expires_at = Some(canban_types::now() + 300_000);
-                                        });
-                                        return;
-                                    }
-                                    run_device_rpc(
-                                        ui,
-                                        devices_busy,
-                                        devices_err,
-                                        "device.invite.create",
-                                        json!({"ttl_secs": 300}),
-                                        move |val| {
-                                            let uri = val["uri"].as_str().map(str::to_owned);
-                                            let code = val["code"].as_str().unwrap_or_default().to_owned();
-                                            let pk = val["server_pubkey"].as_str().unwrap_or_default();
-                                            let exp = val["expires_at"].as_u64();
-                                            let display_uri = uri.unwrap_or_else(|| {
-                                                format!("canban://<host-ip>:{DEFAULT_DAEMON_PORT}?pk={pk}#{code}")
-                                            });
-                                            update_paired_devices(devices_live, |cur| {
-                                                cur.generated_uri = Some(display_uri);
-                                                cur.generated_expires_at = exp;
-                                            });
-                                        },
-                                    );
-                                })
-                                .disabled(move || devices_busy.get() || !state.listening),
-                            )
-                            .child(
-                                compact_action("Refresh", Variant::Quiet, move |_| reload_devices())
-                                    .disabled(move || devices_loading.get()),
+                            .gap_2()
+                            .child(label("Paired Devices").font_weight(FontWeight::SEMIBOLD))
+                            .child(badge(format!("{}", state.devices.len())))
+                            .children(
+                                state
+                                    .server_pubkey_fingerprint
+                                    .clone()
+                                    .map(|fp| badge(format!("Key {fp}"))),
                             ),
+                    )
+                    .child(
+                        muted("Revocable device keys authorized to connect to this machine over Noise-encrypted mux.")
+                            .text_size(px(11.5)),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        compact_action("Generate Pairing URI", Variant::Secondary, move |_| {
+                            if !crate::backend::is_connected() {
+                                devices_err.set(None);
+                                let demo_uri = "canban://100.84.0.1:7680?pk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#pair_demo9f8e7d6c5b4a3210fedcba987654".to_owned();
+                                ui.paired_devices_preview.update(|slot| {
+                                    let p = slot.get_or_insert_with(Default::default);
+                                    p.generated_uri = Some(demo_uri);
+                                    p.generated_expires_at = Some(canban_types::now() + 300_000);
+                                });
+                                return;
+                            }
+                            run_device_rpc(
+                                ui,
+                                devices_busy,
+                                devices_err,
+                                "device.invite.create",
+                                json!({"ttl_secs": 300}),
+                                move |val| {
+                                    let uri = val["uri"].as_str().map(str::to_owned);
+                                    let code = val["code"].as_str().unwrap_or_default().to_owned();
+                                    let pk = val["server_pubkey"].as_str().unwrap_or_default();
+                                    let exp = val["expires_at"].as_u64();
+                                    let display_uri = uri.unwrap_or_else(|| {
+                                        format!("canban://<host-ip>:{DEFAULT_DAEMON_PORT}?pk={pk}#{code}")
+                                    });
+                                    update_paired_devices(devices_live, |cur| {
+                                        cur.generated_uri = Some(display_uri);
+                                        cur.generated_expires_at = exp;
+                                    });
+                                },
+                            );
+                        })
+                        .disabled(move || devices_busy.get() || !state.listening),
+                    )
+                    .child(
+                        compact_action("Refresh", Variant::Quiet, move |_| reload_devices())
+                            .disabled(move || devices_loading.get()),
                     ),
             );
+
+        let mut card = view()
+            .rounded(px(RADIUS))
+            .bg(SURFACE)
+            .border_1()
+            .border_color(BORDER)
+            .overflow_hidden()
+            .min_w(px(0.))
+            .gap_0();
 
         if state.listening {
             let primary_addr = state
@@ -3119,7 +3127,6 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                 view()
                     .px_3p5()
                     .py_2p5()
-                    .bg(SURFACE)
                     .border_b_1()
                     .border_color(BORDER)
                     .flex_row()
@@ -3202,7 +3209,6 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                 view()
                     .px_3p5()
                     .py_2p5()
-                    .bg(ATTENTION_SURFACE)
                     .border_b_1()
                     .border_color(BORDER)
                     .flex_row()
@@ -3212,10 +3218,16 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                     .gap_2()
                     .child(
                         view()
+                            .flex_1()
+                            .min_w(px(220.))
                             .gap_0p5()
-                            .min_w(px(0.))
                             .child(
-                                label("Remote Access Off").font_weight(FontWeight::SEMIBOLD),
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(label("Remote Access").font_weight(FontWeight::SEMIBOLD))
+                                    .child(status("Off", Tone::Attention)),
                             )
                             .child(
                                 muted(format!(
@@ -3264,7 +3276,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                     .py_2()
                     .border_b_1()
                     .border_color(BORDER)
-                    .child(notice(err, Tone::Danger)),
+                    .child(text(err).text_size(px(BODY_SIZE)).text_color(DANGER)),
             );
         }
 
@@ -3435,21 +3447,56 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                 card = card.child(row);
             }
         }
-        card
+        view().gap_2().min_w(px(0.)).child(header).child(card)
     }))
-    .child(
-        panel()
-            .p_3p5()
-            .gap_1p5()
-            .bg(INSET)
-            .border_1()
-            .border_color(BORDER)
-            .child(
-                label("Headless Linux / Remote CLI Quick Reference")
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(muted(
-                "On any remote Linux or macOS machine, run `canban service install --tailscale && canban pair --tailscale` to enable autonomous 24/7 background execution and print a single-use pairing URI. Pass `--allow-insecure-bind` on `serve`/`service install` if binding to a custom WireGuard/ZeroTier or LAN interface.",
-            )),
-    )
+    .child(dynamic(move || {
+        let open = cli_guide_open.get();
+        let cmd = "canban service install --tailscale && canban pair --tailscale";
+        let body = if open {
+            view()
+                .gap_2()
+                .pt_1()
+                .min_w(px(0.))
+                .child(
+                    view()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(BORDER)
+                        .bg(SURFACE)
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            label(cmd)
+                                .font_family(MONO_FONT)
+                                .text_size(px(12.))
+                                .min_w(px(0.))
+                                .flex_1(),
+                        )
+                        .child(compact_action("Copy", Variant::Secondary, move |_| {
+                            copy_text(ui, cmd.to_owned());
+                            ui.notify("Copied remote CLI setup command");
+                        })),
+                )
+                .child(
+                    muted("Run on any remote Linux or macOS machine for 24/7 autonomous execution and a single-use pairing URI. Pass `--allow-insecure-bind` on `serve`/`service install` if binding to a custom WireGuard/ZeroTier or LAN interface.")
+                        .text_size(px(12.)),
+                )
+                .into_element()
+        } else {
+            view().into_element()
+        };
+        collapsible_section_group(
+            "Remote CLI Quick Reference",
+            None,
+            open,
+            move |_| cli_guide_open.update(|v| *v = !*v),
+            body,
+        )
+        .into_element()
+    }))
 }

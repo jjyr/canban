@@ -91,44 +91,6 @@ pub fn canban_skill_onboarding_section(ui: Ui) -> SectionGroup {
     .child(canban_skill_box(ui))
 }
 
-fn canban_skill_settings_block(ui: Ui) -> View {
-    view()
-        .gap_2()
-        .py_2()
-        .border_t_1()
-        .border_b_1()
-        .border_color(BORDER)
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    view()
-                        .gap_0p5()
-                        .min_w(px(0.))
-                        .flex_1()
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(label("Canban CLI Skill").font_weight(FontWeight::MEDIUM))
-                                .child(badge("Optional")),
-                        )
-                        .child(
-                            muted(
-                                "Teach your enabled Agents how to operate Cards, comments, reviews, and workflows via $CANBAN_CLI.",
-                            )
-                            .text_size(px(12.)),
-                        ),
-                ),
-        )
-        .child(canban_skill_box(ui))
-}
-
 /// Refresh `ui.agent_catalog` on the effective configuration host.
 pub fn refresh_catalog(ui: Ui) {
     let host_id = ui.effective_config_host();
@@ -2130,10 +2092,10 @@ fn orchestrator_subpanel(
     };
 
     view()
-        .rounded(px(RADIUS))
-        .bg(INSET)
-        .px_2p5()
-        .py_2()
+        .pl_3()
+        .py_1()
+        .border_l_1()
+        .border_color(BORDER)
         .gap_1p5()
         .child(planner_row)
         .child(worker_row)
@@ -2939,7 +2901,12 @@ fn agent_env_inline_editor(
             Some(profile_id.clone())
         });
 
-    panel()
+    view()
+        .ml_2()
+        .pl_3p5()
+        .py_2()
+        .border_l_1()
+        .border_color(BORDER)
         .gap_2()
         .child(
             view()
@@ -3010,7 +2977,7 @@ fn agent_env_toggle_button(
 }
 
 /// Global Settings section for Agents, Custom CLI Agents, Default `@identity`, and Role Identities.
-pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement {
+pub fn global_settings_section(ui: Ui) -> impl IntoElement {
     if ui.agent_catalog.with_untracked(Value::is_null) || !ui.agent_catalog_loading.get_untracked()
     {
         refresh_catalog(ui);
@@ -3036,8 +3003,9 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
     let command_args_draft = signal(String::new());
     let command_error = signal(String::new());
     let env_target = signal(Option::<String>::None);
-
-    let copy_path = config_path.clone();
+    let skill_copied = signal(false);
+    let skill_cmd = skill_install_command();
+    let skill_cmd_copy = skill_cmd.clone();
 
     settings_section(
         "Agents & Identities",
@@ -3101,23 +3069,10 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             )),
     )
     .child(
-        view()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .flex_wrap()
-            .gap_2()
-            .py_1()
-            .child(
-                view()
-                    .gap_0p5()
-                    .child(label("Default Agent").font_weight(FontWeight::MEDIUM))
-                    .child(
-                        muted("Used when a Workflow step omits profile, and pre-selected for reviews, Workflows, and @.")
-                            .text_size(px(12.)),
-                    ),
-            )
-            .child(dynamic(move || {
+        settings_group().row(settings_row(
+            "Default Agent",
+            "Used when a Workflow step omits profile, and pre-selected for reviews, Workflows, and @.",
+            dynamic(move || {
                 let current_default = ui.default_agent.get();
                 let enabled_profiles = ui.profiles.get();
                 let cur_mark = enabled_profiles
@@ -3125,7 +3080,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                     .find(|p| p.id == current_default)
                     .map(|p| crate::profiles::provider(p).0)
                     .unwrap_or(Icon::Agent);
-                action_with_icon(
+                compact_action_with_icon(
                     cur_mark,
                     format!("@{current_default} ▾"),
                     Variant::Secondary,
@@ -3155,9 +3110,9 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                         });
                     },
                 )
-            })),
+            }),
+        )),
     )
-    .child(canban_skill_settings_block(ui))
     .child(
         view()
             .gap_2()
@@ -3194,8 +3149,13 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             .child(when(
                 move || adding_identity.get(),
                 move || {
-                    panel()
+                    view()
+                        .p_3()
                         .gap_2p5()
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(BORDER)
+                        .bg(SURFACE)
                         .child(
                             view()
                                 .flex_row()
@@ -3278,10 +3238,15 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                     all.iter().filter(|p| p.is_identity()).cloned().collect();
                 let active_edit = editing_role.get();
                 let active_custom_model = custom_model_target.get();
+                let total_identities = identities.len();
                 view()
-                    .border_t_1()
+                    .rounded(px(RADIUS))
+                    .border_1()
                     .border_color(BORDER)
-                    .children(identities.into_iter().map(|prof| {
+                    .bg(SURFACE)
+                    .overflow_hidden()
+                    .min_w(px(0.))
+                    .children(identities.into_iter().enumerate().map(|(idx, prof)| {
                         let pid = prof.id.clone();
                         let (mark, prov_name) = crate::profiles::provider(&prof);
                         let is_builtin_role = matches!(
@@ -3322,11 +3287,11 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                         let toggle_pid = pid.clone();
                         let prof_enabled = prof.enabled;
 
-                        view()
-                            .py_2p5()
-                            .border_b_1()
-                            .border_color(BORDER)
-                            .gap_2()
+                        let mut row = view().px_3p5().py_2p5().gap_2();
+                        if idx + 1 < total_identities {
+                            row = row.border_b_1().border_color(BORDER);
+                        }
+                        row
                             .child(
                                 view()
                                     .flex_row()
@@ -3606,8 +3571,13 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             .child(when(
                 move || adding_custom_agent.get(),
                 move || {
-                    panel()
+                    view()
+                        .p_3()
                         .gap_2p5()
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(BORDER)
+                        .bg(SURFACE)
                         .child(
                             view()
                                 .gap_1()
@@ -3809,8 +3779,9 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                     .child(if enabled_direct.is_empty() {
                         view().into_element()
                     } else {
+                        let total_direct = enabled_direct.len();
                         view()
-                            .gap_1()
+                            .gap_2()
                             .pt_1()
                             .child(
                                 muted("Agent defaults (inherited by @identities unless overridden above):")
@@ -3818,9 +3789,13 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                             )
                             .child(
                                 view()
-                                    .border_t_1()
+                                    .rounded(px(RADIUS))
+                                    .border_1()
                                     .border_color(BORDER)
-                                    .children(enabled_direct.into_iter().map(|prof| {
+                                    .bg(SURFACE)
+                                    .overflow_hidden()
+                                    .min_w(px(0.))
+                                    .children(enabled_direct.into_iter().enumerate().map(|(idx, prof)| {
                                         let pid = prof.id.clone();
                                         let (mark, prov_name) = crate::profiles::provider(&prof);
                                         let eng_key = engine_key_for_profile(&prof);
@@ -3871,11 +3846,11 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                         let cmd_pid = pid.clone();
                                         let del_pid = pid.clone();
 
-                                        view()
-                                            .py_2()
-                                            .border_b_1()
-                                            .border_color(BORDER)
-                                            .gap_1p5()
+                                        let mut row = view().px_3p5().py_2p5().gap_1p5();
+                                        if idx + 1 < total_direct {
+                                            row = row.border_b_1().border_color(BORDER);
+                                        }
+                                        row
                                             .child(
                                                 view()
                                                     .flex_row()
@@ -4051,17 +4026,93 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             })),
     )
     .child(
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .pt_1()
-            .child(muted("Config:"))
-            .child(muted(config_path).font_family(MONO_FONT).text_size(px(11.5)))
-            .child(compact_action("Copy path", Variant::Quiet, move |_| {
-                copy_text(ui, copy_path.clone())
-            })),
+        settings_group()
+            .title("CLI Skill & Configuration")
+            .row(
+                view()
+                    .px_3p5()
+                    .py_2p5()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .min_w(px(0.))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(200.))
+                            .gap_0p5()
+                            .child(label("$CANBAN_CLI skill").font_weight(FontWeight::MEDIUM))
+                            .child(
+                                muted(skill_cmd)
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.5))
+                                    .truncate(),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1p5()
+                            .flex_shrink_0()
+                            .child(compact_action(
+                                move || if skill_copied.get() { "✓ Copied" } else { "Copy" },
+                                Variant::Secondary,
+                                move |_| {
+                                    copy_text(ui, skill_cmd_copy.clone());
+                                    skill_copied.set(true);
+                                },
+                            ))
+                            .child(compact_action(
+                                format!(
+                                    "Terminal {}",
+                                    crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
+                                ),
+                                Variant::Quiet,
+                                move |_| crate::commands::execute(ui, "new-terminal"),
+                            )),
+                    ),
+            )
+            .row(
+                view()
+                    .px_3p5()
+                    .py_2p5()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .min_w(px(0.))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(200.))
+                            .gap_0p5()
+                            .child(label("Config file").font_weight(FontWeight::MEDIUM))
+                            .child(
+                                label(move || {
+                                    format!(
+                                        "{}/config/agents.json",
+                                        crate::backend::home_for(&ui.settings_host.get())
+                                    )
+                                })
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.5))
+                                .text_color(MUTED)
+                                .truncate(),
+                            ),
+                    )
+                    .child(compact_action("Copy path", Variant::Quiet, move |_| {
+                        let path = format!(
+                            "{}/config/agents.json",
+                            crate::backend::home_for(&ui.settings_host.get_untracked())
+                        );
+                        copy_text(ui, path);
+                    })),
+            ),
     )
 }
 
@@ -4668,7 +4719,7 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
                             .child(compact_action(
                                 "Global Agents & Identities…",
                                 Variant::Quiet,
-                                move |_| ui.navigate("settings"),
+                                move |_| ui.open_settings_section("agents"),
                             ))
                             .child(
                                 view()
@@ -4698,38 +4749,22 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
                             ),
                     )
                     .child(
-                        panel()
-                            .gap_3()
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        view()
-                                            .gap_0p5()
-                                            .child(
-                                                label("Project Environment & Secrets")
-                                                    .font_weight(FontWeight::SEMIBOLD),
-                                            )
-                                            .child(
-                                                muted("Overrides Global and Agent/Identity secrets & variables for this Project; local to the Project's host.")
-                                                    .text_size(px(12.)),
-                                            ),
-                                    ),
-                            )
-                            .child(crate::components::env_table::env_table(
-                                ui,
-                                crate::components::env_table::EnvTableConfig {
-                                    host_id,
-                                    project_id: Some(ui.project),
-                                    scope_key: env_scope_key,
-                                    source_meta: env_source_meta,
-                                    save_label: "Save Project Env",
-                                    on_save: on_project_env_save,
-                                    dirty_out: None,
-                                },
-                            )),
+                        settings_section(
+                            "Project Environment & Secrets",
+                            "Overrides Global and Agent/Identity secrets & variables for this Project; local to the Project's host.",
+                        )
+                        .child(crate::components::env_table::env_table(
+                            ui,
+                            crate::components::env_table::EnvTableConfig {
+                                host_id,
+                                project_id: Some(ui.project),
+                                scope_key: env_scope_key,
+                                source_meta: env_source_meta,
+                                save_label: "Save Project Env",
+                                on_save: on_project_env_save,
+                                dirty_out: None,
+                            },
+                        )),
                     ),
             ),
         )

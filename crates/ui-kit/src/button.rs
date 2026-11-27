@@ -157,6 +157,37 @@ pub fn toggle(
         .on_press(move |_: &()| changed(!value()))
 }
 
+/// Compact pill switch without inline text label, for right-aligned settings rows.
+pub fn switch(
+    a11y_label: &'static str,
+    value: impl Fn() -> bool + Copy + 'static,
+    changed: impl Fn(bool) + 'static,
+) -> nsh_base::ButtonElement {
+    press_target()
+        .app_class(super::motion::CONTROL_TRANSITION)
+        .w(px(34.))
+        .h(px(20.))
+        .rounded_full()
+        .p_0p5()
+        .bg(move || if value() { ACCENT_FILL } else { INSET })
+        .border_1()
+        .border_color(move || if value() { CLEAR } else { BORDER })
+        .focus(|s| s.border_color(ACCENT))
+        .accessibility_label(move || {
+            Some(format!("{a11y_label}: {}", if value() { "on" } else { "off" }).into())
+        })
+        .child(
+            view()
+                .app_class(super::motion::CONTROL_TRANSITION)
+                .w(px(14.))
+                .h(px(14.))
+                .rounded_full()
+                .bg(TEXT)
+                .translate_x(move || px(if value() { 14. } else { 0. })),
+        )
+        .on_press(move |_: &()| changed(!value()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};

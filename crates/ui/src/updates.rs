@@ -499,6 +499,10 @@ pub fn rail(ui: Ui) -> impl IntoElement {
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
     let is_failed = computed(move || ui.update.get()["state"]["phase"] == "error");
+    let has_available = computed(move || {
+        let v = ui.update.get();
+        v["disabled"] != true && !v["state"]["available"].is_null()
+    });
     settings_section("Updates", "Published desktop releases.")
         .trailing(dynamic(move || {
             let value = ui.update.get();
@@ -557,65 +561,82 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                 })
             },
         ))
-        .child(
-            view()
+        .child(dynamic(move || {
+            let version_row = view()
+                .px_3p5()
+                .py_2p5()
                 .flex_row()
                 .flex_wrap()
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .child(settings_field(
-                    "Current version",
-                    "",
-                    label(move || {
-                        ui.update.get()["build"]["version"]
-                            .as_str()
-                            .unwrap_or("development")
-                            .to_owned()
-                    })
-                    .font_family(MONO_FONT)
-                    .text_size(px(12.)),
-                ))
+                .min_w(px(0.))
                 .child(
-                    action("Check for updates", Variant::Secondary, move |_| check(ui))
+                    view()
+                        .flex_1()
+                        .min_w(px(200.))
+                        .gap_0p5()
+                        .child(label("Current version").font_weight(FontWeight::MEDIUM))
+                        .child(
+                            label(move || {
+                                ui.update.get()["build"]["version"]
+                                    .as_str()
+                                    .unwrap_or("development")
+                                    .to_owned()
+                            })
+                            .font_family(MONO_FONT)
+                            .text_size(px(12.))
+                            .text_color(MUTED),
+                        ),
+                )
+                .child(
+                    compact_action("Check for updates", Variant::Secondary, move |_| check(ui))
                         .disabled(move || {
                             busy(ui)
                                 || ui.update.get()["disabled"] == true
                                 || ui.update.get()["state"]["phase"] == "manual_recovery"
                         }),
-                ),
-        )
-        .child(when(
-            move || ui.update.get()["disabled"] != true && !ui.update.get()["state"]["available"].is_null(),
-            move || {
-                view()
+                );
+
+            let mut group = settings_group().row(version_row);
+            if has_available.get() {
+                let available_row = view()
+                    .px_3p5()
+                    .py_2p5()
                     .flex_row()
                     .flex_wrap()
                     .items_center()
                     .justify_between()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(RADIUS))
-                    .bg(INSET)
-                    .child(label(move || {
-                        format!(
-                            "Available · {}",
-                            ui.update.get()["state"]["available"]["manifest"]["version"]
-                                .as_str()
-                                .unwrap_or("")
-                        )
-                    }))
+                    .gap_3()
+                    .min_w(px(0.))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(200.))
+                            .gap_0p5()
+                            .child(label("Available release").font_weight(FontWeight::MEDIUM))
+                            .child(
+                                label(move || {
+                                    ui.update.get()["state"]["available"]["manifest"]["version"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_owned()
+                                })
+                                .font_family(MONO_FONT)
+                                .text_size(px(12.))
+                                .text_color(ACCENT),
+                            ),
+                    )
                     .child(dynamic(move || {
                         let btn = if is_failed.get() {
-                            action_with_icon(
+                            compact_action_with_icon(
                                 Icon::Refresh,
                                 "Retry update",
                                 Variant::Primary,
                                 move |_| install(ui),
                             )
                         } else {
-                            action("Install and restart", Variant::Primary, move |_| {
+                            compact_action("Install and restart", Variant::Primary, move |_| {
                                 install(ui)
                             })
                         };
@@ -623,9 +644,11 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                             busy(ui) || ui.update.get()["state"]["phase"] == "manual_recovery"
                         })
                         .into_element()
-                    }))
-            },
-        ))
+                    }));
+                group = group.row(available_row);
+            }
+            group.into_element()
+        }))
         .child(when(
             move || {
                 ui.update.get()["state"]["error"]

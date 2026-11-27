@@ -66,23 +66,24 @@ Overview now renders compact Needs you, Updates, Running and Queued groups, with
 
 ## Settings composition
 
-Settings pairs a section jump column (208 points wide on desktop viewports, collapsing into a horizontal top jump strip when `narrow < 950` points without unmounting the content scroll) with one screen-owned vertical scroll (`max_w` 880 points). Clicking a jump entry scrolls directly to that section while pinning its active highlight across smooth-scroll animation and clamped bottom offsets until the user scrolls away; manual scrolling updates the active item via scroll-spy. Shared `settings_section`, `settings_field`, `settings_nav_heading` and `settings_nav_item` components provide consistent group headings, surfaces, borders, spacing and focus/hover states. Numeric fields are bounded to 160 points; descriptions wrap in narrow layouts.
+Settings pairs a section navigation column (208 points wide on desktop viewports, collapsing into a horizontal top strip when `narrow < 950` points) with a 1-of-1 independent section viewport inside a single screen-owned scroll (`max_w` 880 points). Clicking a navigation item switches directly to that section and resets scroll to the top; legacy deep-link IDs (`"theme"`, `"terminal-env"`, `"herdr"`, `"about"`, `"licenses"`) automatically resolve to their consolidated sections. When multiple `canband` hosts are configured, a single host selector appears under `HOST` in the middle rail and as a compact top host bar on host-scoped pages.
+
+Shared `settings_section`, `settings_group`, `settings_row`, `settings_kv_row`, `cell_field`, `switch`, `settings_nav_heading`, and `settings_nav_item` components follow a single-boundary rule (one `SURFACE` + `1px` `BORDER` container per group with `1px` row dividers and borderless inline table inputs).
 
 | Nav group | Section | Capabilities exposed |
 | --- | --- | --- |
-| Interface | Theme and support | Notification sound toggle, theme picker, shortcuts palette, issue reporting and diagnostics copy |
-| Interface | Terminal | Installed monospaced font family picker, point size controls (9–32 pt) and reset |
-| App | Hosts | `This Mac` and connected remote `canband` hosts (Tailscale/SSH), pairing, reconnect, `Update Daemon`, and removal |
-| App | Diagnostics | Per-host connectivity, API compatibility, Herdr Core, toolchains, and live daemon logs |
-| App | Updates | Current build version, channel check and install/restart |
-| Host | Agent scheduling | Execution summary, global concurrency, idle timeout and Save scheduling settings; validation stays inside the group |
-| Host | Terminal Environment | **Inherit User Terminal Environment** toggle (`Inherit` default vs. `Minimal` fallback) plus **Refresh** snapshot control; applies to automated `Agent`/`Script` steps on `local` / `collaborator` trust while `external_pr` and untrusted external cardless events remain scoped to minimal/`PATH`-only env unless explicitly overridden in workflow/step `env:` (interactive Card Terminals and code-controlled AppServer actions remain unrestricted) |
-| Host | Agents & Identities | Enabled Herdr CLI Agents, `@identities`, default interactive Agent, Setup wizard and configuration reload |
-| Host | Herdr | Runtime executable/session and explicit Check connection |
-| Host | Storage | Application-home location and path copy |
-| *(Bottom divider)* | Acknowledgements & Licenses | Canban Apache-2.0 attribution, core/runtime credits (`Herdr`, `sheprd` / formerly `herdr-gpui`, `NSH`, `Ghostty`), asset/upstream credits (`CodexBar`, `iTerm2-Color-Schemes`, `Lucide`, `Lobe Icons`, `Primer Octicons`) with license badges and repository links, plus a collapsible bundled-notices and full license viewer |
+| General | Appearance (`Appearance & General`) | Embedded 17-theme palette grid (hover preview, click apply), notification sounds switch, shortcuts palette, issue reporting, and diagnostics copy |
+| General | Terminal | Installed monospaced font family picker, cell size stepper (9–32 pt), reset, and **Automation Environment** mode (`Inherit Shell Env` default vs. `Minimal (PATH only)` + `Refresh env`, scoped to the selected host when multi-host; external fork PRs and untrusted external cardless runs default to minimal env unless overridden in workflow/step `env:`) |
+| General | Environment & Secrets | Global encrypted secrets and plain variables table (single-layer grid with `.env` paste and shell import) plus on-demand cross-host sync bar |
+| General | Hosts & Pairing | `This Mac` and connected remote `canband` hosts (Tailscale/SSH), pairing, Tailscale remote access, reconnect, `Update Daemon`, removal, and collapsible Remote CLI Quick Reference |
+| General | Updates | Current build version, channel check, and install/restart |
+| Host | Scheduling (`Agent Scheduling`) | Live execution summary, concurrency stepper (`>= 1`), and idle timeout stepper (`0` disables) with immediate auto-save on step, Enter, or blur and inline validation |
+| Host | Agents & Identities | Enabled Herdr CLI Agents, `@identities` (with `2px`-rail indented inline Env/Orchestrator panels), default interactive Agent, Setup wizard, reload, and compact CLI Skill & reactive config file strip |
+| Host | Diagnostics & Runtime | Health summary pills, unified Connection / AppServer / SQLite WAL / **Herdr** runtime (`hc` executable, session, and `Check connection`), toolchain & Agent binaries, and live daemon logs |
+| Host | Storage & Archives | Application-home location with path copy and single-layer cold-archived Projects list |
+| *(Bottom divider)* | About & Licenses | Canban Apache-2.0 attribution, core/runtime credits (`Herdr`, `sheprd` / formerly `herdr-gpui`, `NSH`, `Ghostty`), asset/upstream credits (`CodexBar`, `iTerm2-Color-Schemes`, `Lucide`, `Lobe Icons`, `Primer Octicons`) with license badges and repository links, plus a collapsible bundled-notices and full license viewer |
 
-Save scheduling settings persists both fields; concurrency must be positive, idle timeout nonnegative, and 0 disables idle reclamation.
+Scheduling changes persist automatically on step, Enter, or blur; concurrency must be positive, idle timeout nonnegative, and 0 disables idle reclamation.
 
 ## Components and Gallery
 
@@ -90,11 +91,11 @@ Save scheduling settings persists both fields; concurrency must be positive, idl
 | --- | --- |
 | `ui-kit/entry_card.rs` | Generic icon, title, supporting text and press intent; one NSH Button |
 | `ui-kit/directory_field.rs` | Controlled `path_combobox` / `directory_field`: single editable path input, inline subdirectory filtering, `Tab` drill-down, `Enter`/click selection, `New directory` fallback, and path-selected intent (no external `Choose…` button) |
-| `ui-kit/settings.rs` | Section/field visual composition plus `settings_nav_heading` / `settings_nav_item` jump controls; parent owns scrolling and persistence |
-| `ui/settings.rs` | Settings middle jump rail, narrow horizontal jump strip, scroll-spy/pin model, and `Acknowledgements & Licenses` section |
+| `ui-kit/settings.rs` | Section headers, single-boundary `settings_group` / `settings_row` / `settings_kv_row` containers, and `settings_nav_heading` / `settings_nav_item` rail controls |
+| `ui/settings.rs` | Settings 1-of-1 navigation rail, narrow horizontal strip, unified host scope bar, `Terminal` composition, `Storage & Archives`, and `About & Licenses` section |
 | `ui/board.rs`, `ui/screens.rs` | Project availability, form/autoname policy and application operations |
 | `ui/overview.rs` | Compact global rows and direct destinations; no filtering |
-| `ui/components/scheduling.rs`, `ui/profiles.rs` | Shared settings section and content-only profile projection |
+| `ui/components/scheduling.rs`, `ui/profiles.rs` | Auto-saving scheduling group and content-only profile projection |
 
 The production Gallery includes Empty Board, Settings, existing all-state Overview fixtures, and shared entry/directory controls. Narrow viewport now constrains the workspace to 720 points, crossing the native narrow-layout breakpoint. These scenarios reuse production components and require no application data or Agent.
 

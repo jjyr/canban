@@ -10,9 +10,20 @@ pub fn theme_choice(
     disabled: impl Fn() -> bool + 'static,
     press: impl Fn(&()) + 'static,
 ) -> View {
+    theme_choice_card(theme, Percentage(0.48), selected, preview, disabled, press)
+}
+
+pub fn theme_choice_card(
+    theme: &'static Theme,
+    width: impl Into<Length>,
+    selected: impl Fn() -> bool + 'static,
+    preview: impl Fn(bool) + Copy + 'static,
+    disabled: impl Fn() -> bool + 'static,
+    press: impl Fn(&()) + 'static,
+) -> View {
     let selected = computed(selected);
     view()
-        .w(Percentage(0.48))
+        .w(width.into())
         .on_mouse_enter(move |_: &MouseEvent| preview(true))
         .on_mouse_leave(move |_: &MouseEvent| preview(false))
         .child(
