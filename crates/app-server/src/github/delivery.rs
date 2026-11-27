@@ -1793,6 +1793,7 @@ fn record_pr_activity_updates(
         let self_action = is_self(author)
             || crate::events::github::has_written_receipt(db, repository, "comment", cid);
         let url = c["html_url"].as_str().unwrap_or(pr_url);
+        let occurred_at = parse_github_timestamp_ms(c["created_at"].as_str()).unwrap_or(now_ms);
         log(
             db,
             card,
@@ -1811,8 +1812,9 @@ fn record_pr_activity_updates(
                 "pr_url": pr_url,
                 "stage": card.stage,
                 "self_action": self_action,
+                "occurred_at": occurred_at,
             }),
-            now_ms,
+            occurred_at,
         )?;
         emitted = true;
     }
@@ -1830,6 +1832,7 @@ fn record_pr_activity_updates(
         let url = c["html_url"].as_str().unwrap_or(pr_url);
         let path = c["path"].as_str().unwrap_or("");
         let line = c["line"].as_u64().or_else(|| c["original_line"].as_u64());
+        let occurred_at = parse_github_timestamp_ms(c["created_at"].as_str()).unwrap_or(now_ms);
         log(
             db,
             card,
@@ -1850,8 +1853,9 @@ fn record_pr_activity_updates(
                 "pr_url": pr_url,
                 "stage": card.stage,
                 "self_action": self_action,
+                "occurred_at": occurred_at,
             }),
-            now_ms,
+            occurred_at,
         )?;
         emitted = true;
     }
@@ -1872,6 +1876,9 @@ fn record_pr_activity_updates(
         let self_action = is_self(author)
             || crate::events::github::has_written_receipt(db, repository, "review", rid);
         let url = r["html_url"].as_str().unwrap_or(pr_url);
+        let occurred_at = parse_github_timestamp_ms(r["submitted_at"].as_str())
+            .or_else(|| parse_github_timestamp_ms(r["created_at"].as_str()))
+            .unwrap_or(now_ms);
         let msg = match state {
             "APPROVED" => format!("{author} approved PR #{pr_number}"),
             "CHANGES_REQUESTED" => format!("{author} requested changes on PR #{pr_number}"),
@@ -1909,8 +1916,9 @@ fn record_pr_activity_updates(
                 "pr_url": pr_url,
                 "stage": card.stage,
                 "self_action": self_action,
+                "occurred_at": occurred_at,
             }),
-            now_ms,
+            occurred_at,
         )?;
         emitted = true;
     }
@@ -1919,4 +1927,8 @@ fn record_pr_activity_updates(
         save_obs()?;
     }
     Ok(emitted)
+}
+
+fn parse_github_timestamp_ms(raw: Option<&str>) -> Option<u64> {
+    canban_notifications::parse_rfc3339_ms(raw?)
 }

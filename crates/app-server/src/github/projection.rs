@@ -152,24 +152,42 @@ pub(crate) fn enrich_pr_events(client: &canban_github::Client, events: &mut [Eve
         let Some(activity) = cached else {
             continue;
         };
-        let body = match ev.kind.as_str() {
+        let (body, raw_ts) = match ev.kind.as_str() {
             "github.pr.commented" => {
                 let section = if ev.data["kind"].as_str() == Some("review_comment") {
                     "review_comments"
                 } else {
                     "issue_comments"
                 };
-                ev.data["comment_id"]
+                let entry = ev.data["comment_id"]
                     .as_u64()
-                    .and_then(|cid| activity[section][cid.to_string()]["body"].as_str())
+                    .map(|cid| &activity[section][cid.to_string()]);
+                (
+                    entry.and_then(|v| v["body"].as_str()),
+                    entry.and_then(|v| v["created_at"].as_str()),
+                )
             }
-            "github.pr.reviewed" => ev.data["review_id"]
-                .as_u64()
-                .and_then(|rid| activity["reviews"][rid.to_string()]["body"].as_str()),
-            _ => None,
+            "github.pr.reviewed" => {
+                let entry = ev.data["review_id"]
+                    .as_u64()
+                    .map(|rid| &activity["reviews"][rid.to_string()]);
+                (
+                    entry.and_then(|v| v["body"].as_str()),
+                    entry.and_then(|v| {
+                        v["submitted_at"]
+                            .as_str()
+                            .or_else(|| v["created_at"].as_str())
+                    }),
+                )
+            }
+            _ => (None, None),
         };
         if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
             ev.data["projected_body"] = json!(body);
+        }
+        if let Some(occurred_at) = raw_ts.and_then(canban_notifications::parse_rfc3339_ms) {
+            ev.data["occurred_at"] = json!(occurred_at);
+            ev.created_at = occurred_at;
         }
     }
 }

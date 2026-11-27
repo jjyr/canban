@@ -352,6 +352,7 @@ pub fn reminders_from_events_at(s: &Snapshot, events: &[Event], at: u64) -> Vec<
             let unread = e.sequence > read_seq;
             let audible = event_is_audible_when_unread(&id, e);
             let meta = build_event_meta(e);
+            let event_ts = e.data["occurred_at"].as_u64().unwrap_or(e.created_at);
             let item = items.entry(id.clone()).or_insert_with(|| Reminder {
                 id,
                 project_id: e.project_id.clone(),
@@ -360,11 +361,12 @@ pub fn reminders_from_events_at(s: &Snapshot, events: &[Event], at: u64) -> Vec<
                 unread: false,
                 pending: false,
                 sequence: 0,
-                created_at: e.created_at,
+                created_at: event_ts,
                 audible_when_unread: false,
                 event: None,
             });
             item.sequence = item.sequence.max(e.sequence);
+            item.created_at = item.created_at.max(event_ts);
             item.unread |= unread;
             item.audible_when_unread |= audible;
             item.message = e.message.clone();

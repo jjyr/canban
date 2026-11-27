@@ -51,6 +51,7 @@ pub struct UndoBatch {
 #[derive(Clone, Copy)]
 pub struct State {
     pub drawer: Signal<String>,
+    pub schedule_expanded: Signal<bool>,
     pub expanded_stacks: Signal<BTreeSet<String>>,
     pub expanded_terminals: Signal<BTreeSet<String>>,
     pub expanded_github_items: Signal<BTreeSet<String>>,
@@ -78,6 +79,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             drawer: signal("today".into()),
+            schedule_expanded: signal(false),
             expanded_stacks: signal(BTreeSet::new()),
             expanded_terminals: signal(BTreeSet::new()),
             expanded_github_items: signal(BTreeSet::new()),
@@ -137,17 +139,17 @@ fn parse_rfc3339_ms(raw: &str) -> u64 {
 
 fn friendly_gh_reason(raw: &str) -> String {
     match raw {
-        "review_requested" => "请求 Review".into(),
-        "mention" => "@提及".into(),
-        "team_mention" => "团队提及".into(),
-        "assign" => "已指派".into(),
-        "author" => "你发起的".into(),
-        "comment" => "新评论".into(),
-        "ci_activity" => "CI 动态".into(),
-        "state_change" => "状态变更".into(),
-        "subscribed" => "关注动态".into(),
+        "review_requested" => "Review requested".into(),
+        "mention" => "@mention".into(),
+        "team_mention" => "Team mention".into(),
+        "assign" => "Assigned".into(),
+        "author" => "Author".into(),
+        "comment" => "Comment".into(),
+        "ci_activity" => "CI activity".into(),
+        "state_change" => "State change".into(),
+        "subscribed" => "Subscribed".into(),
         other if !other.is_empty() => other.replace('_', " "),
-        _ => "通知".into(),
+        _ => "Notification".into(),
     }
 }
 
@@ -485,12 +487,12 @@ pub fn undo_last(ui: Ui) {
         .map(|id| json!({ "id": id, "state": "active" }))
         .collect();
     triage_items(ui, patches, None);
-    ui.notify("已撤销");
+    ui.notify("Undone");
 }
 
 pub fn restore_item(ui: Ui, key: String) {
     triage_items(ui, vec![json!({ "id": key, "state": "active" })], None);
-    ui.notify("已恢复到今天");
+    ui.notify("Restored to Today");
 }
 
 pub fn pin_to_today(ui: Ui, key: String, day_start_ms: u64, watermark: Option<u64>) {
@@ -502,7 +504,7 @@ pub fn pin_to_today(ui: Ui, key: String, day_start_ms: u64, watermark: Option<u6
             "day_start_ms": day_start_ms,
             "watermark": watermark,
         })],
-        Some("已拉入今天".into()),
+        Some("Added to Today".into()),
     );
 }
 
@@ -553,7 +555,7 @@ pub fn open_defer_menu(ui: Ui, items: Vec<(String, Option<u64>)>, subject: Strin
                         triage_items(
                             ui,
                             patches,
-                            Some(format!("已推迟「{subject}」→ {label_text}")),
+                            Some(format!("Deferred \"{subject}\" → {label_text}")),
                         );
                     })
                 })
@@ -567,21 +569,21 @@ pub fn defer_remaining_all(ui: Ui) {
     let inbox = ui.daily_inbox.get_untracked();
     let items = inbox.remaining_triage_keys();
     if items.is_empty() {
-        ui.notify("今天已经全部清空");
+        ui.notify("All caught up for today");
         return;
     }
     let count = items.len();
-    open_defer_menu(ui, items, format!("剩余全部 {count} 项"));
+    open_defer_menu(ui, items, format!("remaining {count} items"));
 }
 
 pub fn open_cutoff_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
     let options: &[(u16, &str)] = &[
-        (0, "00:00 · 自然日（默认）"),
-        (4 * 60, "04:00 · 凌晨切日"),
-        (6 * 60, "06:00 · 清晨切日"),
-        (9 * 60, "09:00 · 上班切日"),
-        (10 * 60, "10:00 · 晚起切日"),
+        (0, "00:00 · Calendar day (default)"),
+        (4 * 60, "04:00 · Late-night cutoff"),
+        (6 * 60, "06:00 · Early morning cutoff"),
+        (9 * 60, "09:00 · Workday start"),
+        (10 * 60, "10:00 · Late morning cutoff"),
     ];
     let current = cutoff_minutes_from_utility(&ui.utility.get_untracked());
     ui.spawn(async move {
@@ -595,7 +597,7 @@ pub fn open_cutoff_menu(ui: Ui) {
                             ui,
                             json!({ "inbox_cutoff_minutes": mins }),
                         );
-                        ui.notify(format!("日切时间已设为 {}", format_cutoff(mins)));
+                        ui.notify(format!("Day cutoff set to {}", format_cutoff(mins)));
                     })
                 })
                 .collect(),
@@ -623,7 +625,7 @@ pub fn dismiss_github_item(ui: Ui, item: GitHubStackItem) {
     dismiss_items(
         ui,
         vec![(item.key, item.watermark)],
-        format!("已标记已读 · {}", item.title),
+        format!("Marked read · {}", item.title),
     );
 }
 
@@ -651,7 +653,7 @@ pub fn dismiss_github_stack(ui: Ui, stack: GitHubProjectStack) {
     dismiss_items(
         ui,
         keys,
-        format!("已清空 GitHub · {} ({count})", stack.display_name),
+        format!("Cleared GitHub · {} ({count})", stack.display_name),
     );
 }
 
@@ -660,7 +662,7 @@ pub fn close_terminal_from_inbox(ui: Ui, terminal_id: String, title: String) {
         dismiss_items(
             ui,
             vec![(format!("terminal:{terminal_id}"), None)],
-            format!("已关闭 {title}"),
+            format!("Closed {title}"),
         );
         return;
     }
@@ -677,7 +679,7 @@ pub fn close_terminal_from_inbox(ui: Ui, terminal_id: String, title: String) {
                 s.remove(&tid);
             });
             if res.is_ok() {
-                ui.notify(format!("已关闭 {title}"));
+                ui.notify(format!("Closed {title}"));
             }
         },
     );
@@ -688,7 +690,7 @@ pub fn close_all_plain_shells(ui: Ui, shells: Vec<InboxTerminalWork>) {
     for shell in shells {
         close_terminal_from_inbox(ui, shell.terminal_id, shell.title);
     }
-    ui.notify(format!("正在关闭 {count} 个普通 Shell"));
+    ui.notify(format!("Closing {count} plain shells"));
 }
 
 pub fn toggle_stack(ui: Ui, id: String) {
@@ -725,7 +727,7 @@ pub fn submit_inline_reply(ui: Ui) {
             ui.inbox.reply_target.set(None);
             ui.inbox.reply_draft.set(String::new());
         });
-        ui.notify("Fixture: 已发送回复");
+        ui.notify("Fixture: reply sent");
         return;
     }
     ui.inbox.reply_sending.set(true);
@@ -742,7 +744,7 @@ pub fn submit_inline_reply(ui: Ui) {
                             ui.inbox.reply_target.set(None);
                             ui.inbox.reply_draft.set(String::new());
                         });
-                        ui.notify("回复已发送");
+                        ui.notify("Reply sent");
                     }
                 },
             );
@@ -760,7 +762,7 @@ pub fn submit_inline_reply(ui: Ui) {
                             ui.inbox.reply_target.set(None);
                             ui.inbox.reply_draft.set(String::new());
                         });
-                        ui.notify("已发送到终端");
+                        ui.notify("Sent to terminal");
                         set_timeout(std::time::Duration::from_millis(600), move || {
                             fetch_terminal_preview(ui, tid_refresh, 16);
                         });
@@ -793,7 +795,7 @@ pub fn submit_inline_reply(ui: Ui) {
                             ui.inbox.reply_target.set(None);
                             ui.inbox.reply_draft.set(String::new());
                         });
-                        ui.notify("GitHub 评论已发布");
+                        ui.notify("GitHub comment posted");
                     }
                 },
             );
@@ -801,19 +803,19 @@ pub fn submit_inline_reply(ui: Ui) {
     }
 }
 
-pub fn format_relative_zh(ts_ms: u64, now_ms: u64) -> String {
+pub fn format_relative(ts_ms: u64, now_ms: u64) -> String {
     if ts_ms == 0 {
         return String::new();
     }
     let elapsed_s = now_ms.saturating_sub(ts_ms) / 1000;
     if elapsed_s < 60 {
-        "刚刚".into()
+        "Just now".into()
     } else if elapsed_s < 3600 {
-        format!("{} 分钟前", elapsed_s / 60)
+        format!("{}m ago", elapsed_s / 60)
     } else if elapsed_s < 86_400 {
-        format!("{} 小时前", elapsed_s / 3600)
+        format!("{}h ago", elapsed_s / 3600)
     } else {
-        format!("{} 天前", elapsed_s / 86_400)
+        format!("{}d ago", elapsed_s / 86_400)
     }
 }
 
@@ -831,10 +833,11 @@ pub fn format_defer_until(ts_ms: u64) -> String {
     chrono::Local
         .timestamp_millis_opt(ts_ms as i64)
         .single()
-        .map(|dt| dt.format("%m/%d %H:%M").to_string())
+        .map(|dt| dt.format("%b %d %H:%M").to_string())
         .unwrap_or_default()
 }
 
+/// Left-rail Inbox badge count: only items requiring direct action right now.
 pub fn current_inbox_count(inbox: &DailyInbox) -> usize {
-    inbox.remaining_today
+    inbox.actionable_count
 }

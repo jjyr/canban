@@ -544,8 +544,8 @@ pub fn popover(ui: Ui) -> impl IntoElement {
 
                             if urgent_count == 0 && running_count == 0 && queued_count == 0 {
                                 return crate::components::activity::empty(
-                                    "此刻安静运行",
-                                    "当前没有运行中、排队中或阻塞等待的 Agent。",
+                                    "All quiet",
+                                    "No running, queued, or blocked agents right now.",
                                 )
                                 .into_element();
                             }
@@ -567,7 +567,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     urgent_list = urgent_list.child(
                                         view().pt_1p5().flex_row().justify_end().child(
                                             compact_action(
-                                                format!("+{extra} 更多紧急项，在 Inbox 中处理 →"),
+                                                format!("+{extra} more in Inbox →"),
                                                 Variant::Quiet,
                                                 move |_| {
                                                     close(ui);
@@ -578,7 +578,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     );
                                 }
                                 body = body.child(
-                                    section_group("此刻阻塞 / 待确认")
+                                    section_group("Blocked / Waiting")
                                         .count(urgent_count + m.overflow_urgent)
                                         .tone(Tone::Attention)
                                         .child(urgent_list),
@@ -599,7 +599,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     run_list = run_list.child(render_standalone_row(ui, entry));
                                 }
                                 body = body.child(
-                                    section_group("正在运行")
+                                    section_group("Running")
                                         .count(running_count)
                                         .tone(Tone::Info)
                                         .trailing(compact_action(
@@ -625,7 +625,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     ));
                                 }
                                 body = body.child(
-                                    section_group("排队中")
+                                    section_group("Queued")
                                         .count(queued_count)
                                         .tone(Tone::Neutral)
                                         .child(q_list),
@@ -650,15 +650,15 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     muted(move || {
                                         let rem = stats.get().3;
                                         if rem == 0 {
-                                            "今日 Inbox 已清零 ✓".into()
+                                            "Today's Inbox cleared ✓".into()
                                         } else {
-                                            format!("今日 Inbox 剩余 {rem} 项")
+                                            format!("{rem} remaining in Inbox")
                                         }
                                     })
                                     .text_size(px(12.)),
                                 )
                                 .child(compact_action(
-                                    "打开 Inbox →",
+                                    "Open Inbox →",
                                     Variant::Secondary,
                                     move |_| {
                                         close(ui);
@@ -677,7 +677,7 @@ fn render_pulse_urgent_card(ui: Ui, prepared: PreparedOverviewRow) -> impl IntoE
     let key_defer = format!("card:{card_id}");
     let key_dismiss = key_defer.clone();
     let defer_label = format!("#{card_num} {card_title}");
-    let dismiss_label = format!("已处理 #{card_num} {card_title}");
+    let dismiss_label = format!("Handled #{card_num} {card_title}");
     let cid_read = card_id.clone();
     let activate_row = prepared.row.clone();
     let top_trailing = waiting_status_pill(ui, prepared.waiting_since);
@@ -734,14 +734,14 @@ fn render_pulse_urgent_card(ui: Ui, prepared: PreparedOverviewRow) -> impl IntoE
                 .items_center()
                 .gap_1()
                 .flex_shrink_0()
-                .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
+                .child(chrome_button(Icon::Clock, "Defer", move |_| {
                     crate::inbox::state::open_defer_menu(
                         ui,
                         vec![(key_defer.clone(), None)],
                         defer_label.clone(),
                     );
                 }))
-                .child(compact_action("✓", Variant::Quiet, move |_| {
+                .child(chrome_button(Icon::Check, "Mark done", move |_| {
                     let max_seq = ui.snapshot.with_untracked(|s| {
                         s.card_summaries
                             .get(&cid_read)
@@ -767,7 +767,7 @@ fn render_pulse_urgent_standalone(ui: Ui, row: PreparedStandaloneRow) -> impl In
     let key_defer = format!("terminal:{tid}");
     let key_dismiss = key_defer.clone();
     let title_defer = row.title.clone();
-    let title_dismiss = format!("已忽略 {}", row.title);
+    let title_dismiss = format!("Dismissed {}", row.title);
     let top_trailing = waiting_status_pill(ui, row.waiting_since);
 
     view()
@@ -827,14 +827,14 @@ fn render_pulse_urgent_standalone(ui: Ui, row: PreparedStandaloneRow) -> impl In
                 .items_center()
                 .gap_1()
                 .flex_shrink_0()
-                .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
+                .child(chrome_button(Icon::Clock, "Defer", move |_| {
                     crate::inbox::state::open_defer_menu(
                         ui,
                         vec![(key_defer.clone(), None)],
                         title_defer.clone(),
                     );
                 }))
-                .child(compact_action("✓", Variant::Quiet, move |_| {
+                .child(chrome_button(Icon::Check, "Dismiss", move |_| {
                     crate::inbox::state::dismiss_items(
                         ui,
                         vec![(key_dismiss.clone(), None)],

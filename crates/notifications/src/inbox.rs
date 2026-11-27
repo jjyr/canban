@@ -60,30 +60,121 @@ pub fn defer_presets(now_ms: u64, tz_offset_secs: i64, cutoff_minutes: u16) -> V
     vec![
         DeferPreset {
             id: "next_cutoff",
-            label: format!("下个日切点 ({cutoff_h:02}:{cutoff_m:02})"),
+            label: format!("Next cutoff ({cutoff_h:02}:{cutoff_m:02})"),
             until_ms: next_cutoff_ms,
         },
         DeferPreset {
             id: "2h",
-            label: "2 小时后".into(),
+            label: "In 2 hours".into(),
             until_ms: in_2h,
         },
         DeferPreset {
             id: "tonight",
-            label: "今晚 20:00".into(),
+            label: "Tonight 20:00".into(),
             until_ms: tonight_utc_ms,
         },
         DeferPreset {
             id: "tomorrow_9",
-            label: "明天 09:00".into(),
+            label: "Tomorrow 09:00".into(),
             until_ms: tomorrow_9_utc_ms,
         },
         DeferPreset {
             id: "next_monday",
-            label: "下周一 09:00".into(),
+            label: "Next Monday 09:00".into(),
             until_ms: next_monday_9_utc_ms,
         },
     ]
+}
+
+pub fn parse_rfc3339_ms(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    if s.len() < 19 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-'
+        || b[7] != b'-'
+        || (b[10] != b'T' && b[10] != b't' && b[10] != b' ')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let year: i64 = s[0..4].parse().ok()?;
+    let month: u32 = s[5..7].parse().ok()?;
+    let day: u32 = s[8..10].parse().ok()?;
+    let hour: i64 = s[11..13].parse().ok()?;
+    let minute: i64 = s[14..16].parse().ok()?;
+    let second: i64 = s[17..19].parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
+    let rest = &s[19..];
+    let tz_part = if let Some(after_dot) = rest.strip_prefix('.') {
+        let digits = after_dot.bytes().take_while(u8::is_ascii_digit).count();
+        &after_dot[digits..]
+    } else {
+        rest
+    };
+    let tz_offset_secs: i64 = if tz_part.is_empty() || tz_part.eq_ignore_ascii_case("Z") {
+        0
+    } else if tz_part.len() >= 6 && (tz_part.starts_with('+') || tz_part.starts_with('-')) {
+        let sign: i64 = if tz_part.starts_with('-') { -1 } else { 1 };
+        let th: i64 = tz_part[1..3].parse().ok()?;
+        let tm: i64 = tz_part[4..6].parse().ok()?;
+        sign * (th * 3600 + tm * 60)
+    } else {
+        return None;
+    };
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(month);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3600 + minute * 60 + second - tz_offset_secs;
+    u64::try_from(secs).ok().map(|s| s.saturating_mul(1_000))
+}
+
+/// Deterministic UTC RFC3339 formatter (`YYYY-MM-DDTHH:MM:SSZ`) with zero external dependencies.
+pub fn format_rfc3339_utc_ms(ms: u64) -> String {
+    let total_secs = (ms / 1_000) as i64;
+    let days = total_secs.div_euclid(86_400);
+    let rem = total_secs.rem_euclid(86_400);
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn is_github_reason_review(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        "review_requested" | "review requested" | "github.pr.reviewed"
+    )
+}
+
+fn is_github_reason_mention(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        "mention" | "team_mention" | "@mention" | "team mention"
+    )
 }
 
 /// Lightweight GitHub notification input fed from `github.browse(kind="notifications")`.
@@ -136,6 +227,11 @@ pub enum NeedsYouKind {
         project_name: String,
         host_label: Option<String>,
         terminal_id: Option<String>,
+        agent_engine: Option<String>,
+        pr_number: Option<u64>,
+        pr_checks_summary: Option<String>,
+        pr_ci_state: Option<String>,
+        branch: Option<String>,
         headline: String,
         detail: Option<String>,
         body: Option<String>,
@@ -189,6 +285,8 @@ pub struct GitHubStackItem {
     pub card_number: Option<u64>,
     pub read_sequence: u64,
     pub is_ci_failure: bool,
+    pub is_actionable: bool,
+    pub is_synced_card: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,6 +300,11 @@ pub struct GitHubProjectStack {
     pub preview: String,
     pub latest_at: u64,
     pub has_ci_failure: bool,
+    pub ci_failed_count: usize,
+    pub review_count: usize,
+    pub mention_count: usize,
+    pub synced_card_count: usize,
+    pub actionable_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,6 +402,8 @@ pub struct DailyInbox {
     pub day_start_ms: u64,
     pub next_cutoff_ms: u64,
     pub cutoff_minutes: u16,
+    /// Items currently requiring direct user action (used for the left-rail Inbox badge).
+    pub actionable_count: usize,
     pub completed_today: usize,
     pub remaining_today: usize,
     pub total_today: usize,
@@ -309,6 +414,7 @@ pub struct DailyInbox {
     pub open_cards: Vec<InboxCardWork>,
     pub agent_terminals: Vec<InboxTerminalWork>,
     pub plain_shells: Vec<InboxTerminalWork>,
+    pub earlier_github: Vec<GitHubStackItem>,
     pub carryover_cards: Vec<InboxCardWork>,
     pub deferred_items: Vec<DeferredInboxItem>,
     pub done_today_items: Vec<DoneInboxItem>,
@@ -462,6 +568,15 @@ pub fn build_daily_inbox(
         })
         .collect();
 
+    let gh_issue_updated_ms: BTreeMap<(&str, u64), u64> = snapshot
+        .github_issues
+        .iter()
+        .filter_map(|gi| {
+            let ts = parse_rfc3339_ms(&gi.updated_at)?;
+            Some(((gi.project_id.as_str(), gi.source.issue_id), ts))
+        })
+        .collect();
+
     let mut inbox = DailyInbox {
         day_start_ms,
         next_cutoff_ms,
@@ -470,6 +585,7 @@ pub fn build_daily_inbox(
     };
 
     let mut handled_card_ids: BTreeSet<String> = BTreeSet::new();
+    let mut handled_terminal_ids: BTreeSet<String> = BTreeSet::new();
     let mut deferred_keys: BTreeSet<String> = BTreeSet::new();
     let mut done_keys: BTreeSet<String> = BTreeSet::new();
 
@@ -520,6 +636,9 @@ pub fn build_daily_inbox(
         if matches!(run.state.as_str(), "failed" | "blocked") {
             match classify_triage(&triage_map, &sched_key, now_ms, day_start_ms, Some(ts)) {
                 TriageDisposition::Active | TriageDisposition::PinnedToday => {
+                    if let Some(tid) = &run.terminal_id {
+                        handled_terminal_ids.insert(tid.clone());
+                    }
                     inbox.needs_you.push(NeedsYouItem {
                         key: sched_key,
                         watermark: Some(ts),
@@ -545,7 +664,7 @@ pub fn build_daily_inbox(
                             key: sched_key,
                             title: format!("Schedule · {} ({})", run.workflow_name, run.state),
                             context: proj_name,
-                            kind_label: "定时任务",
+                            kind_label: "Schedule",
                             defer_until: until,
                             card_id: run.card_id.clone(),
                             terminal_id: run.terminal_id.clone(),
@@ -559,7 +678,7 @@ pub fn build_daily_inbox(
                             key: sched_key,
                             title: format!("Schedule · {}", run.workflow_name),
                             context: proj_name,
-                            kind_label: "定时任务",
+                            kind_label: "Schedule",
                             completed_at: triage_map
                                 .get(&format!("schedule:{}", run.id) as &str)
                                 .map(|e| e.updated_at)
@@ -619,7 +738,7 @@ pub fn build_daily_inbox(
                             key: card_key,
                             title: format!("#{} {}", card.number, card.title),
                             context: format!("{} · {}", run.workflow_name, proj_name),
-                            kind_label: "定时新卡",
+                            kind_label: "Scheduled Card",
                             defer_until: until,
                             card_id: Some(card.id.clone()),
                             terminal_id: None,
@@ -634,7 +753,7 @@ pub fn build_daily_inbox(
                             key: card_key,
                             title: format!("#{} {}", card.number, card.title),
                             context: format!("{} · {}", run.workflow_name, proj_name),
-                            kind_label: "定时新卡",
+                            kind_label: "Scheduled Card",
                             completed_at: triage_map
                                 .get(&format!("schedule-card:{}", card.id) as &str)
                                 .map(|e| e.updated_at)
@@ -711,20 +830,20 @@ pub fn build_daily_inbox(
             .max_by_key(|r| (r.sequence, r.created_at))
             .copied();
 
-        let (headline, detail, body, actor, is_review, is_blocked, terminal_id, ts) =
+        let (headline, detail, body, actor, agent_engine, is_review, is_blocked, terminal_id, ts) =
             if let Some(row) = row {
                 let first_reason = row.reasons.first();
                 let is_review = row.reasons.iter().any(|r| r.source == "review");
                 let is_blocked = row.reasons.iter().any(|r| r.source == "runtime")
                     || row.agent().is_some_and(|a| a.state == "blocked");
                 let headline = if is_review {
-                    "等待 Review 审批".into()
+                    "Waiting for review approval".into()
                 } else if is_blocked {
-                    "Agent 等待你的回应".into()
+                    "Agent waiting for your reply".into()
                 } else if let Some(r) = first_reason {
                     r.message.clone()
                 } else {
-                    "需要你处理".into()
+                    "Needs your attention".into()
                 };
                 let detail = first_reason.map(|r| r.message.clone());
                 let body = latest_unread
@@ -740,6 +859,18 @@ pub fn build_daily_inbox(
                     .or_else(|| {
                         latest_unread.and_then(|r| r.event.as_ref().map(|m| m.actor.clone()))
                     });
+                let agent_engine = row
+                    .terminal
+                    .as_ref()
+                    .and_then(|t| t.active_agent_engine().map(str::to_owned))
+                    .or_else(|| {
+                        row.agent().map(|a| {
+                            a.profile
+                                .preset
+                                .clone()
+                                .unwrap_or_else(|| a.profile.id.clone())
+                        })
+                    });
                 let ts = latest_unread
                     .map(|r| r.created_at)
                     .or_else(|| row.agent().map(|a| a.updated_at))
@@ -750,6 +881,7 @@ pub fn build_daily_inbox(
                     detail,
                     body,
                     actor,
+                    agent_engine,
                     is_review,
                     is_blocked,
                     row.outcome_terminal_id().map(str::to_owned),
@@ -767,6 +899,7 @@ pub fn build_daily_inbox(
                     None,
                     body,
                     actor,
+                    None,
                     false,
                     false,
                     None,
@@ -779,10 +912,23 @@ pub fn build_daily_inbox(
         match classify_triage(&triage_map, &key, now_ms, day_start_ms, wm) {
             TriageDisposition::Active | TriageDisposition::PinnedToday => {
                 handled_card_ids.insert(card.id.clone());
+                if let Some(tid) = &terminal_id {
+                    handled_terminal_ids.insert(tid.clone());
+                }
                 let can_quick_merge = card.worktree.is_some()
                     && !card.resolved()
                     && !card.is_github_pr()
                     && !snapshot.merging_cards.contains(&card.id);
+                let pr_number = card.pull_request.as_ref().map(|p| p.number);
+                let pr_checks_summary = card
+                    .pull_request
+                    .as_ref()
+                    .map(|p| p.checks.clone())
+                    .filter(|s| !s.is_empty());
+                let pr_ci_state = card
+                    .pull_request
+                    .as_ref()
+                    .and_then(|p| p.checks_summary.as_ref().map(|c| c.state.clone()));
                 inbox.needs_you.push(NeedsYouItem {
                     key,
                     watermark: wm,
@@ -795,6 +941,11 @@ pub fn build_daily_inbox(
                         project_name: proj_name,
                         host_label: project_host_label(snapshot, &card.project_id),
                         terminal_id,
+                        agent_engine,
+                        pr_number,
+                        pr_checks_summary,
+                        pr_ci_state,
+                        branch: card.branch.clone(),
                         headline,
                         detail,
                         body,
@@ -864,33 +1015,13 @@ pub fn build_daily_inbox(
             .get(&repo_lower)
             .map(|(pid, pname)| (Some((*pid).to_owned()), (*pname).to_owned()))
             .unwrap_or_else(|| (None, notif.repository.clone()));
+        let is_review_req = is_github_reason_review(&notif.reason);
+        let is_mention = is_github_reason_mention(&notif.reason);
+        let is_actionable = is_review_req || is_mention;
 
-        match classify_triage(&triage_map, &key, now_ms, day_start_ms, wm) {
+        let disp = classify_triage(&triage_map, &key, now_ms, day_start_ms, wm);
+        match disp {
             TriageDisposition::Active | TriageDisposition::PinnedToday => {
-                let stack_key = project_id
-                    .clone()
-                    .unwrap_or_else(|| format!("repo:{repo_lower}"));
-                let stack =
-                    gh_stacks_map
-                        .entry(stack_key.clone())
-                        .or_insert_with(|| GitHubProjectStack {
-                            stack_id: format!("github-stack:{stack_key}"),
-                            repository: notif.repository.clone(),
-                            project_id: project_id.clone(),
-                            display_name: display_name.clone(),
-                            items: Vec::new(),
-                            authors: Vec::new(),
-                            preview: String::new(),
-                            latest_at: notif.updated_at_ms,
-                            has_ci_failure: false,
-                        });
-                stack.latest_at = stack.latest_at.max(notif.updated_at_ms);
-                if let Some(author) = &notif.author
-                    && !author.is_empty()
-                    && !stack.authors.contains(author)
-                {
-                    stack.authors.push(author.clone());
-                }
                 let kind_prefix = match notif.kind.as_str() {
                     "pr" => "PR",
                     "commit" => "Commit",
@@ -900,7 +1031,7 @@ pub fn build_daily_inbox(
                     Some(n) => format!("{kind_prefix} #{n} · {}", notif.reason),
                     None => notif.reason.clone(),
                 };
-                stack.items.push(GitHubStackItem {
+                let item = GitHubStackItem {
                     key,
                     watermark: wm,
                     repository: notif.repository.clone(),
@@ -919,7 +1050,45 @@ pub fn build_daily_inbox(
                     card_number: notif.linked_card_number,
                     read_sequence: 0,
                     is_ci_failure: false,
-                });
+                    is_actionable,
+                    is_synced_card: false,
+                };
+                let is_today =
+                    disp == TriageDisposition::PinnedToday || notif.updated_at_ms >= day_start_ms;
+                if !is_today {
+                    inbox.earlier_github.push(item);
+                    continue;
+                }
+                let stack_key = project_id
+                    .clone()
+                    .unwrap_or_else(|| format!("repo:{repo_lower}"));
+                let stack =
+                    gh_stacks_map
+                        .entry(stack_key.clone())
+                        .or_insert_with(|| GitHubProjectStack {
+                            stack_id: format!("github-stack:{stack_key}"),
+                            repository: notif.repository.clone(),
+                            project_id: project_id.clone(),
+                            display_name: display_name.clone(),
+                            items: Vec::new(),
+                            authors: Vec::new(),
+                            preview: String::new(),
+                            latest_at: notif.updated_at_ms,
+                            has_ci_failure: false,
+                            ci_failed_count: 0,
+                            review_count: 0,
+                            mention_count: 0,
+                            synced_card_count: 0,
+                            actionable_count: 0,
+                        });
+                stack.latest_at = stack.latest_at.max(notif.updated_at_ms);
+                if let Some(author) = &notif.author
+                    && !author.is_empty()
+                    && !stack.authors.contains(author)
+                {
+                    stack.authors.push(author.clone());
+                }
+                stack.items.push(item);
             }
             TriageDisposition::Deferred(until) => {
                 if deferred_keys.insert(key.clone()) {
@@ -979,6 +1148,8 @@ pub fn build_daily_inbox(
             .or_else(|| card.pull_request.as_ref().map(|p| p.number))
             .or_else(|| card.github_issue().map(|s| s.number));
         let is_ci_failure = meta.is_some_and(|m| m.kind == "github.pr.ci_failed");
+        let is_review_ev = meta.is_some_and(|m| m.kind == "github.pr.reviewed");
+        let is_actionable = is_ci_failure || is_review_ev;
         if !is_ci_failure
             && let Some(n) = pr_num
             && seen_gh_targets.contains(&(repo.to_ascii_lowercase(), n))
@@ -992,8 +1163,59 @@ pub fn build_daily_inbox(
             .cloned()
             .unwrap_or_else(|| repo.clone());
 
-        match classify_triage(&triage_map, &key, now_ms, day_start_ms, wm) {
+        let disp = classify_triage(&triage_map, &key, now_ms, day_start_ms, wm);
+        match disp {
             TriageDisposition::Active | TriageDisposition::PinnedToday => {
+                let author = meta
+                    .map(|m| {
+                        m.actor
+                            .strip_prefix("github:")
+                            .unwrap_or(&m.actor)
+                            .to_owned()
+                    })
+                    .filter(|a| !a.is_empty() && a != "github" && a != "system");
+                let url = meta
+                    .and_then(|m| m.action_url.clone())
+                    .or_else(|| card.pull_request.as_ref().map(|p| p.url.clone()))
+                    .or_else(|| card.github_issue().map(|s| s.url.clone()))
+                    .unwrap_or_default();
+                let subtitle = match (pr_num, meta.map(|m| m.kind.as_str())) {
+                    (Some(n), Some("github.pr.ci_failed")) => format!("PR #{n} · CI failed"),
+                    (Some(n), Some("github.pr.ci_succeeded")) => format!("PR #{n} · CI passed"),
+                    (Some(n), Some("github.pr.reviewed")) => format!("PR #{n} · Review"),
+                    (Some(n), Some("github.pr.commented")) => format!("PR #{n} · Comment"),
+                    (Some(n), _) => format!("PR #{n} · Update"),
+                    (None, _) => rem.message.clone(),
+                };
+                let item = GitHubStackItem {
+                    key,
+                    watermark: wm,
+                    repository: repo.clone(),
+                    kind: "pr".into(),
+                    number: pr_num,
+                    title: card.title.clone(),
+                    subtitle,
+                    body: meta.and_then(|m| m.body.clone().or_else(|| m.summary.clone())),
+                    author: author.clone(),
+                    reason: meta.map(|m| m.kind.clone()).unwrap_or_default(),
+                    failed_checks: meta.map(|m| m.failed_checks.clone()).unwrap_or_default(),
+                    url,
+                    timestamp_ms: rem.created_at,
+                    thread_id: None,
+                    card_id: Some(card.id.clone()),
+                    card_number: Some(card.number),
+                    read_sequence: rem.sequence,
+                    is_ci_failure,
+                    is_actionable,
+                    is_synced_card: false,
+                };
+                let is_today = disp == TriageDisposition::PinnedToday
+                    || is_ci_failure
+                    || rem.created_at >= day_start_ms;
+                if !is_today {
+                    inbox.earlier_github.push(item);
+                    continue;
+                }
                 let stack_key = card.project_id.clone();
                 let stack =
                     gh_stacks_map
@@ -1008,55 +1230,20 @@ pub fn build_daily_inbox(
                             preview: String::new(),
                             latest_at: rem.created_at,
                             has_ci_failure: false,
+                            ci_failed_count: 0,
+                            review_count: 0,
+                            mention_count: 0,
+                            synced_card_count: 0,
+                            actionable_count: 0,
                         });
                 stack.latest_at = stack.latest_at.max(rem.created_at);
                 stack.has_ci_failure |= is_ci_failure;
-                let author = meta
-                    .map(|m| {
-                        m.actor
-                            .strip_prefix("github:")
-                            .unwrap_or(&m.actor)
-                            .to_owned()
-                    })
-                    .filter(|a| !a.is_empty() && a != "github" && a != "system");
                 if let Some(a) = &author
                     && !stack.authors.contains(a)
                 {
                     stack.authors.push(a.clone());
                 }
-                let url = meta
-                    .and_then(|m| m.action_url.clone())
-                    .or_else(|| card.pull_request.as_ref().map(|p| p.url.clone()))
-                    .or_else(|| card.github_issue().map(|s| s.url.clone()))
-                    .unwrap_or_default();
-                let subtitle = match (pr_num, meta.map(|m| m.kind.as_str())) {
-                    (Some(n), Some("github.pr.ci_failed")) => format!("PR #{n} · CI 失败"),
-                    (Some(n), Some("github.pr.ci_succeeded")) => format!("PR #{n} · CI 通过"),
-                    (Some(n), Some("github.pr.reviewed")) => format!("PR #{n} · Review"),
-                    (Some(n), Some("github.pr.commented")) => format!("PR #{n} · 评论"),
-                    (Some(n), _) => format!("PR #{n} · 更新"),
-                    (None, _) => rem.message.clone(),
-                };
-                stack.items.push(GitHubStackItem {
-                    key,
-                    watermark: wm,
-                    repository: repo,
-                    kind: "pr".into(),
-                    number: pr_num,
-                    title: card.title.clone(),
-                    subtitle,
-                    body: meta.and_then(|m| m.body.clone().or_else(|| m.summary.clone())),
-                    author,
-                    reason: meta.map(|m| m.kind.clone()).unwrap_or_default(),
-                    failed_checks: meta.map(|m| m.failed_checks.clone()).unwrap_or_default(),
-                    url,
-                    timestamp_ms: rem.created_at,
-                    thread_id: None,
-                    card_id: Some(card.id.clone()),
-                    card_number: Some(card.number),
-                    read_sequence: rem.sequence,
-                    is_ci_failure,
-                });
+                stack.items.push(item);
             }
             TriageDisposition::Deferred(until) => {
                 if deferred_keys.insert(key.clone()) {
@@ -1092,34 +1279,8 @@ pub fn build_daily_inbox(
         }
     }
 
-    for stack in gh_stacks_map.values_mut() {
-        stack.items.sort_by(|a, b| {
-            b.is_ci_failure
-                .cmp(&a.is_ci_failure)
-                .then_with(|| b.timestamp_ms.cmp(&a.timestamp_ms))
-                .then_with(|| a.key.cmp(&b.key))
-        });
-        stack.preview = stack
-            .items
-            .iter()
-            .take(3)
-            .map(|i| match i.number {
-                Some(n) if i.is_ci_failure => format!("#{n} CI 失败"),
-                Some(n) => format!("#{n} {}", i.title),
-                None => i.title.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-    }
-    inbox.github_stacks = gh_stacks_map.into_values().collect();
-    inbox.github_stacks.sort_by(|a, b| {
-        b.has_ci_failure
-            .cmp(&a.has_ci_failure)
-            .then_with(|| b.latest_at.cmp(&a.latest_at))
-            .then_with(|| a.stack_id.cmp(&b.stack_id))
-    });
-
-    // 4. Today's Open Work (Unresolved Cards touched today or pinned today) & Carry-over Cards.
+    // 4. Today's Open Work (Unresolved Cards genuinely worked on today or pinned today)
+    //    & Auto-Stacked Today-Synced GitHub Cards & Carry-over Cards.
     let live_agent_cards: BTreeSet<&str> = snapshot
         .terminals
         .iter()
@@ -1148,7 +1309,7 @@ pub fn build_daily_inbox(
                         key,
                         title: format!("#{} {}", card.number, card.title),
                         context: proj_name,
-                        kind_label: "已解决 Card",
+                        kind_label: "Resolved Card",
                         completed_at: res_at,
                         card_id: Some(card.id.clone()),
                         can_restore: false,
@@ -1161,15 +1322,36 @@ pub fn build_daily_inbox(
             continue;
         }
         let summary = snapshot.card_summaries.get(&card.id);
-        let last_act = summary
-            .map(|s| s.last_activity_at.max(s.last_user_activity_at))
-            .unwrap_or(0)
-            .max(card.created_at);
+        let gh_source = card.github_issue();
+        let is_github_synced = gh_source.is_some();
+        let local_user_act = summary.map(|s| s.last_user_activity_at).unwrap_or(0);
+        let local_created_today = !is_github_synced && card.created_at >= day_start_ms;
+        let has_local_work_today = local_user_act >= day_start_ms
+            || live_agent_cards.contains(card.id.as_str())
+            || local_created_today;
+        let gh_real_ts = gh_source
+            .and_then(|s| {
+                gh_issue_updated_ms
+                    .get(&(card.project_id.as_str(), s.issue_id))
+                    .copied()
+            })
+            .unwrap_or(0);
+        let last_act = if is_github_synced && !has_local_work_today {
+            gh_real_ts.max(local_user_act)
+        } else {
+            summary
+                .map(|s| s.last_activity_at.max(s.last_user_activity_at))
+                .unwrap_or(0)
+                .max(if is_github_synced {
+                    gh_real_ts
+                } else {
+                    card.created_at
+                })
+        };
         let max_seq = summary.map(|s| s.last_event_seq).unwrap_or(0);
         let key = format!("card:{}", card.id);
         let wm = Some(max_seq.max(last_act));
         let disp = classify_triage(&triage_map, &key, now_ms, day_start_ms, wm);
-        let touched_today = last_act >= day_start_ms || live_agent_cards.contains(card.id.as_str());
 
         let pr_summary = card
             .pull_request
@@ -1231,6 +1413,86 @@ pub fn build_daily_inbox(
                 });
             }
             TriageDisposition::Active => {
+                // Untouched synced GitHub issue/PR cards never flood Open Today:
+                // - Updated on GitHub today -> auto-stack into the project's GitHub bundle.
+                // - Historical synced card -> quiet Carry-over.
+                if let Some(src) = gh_source
+                    && !has_local_work_today
+                {
+                    if gh_real_ts >= day_start_ms
+                        && !seen_gh_targets
+                            .contains(&(src.repository.to_ascii_lowercase(), src.number))
+                    {
+                        seen_gh_targets.insert((src.repository.to_ascii_lowercase(), src.number));
+                        let stack_key = card.project_id.clone();
+                        let stack = gh_stacks_map.entry(stack_key.clone()).or_insert_with(|| {
+                            GitHubProjectStack {
+                                stack_id: format!("github-stack:{stack_key}"),
+                                repository: src.repository.clone(),
+                                project_id: Some(card.project_id.clone()),
+                                display_name: proj_name.clone(),
+                                items: Vec::new(),
+                                authors: Vec::new(),
+                                preview: String::new(),
+                                latest_at: gh_real_ts,
+                                has_ci_failure: false,
+                                ci_failed_count: 0,
+                                review_count: 0,
+                                mention_count: 0,
+                                synced_card_count: 0,
+                                actionable_count: 0,
+                            }
+                        });
+                        stack.latest_at = stack.latest_at.max(gh_real_ts);
+                        let is_pr = card.is_github_pr();
+                        let subtitle = if is_pr {
+                            format!("Synced PR #{} · {}", src.number, card.stage)
+                        } else {
+                            format!("Synced Issue #{} · {}", src.number, card.stage)
+                        };
+                        stack.items.push(GitHubStackItem {
+                            key,
+                            watermark: wm,
+                            repository: src.repository.clone(),
+                            kind: if is_pr { "pr".into() } else { "issue".into() },
+                            number: Some(src.number),
+                            title: card.title.clone(),
+                            subtitle,
+                            body: (!card.body.trim().is_empty()).then(|| card.body.clone()),
+                            author: None,
+                            reason: "synced".into(),
+                            failed_checks: Vec::new(),
+                            url: src.url.clone(),
+                            timestamp_ms: gh_real_ts,
+                            thread_id: None,
+                            card_id: Some(card.id.clone()),
+                            card_number: Some(card.number),
+                            read_sequence: 0,
+                            is_ci_failure: false,
+                            is_actionable: false,
+                            is_synced_card: true,
+                        });
+                    } else {
+                        inbox.carryover_cards.push(InboxCardWork {
+                            key,
+                            watermark: wm,
+                            card_id: card.id.clone(),
+                            card_number: card.number,
+                            card_title: card.title.clone(),
+                            stage: card.stage.clone(),
+                            project_id: card.project_id.clone(),
+                            project_name: proj_name,
+                            host_label: project_host_label(snapshot, &card.project_id),
+                            pr_summary,
+                            pr_ci_state,
+                            last_activity_at: last_act,
+                            pinned_today: false,
+                            has_live_agent: false,
+                        });
+                    }
+                    continue;
+                }
+
                 let item = InboxCardWork {
                     key,
                     watermark: wm,
@@ -1247,7 +1509,7 @@ pub fn build_daily_inbox(
                     pinned_today: false,
                     has_live_agent: live_agent_cards.contains(card.id.as_str()),
                 };
-                if touched_today {
+                if has_local_work_today {
                     inbox.open_cards.push(item);
                 } else {
                     inbox.carryover_cards.push(item);
@@ -1255,9 +1517,59 @@ pub fn build_daily_inbox(
             }
         }
     }
+
+    for stack in gh_stacks_map.values_mut() {
+        stack.items.sort_by(|a, b| {
+            b.is_ci_failure
+                .cmp(&a.is_ci_failure)
+                .then_with(|| b.is_actionable.cmp(&a.is_actionable))
+                .then_with(|| b.timestamp_ms.cmp(&a.timestamp_ms))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        stack.ci_failed_count = stack.items.iter().filter(|i| i.is_ci_failure).count();
+        stack.review_count = stack
+            .items
+            .iter()
+            .filter(|i| !i.is_ci_failure && is_github_reason_review(&i.reason))
+            .count();
+        stack.mention_count = stack
+            .items
+            .iter()
+            .filter(|i| !i.is_ci_failure && is_github_reason_mention(&i.reason))
+            .count();
+        stack.synced_card_count = stack.items.iter().filter(|i| i.is_synced_card).count();
+        stack.actionable_count = stack.items.iter().filter(|i| i.is_actionable).count();
+        stack.has_ci_failure = stack.ci_failed_count > 0;
+        stack.preview = stack
+            .items
+            .iter()
+            .take(3)
+            .map(|i| match i.number {
+                Some(n) if i.is_ci_failure => format!("#{n} CI failed"),
+                Some(n) => format!("#{n} {}", i.title),
+                None => i.title.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+    }
+    inbox.github_stacks = gh_stacks_map.into_values().collect();
+    inbox.github_stacks.sort_by(|a, b| {
+        b.has_ci_failure
+            .cmp(&a.has_ci_failure)
+            .then_with(|| b.actionable_count.cmp(&a.actionable_count))
+            .then_with(|| b.latest_at.cmp(&a.latest_at))
+            .then_with(|| a.stack_id.cmp(&b.stack_id))
+    });
+    inbox.earlier_github.sort_by(|a, b| {
+        b.timestamp_ms
+            .cmp(&a.timestamp_ms)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
     inbox.open_cards.sort_by(|a, b| {
         b.pinned_today
             .cmp(&a.pinned_today)
+            .then_with(|| a.project_name.cmp(&b.project_name))
             .then_with(|| b.last_activity_at.cmp(&a.last_activity_at))
             .then_with(|| a.card_id.cmp(&b.card_id))
     });
@@ -1277,6 +1589,9 @@ pub fn build_daily_inbox(
     for entry in &snapshot.terminals {
         let status = entry.herdr_status();
         if matches!(status, HerdrStatus::Ended | HerdrStatus::Closing) {
+            continue;
+        }
+        if handled_terminal_ids.contains(&entry.id) {
             continue;
         }
         let is_live = if let Some(a) = &entry.agent {
@@ -1329,6 +1644,13 @@ pub fn build_daily_inbox(
             .map(|a| a.card_id.clone())
             .or_else(|| ctx.and_then(|c| c.card_id.clone()))
             .or_else(|| entry.origin_card_id.clone());
+        // Avoid duplicating a card-bound blocked agent already surfaced in Waiting on You.
+        if let Some(cid) = &card_id
+            && handled_card_ids.contains(cid)
+            && matches!(status, HerdrStatus::Blocked | HerdrStatus::Error)
+        {
+            continue;
+        }
         let card = card_id
             .as_deref()
             .and_then(|cid| cards_by_id.get(cid).copied());
@@ -1389,7 +1711,7 @@ pub fn build_daily_inbox(
                         key,
                         title: entry.title(),
                         context: context_label,
-                        kind_label: if is_agent { "Agent 终端" } else { "Shell" },
+                        kind_label: if is_agent { "Agent Terminal" } else { "Shell" },
                         defer_until: until,
                         card_id,
                         terminal_id: Some(entry.id.clone()),
@@ -1403,7 +1725,7 @@ pub fn build_daily_inbox(
                         key,
                         title: entry.title(),
                         context: context_label,
-                        kind_label: if is_agent { "Agent 终端" } else { "Shell" },
+                        kind_label: if is_agent { "Agent Terminal" } else { "Shell" },
                         completed_at: triage_map
                             .get(&format!("terminal:{}", entry.id) as &str)
                             .map(|e| e.updated_at)
@@ -1443,8 +1765,21 @@ pub fn build_daily_inbox(
         .sort_by(|a, b| b.completed_at.cmp(&a.completed_at).then(a.key.cmp(&b.key)));
 
     let gh_count: usize = inbox.github_stacks.iter().map(|s| s.items.len()).sum();
+    let gh_actionable: usize = inbox.github_stacks.iter().map(|s| s.actionable_count).sum();
     let sched_card_count: usize = inbox.schedule_stacks.iter().map(|s| s.cards.len()).sum();
     let plain_shell_stack_count = usize::from(!inbox.plain_shells.is_empty());
+    let urgent_agent_terms = inbox
+        .agent_terminals
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.status,
+                HerdrStatus::Blocked | HerdrStatus::Error | HerdrStatus::Disconnected
+            )
+        })
+        .count();
+
+    inbox.actionable_count = inbox.needs_you.len() + urgent_agent_terms + gh_actionable;
     inbox.remaining_today = inbox.needs_you.len()
         + gh_count
         + sched_card_count

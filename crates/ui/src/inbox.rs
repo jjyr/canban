@@ -1,5 +1,6 @@
-//! Daily Inbox: Google-Inbox-style single-page workspace with automatic project/source stacks,
-//! inline triage, live Agent Terminal status/output preview, Schedule pulse, and End-of-Day Defer.
+//! Daily Inbox: Linear × Shortwave single-page triage workspace with visual-archetype rows,
+//! Google-Inbox-style project bundles, live Agent Terminal viewports, Schedule health track,
+//! and End-of-Day Defer.
 pub mod state;
 pub use state::{
     State, cutoff_minutes_from_utility, defer_remaining_all, init, local_tz_offset_secs,
@@ -50,16 +51,16 @@ fn engine_icon(engine: Option<&str>) -> Icon {
     }
 }
 
-fn terminal_status_visual(status: HerdrStatus) -> (&'static str, Tone, bool) {
+fn terminal_status_visual(status: HerdrStatus) -> (&'static str, Tone, bool, ThemeColor) {
     match status {
-        HerdrStatus::Blocked => ("等待输入", Tone::Attention, false),
-        HerdrStatus::Done => ("已完成未关", Tone::Success, false),
-        HerdrStatus::Working => ("运行中", Tone::Info, true),
-        HerdrStatus::Starting | HerdrStatus::Queued => ("启动中", Tone::Info, true),
-        HerdrStatus::Idle => ("空闲等待", Tone::Neutral, false),
-        HerdrStatus::Error => ("运行出错", Tone::Danger, false),
-        HerdrStatus::Disconnected => ("已断开", Tone::Danger, false),
-        _ => ("打开中", Tone::Neutral, false),
+        HerdrStatus::Blocked => ("Waiting", Tone::Attention, false, ATTENTION),
+        HerdrStatus::Done => ("Done", Tone::Success, false, SUCCESS),
+        HerdrStatus::Working => ("Running", Tone::Info, true, ACCENT),
+        HerdrStatus::Starting | HerdrStatus::Queued => ("Starting", Tone::Info, true, ACCENT),
+        HerdrStatus::Idle => ("Idle", Tone::Neutral, false, MUTED),
+        HerdrStatus::Error => ("Error", Tone::Danger, false, DANGER),
+        HerdrStatus::Disconnected => ("Disconnected", Tone::Danger, false, DANGER),
+        _ => ("Open", Tone::Neutral, false, MUTED),
     }
 }
 
@@ -68,9 +69,103 @@ fn shorten_path(path: &str) -> String {
     compact_home(path, &home)
 }
 
+fn format_today_date() -> String {
+    chrono::Local::now().format("%a, %b %-d").to_string()
+}
+
+/// 32×32 rounded visual-archetype icon tile with optional ringed corner status dot.
+fn icon_tile_32(
+    kind: Icon,
+    bg: ThemeColor,
+    fg: ThemeColor,
+    corner_dot: Option<ThemeColor>,
+) -> View {
+    let mut tile = view()
+        .relative()
+        .flex_shrink_0()
+        .w(px(32.))
+        .h(px(32.))
+        .rounded(px(8.))
+        .bg(bg)
+        .items_center()
+        .justify_center()
+        .pointer_events(PointerEvents::None)
+        .child(icon_tinted(kind, fg).w(px(16.)).h(px(16.)));
+    if let Some(dot) = corner_dot {
+        tile = tile.child(corner_badge_dot(dot));
+    }
+    tile
+}
+
+/// 32×32 tile showing a full-color branded Agent provider logo + optional corner status dot.
+fn agent_icon_tile_32(
+    engine: Option<&str>,
+    bg: ThemeColor,
+    corner_dot: Option<ThemeColor>,
+) -> View {
+    let mut tile = view()
+        .relative()
+        .flex_shrink_0()
+        .w(px(32.))
+        .h(px(32.))
+        .rounded(px(8.))
+        .bg(bg)
+        .items_center()
+        .justify_center()
+        .pointer_events(PointerEvents::None)
+        .child(icon_colored(engine_icon(engine), 18.));
+    if let Some(dot) = corner_dot {
+        tile = tile.child(corner_badge_dot(dot));
+    }
+    tile
+}
+
+/// 32×32 dark terminal-chrome tile so CLI/Agent terminals look unmistakably like terminal sessions.
+fn terminal_icon_tile_32(engine: Option<&str>, corner_dot: Option<ThemeColor>) -> View {
+    let glyph = if let Some(eng) = engine {
+        icon_colored(engine_icon(Some(eng)), 17.).into_element()
+    } else {
+        icon_tinted(Icon::Terminal, TEXT)
+            .w(px(16.))
+            .h(px(16.))
+            .into_element()
+    };
+    let mut tile = view()
+        .relative()
+        .flex_shrink_0()
+        .w(px(32.))
+        .h(px(32.))
+        .rounded(px(8.))
+        .bg(BACKGROUND)
+        .border_1()
+        .border_color(BORDER)
+        .items_center()
+        .justify_center()
+        .pointer_events(PointerEvents::None)
+        .child(glyph);
+    if let Some(dot) = corner_dot {
+        tile = tile.child(corner_badge_dot(dot));
+    }
+    tile
+}
+
+fn corner_badge_dot(color: ThemeColor) -> View {
+    view()
+        .absolute()
+        .right(px(-2.))
+        .bottom(px(-2.))
+        .w(px(11.))
+        .h(px(11.))
+        .rounded_full()
+        .bg(SURFACE)
+        .items_center()
+        .justify_center()
+        .child(view().w(px(7.)).h(px(7.)).rounded_full().bg(color))
+}
+
 fn stacked_deck_lip() -> View {
     view()
-        .mx_2p5()
+        .mx_3()
         .h(px(4.))
         .bg(INSET)
         .border_l_1()
@@ -80,38 +175,39 @@ fn stacked_deck_lip() -> View {
         .rounded_b(px(6.))
 }
 
-fn section_header(
-    title: impl Into<String>,
-    count: usize,
-    tone: Tone,
-    trailing: Option<AnyElement>,
-) -> View {
+fn sheet_container() -> View {
+    view()
+        .bg(SURFACE)
+        .border_1()
+        .border_color(BORDER)
+        .rounded(px(10.))
+        .overflow_hidden()
+}
+
+fn section_heading(title: impl Into<String>, count: usize, trailing: Option<AnyElement>) -> View {
     let mut row = view()
         .flex_row()
         .items_center()
         .justify_between()
         .gap_2()
         .pt_1()
+        .px_0p5()
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(status_dot(match tone {
-                    Tone::Attention => ATTENTION,
-                    Tone::Danger => DANGER,
-                    Tone::Success => SUCCESS,
-                    Tone::Info => ACCENT,
-                    Tone::Highlight => HIGHLIGHT,
-                    Tone::Neutral => MUTED,
-                }))
                 .child(
                     label(title.into())
-                        .text_size(px(12.5))
+                        .text_size(px(11.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(TEXT),
+                        .text_color(MUTED),
                 )
-                .child(badge(count.to_string())),
+                .child(
+                    muted(count.to_string())
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.)),
+                ),
         );
     if let Some(el) = trailing {
         row = row.child(el);
@@ -119,53 +215,67 @@ fn section_header(
     row
 }
 
-fn inline_reply_box(ui: Ui, expected: ReplyTarget) -> impl IntoElement {
-    let is_open = computed(move || {
-        ui.inbox
-            .reply_target
-            .with(|t| t.as_ref() == Some(&expected))
-    });
-    when(
-        move || is_open.get(),
-        move || {
-            let placeholder = match ui.inbox.reply_target.get_untracked() {
-                Some(ReplyTarget::Terminal { ref label, .. }) => {
-                    format!("直接回复到 {label}（回车发送）…")
-                }
-                Some(ReplyTarget::GitHub { ref label, .. }) => {
-                    format!("回复到 GitHub {label}…")
-                }
-                Some(ReplyTarget::Card { ref label, .. }) => {
-                    format!("回复到 {label}（支持 @agent）…")
-                }
-                None => "输入回复内容…".into(),
-            };
-            view()
-                .mt_2()
-                .pt_2()
-                .border_t_1()
-                .border_color(BORDER)
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    field(ui.inbox.reply_draft, &placeholder)
-                        .flex_1()
-                        .min_w(px(0.))
-                        .on_submit(move |_: &str| submit_inline_reply(ui)),
-                )
-                .child(
-                    compact_action("发送", Variant::Primary, move |_| submit_inline_reply(ui))
-                        .disabled(move || {
-                            ui.inbox.reply_sending.get()
-                                || ui.inbox.reply_draft.with(|d| d.trim().is_empty())
-                        }),
-                )
-                .child(compact_action("取消", Variant::Quiet, move |_| {
+fn colored_count_chip(dot: ThemeColor, text_str: String) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(view().w(px(6.)).h(px(6.)).rounded_full().bg(dot))
+        .child(label(text_str).text_size(px(12.)).text_color(TEXT))
+}
+
+fn inline_reply_box(ui: Ui, target: ReplyTarget) -> impl IntoElement {
+    let target_check = target.clone();
+    dynamic(move || {
+        let active = ui.inbox.reply_target.get().as_ref() == Some(&target_check);
+        if !active {
+            return view().into_element();
+        }
+        let sending = ui.inbox.reply_sending.get();
+        let placeholder = match ui.inbox.reply_target.get_untracked() {
+            Some(ReplyTarget::Terminal { label, .. }) => {
+                format!("Send input to {label} (Enter to send)…")
+            }
+            Some(ReplyTarget::GitHub { label, .. }) => {
+                format!("Comment on GitHub {label}…")
+            }
+            Some(ReplyTarget::Card { label, .. }) => {
+                format!("Reply to {label} (@agent supported)…")
+            }
+            None => "Write a reply…".into(),
+        };
+        let input = field(ui.inbox.reply_draft, &placeholder)
+            .flex_1()
+            .min_w(px(0.))
+            .on_submit(move |_: &str| submit_inline_reply(ui));
+
+        view()
+            .mt_2()
+            .p_2()
+            .bg(INSET)
+            .border_1()
+            .border_color(ACCENT)
+            .rounded(px(8.))
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(input)
+            .child(if sending {
+                status("Sending…", Tone::Info).into_element()
+            } else {
+                compact_action_with_icon(Icon::MessageSquare, "Send", Variant::Primary, move |_| {
+                    submit_inline_reply(ui)
+                })
+                .into_element()
+            })
+            .child(chrome_button(Icon::Close, "Cancel reply", move |_| {
+                batch(|| {
                     ui.inbox.reply_target.set(None);
-                }))
-        },
-    )
+                    ui.inbox.reply_draft.set(String::new());
+                });
+            }))
+            .into_element()
+    })
 }
 
 /// Top 42pt unified chrome bar for the Daily Inbox route.
@@ -174,9 +284,9 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
         let inbox = ui.daily_inbox.get();
         (
             inbox.completed_today,
-            inbox.remaining_today,
             inbox.total_today,
             inbox.deferred_items.len(),
+            inbox.remaining_today,
             inbox.cutoff_minutes,
         )
     });
@@ -188,6 +298,7 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
         .h_full()
         .flex_row()
         .items_center()
+        .justify_between()
         .gap_2()
         .pl_2()
         .window_drag(true)
@@ -195,57 +306,53 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
             view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_2p5()
                 .min_w(px(0.))
                 .window_drag(false)
                 .child(icon_tinted(Icon::Inbox, ACCENT).w(px(15.)).h(px(15.)))
                 .child(
-                    label("Inbox")
+                    label("Today")
+                        .text_size(px(13.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.5)),
+                        .text_color(TEXT),
                 )
+                .child(muted(format_today_date()).text_size(px(12.)))
                 .child(dynamic(move || {
-                    let (done, remaining, total, _, _) = summary.get();
+                    let (done, total, _, rem, _) = summary.get();
                     let ratio = if total == 0 {
                         1.0_f32
                     } else {
                         (done as f32 / total as f32).clamp(0.0, 1.0)
                     };
-                    let fill_w = (ratio * 58.0).round();
-                    let all_clear = remaining == 0;
+                    let fill_w = (ratio * 64.0).round();
+                    let status_text = if total == 0 {
+                        "All clear".to_owned()
+                    } else if rem == 0 {
+                        format!("Cleared · {done}/{total}")
+                    } else {
+                        format!("{done}/{total} cleared")
+                    };
                     view()
                         .flex_row()
                         .items_center()
-                        .gap_1p5()
-                        .pl_1()
+                        .gap_2()
                         .child(
                             view()
-                                .w(px(58.))
-                                .h(px(5.))
+                                .w(px(64.))
+                                .h(px(4.))
                                 .rounded_full()
                                 .bg(INSET)
-                                .border_1()
-                                .border_color(BORDER)
                                 .overflow_hidden()
-                                .child(view().w(px(fill_w)).h_full().bg(if all_clear {
+                                .child(view().h_full().w(px(fill_w)).bg(if rem == 0 {
                                     SUCCESS
                                 } else {
                                     ACCENT
                                 })),
                         )
-                        .child(
-                            muted(if all_clear {
-                                format!("已清零 · {done}/{total}")
-                            } else {
-                                format!("{done}/{total}")
-                            })
-                            .text_size(px(11.5))
-                            .font_family(MONO_FONT),
-                        )
+                        .child(muted(status_text).font_family(MONO_FONT).text_size(px(11.)))
                         .into_element()
                 })),
         )
-        .child(view().flex_1().h_full().window_drag(true))
         .child(
             view()
                 .flex_row()
@@ -254,55 +361,65 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                 .flex_shrink_0()
                 .window_drag(false)
                 .child(dynamic(move || {
-                    let (done, _, _, deferred, _) = summary.get();
+                    let (done, _, deferred, _, _) = summary.get();
                     let deferred_lbl = if deferred > 0 {
-                        format!("已推迟 {deferred}")
+                        format!("Deferred {deferred}")
                     } else {
-                        "已推迟".into()
+                        "Deferred".into()
                     };
                     let done_lbl = if done > 0 {
-                        format!("已完成 {done}")
+                        format!("Done {done}")
                     } else {
-                        "已完成".into()
+                        "Done".into()
                     };
-                    segmented()
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .bg(INSET)
+                        .p_0p5()
+                        .rounded(px(7.))
+                        .gap_0p5()
                         .child(compact_segment(
-                            "今天",
+                            "Today",
                             None,
-                            move || drawer.get() == "today",
+                            move || drawer.with(|d| d == "today"),
                             move |_| drawer.set("today".into()),
                         ))
                         .child(compact_segment(
                             deferred_lbl,
                             None,
-                            move || drawer.get() == "deferred",
+                            move || drawer.with(|d| d == "deferred"),
                             move |_| drawer.set("deferred".into()),
                         ))
                         .child(compact_segment(
                             done_lbl,
                             None,
-                            move || drawer.get() == "done",
+                            move || drawer.with(|d| d == "done"),
                             move |_| drawer.set("done".into()),
                         ))
                         .into_element()
                 }))
-                .child(when(
-                    move || summary.get().1 > 0 && drawer.get() == "today",
-                    move || {
-                        compact_action("推迟剩余全部 ▾", Variant::Secondary, move |_| {
-                            defer_remaining_all(ui)
-                        })
-                    },
-                ))
+                .child(dynamic(move || {
+                    let (_, _, _, rem, _) = summary.get();
+                    if rem == 0 || drawer.get() != "today" {
+                        return view().into_element();
+                    }
+                    compact_action_with_icon(
+                        Icon::Clock,
+                        "Defer rest ▾",
+                        Variant::Secondary,
+                        move |_| defer_remaining_all(ui),
+                    )
+                    .into_element()
+                }))
                 .child(compact_action(
-                    move || format!("日切 {} ▾", format_cutoff(summary.get().4)),
+                    move || format!("{} ▾", format_cutoff(summary.get().4)),
                     Variant::Quiet,
                     move |_| open_cutoff_menu(ui),
                 ))
-                .child(chrome_button_disabled(
+                .child(chrome_button(
                     Icon::Refresh,
-                    "刷新 GitHub 通知与终端预览",
-                    move || ui.inbox.github_loading.get(),
+                    "Refresh GitHub notifications & terminal previews",
                     move |_| {
                         refresh_github_notifications(ui, true);
                         prefetch_agent_terminal_previews(ui);
@@ -311,69 +428,232 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
         )
 }
 
-fn render_schedule_pulse(ui: Ui, runs: &[SchedulePulseItem]) -> Option<View> {
+/// Calm single-line Schedule health strip with visual status dots; click to inspect today's runs.
+fn render_schedule_strip(ui: Ui, runs: &[SchedulePulseItem]) -> Option<View> {
     if runs.is_empty() {
         return None;
     }
-    let mut pills = view()
+    let expanded = ui.inbox.schedule_expanded.get();
+    let passed = runs
+        .iter()
+        .filter(|r| matches!(r.state.as_str(), "completed" | "succeeded"))
+        .count();
+    let failed = runs
+        .iter()
+        .filter(|r| matches!(r.state.as_str(), "failed" | "blocked"))
+        .count();
+    let running = runs
+        .iter()
+        .filter(|r| matches!(r.state.as_str(), "running" | "starting" | "queued"))
+        .count();
+    let total = runs.len();
+
+    let mut summary_parts = Vec::new();
+    if failed > 0 {
+        summary_parts.push(format!("{failed} failed"));
+    }
+    if running > 0 {
+        summary_parts.push(format!("{running} running"));
+    }
+    if passed > 0 {
+        if failed == 0 && running == 0 {
+            summary_parts.push(format!("{passed}/{total} passed"));
+        } else {
+            summary_parts.push(format!("{passed} passed"));
+        }
+    }
+    if summary_parts.is_empty() {
+        summary_parts.push(format!("{total} scheduled"));
+    }
+
+    let mut dot_track = view().flex_row().items_center().gap_1();
+    for run in runs.iter().take(12) {
+        let color = match run.state.as_str() {
+            "completed" | "succeeded" => SUCCESS,
+            "failed" => DANGER,
+            "blocked" => ATTENTION,
+            "running" | "starting" | "queued" => ACCENT,
+            _ => MUTED,
+        };
+        dot_track = dot_track.child(view().w(px(7.)).h(px(7.)).rounded_full().bg(color));
+    }
+
+    let trigger_tint = if failed > 0 {
+        DANGER
+    } else if running > 0 {
+        ACCENT
+    } else {
+        SUCCESS
+    };
+
+    let header = press_target()
+        .w_full()
         .flex_row()
-        .flex_wrap()
         .items_center()
-        .gap_1p5()
+        .justify_between()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .bg(CLEAR)
+        .hover(|s| s.bg(CARD_HOVER))
+        .on_press(move |_: &()| {
+            ui.inbox.schedule_expanded.update(|v| *v = !*v);
+        })
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2p5()
+                .child(
+                    icon_tinted(Icon::Trigger, trigger_tint)
+                        .w(px(14.))
+                        .h(px(14.)),
+                )
+                .child(
+                    label("Schedules today")
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(TEXT),
+                )
+                .child(dot_track)
+                .child(
+                    muted(summary_parts.join(" · "))
+                        .text_size(px(12.))
+                        .text_color(if failed > 0 { DANGER } else { MUTED }),
+                ),
+        )
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .pr_1()
-                .child(icon_tinted(Icon::Clock, MUTED).w(px(12.5)).h(px(12.5)))
-                .child(muted("今日定时").text_size(px(11.5))),
+                .child(muted(if expanded { "Hide" } else { "Details" }).text_size(px(11.5)))
+                .child(
+                    icon_tinted(
+                        if expanded {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::Forward
+                        },
+                        MUTED,
+                    )
+                    .w(px(13.))
+                    .h(px(13.)),
+                ),
         );
 
-    for run in runs.iter().take(8) {
-        let time_str = format_clock_hm(run.scheduled_at);
-        let (mark, tone) = match run.state.as_str() {
-            "completed" | "succeeded" => ("✓", Tone::Success),
-            "failed" => ("✗", Tone::Danger),
-            "blocked" => ("!", Tone::Attention),
-            "running" | "starting" | "queued" => ("●", Tone::Info),
-            _ => ("·", Tone::Neutral),
-        };
-        let extra = if run.creates_card && run.card_number.is_some() {
-            format!(" #{}", run.card_number.unwrap_or(0))
-        } else {
-            String::new()
-        };
-        let label_text = format!("{mark} {time_str} {}{extra}", run.schedule_name);
-        let pid = run.project_id.clone();
-        let sid = run.schedule_id.clone();
-        let card_id = run.card_id.clone();
-        pills = pills.child(status_button(
-            label_text,
-            tone,
-            matches!(run.state.as_str(), "running" | "starting"),
-            None,
-            true,
-            move |_| {
-                if let Some(cid) = &card_id {
-                    ui.open_card(cid.clone());
-                } else {
-                    crate::schedules::open(ui, Some(pid.clone()), Some(sid.clone()));
-                }
-            },
-        ));
-    }
+    let mut container = sheet_container().child(header);
+    if expanded {
+        for run in runs.iter().take(12) {
+            let time_str = format_clock_hm(run.scheduled_at);
+            let (dot_color, state_label, state_tone) = match run.state.as_str() {
+                "completed" | "succeeded" => (SUCCESS, "Passed".to_owned(), Tone::Success),
+                "failed" => (DANGER, "Failed".to_owned(), Tone::Danger),
+                "blocked" => (ATTENTION, "Waiting".to_owned(), Tone::Attention),
+                "running" | "starting" | "queued" => (ACCENT, "Running".to_owned(), Tone::Info),
+                other => (MUTED, other.to_owned(), Tone::Neutral),
+            };
+            let detail = run
+                .error
+                .clone()
+                .or_else(|| run.summary.clone())
+                .unwrap_or_default();
+            let pid = run.project_id.clone();
+            let sid = run.schedule_id.clone();
+            let cid = run.card_id.clone();
+            let pid_retry = run.project_id.clone();
+            let sid_retry = run.schedule_id.clone();
+            let is_failed = run.state == "failed";
 
-    Some(
-        view()
-            .px_3()
-            .py_2()
-            .bg(SURFACE)
-            .border_1()
-            .border_color(BORDER)
-            .rounded(px(8.))
-            .child(pills),
-    )
+            let mut row_left = view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    muted(time_str)
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .flex_shrink_0(),
+                )
+                .child(status_dot(dot_color))
+                .child(
+                    label(run.schedule_name.clone())
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .truncate(),
+                )
+                .child(muted(run.project_name.clone()).text_size(px(11.5)));
+            if let Some(num) = run.card_number {
+                row_left = row_left.child(badge(format!("#{num}")));
+            }
+            if !detail.is_empty() {
+                row_left = row_left.child(
+                    muted(detail)
+                        .text_size(px(11.5))
+                        .text_color(if is_failed { DANGER } else { MUTED })
+                        .truncate()
+                        .flex_1()
+                        .min_w(px(0.)),
+                );
+            }
+
+            let mut right = view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .flex_shrink_0()
+                .child(status(state_label, state_tone));
+            if is_failed {
+                right = right.child(compact_action_with_icon(
+                    Icon::Refresh,
+                    "Retry",
+                    Variant::Secondary,
+                    move |_| {
+                        dispatch(
+                            ui,
+                            "schedule.trigger",
+                            json!({ "project_id": pid_retry, "schedule_id": sid_retry }),
+                        );
+                        ui.notify("Retried scheduled run");
+                    },
+                ));
+            }
+            container = container.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(BORDER)
+                    .child(
+                        press_target()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .bg(CLEAR)
+                            .rounded(px(4.))
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .on_press(move |_: &()| {
+                                if let Some(card_id) = &cid {
+                                    ui.open_card(card_id.clone());
+                                } else {
+                                    crate::schedules::open(
+                                        ui,
+                                        Some(pid.clone()),
+                                        Some(sid.clone()),
+                                    );
+                                }
+                            })
+                            .child(row_left),
+                    )
+                    .child(right),
+            );
+        }
+    }
+    Some(container)
 }
 
 fn render_undo_banner(ui: Ui) -> impl IntoElement {
@@ -405,10 +685,13 @@ fn render_undo_banner(ui: Ui) -> impl IntoElement {
                     .flex_row()
                     .items_center()
                     .gap_1p5()
-                    .child(compact_action("撤销", Variant::Primary, move |_| {
-                        undo_last(ui)
-                    }))
-                    .child(chrome_button(Icon::Close, "关闭提示", move |_| {
+                    .child(compact_action_with_icon(
+                        Icon::Undo,
+                        "Undo",
+                        Variant::Primary,
+                        move |_| undo_last(ui),
+                    ))
+                    .child(chrome_button(Icon::Close, "Dismiss", move |_| {
                         ui.inbox.undo_banner.set(None);
                     })),
             )
@@ -416,11 +699,23 @@ fn render_undo_banner(ui: Ui) -> impl IntoElement {
     })
 }
 
-fn render_needs_you_item(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
+/// Visual-archetype row inside the `WAITING ON YOU` sheet:
+/// 1. Agent asking/blocked -> branded provider icon tile + amber chat quote bubble + Primary `Reply`
+/// 2. Review / Ready to Merge -> purple `Eye` or blue `GitMerge` tile + PR/CI delivery bar + Primary `Merge PR`/`Review`
+/// 3. Schedule Failed -> red `TriangleAlert` tile + monospace red error console strip + Primary `Retry`
+fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64, first: bool) -> View {
     let key_defer = item.key.clone();
     let key_dismiss = item.key.clone();
     let wm = item.watermark;
-    let rel = format_relative_zh(item.timestamp_ms, now_ms);
+    let rel = format_relative(item.timestamp_ms, now_ms);
+
+    let row_base = |accent: ThemeColor| {
+        let mut r = view().flex_row().items_stretch().min_w(px(0.));
+        if !first {
+            r = r.border_t_1().border_color(BORDER);
+        }
+        r.child(view().w(px(3.)).flex_shrink_0().bg(accent))
+    };
 
     match item.kind {
         NeedsYouKind::Card {
@@ -430,6 +725,11 @@ fn render_needs_you_item(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             project_name,
             host_label,
             terminal_id,
+            agent_engine,
+            pr_number,
+            pr_checks_summary,
+            pr_ci_state,
+            branch,
             headline,
             detail,
             body,
@@ -441,13 +741,6 @@ fn render_needs_you_item(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             can_quick_merge,
             ..
         } => {
-            let tone = if is_blocked {
-                Tone::Attention
-            } else if is_review {
-                Tone::Highlight
-            } else {
-                Tone::Info
-            };
             let reply_target = ReplyTarget::Card {
                 card_id: card_id.clone(),
                 label: format!("#{card_number} {card_title}"),
@@ -461,130 +754,301 @@ fn render_needs_you_item(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             let defer_title = format!("#{card_number} {card_title}");
             let dismiss_title = format!("#{card_number} {card_title}");
 
-            let mut top = view()
+            let is_code_gate = !is_blocked && (is_review || can_quick_merge);
+            let accent_bar = if is_blocked {
+                ATTENTION
+            } else if can_quick_merge {
+                ACCENT
+            } else if is_review {
+                HIGHLIGHT
+            } else {
+                ACCENT
+            };
+
+            // Distinct 32×32 visual anchor tile
+            let left_tile = if is_blocked {
+                agent_icon_tile_32(agent_engine.as_deref(), ATTENTION_SURFACE, Some(ATTENTION))
+            } else if can_quick_merge {
+                icon_tile_32(Icon::GitMerge, SELECTED, ACCENT, None)
+            } else if is_review {
+                icon_tile_32(Icon::Eye, HIGHLIGHT_SURFACE, HIGHLIGHT, None)
+            } else if agent_engine.is_some() {
+                agent_icon_tile_32(agent_engine.as_deref(), SELECTED, None)
+            } else {
+                icon_tile_32(Icon::MessageSquare, SELECTED, ACCENT, None)
+            };
+
+            // Intent-first title line
+            let intent_line = if is_blocked {
+                match &actor {
+                    Some(a) => format!("{a} is waiting for your reply"),
+                    None => "Agent is waiting for your reply".into(),
+                }
+            } else if can_quick_merge {
+                if let Some(n) = pr_number {
+                    format!("Ready to merge · PR #{n}")
+                } else {
+                    "Ready to merge".into()
+                }
+            } else if is_review {
+                "Review & approval requested".into()
+            } else {
+                headline.clone()
+            };
+
+            // Quiet context breadcrumb: `#184 Title · project`
+            let mut meta_row = view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_1p5()
                 .min_w(px(0.))
-                .child(status_dot(if is_blocked {
-                    ATTENTION
-                } else if is_review {
-                    HIGHLIGHT
-                } else {
-                    ACCENT
-                }))
-                .child(badge(project_name))
                 .child(
                     muted(format!("#{card_number}"))
                         .font_family(MONO_FONT)
-                        .text_size(px(12.)),
+                        .text_size(px(11.5)),
                 )
                 .child(
                     label(card_title.clone())
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.))
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(TEXT)
                         .truncate()
                         .flex_1()
                         .min_w(px(0.)),
-                );
+                )
+                .child(muted(project_name).text_size(px(11.5)).flex_shrink_0());
             if let Some(h) = host_label {
-                top = top.child(badge(h));
-            }
-            if let Some(a) = actor {
-                top = top.child(status(a, tone));
+                meta_row = meta_row.child(badge(h));
             }
             if unread_count > 1 {
-                top = top.child(badge(format!("+{unread_count}")));
+                meta_row = meta_row.child(badge(format!("+{unread_count}")));
             }
             if !rel.is_empty() {
-                top = top.child(muted(rel).text_size(px(11.5)).flex_shrink_0());
+                meta_row = meta_row.child(muted(rel).text_size(px(11.)).flex_shrink_0());
             }
 
             let excerpt = body
                 .filter(|b| !b.trim().is_empty())
                 .or(detail.filter(|d| !d.trim().is_empty() && d != &headline));
 
-            let mut actions = view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_end()
-                .gap_1p5()
-                .pt_1()
-                .child(compact_action(
-                    "直接回复",
+            // Archetype-specific content body
+            let mut body_col = view().flex_1().min_w(px(0.)).gap_1p5().child(
+                press_target()
+                    .w_full()
+                    .bg(CLEAR)
+                    .rounded(px(5.))
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .on_press(move |_: &()| ui.open_card(cid_open.clone()))
+                    .child(
+                        view().gap_0p5().child(meta_row).child(
+                            label(intent_line)
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(if is_blocked {
+                                    ATTENTION
+                                } else if is_review && !can_quick_merge {
+                                    HIGHLIGHT
+                                } else {
+                                    ACCENT
+                                }),
+                        ),
+                    ),
+            );
+
+            if is_code_gate {
+                // Code delivery / PR check strip
+                let mut pr_strip = view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .px_2p5()
+                    .py_1p5()
+                    .bg(INSET)
+                    .rounded(px(6.));
+                if let Some(n) = pr_number {
+                    pr_strip = pr_strip.child(
+                        label(format!("PR #{n}"))
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(TEXT),
+                    );
+                }
+                if let Some(ci) = pr_ci_state.as_deref() {
+                    let (ci_text, ci_tone) = match ci {
+                        "success" => (
+                            pr_checks_summary
+                                .clone()
+                                .unwrap_or_else(|| "Checks passed".into()),
+                            Tone::Success,
+                        ),
+                        "failure" | "error" => (
+                            pr_checks_summary
+                                .clone()
+                                .unwrap_or_else(|| "CI failed".into()),
+                            Tone::Danger,
+                        ),
+                        _ => (
+                            pr_checks_summary
+                                .clone()
+                                .unwrap_or_else(|| "Checks running".into()),
+                            Tone::Info,
+                        ),
+                    };
+                    pr_strip = pr_strip.child(status(ci_text, ci_tone));
+                }
+                if let Some(br) = branch {
+                    pr_strip = pr_strip.child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(icon_tinted(Icon::Branch, MUTED).w(px(12.)).h(px(12.)))
+                            .child(muted(br).font_family(MONO_FONT).text_size(px(11.5))),
+                    );
+                }
+                if pr_number.is_some() || pr_ci_state.is_some() || excerpt.is_some() {
+                    if let Some(ex) = excerpt {
+                        pr_strip =
+                            pr_strip.child(muted(ex).text_size(px(12.)).truncate().min_w(px(0.)));
+                    }
+                    body_col = body_col.child(pr_strip);
+                }
+            } else if let Some(ex) = excerpt {
+                // Conversational speech quote block (high-contrast text, warm left bar when blocked)
+                body_col = body_col.child(
+                    view()
+                        .flex_row()
+                        .items_start()
+                        .gap_2()
+                        .px_2p5()
+                        .py_2()
+                        .bg(if is_blocked { ATTENTION_SURFACE } else { INSET })
+                        .border_l_1()
+                        .border_color(if is_blocked { ATTENTION } else { ACCENT })
+                        .rounded(px(6.))
+                        .child(
+                            icon_tinted(
+                                Icon::MessageSquare,
+                                if is_blocked { ATTENTION } else { MUTED },
+                            )
+                            .w(px(13.))
+                            .h(px(13.))
+                            .mt(px(2.)),
+                        )
+                        .child(
+                            label(ex)
+                                .text_size(px(12.5))
+                                .text_color(TEXT)
+                                .select_text()
+                                .flex_1()
+                                .min_w(px(0.)),
+                        ),
+                );
+            }
+
+            // Left primary CTA + subtle secondary; Right fixed Defer + Done muscle memory icons
+            let mut left_actions = view().flex_row().items_center().gap_1p5();
+            if can_quick_merge {
+                left_actions = left_actions
+                    .child(compact_action_with_icon(
+                        Icon::GitMerge,
+                        "Merge PR",
+                        Variant::Primary,
+                        move |_| {
+                            if let Some(card) = ui.snapshot.with_untracked(|s| {
+                                s.cards.iter().find(|c| c.id == cid_merge).cloned()
+                            }) {
+                                crate::card::quick_merge_start(ui, card);
+                            }
+                        },
+                    ))
+                    .child(compact_action("Reply", Variant::Quiet, move |_| {
+                        start_inline_reply(ui, reply_target_btn.clone())
+                    }));
+            } else if is_blocked {
+                left_actions = left_actions.child(compact_action_with_icon(
+                    Icon::MessageSquare,
+                    "Reply",
+                    Variant::Primary,
+                    move |_| start_inline_reply(ui, reply_target_btn.clone()),
+                ));
+            } else if is_review {
+                let cid_rev = card_id.clone();
+                left_actions = left_actions
+                    .child(compact_action_with_icon(
+                        Icon::Eye,
+                        "Review",
+                        Variant::Primary,
+                        move |_| ui.open_card(cid_rev.clone()),
+                    ))
+                    .child(compact_action("Reply", Variant::Quiet, move |_| {
+                        start_inline_reply(ui, reply_target_btn.clone())
+                    }));
+            } else {
+                left_actions = left_actions.child(compact_action_with_icon(
+                    Icon::MessageSquare,
+                    "Reply",
                     Variant::Secondary,
                     move |_| start_inline_reply(ui, reply_target_btn.clone()),
                 ));
-            if can_quick_merge {
-                actions = actions.child(compact_action(
-                    "快速合入",
-                    Variant::Primary,
+            }
+            if let Some(tid) = term_open {
+                left_actions = left_actions.child(compact_action_with_icon(
+                    Icon::Terminal,
+                    "Terminal ↗",
+                    Variant::Quiet,
                     move |_| {
-                        if let Some(card) = ui
-                            .snapshot
-                            .with_untracked(|s| s.cards.iter().find(|c| c.id == cid_merge).cloned())
-                        {
-                            crate::card::quick_merge_start(ui, card);
-                        }
+                        ui.open_card_with_terminal(cid_term.clone(), Some(tid.clone()));
                     },
                 ));
             }
-            if let Some(tid) = term_open {
-                actions =
-                    actions.child(compact_action("看终端 ↗", Variant::Quiet, move |_| {
-                        ui.open_card_with_terminal(cid_term.clone(), Some(tid.clone()));
-                    }));
-            }
-            actions = actions
-                .child(compact_action(
-                    "打开 Card ↗",
-                    Variant::Quiet,
-                    move |_| {
-                        ui.open_card(cid_open.clone());
-                    },
-                ))
-                .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
+
+            let right_triage = view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .child(chrome_button(Icon::Clock, "Defer", move |_| {
                     open_defer_menu(ui, vec![(key_defer.clone(), wm)], defer_title.clone())
                 }))
-                .child(compact_action("已处理 ✓", Variant::Quiet, move |_| {
+                .child(chrome_button(Icon::Check, "Mark handled", move |_| {
                     if unread_seq > 0 {
                         crate::overview::mark_card_read(ui, cid_dismiss.clone(), unread_seq);
                     }
                     dismiss_items(
                         ui,
                         vec![(key_dismiss.clone(), wm)],
-                        format!("已处理 {dismiss_title}"),
+                        format!("Handled {dismiss_title}"),
                     );
                 }));
 
-            let mut card = view()
-                .p_3()
-                .gap_1p5()
-                .bg(SURFACE)
-                .border_1()
-                .border_color(if is_blocked { ATTENTION } else { BORDER })
-                .rounded(px(8.))
-                .child(top)
-                .child(
-                    label(headline)
-                        .text_size(px(12.5))
-                        .text_color(if is_blocked { ATTENTION } else { TEXT }),
-                );
-            if let Some(ex) = excerpt {
-                card = card.child(
-                    view()
-                        .px_2p5()
-                        .py_1p5()
-                        .bg(INSET)
-                        .border_l_1()
-                        .border_color(if is_blocked { ATTENTION } else { ACCENT })
-                        .rounded(px(4.))
-                        .child(muted(ex).text_size(px(12.)).select_text()),
-                );
-            }
-            card.child(actions)
-                .child(inline_reply_box(ui, reply_target))
+            let action_bar = view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .pt_0p5()
+                .child(left_actions)
+                .child(right_triage);
+
+            row_base(accent_bar).child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .px_3p5()
+                    .py_3()
+                    .flex_row()
+                    .items_start()
+                    .gap_3()
+                    .child(left_tile)
+                    .child(
+                        body_col
+                            .child(action_bar)
+                            .child(inline_reply_box(ui, reply_target)),
+                    ),
+            )
         }
         NeedsYouKind::ScheduleFailed {
             schedule_id,
@@ -604,137 +1068,190 @@ fn render_needs_you_item(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             let sid_retry = schedule_id.clone();
             let pid_open = project_id.clone();
             let sid_open = schedule_id.clone();
+            let pid_row = project_id.clone();
+            let sid_row = schedule_id.clone();
             let is_failed = state == "failed";
+            let accent = if is_failed { DANGER } else { ATTENTION };
 
-            let mut top = view()
+            let left_tile = icon_tile_32(
+                Icon::TriangleAlert,
+                if is_failed {
+                    DANGER_SURFACE
+                } else {
+                    ATTENTION_SURFACE
+                },
+                accent,
+                None,
+            );
+
+            let mut meta_row = view()
                 .flex_row()
                 .items_center()
-                .gap_2()
-                .child(status_dot(if is_failed { DANGER } else { ATTENTION }))
-                .child(badge(project_name))
+                .gap_1p5()
+                .min_w(px(0.))
                 .child(
-                    label(format!("Schedule · {schedule_name}"))
+                    label(schedule_name.clone())
+                        .text_size(px(12.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.))
+                        .text_color(TEXT)
+                        .truncate()
                         .flex_1()
-                        .truncate(),
+                        .min_w(px(0.)),
                 )
-                .child(status(
-                    if is_failed {
-                        "执行失败"
-                    } else {
-                        "等待确认"
-                    },
-                    if is_failed {
-                        Tone::Danger
-                    } else {
-                        Tone::Attention
-                    },
-                ));
+                .child(muted(project_name).text_size(px(11.5)).flex_shrink_0());
             if let Some(h) = host_label {
-                top = top.child(badge(h));
+                meta_row = meta_row.child(badge(h));
             }
             if !rel.is_empty() {
-                top = top.child(muted(rel).text_size(px(11.5)));
+                meta_row = meta_row.child(muted(rel).text_size(px(11.)).flex_shrink_0());
             }
 
             let detail_text = error
                 .or(summary)
-                .unwrap_or_else(|| "定时任务未正常完成，可重试或查看详情。".into());
+                .unwrap_or_else(|| "Scheduled run did not complete cleanly.".into());
 
-            let mut actions = view()
+            let mut left_actions =
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(compact_action_with_icon(
+                        Icon::Refresh,
+                        "Retry",
+                        Variant::Primary,
+                        move |_| {
+                            dispatch(
+                                ui,
+                                "schedule.trigger",
+                                json!({ "project_id": pid_retry, "schedule_id": sid_retry }),
+                            );
+                            ui.notify("Retried scheduled run");
+                        },
+                    ));
+            if let Some(tid) = terminal_id {
+                left_actions = left_actions.child(compact_action_with_icon(
+                    Icon::Terminal,
+                    "Terminal ↗",
+                    Variant::Quiet,
+                    move |_| ui.open_terminal(tid.clone()),
+                ));
+            }
+            left_actions =
+                left_actions.child(compact_action("Inspect ↗", Variant::Quiet, move |_| {
+                    crate::schedules::open(ui, Some(pid_open.clone()), Some(sid_open.clone()));
+                }));
+
+            let right_triage = view()
                 .flex_row()
                 .items_center()
-                .justify_end()
-                .gap_1p5()
-                .pt_1()
-                .child(compact_action("重试", Variant::Secondary, move |_| {
-                    dispatch(
-                        ui,
-                        "schedule.trigger",
-                        json!({ "project_id": pid_retry, "schedule_id": sid_retry }),
-                    );
-                    ui.notify("已重新触发定时任务");
-                }));
-            if let Some(tid) = terminal_id {
-                actions =
-                    actions.child(compact_action("看终端 ↗", Variant::Quiet, move |_| {
-                        ui.open_terminal(tid.clone());
-                    }));
-            }
-            actions = actions
-                .child(compact_action(
-                    "查看详情 ↗",
-                    Variant::Quiet,
-                    move |_| {
-                        crate::schedules::open(ui, Some(pid_open.clone()), Some(sid_open.clone()));
-                    },
-                ))
-                .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
+                .gap_1()
+                .flex_shrink_0()
+                .child(chrome_button(Icon::Clock, "Defer", move |_| {
                     open_defer_menu(ui, vec![(key_defer.clone(), wm)], defer_title.clone())
                 }))
-                .child(compact_action("忽略 ✓", Variant::Quiet, move |_| {
+                .child(chrome_button(Icon::Check, "Dismiss", move |_| {
                     dismiss_items(
                         ui,
                         vec![(key_dismiss.clone(), wm)],
-                        format!("已忽略 {dismiss_title}"),
+                        format!("Dismissed {dismiss_title}"),
                     )
                 }));
 
-            view()
-                .p_3()
-                .gap_1p5()
-                .bg(SURFACE)
-                .border_1()
-                .border_color(if is_failed { DANGER } else { ATTENTION })
-                .rounded(px(8.))
-                .child(top)
-                .child(
-                    view()
-                        .px_2p5()
-                        .py_1p5()
-                        .bg(INSET)
-                        .border_l_1()
-                        .border_color(if is_failed { DANGER } else { ATTENTION })
-                        .rounded(px(4.))
-                        .child(
-                            muted(detail_text)
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
-                                .select_text(),
-                        ),
-                )
-                .child(actions)
+            row_base(accent).child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .px_3p5()
+                    .py_3()
+                    .flex_row()
+                    .items_start()
+                    .gap_3()
+                    .child(left_tile)
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap_1p5()
+                            .child(
+                                press_target()
+                                    .w_full()
+                                    .bg(CLEAR)
+                                    .rounded(px(5.))
+                                    .hover(|s| s.bg(CARD_HOVER))
+                                    .on_press(move |_: &()| {
+                                        crate::schedules::open(
+                                            ui,
+                                            Some(pid_row.clone()),
+                                            Some(sid_row.clone()),
+                                        );
+                                    })
+                                    .child(
+                                        view().gap_0p5().child(meta_row).child(
+                                            label(if is_failed {
+                                                "Scheduled run failed"
+                                            } else {
+                                                "Scheduled run waiting for input"
+                                            })
+                                            .text_size(px(12.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(accent),
+                                        ),
+                                    ),
+                            )
+                            // Monospace error console strip
+                            .child(
+                                view()
+                                    .px_2p5()
+                                    .py_2()
+                                    .bg(BACKGROUND)
+                                    .border_1()
+                                    .border_color(if is_failed {
+                                        DANGER_SURFACE
+                                    } else {
+                                        ATTENTION_SURFACE
+                                    })
+                                    .rounded(px(6.))
+                                    .child(
+                                        label(detail_text)
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(11.5))
+                                            .text_color(accent)
+                                            .select_text(),
+                                    ),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .pt_0p5()
+                                    .child(left_actions)
+                                    .child(right_triage),
+                            ),
+                    ),
+            )
         }
     }
 }
 
-fn render_github_stack_item(ui: Ui, item: GitHubStackItem, now_ms: u64) -> View {
-    let rel = format_relative_zh(item.timestamp_ms, now_ms);
-    let key_defer = item.key.clone();
+fn render_github_stack_item(
+    ui: Ui,
+    item: GitHubStackItem,
+    project_id: Option<String>,
+    now_ms: u64,
+) -> View {
+    let key_str = item.key.clone();
+    let key_expand = key_str.clone();
+    let key_body = key_str.clone();
+    let key_defer = key_str.clone();
     let wm = item.watermark;
-    let item_for_dismiss = item.clone();
-    let item_for_expand = item.clone();
-    let item_key_expand = item.key.clone();
-    let item_key_body = item.key.clone();
+    let rel = format_relative(item.timestamp_ms, now_ms);
     let url_open = item.url.clone();
-    let repo_diff = item.repository.clone();
-    let num_diff = item.number;
-    let is_pr = item.kind == "pr";
-    let url_diff = item.url.clone();
-    let title_defer = item.title.clone();
-    let card_id_open = item.card_id.clone();
-    let card_num_open = item.card_number;
-
-    let gh_ref = GitHubReference {
-        repository: item.repository.clone(),
-        kind: item.kind.clone(),
-        number: item.number,
-        sha: None,
-        url: item.url.clone(),
-    };
-    let fallback_title = item.title.clone();
-
+    let item_for_load = item.clone();
+    let item_for_dismiss = item.clone();
+    let defer_title = item.title.clone();
+    let can_reply = item.number.is_some() && matches!(item.kind.as_str(), "pr" | "issue");
     let reply_target = item.number.map(|num| ReplyTarget::GitHub {
         key: item.key.clone(),
         repository: item.repository.clone(),
@@ -744,159 +1261,178 @@ fn render_github_stack_item(ui: Ui, item: GitHubStackItem, now_ms: u64) -> View 
         label: format!("{} #{num}", item.repository),
     });
 
-    let mut top = view().flex_row().items_center().gap_2().min_w(px(0.));
-    if let Some(author) = &item.author {
-        top = top.child(
-            view()
-                .px_1p5()
-                .py_0p5()
-                .rounded_full()
-                .bg(INSET)
-                .border_1()
-                .border_color(BORDER)
-                .child(
-                    label(format!("@{author}"))
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(ACCENT),
-                ),
-        );
-    }
-    top = top
-        .child(status(
-            item.subtitle.clone(),
-            if item.is_ci_failure {
-                Tone::Danger
-            } else if is_pr {
-                Tone::Info
-            } else {
-                Tone::Neutral
-            },
-        ))
+    // Small semantic icon differentiating CI failure vs review vs mention vs synced card
+    let (row_icon, row_tint) = if item.is_ci_failure {
+        (Icon::TriangleAlert, DANGER)
+    } else if item.is_synced_card {
+        (Icon::Board, MUTED)
+    } else if item.reason.to_ascii_lowercase().contains("review") {
+        (Icon::Eye, HIGHLIGHT)
+    } else if item.reason.to_ascii_lowercase().contains("mention") {
+        (Icon::MessageSquare, ATTENTION)
+    } else {
+        (Icon::GitHub, MUTED)
+    };
+
+    let mut top = view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .min_w(px(0.))
+        .child(icon_tinted(row_icon, row_tint).w(px(14.)).h(px(14.)))
         .child(
             label(item.title.clone())
                 .font_weight(FontWeight::MEDIUM)
                 .text_size(px(12.5))
+                .truncate()
                 .flex_1()
-                .min_w(px(0.))
-                .truncate(),
+                .min_w(px(0.)),
+        )
+        .child(
+            muted(item.subtitle.clone())
+                .font_family(MONO_FONT)
+                .text_size(px(11.5))
+                .text_color(if item.is_ci_failure { DANGER } else { MUTED }),
         );
+    if let Some(a) = &item.author {
+        top = top.child(muted(format!("@{a}")).text_size(px(11.5)));
+    }
     if !rel.is_empty() {
         top = top.child(muted(rel).text_size(px(11.)).flex_shrink_0());
     }
 
+    let failed_checks = item.failed_checks.clone();
     let static_body = item.body.clone();
-    let body_block = dynamic(move || {
+    let body_preview = dynamic(move || {
         let expanded = ui
             .inbox
             .expanded_github_items
-            .with(|s| s.contains(&item_key_body));
-        let cached_body = ui
+            .with(|s| s.contains(&key_body));
+        let cached = ui
             .inbox
             .github_item_bodies
-            .with(|m| m.get(&item_key_body).cloned());
-        let loading = ui
-            .inbox
-            .github_item_loading
-            .with(|s| s.contains(&item_key_body));
-        let text_opt = static_body
-            .clone()
-            .filter(|b| !b.trim().is_empty())
-            .or_else(|| cached_body.filter(|b| !b.trim().is_empty()));
-        if loading {
-            return muted("正在加载 GitHub 正文…")
-                .text_size(px(11.5))
+            .with(|m| m.get(&key_body).cloned());
+        let loading = ui.inbox.github_item_loading.with(|s| s.contains(&key_body));
+
+        let mut col = view().gap_1p5();
+        if !failed_checks.is_empty() {
+            let mut pills = view().flex_row().flex_wrap().gap_1().pt_0p5();
+            for chk in &failed_checks {
+                pills = pills.child(status(format!("✗ {chk}"), Tone::Danger));
+            }
+            col = col.child(pills);
+        }
+        let text_body = static_body.clone().or(cached);
+        if loading && text_body.is_none() {
+            return col
+                .child(muted("Loading GitHub details…").text_size(px(11.5)))
                 .into_element();
         }
-        let Some(full) = text_opt else {
-            return view().into_element();
-        };
-        let display = if !expanded && full.chars().count() > 220 {
-            format!("{}…", full.chars().take(220).collect::<String>())
-        } else {
-            full
-        };
-        view()
-            .px_2p5()
-            .py_1p5()
-            .bg(INSET)
-            .border_l_1()
-            .border_color(BORDER)
-            .rounded(px(4.))
-            .child(muted(display).text_size(px(12.)).select_text())
-            .into_element()
+        if let Some(body_str) = text_body.filter(|b| !b.trim().is_empty()) {
+            let shown = if expanded || body_str.chars().count() <= 180 {
+                body_str
+            } else {
+                format!("{}…", body_str.chars().take(180).collect::<String>())
+            };
+            col = col.child(
+                view()
+                    .px_2p5()
+                    .py_1p5()
+                    .bg(INSET)
+                    .rounded(px(5.))
+                    .child(muted(shown).text_size(px(12.)).select_text()),
+            );
+        }
+        col.into_element()
     });
 
-    let mut actions = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .justify_end()
-        .gap_1p5()
-        .pt_1();
-
-    if let Some(rt) = reply_target.clone() {
-        actions = actions.child(compact_action("回复", Variant::Secondary, move |_| {
-            start_inline_reply(ui, rt.clone())
-        }));
+    let mut left_actions = view().flex_row().items_center().gap_1p5();
+    if can_reply && let Some(rt) = reply_target.clone() {
+        left_actions = left_actions.child(compact_action_with_icon(
+            Icon::MessageSquare,
+            "Reply",
+            Variant::Secondary,
+            move |_| start_inline_reply(ui, rt.clone()),
+        ));
     }
-    if item.number.is_some() {
-        actions = actions.child(compact_action("正文 ▾", Variant::Quiet, move |_| {
-            load_github_item_body(ui, &item_for_expand);
-            ui.inbox.expanded_github_items.update(|s| {
-                if !s.remove(&item_key_expand) {
-                    s.insert(item_key_expand.clone());
-                }
-            });
-        }));
+    if item.number.is_some() && !item.is_synced_card {
+        left_actions =
+            left_actions.child(compact_action("Preview ▾", Variant::Quiet, move |_| {
+                ui.inbox.expanded_github_items.update(|s| {
+                    if !s.remove(&key_expand) {
+                        s.insert(key_expand.clone());
+                    }
+                });
+                load_github_item_body(ui, &item_for_load);
+            }));
     }
-    if is_pr && let Some(num) = num_diff {
-        actions = actions.child(compact_action("Diff", Variant::Quiet, move |_| {
-            crate::review::open_standalone_pr(ui, repo_diff.clone(), num, url_diff.clone());
-        }));
-    }
-    if let Some(cid) = card_id_open {
-        let lbl = card_num_open
+    if let Some(cid) = item.card_id.clone() {
+        let lbl = item
+            .card_number
             .map(|n| format!("Card #{n} ↗"))
-            .unwrap_or_else(|| "打开 Card ↗".into());
-        actions = actions.child(compact_action(lbl, Variant::Quiet, move |_| {
+            .unwrap_or_else(|| "Open Card ↗".into());
+        left_actions = left_actions.child(compact_action(lbl, Variant::Quiet, move |_| {
             ui.open_card(cid.clone());
         }));
-    } else if item.kind != "commit" {
-        actions = actions.child(compact_action("转为 Card", Variant::Quiet, move |_| {
-            crate::github::add_to_board(ui, gh_ref.clone(), fallback_title.clone());
-        }));
+    } else if let (Some(pid), Some(num)) = (project_id, item.number) {
+        let reference = GitHubReference {
+            repository: item.repository.clone(),
+            kind: item.kind.clone(),
+            number: Some(num),
+            sha: None,
+            url: item.url.clone(),
+        };
+        let title_for_card = item.title.clone();
+        left_actions =
+            left_actions.child(compact_action("Create Card", Variant::Quiet, move |_| {
+                dispatch(
+                    ui,
+                    "github.create_card",
+                    json!({
+                        "project_id": pid,
+                        "reference": reference,
+                        "title": title_for_card,
+                    }),
+                );
+            }));
     }
     if !url_open.is_empty() {
-        actions = actions.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
-            crate::github::open_url(ui, url_open.clone());
-        }));
+        left_actions =
+            left_actions.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
+                let _ = crate::platform::open_external(&url_open);
+            }));
     }
-    actions = actions
-        .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
-            open_defer_menu(ui, vec![(key_defer.clone(), wm)], title_defer.clone())
+
+    let right_triage = view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .flex_shrink_0()
+        .child(chrome_button(Icon::Clock, "Defer", move |_| {
+            open_defer_menu(ui, vec![(key_defer.clone(), wm)], defer_title.clone())
         }))
-        .child(compact_action("已读 ✓", Variant::Quiet, move |_| {
+        .child(chrome_button(Icon::Check, "Mark read", move |_| {
             dismiss_github_item(ui, item_for_dismiss.clone())
         }));
 
     let mut row = view()
-        .px_3()
+        .pl(px(46.))
+        .pr_3p5()
         .py_2p5()
         .gap_1p5()
         .border_t_1()
         .border_color(BORDER)
-        .child(top);
-
-    if !item.failed_checks.is_empty() {
-        let mut checks_row = view().flex_row().flex_wrap().items_center().gap_1();
-        for check in &item.failed_checks {
-            checks_row = checks_row.child(status(format!("✗ {check}"), Tone::Danger));
-        }
-        row = row.child(checks_row);
-    }
-
-    row = row.child(body_block).child(actions);
+        .child(top)
+        .child(body_preview)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(left_actions)
+                .child(right_triage),
+        );
     if let Some(rt) = reply_target {
         row = row.child(inline_reply_box(ui, rt));
     }
@@ -906,114 +1442,167 @@ fn render_github_stack_item(ui: Ui, item: GitHubStackItem, now_ms: u64) -> View 
 fn render_github_stack(ui: Ui, stack: GitHubProjectStack, now_ms: u64) -> View {
     let stack_id = stack.stack_id.clone();
     let stack_id_toggle = stack_id.clone();
-    let stack_id_check = stack_id.clone();
-    let expanded = ui
-        .inbox
-        .expanded_stacks
-        .with_untracked(|s| s.contains(&stack_id_check));
+    let expanded = ui.inbox.expanded_stacks.with(|s| s.contains(&stack_id));
     let count = stack.items.len();
-    let rel = format_relative_zh(stack.latest_at, now_ms);
+    let rel = format_relative(stack.latest_at, now_ms);
     let defer_keys: Vec<(String, Option<u64>)> = stack
         .items
         .iter()
         .map(|i| (i.key.clone(), i.watermark))
         .collect();
-    let stack_name_defer = format!("GitHub · {}", stack.display_name);
-    let stack_for_clear = stack.clone();
+    let stack_subject = format!("GitHub · {} ({count})", stack.display_name);
+    let stack_for_dismiss = stack.clone();
 
-    let mut header_left = view().flex_1().min_w(px(0.)).gap_1().child(
+    let tile = icon_tile_32(
+        Icon::GitHub,
+        if stack.has_ci_failure {
+            DANGER_SURFACE
+        } else {
+            INSET
+        },
+        if stack.has_ci_failure { DANGER } else { TEXT },
+        stack.has_ci_failure.then_some(DANGER),
+    );
+
+    // Visual semantic counter line when collapsed (colored dots instead of a wall of truncated text!)
+    let mut breakdown = view().flex_row().flex_wrap().items_center().gap_2p5();
+    let mut has_counters = false;
+    if stack.ci_failed_count > 0 {
+        breakdown = breakdown.child(colored_count_chip(
+            DANGER,
+            format!("{} CI failed", stack.ci_failed_count),
+        ));
+        has_counters = true;
+    }
+    if stack.review_count > 0 {
+        breakdown = breakdown.child(colored_count_chip(
+            HIGHLIGHT,
+            format!(
+                "{} {}",
+                stack.review_count,
+                if stack.review_count == 1 {
+                    "review"
+                } else {
+                    "reviews"
+                }
+            ),
+        ));
+        has_counters = true;
+    }
+    if stack.mention_count > 0 {
+        breakdown = breakdown.child(colored_count_chip(
+            ATTENTION,
+            format!(
+                "{} {}",
+                stack.mention_count,
+                if stack.mention_count == 1 {
+                    "mention"
+                } else {
+                    "mentions"
+                }
+            ),
+        ));
+        has_counters = true;
+    }
+    if stack.synced_card_count > 0 {
+        breakdown = breakdown.child(colored_count_chip(
+            ACCENT,
+            format!("{} synced today", stack.synced_card_count),
+        ));
+        has_counters = true;
+    }
+    let accounted =
+        stack.ci_failed_count + stack.review_count + stack.mention_count + stack.synced_card_count;
+    if has_counters && count > accounted {
+        breakdown =
+            breakdown.child(muted(format!("+{} updates", count - accounted)).text_size(px(12.)));
+    }
+
+    let mut header_body = view().flex_1().min_w(px(0.)).gap_1().child(
         view()
             .flex_row()
             .items_center()
             .gap_2()
-            .min_w(px(0.))
-            .child(
-                icon_tinted(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::Forward
-                    },
-                    MUTED,
-                )
-                .w(px(14.))
-                .h(px(14.)),
-            )
-            .child(icon_tinted(Icon::GitHub, TEXT).w(px(15.)).h(px(15.)))
             .child(
                 label(format!("GitHub · {}", stack.display_name))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(13.))
                     .truncate(),
             )
-            .child(status(
-                count.to_string(),
-                if stack.has_ci_failure {
-                    Tone::Danger
-                } else {
-                    Tone::Info
-                },
-            ))
-            .children(stack.authors.iter().take(3).map(|a| badge(format!("@{a}")))),
+            .child(badge(count.to_string()))
+            .child(if !rel.is_empty() {
+                muted(rel).text_size(px(11.)).into_element()
+            } else {
+                view().into_element()
+            }),
     );
-    if !expanded && !stack.preview.is_empty() {
-        header_left = header_left.child(
-            muted(stack.preview.clone())
-                .pl(px(22.))
-                .text_size(px(12.))
-                .truncate(),
-        );
+    if !expanded {
+        if has_counters {
+            header_body = header_body.child(breakdown);
+        } else if !stack.preview.is_empty() {
+            header_body =
+                header_body.child(muted(stack.preview.clone()).text_size(px(12.)).truncate());
+        }
     }
 
     let header = view()
         .flex_row()
         .items_center()
         .gap_2()
-        .px_3()
+        .px_3p5()
         .py_2p5()
         .child(
             press_target()
                 .flex_1()
                 .min_w(px(0.))
                 .bg(CLEAR)
-                .rounded(px(RADIUS))
+                .rounded(px(6.))
+                .hover(|s| s.bg(CARD_HOVER))
                 .on_press(move |_: &()| toggle_stack(ui, stack_id_toggle.clone()))
-                .child(header_left),
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2p5()
+                        .child(
+                            icon_tinted(
+                                if expanded {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::Forward
+                                },
+                                MUTED,
+                            )
+                            .w(px(14.))
+                            .h(px(14.)),
+                        )
+                        .child(tile)
+                        .child(header_body),
+                ),
         )
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_1p5()
+                .gap_1()
                 .flex_shrink_0()
-                .child(if !rel.is_empty() {
-                    muted(rel).text_size(px(11.5)).into_element()
-                } else {
-                    view().into_element()
-                })
-                .child(compact_action(
-                    "推迟本组 ▾",
-                    Variant::Quiet,
-                    move |_| open_defer_menu(ui, defer_keys.clone(), stack_name_defer.clone()),
-                ))
-                .child(compact_action(
-                    "全部已读 ✓",
-                    Variant::Quiet,
-                    move |_| dismiss_github_stack(ui, stack_for_clear.clone()),
-                )),
+                .child(chrome_button(Icon::Clock, "Defer bundle", move |_| {
+                    open_defer_menu(ui, defer_keys.clone(), stack_subject.clone())
+                }))
+                .child(chrome_button(Icon::Check, "Mark all read", move |_| {
+                    dismiss_github_stack(ui, stack_for_dismiss.clone())
+                })),
         );
 
-    let mut box_view = view()
-        .bg(SURFACE)
-        .border_1()
-        .border_color(if stack.has_ci_failure { DANGER } else { BORDER })
-        .rounded(px(8.))
-        .overflow_hidden()
-        .child(header);
+    let mut box_view = sheet_container().child(header);
+    if stack.has_ci_failure {
+        box_view = box_view.border_color(DANGER);
+    }
 
     if expanded {
+        let pid = stack.project_id.clone();
         for item in stack.items {
-            box_view = box_view.child(render_github_stack_item(ui, item, now_ms));
+            box_view = box_view.child(render_github_stack_item(ui, item, pid.clone(), now_ms));
         }
     }
 
@@ -1027,12 +1616,9 @@ fn render_github_stack(ui: Ui, stack: GitHubProjectStack, now_ms: u64) -> View {
 fn render_schedule_stack(ui: Ui, stack: ScheduleCardStack, now_ms: u64) -> View {
     let stack_id = stack.stack_id.clone();
     let stack_id_toggle = stack_id.clone();
-    let expanded = ui
-        .inbox
-        .expanded_stacks
-        .with_untracked(|s| s.contains(&stack_id));
+    let expanded = ui.inbox.expanded_stacks.with(|s| s.contains(&stack_id));
     let count = stack.cards.len();
-    let rel = format_relative_zh(stack.latest_at, now_ms);
+    let rel = format_relative(stack.latest_at, now_ms);
     let preview = stack
         .cards
         .iter()
@@ -1046,109 +1632,114 @@ fn render_schedule_stack(ui: Ui, stack: ScheduleCardStack, now_ms: u64) -> View 
         .map(|c| (c.key.clone(), c.watermark))
         .collect();
     let dismiss_keys = defer_keys.clone();
-    let stack_name = format!("Schedule · {}", stack.schedule_name);
+    let stack_name = format!("Scheduled · {}", stack.schedule_name);
     let stack_name_dismiss = stack_name.clone();
 
-    let mut header_left = view().flex_1().min_w(px(0.)).gap_1().child(
+    let tile = icon_tile_32(Icon::Trigger, SELECTED, ACCENT, None);
+
+    let mut header_body = view().flex_1().min_w(px(0.)).gap_1().child(
         view()
             .flex_row()
             .items_center()
             .gap_2()
-            .child(
-                icon_tinted(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::Forward
-                    },
-                    MUTED,
-                )
-                .w(px(14.))
-                .h(px(14.)),
-            )
-            .child(icon_tinted(Icon::Clock, ACCENT).w(px(15.)).h(px(15.)))
             .child(
                 label(stack_name.clone())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(13.))
                     .truncate(),
             )
-            .child(status(format!("+{count} 张新卡"), Tone::Info))
-            .child(badge(stack.project_name.clone())),
+            .child(status(
+                format!(
+                    "{count} {} to triage",
+                    if count == 1 { "card" } else { "cards" }
+                ),
+                Tone::Info,
+            ))
+            .child(muted(stack.project_name.clone()).text_size(px(11.5)))
+            .child(if !rel.is_empty() {
+                muted(rel).text_size(px(11.)).into_element()
+            } else {
+                view().into_element()
+            }),
     );
     if !expanded && !preview.is_empty() {
-        header_left = header_left.child(muted(preview).pl(px(22.)).text_size(px(12.)).truncate());
+        header_body = header_body.child(muted(preview).text_size(px(12.)).truncate());
     }
 
     let header = view()
         .flex_row()
         .items_center()
         .gap_2()
-        .px_3()
+        .px_3p5()
         .py_2p5()
         .child(
             press_target()
                 .flex_1()
                 .min_w(px(0.))
                 .bg(CLEAR)
-                .rounded(px(RADIUS))
+                .rounded(px(6.))
+                .hover(|s| s.bg(CARD_HOVER))
                 .on_press(move |_: &()| toggle_stack(ui, stack_id_toggle.clone()))
-                .child(header_left),
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2p5()
+                        .child(
+                            icon_tinted(
+                                if expanded {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::Forward
+                                },
+                                MUTED,
+                            )
+                            .w(px(14.))
+                            .h(px(14.)),
+                        )
+                        .child(tile)
+                        .child(header_body),
+                ),
         )
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_1p5()
+                .gap_1()
                 .flex_shrink_0()
-                .child(if !rel.is_empty() {
-                    muted(rel).text_size(px(11.5)).into_element()
-                } else {
-                    view().into_element()
-                })
-                .child(compact_action(
-                    "推迟本组 ▾",
-                    Variant::Quiet,
-                    move |_| open_defer_menu(ui, defer_keys.clone(), stack_name.clone()),
-                ))
-                .child(compact_action(
-                    "全部忽略 ✓",
-                    Variant::Quiet,
-                    move |_| {
-                        dismiss_items(
-                            ui,
-                            dismiss_keys.clone(),
-                            format!("已忽略 {stack_name_dismiss}"),
-                        )
-                    },
-                )),
+                .child(chrome_button(Icon::Clock, "Defer bundle", move |_| {
+                    open_defer_menu(ui, defer_keys.clone(), stack_name.clone())
+                }))
+                .child(chrome_button(Icon::Check, "Dismiss all", move |_| {
+                    dismiss_items(
+                        ui,
+                        dismiss_keys.clone(),
+                        format!("Dismissed {stack_name_dismiss}"),
+                    )
+                })),
         );
 
-    let mut box_view = view()
-        .bg(SURFACE)
-        .border_1()
-        .border_color(BORDER)
-        .rounded(px(8.))
-        .overflow_hidden()
-        .child(header);
-
+    let mut box_view = sheet_container().child(header);
     if expanded {
         for c in stack.cards {
             let cid_open = c.card_id.clone();
             let cid_archive = c.card_id.clone();
+            let key_defer = c.key.clone();
             let key_dismiss = c.key.clone();
             let wm = c.watermark;
-            let title_dismiss = format!("#{} {}", c.card_number, c.card_title);
+            let title_str = format!("#{} {}", c.card_number, c.card_title);
+            let title_dismiss = title_str.clone();
             let excerpt = {
                 let t = c.card_body.trim();
-                if t.chars().count() > 260 {
-                    format!("{}…", t.chars().take(260).collect::<String>())
+                if t.chars().count() > 220 {
+                    format!("{}…", t.chars().take(220).collect::<String>())
                 } else {
                     t.to_owned()
                 }
             };
             let mut item_view = view()
-                .px_3()
+                .pl(px(46.))
+                .pr_3p5()
                 .py_2p5()
                 .gap_1p5()
                 .border_t_1()
@@ -1158,10 +1749,11 @@ fn render_schedule_stack(ui: Ui, stack: ScheduleCardStack, now_ms: u64) -> View 
                         .flex_row()
                         .items_center()
                         .gap_2()
+                        .child(icon_tinted(Icon::Board, MUTED).w(px(14.)).h(px(14.)))
                         .child(
                             muted(format!("#{}", c.card_number))
                                 .font_family(MONO_FONT)
-                                .text_size(px(12.)),
+                                .text_size(px(11.5)),
                         )
                         .child(
                             label(c.card_title.clone())
@@ -1178,7 +1770,7 @@ fn render_schedule_stack(ui: Ui, stack: ScheduleCardStack, now_ms: u64) -> View 
                         .px_2p5()
                         .py_1p5()
                         .bg(INSET)
-                        .rounded(px(4.))
+                        .rounded(px(5.))
                         .child(muted(excerpt).text_size(px(12.)).select_text()),
                 );
             }
@@ -1186,33 +1778,60 @@ fn render_schedule_stack(ui: Ui, stack: ScheduleCardStack, now_ms: u64) -> View 
                 view()
                     .flex_row()
                     .items_center()
-                    .justify_end()
-                    .gap_1p5()
-                    .child(compact_action(
-                        "开始做 / 打开 ↗",
-                        Variant::Secondary,
-                        move |_| {
-                            ui.open_card(cid_open.clone());
-                        },
-                    ))
-                    .child(compact_action("归档", Variant::Quiet, move |_| {
-                        if let Some(card) = ui.snapshot.with_untracked(|s| {
-                            s.cards.iter().find(|x| x.id == cid_archive).cloned()
-                        }) {
-                            dispatch(
-                                ui,
-                                "card.archive",
-                                json!({ "card_id": card.id, "revision": card.revision }),
-                            );
-                        }
-                    }))
-                    .child(compact_action("忽略 ✓", Variant::Quiet, move |_| {
-                        dismiss_items(
-                            ui,
-                            vec![(key_dismiss.clone(), wm)],
-                            format!("已忽略 {title_dismiss}"),
-                        )
-                    })),
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(compact_action(
+                                "Keep / Open ↗",
+                                Variant::Secondary,
+                                move |_| {
+                                    ui.open_card(cid_open.clone());
+                                },
+                            ))
+                            .child(compact_action_with_icon(
+                                Icon::Archive,
+                                "Archive",
+                                Variant::Quiet,
+                                move |_| {
+                                    if let Some(card) = ui.snapshot.with_untracked(|s| {
+                                        s.cards.iter().find(|x| x.id == cid_archive).cloned()
+                                    }) {
+                                        dispatch(
+                                            ui,
+                                            "card.archive",
+                                            json!({
+                                                "card_id": card.id,
+                                                "revision": card.revision,
+                                            }),
+                                        );
+                                    }
+                                },
+                            )),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(chrome_button(Icon::Clock, "Defer", move |_| {
+                                open_defer_menu(
+                                    ui,
+                                    vec![(key_defer.clone(), wm)],
+                                    title_str.clone(),
+                                )
+                            }))
+                            .child(chrome_button(Icon::Check, "Dismiss", move |_| {
+                                dismiss_items(
+                                    ui,
+                                    vec![(key_dismiss.clone(), wm)],
+                                    format!("Dismissed {title_dismiss}"),
+                                )
+                            })),
+                    ),
             );
             box_view = box_view.child(item_view);
         }
@@ -1225,8 +1844,248 @@ fn render_schedule_stack(ui: Ui, stack: ScheduleCardStack, now_ms: u64) -> View 
     wrapper
 }
 
-fn render_open_card(ui: Ui, card: InboxCardWork, now_ms: u64) -> View {
-    let rel = format_relative_zh(card.last_activity_at, now_ms);
+/// Archetype 5: Unclosed Agent Terminal row with dark terminal tile + mini dark terminal viewport.
+fn render_agent_terminal_row(ui: Ui, term: InboxTerminalWork, now_ms: u64, first: bool) -> View {
+    let tid = term.terminal_id.clone();
+    let tid_open = tid.clone();
+    let tid_close = tid.clone();
+    let tid_expand = tid.clone();
+    let tid_preview = tid.clone();
+    let card_for_open = term.card_id.clone();
+    let key_defer = term.key.clone();
+    let title_close = term.title.clone();
+    let title_defer = term.title.clone();
+    let rel = format_relative(term.timestamp_ms, now_ms);
+    let (status_lbl, status_tone, is_live, status_color) = terminal_status_visual(term.status);
+    let reply_target = ReplyTarget::Terminal {
+        terminal_id: tid.clone(),
+        label: term.title.clone(),
+    };
+    let reply_target_btn = reply_target.clone();
+
+    let tile = terminal_icon_tile_32(term.agent_engine.as_deref(), Some(status_color));
+
+    let mut header = view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .min_w(px(0.))
+        .child(
+            label(term.title.clone())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(13.))
+                .truncate(),
+        )
+        .child(if is_live {
+            live_status(status_lbl, status_tone)
+        } else {
+            status(status_lbl, status_tone)
+        });
+    if let Some(proj) = &term.project_name {
+        header = header.child(badge(proj.clone()));
+    } else {
+        header =
+            header.child(muted(format!("Unattached ({})", term.host_label)).text_size(px(11.5)));
+    }
+    if let Some(num) = term.card_number {
+        header = header.child(
+            muted(format!("#{num}"))
+                .font_family(MONO_FONT)
+                .text_size(px(11.5)),
+        );
+    }
+    header = header.child(view().flex_1());
+    if !rel.is_empty() {
+        header = header.child(muted(rel).text_size(px(11.)).flex_shrink_0());
+    }
+
+    // Working directory + branch strip
+    let cwd_fallback = term.cwd.clone();
+    let branch_opt = term.branch.clone();
+    let tid_cwd = tid.clone();
+    let location_row = dynamic(move || {
+        let preview_cwd = ui
+            .inbox
+            .terminal_previews
+            .with(|m| m.get(&tid_cwd).and_then(|p| p.cwd.clone()));
+        let cwd_text = preview_cwd
+            .or_else(|| cwd_fallback.clone())
+            .map(|p| shorten_path(&p))
+            .unwrap_or_else(|| "(unknown directory)".into());
+        let mut line = view().flex_row().flex_wrap().items_center().gap_2().child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(icon_tinted(Icon::Folder, MUTED).w(px(12.)).h(px(12.)))
+                .child(muted(cwd_text).font_family(MONO_FONT).text_size(px(11.5))),
+        );
+        if let Some(br) = &branch_opt {
+            line = line.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(icon_tinted(Icon::Branch, MUTED).w(px(12.)).h(px(12.)))
+                    .child(muted(br.clone()).font_family(MONO_FONT).text_size(px(11.5))),
+            );
+        }
+        line.into_element()
+    });
+
+    // Mini dark terminal output viewport
+    let status_detail = term.status_detail.clone();
+    let shell_cmd = term.shell_command.clone();
+    let shell_exit = term.shell_exit_code;
+    let output_viewport = dynamic(move || {
+        let expanded = ui
+            .inbox
+            .expanded_terminals
+            .with(|s| s.contains(&tid_preview));
+        let preview = ui
+            .inbox
+            .terminal_previews
+            .with(|m| m.get(&tid_preview).cloned());
+
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(p) = &preview {
+            if p.loading && p.lines.is_empty() {
+                return view()
+                    .px_2p5()
+                    .py_2()
+                    .bg(BACKGROUND)
+                    .border_1()
+                    .border_color(BORDER)
+                    .rounded(px(6.))
+                    .child(
+                        muted("Reading terminal output…")
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5)),
+                    )
+                    .into_element();
+            }
+            let take_n = if expanded { 14 } else { 2 };
+            let start = p.lines.len().saturating_sub(take_n);
+            lines.extend(p.lines[start..].iter().cloned());
+        }
+        if lines.is_empty() {
+            if let Some(d) = &status_detail {
+                lines.push(d.clone());
+            } else if let Some(cmd) = &shell_cmd {
+                let suffix = shell_exit
+                    .map(|c| format!(" (exit {c})"))
+                    .unwrap_or_default();
+                lines.push(format!("{cmd}{suffix}"));
+            }
+        }
+        if lines.is_empty() {
+            return view().into_element();
+        }
+        let mut box_out = view()
+            .px_2p5()
+            .py_2()
+            .bg(BACKGROUND)
+            .border_1()
+            .border_color(if term.status == HerdrStatus::Blocked {
+                ATTENTION
+            } else {
+                BORDER
+            })
+            .rounded(px(6.))
+            .gap_0p5();
+        for (idx, ln) in lines.into_iter().enumerate() {
+            let prefix = if idx == 0 { "❯ " } else { "  " };
+            box_out = box_out.child(
+                label(format!("{prefix}{ln}"))
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.5))
+                    .text_color(if term.status == HerdrStatus::Blocked {
+                        TEXT
+                    } else {
+                        MUTED
+                    })
+                    .select_text()
+                    .truncate(),
+            );
+        }
+        box_out.into_element()
+    });
+
+    let left_actions = view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(compact_action_with_icon(
+            Icon::MessageSquare,
+            "Send",
+            if term.status == HerdrStatus::Blocked {
+                Variant::Primary
+            } else {
+                Variant::Secondary
+            },
+            move |_| start_inline_reply(ui, reply_target_btn.clone()),
+        ))
+        .child(compact_action("Output ▾", Variant::Quiet, move |_| {
+            let now_expanded = ui
+                .inbox
+                .expanded_terminals
+                .with_untracked(|s| !s.contains(&tid_expand));
+            ui.inbox.expanded_terminals.update(|s| {
+                if !s.remove(&tid_expand) {
+                    s.insert(tid_expand.clone());
+                }
+            });
+            if now_expanded {
+                fetch_terminal_preview(ui, tid_expand.clone(), 24);
+            }
+        }))
+        .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
+            if let Some(cid) = &card_for_open {
+                ui.open_card_with_terminal(cid.clone(), Some(tid_open.clone()));
+            } else {
+                ui.open_terminal(tid_open.clone());
+            }
+        }))
+        .child(compact_action_with_icon(
+            Icon::Close,
+            "Close",
+            Variant::Quiet,
+            move |_| close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone()),
+        ));
+
+    let right_triage = chrome_button(Icon::Clock, "Defer", move |_| {
+        open_defer_menu(ui, vec![(key_defer.clone(), None)], title_defer.clone())
+    });
+
+    let mut row = view().px_3p5().py_3().flex_row().items_start().gap_3();
+    if !first {
+        row = row.border_t_1().border_color(BORDER);
+    }
+    row.child(tile).child(
+        view()
+            .flex_1()
+            .min_w(px(0.))
+            .gap_1p5()
+            .child(header)
+            .child(location_row)
+            .child(output_viewport)
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .pt_0p5()
+                    .child(left_actions)
+                    .child(right_triage),
+            )
+            .child(inline_reply_box(ui, reply_target)),
+    )
+}
+
+/// Archetype 6: Lightweight flat row for Cards you or your agents genuinely worked on today.
+fn render_open_card_row(ui: Ui, card: InboxCardWork, now_ms: u64, first: bool) -> View {
+    let rel = format_relative(card.last_activity_at, now_ms);
     let cid_open = card.card_id.clone();
     let cid_resolve = card.card_id.clone();
     let key_defer = card.key.clone();
@@ -1235,64 +2094,58 @@ fn render_open_card(ui: Ui, card: InboxCardWork, now_ms: u64) -> View {
     let label_title = format!("#{} {}", card.card_number, card.card_title);
     let label_dismiss = label_title.clone();
 
-    let mut top = view()
+    let mut left = view()
         .flex_row()
         .items_center()
         .gap_2()
+        .flex_1()
         .min_w(px(0.))
-        .child(status_dot(if card.has_live_agent {
-            SUCCESS
-        } else {
-            ACCENT
-        }))
-        .child(badge(card.project_name.clone()))
+        .child(
+            icon_tinted(
+                Icon::Board,
+                if card.has_live_agent { ACCENT } else { MUTED },
+            )
+            .w(px(15.))
+            .h(px(15.)),
+        )
         .child(
             muted(format!("#{}", card.card_number))
                 .font_family(MONO_FONT)
-                .text_size(px(12.)),
+                .text_size(px(11.5)),
         )
         .child(
             label(card.card_title.clone())
                 .font_weight(FontWeight::MEDIUM)
-                .text_size(px(13.))
+                .text_size(px(12.5))
+                .truncate()
                 .flex_1()
-                .min_w(px(0.))
-                .truncate(),
+                .min_w(px(0.)),
         )
         .child(badge(card.stage.clone()));
-
-    if card.pinned_today {
-        top = top.child(status("拉入今天", Tone::Info));
-    }
     if let Some(pr) = card.pr_summary {
-        let pr_tone = match card.pr_ci_state.as_deref() {
-            Some("failure") => Tone::Danger,
+        let tone = match card.pr_ci_state.as_deref() {
+            Some("failure" | "error") => Tone::Danger,
             Some("success") => Tone::Success,
             _ => Tone::Neutral,
         };
-        top = top.child(status(pr, pr_tone));
+        left = left.child(status(pr, tone));
+    }
+    if card.pinned_today {
+        left = left.child(status("Pinned", Tone::Info));
     }
     if let Some(h) = card.host_label {
-        top = top.child(badge(h));
+        left = left.child(badge(h));
     }
     if !rel.is_empty() {
-        top = top.child(muted(rel).text_size(px(11.5)).flex_shrink_0());
+        left = left.child(muted(rel).text_size(px(11.)).flex_shrink_0());
     }
 
-    let actions = view()
+    let right = view()
         .flex_row()
         .items_center()
-        .justify_end()
-        .gap_1p5()
-        .pt_1()
-        .child(compact_action(
-            "打开 Card ↗",
-            Variant::Secondary,
-            move |_| {
-                ui.open_card(cid_open.clone());
-            },
-        ))
-        .child(compact_action("Resolve ✓", Variant::Quiet, move |_| {
+        .gap_1()
+        .flex_shrink_0()
+        .child(compact_action("Resolve", Variant::Quiet, move |_| {
             if let Some(c) = ui
                 .snapshot
                 .with_untracked(|s| s.cards.iter().find(|x| x.id == cid_resolve).cloned())
@@ -1302,239 +2155,54 @@ fn render_open_card(ui: Ui, card: InboxCardWork, now_ms: u64) -> View {
                     "card.resolve",
                     json!({ "card_id": c.id, "revision": c.revision }),
                 );
-                ui.notify(format!("已 Resolve #{}", c.number));
+                ui.notify(format!("Resolved #{}", c.number));
             }
         }))
-        .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
+        .child(chrome_button(Icon::Clock, "Defer", move |_| {
             open_defer_menu(ui, vec![(key_defer.clone(), wm)], label_title.clone())
         }))
-        .child(compact_action("移出今日", Variant::Quiet, move |_| {
+        .child(chrome_button(Icon::Check, "Remove from Today", move |_| {
             dismiss_items(
                 ui,
                 vec![(key_dismiss.clone(), wm)],
-                format!("已移出今日 · {label_dismiss}"),
+                format!("Removed from Today · {label_dismiss}"),
             )
         }));
 
-    view()
-        .p_3()
-        .gap_1()
-        .bg(SURFACE)
-        .border_1()
-        .border_color(BORDER)
-        .rounded(px(8.))
-        .child(top)
-        .child(actions)
+    let mut row = view().flex_row().items_center().gap_2().px_3p5().py_2();
+    if !first {
+        row = row.border_t_1().border_color(BORDER);
+    }
+    row.child(
+        press_target()
+            .flex_1()
+            .min_w(px(0.))
+            .bg(CLEAR)
+            .py_0p5()
+            .px_1()
+            .rounded(px(5.))
+            .hover(|s| s.bg(CARD_HOVER))
+            .on_press(move |_: &()| ui.open_card(cid_open.clone()))
+            .child(left),
+    )
+    .child(right)
 }
 
-fn render_agent_terminal_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> View {
-    let (status_label, status_tone, is_live) = terminal_status_visual(term.status);
-    let rel = format_relative_zh(term.timestamp_ms, now_ms);
-    let tid_preview = term.terminal_id.clone();
-    let tid_expand = term.terminal_id.clone();
-    let tid_refresh = term.terminal_id.clone();
-    let tid_open = term.terminal_id.clone();
-    let tid_close = term.terminal_id.clone();
-    let card_open = term.card_id.clone();
-    let title_close = term.title.clone();
-    let key_defer = term.key.clone();
-    let title_defer = term.title.clone();
-    let wait_detail = term.status_detail.clone();
-    let fallback_cwd = term.cwd.clone();
-
-    let reply_target = ReplyTarget::Terminal {
-        terminal_id: term.terminal_id.clone(),
-        label: term
-            .agent_name
-            .clone()
-            .unwrap_or_else(|| term.title.clone()),
-    };
-    let reply_target_btn = reply_target.clone();
-
-    let display_title = match (&term.agent_name, term.card_number, &term.card_title) {
-        (Some(agent), Some(num), Some(ctitle)) => format!("{agent} · #{num} {ctitle}"),
-        (Some(agent), _, _) if term.title != *agent => format!("{agent} · {}", term.title),
-        _ => term.title.clone(),
-    };
-
-    let mut top = view()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .min_w(px(0.))
-        .child(icon_colored(engine_icon(term.agent_engine.as_deref()), 16.))
-        .child(
-            label(display_title)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(13.))
-                .flex_1()
-                .min_w(px(0.))
-                .truncate(),
-        )
-        .child(if is_live {
-            live_status(status_label, status_tone).into_element()
-        } else {
-            status(status_label, status_tone).into_element()
-        });
-    if !rel.is_empty() {
-        top = top.child(muted(rel).text_size(px(11.5)).flex_shrink_0());
-    }
-
-    // Project + Host + exact cwd + branch row.
-    let proj_display = match &term.project_name {
-        Some(p) => format!("{p} ({})", term.host_label),
-        None => format!("无归属项目 ({})", term.host_label),
-    };
-    let tid_cwd = term.terminal_id.clone();
-    let mut loc_row = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_1p5()
-        .min_w(px(0.))
-        .child(icon_tinted(Icon::Folder, MUTED).w(px(12.5)).h(px(12.5)))
-        .child(badge(proj_display))
-        .child(
-            muted(move || {
-                let resolved = ui
-                    .inbox
-                    .terminal_previews
-                    .with(|m| m.get(&tid_cwd).and_then(|p| p.cwd.clone()))
-                    .or_else(|| fallback_cwd.clone());
-                match resolved {
-                    Some(path) if !path.trim().is_empty() => shorten_path(&path),
-                    _ => "(目录未知)".into(),
-                }
-            })
-            .font_family(MONO_FONT)
-            .text_size(px(11.5))
-            .truncate(),
-        );
-    if let Some(br) = &term.branch
-        && !br.is_empty()
-    {
-        loc_row = loc_row.child(badge(format!("⎇ {br}")));
-    }
-
-    // Inline last status / output preview box.
-    let output_box = dynamic(move || {
-        let expanded = ui
-            .inbox
-            .expanded_terminals
-            .with(|s| s.contains(&tid_preview));
-        let preview = ui
-            .inbox
-            .terminal_previews
-            .with(|m| m.get(&tid_preview).cloned());
-        let mut lines_to_show: Vec<String> = Vec::new();
-        if let Some(ref detail) = wait_detail
-            && !detail.trim().is_empty()
-        {
-            lines_to_show.push(detail.clone());
-        }
-        if let Some(ref p) = preview {
-            if !p.lines.is_empty() {
-                let take = if expanded { 16 } else { 2 };
-                let start = p.lines.len().saturating_sub(take);
-                for l in &p.lines[start..] {
-                    if !lines_to_show.contains(l) {
-                        lines_to_show.push(l.clone());
-                    }
-                }
-            } else if p.loading && lines_to_show.is_empty() {
-                return muted("正在读取终端最新输出…")
-                    .text_size(px(11.5))
-                    .into_element();
-            }
-        }
-        if lines_to_show.is_empty() {
-            return view().into_element();
-        }
-        view()
-            .px_2p5()
-            .py_1p5()
-            .bg(INSET)
-            .border_l_1()
-            .border_color(if term.status == HerdrStatus::Blocked {
-                ATTENTION
-            } else if term.status == HerdrStatus::Done {
-                SUCCESS
-            } else {
-                ACCENT
-            })
-            .rounded(px(4.))
-            .child(
-                label(lines_to_show.join("\n"))
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.5))
-                    .text_color(TEXT)
-                    .select_text(),
-            )
-            .into_element()
-    });
-
-    let actions = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .justify_end()
-        .gap_1p5()
-        .pt_1()
-        .child(compact_action(
-            "直接回复",
-            Variant::Secondary,
-            move |_| start_inline_reply(ui, reply_target_btn.clone()),
-        ))
-        .child(compact_action("输出 ▾", Variant::Quiet, move |_| {
-            fetch_terminal_preview(ui, tid_refresh.clone(), 20);
-            ui.inbox.expanded_terminals.update(|s| {
-                if !s.remove(&tid_expand) {
-                    s.insert(tid_expand.clone());
-                }
-            });
-        }))
-        .child(compact_action("看终端 ↗", Variant::Quiet, move |_| {
-            if let Some(cid) = &card_open {
-                ui.open_card_with_terminal(cid.clone(), Some(tid_open.clone()));
-            } else {
-                ui.open_terminal(tid_open.clone());
-            }
-        }))
-        .child(compact_action("关闭终端", Variant::Quiet, move |_| {
-            close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone())
-        }))
-        .child(compact_action("推迟 ▾", Variant::Quiet, move |_| {
-            open_defer_menu(ui, vec![(key_defer.clone(), None)], title_defer.clone())
-        }));
-
-    view()
-        .p_3()
-        .gap_1p5()
-        .bg(SURFACE)
-        .border_1()
-        .border_color(if term.status == HerdrStatus::Blocked {
-            ATTENTION
-        } else {
-            BORDER
-        })
-        .rounded(px(8.))
-        .child(top)
-        .child(loc_row)
-        .child(output_box)
-        .child(actions)
-        .child(inline_reply_box(ui, reply_target))
-}
-
-fn render_plain_shells_stack(ui: Ui, shells: Vec<InboxTerminalWork>) -> Option<View> {
+fn render_plain_shells_section(
+    ui: Ui,
+    shells: Vec<InboxTerminalWork>,
+    now_ms: u64,
+    first: bool,
+) -> Option<View> {
     if shells.is_empty() {
         return None;
     }
-    let stack_id = "plain-shells".to_owned();
-    let expanded = ui
-        .inbox
-        .expanded_stacks
-        .with_untracked(|s| s.contains(&stack_id));
+    let stack_id = "plain-shells-stack".to_owned();
+    let expanded = ui.inbox.expanded_stacks.with(|s| s.contains(&stack_id));
     let count = shells.len();
+    let defer_keys: Vec<(String, Option<u64>)> =
+        shells.iter().map(|s| (s.key.clone(), None)).collect();
+    let shells_close_all = shells.clone();
     let preview = shells
         .iter()
         .take(3)
@@ -1543,287 +2211,425 @@ fn render_plain_shells_stack(ui: Ui, shells: Vec<InboxTerminalWork>) -> Option<V
                 .cwd
                 .as_deref()
                 .map(shorten_path)
-                .unwrap_or_else(|| "~".into());
+                .unwrap_or_else(|| s.host_label.clone());
             match &s.project_name {
                 Some(p) => format!("{p} ({dir})"),
-                None => format!("无归属项目 ({dir})"),
+                None => dir,
             }
         })
         .collect::<Vec<_>>()
         .join(" · ");
-    let shells_close = shells.clone();
-    let defer_keys: Vec<(String, Option<u64>)> =
-        shells.iter().map(|s| (s.key.clone(), None)).collect();
 
-    let mut left = view().flex_1().min_w(px(0.)).gap_1().child(
-        view()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(
-                icon_tinted(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::Forward
-                    },
-                    MUTED,
-                )
-                .w(px(14.))
-                .h(px(14.)),
-            )
-            .child(icon_tinted(Icon::Terminal, MUTED).w(px(14.5)).h(px(14.5)))
-            .child(
-                label(format!("{count} 个普通 Shell 未关闭"))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(13.)),
-            ),
+    let tile = terminal_icon_tile_32(None, None);
+
+    let mut header_body = view().flex_1().min_w(px(0.)).gap_0p5().child(
+        view().flex_row().items_center().gap_2().child(
+            label(format!(
+                "{count} plain {} open",
+                if count == 1 { "shell" } else { "shells" }
+            ))
+            .font_weight(FontWeight::MEDIUM)
+            .text_size(px(12.5)),
+        ),
     );
-    if !expanded {
-        left = left.child(
+    if !expanded && !preview.is_empty() {
+        header_body = header_body.child(
             muted(preview)
-                .pl(px(22.))
                 .font_family(MONO_FONT)
                 .text_size(px(11.5))
                 .truncate(),
         );
     }
 
-    let header = view()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2p5()
-        .child(
-            press_target()
-                .flex_1()
-                .min_w(px(0.))
-                .bg(CLEAR)
-                .on_press(move |_: &()| toggle_stack(ui, stack_id.clone()))
-                .child(left),
-        )
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .flex_shrink_0()
-                .child(compact_action(
-                    "推迟本组 ▾",
-                    Variant::Quiet,
-                    move |_| {
-                        open_defer_menu(ui, defer_keys.clone(), format!("{count} 个普通 Shell"))
-                    },
-                ))
-                .child(compact_action("全部关闭", Variant::Quiet, move |_| {
-                    close_all_plain_shells(ui, shells_close.clone())
-                })),
-        );
-
-    let mut box_view = view()
-        .bg(SURFACE)
-        .border_1()
-        .border_color(BORDER)
-        .rounded(px(8.))
-        .overflow_hidden()
-        .child(header);
+    let mut container = view();
+    if !first {
+        container = container.border_t_1().border_color(BORDER);
+    }
+    container = container.child(
+        view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3p5()
+            .py_2p5()
+            .child(
+                press_target()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .bg(CLEAR)
+                    .rounded(px(6.))
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .on_press(move |_: &()| toggle_stack(ui, stack_id.clone()))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2p5()
+                            .child(
+                                icon_tinted(
+                                    if expanded {
+                                        Icon::ChevronDown
+                                    } else {
+                                        Icon::Forward
+                                    },
+                                    MUTED,
+                                )
+                                .w(px(14.))
+                                .h(px(14.)),
+                            )
+                            .child(tile)
+                            .child(header_body),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .flex_shrink_0()
+                    .child(compact_action("Close all", Variant::Quiet, move |_| {
+                        close_all_plain_shells(ui, shells_close_all.clone())
+                    }))
+                    .child(chrome_button(Icon::Clock, "Defer shells", move |_| {
+                        open_defer_menu(ui, defer_keys.clone(), format!("{count} plain shells"))
+                    })),
+            ),
+    );
 
     if expanded {
         for sh in shells {
             let tid_open = sh.terminal_id.clone();
             let tid_close = sh.terminal_id.clone();
             let title_close = sh.title.clone();
-            let proj = match &sh.project_name {
-                Some(p) => format!("{p} ({})", sh.host_label),
-                None => format!("无归属项目 ({})", sh.host_label),
-            };
+            let rel = format_relative(sh.timestamp_ms, now_ms);
             let cwd_str = sh
                 .cwd
                 .as_deref()
                 .map(shorten_path)
-                .unwrap_or_else(|| "(目录未知)".into());
-            let mut row = view()
+                .unwrap_or_else(|| "(unknown directory)".into());
+            let mut left = view()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .px_3()
-                .py_2()
-                .border_t_1()
-                .border_color(BORDER)
-                .child(label(sh.title.clone()).text_size(px(12.5)))
-                .child(badge(proj))
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    label(sh.title.clone())
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM),
+                )
                 .child(
                     muted(cwd_str)
                         .font_family(MONO_FONT)
                         .text_size(px(11.5))
-                        .flex_1()
                         .truncate(),
                 );
-            if let Some(cmd) = sh.shell_command {
-                let cmd_text = match sh.shell_exit_code {
-                    Some(0) => format!("✓ {cmd}"),
-                    Some(code) => format!("✗ {cmd} ({code})"),
-                    None => format!("● {cmd}"),
-                };
-                row = row.child(status(
-                    cmd_text,
-                    match sh.shell_exit_code {
-                        Some(0) => Tone::Success,
-                        Some(_) => Tone::Danger,
-                        None => Tone::Info,
-                    },
-                ));
+            if let Some(proj) = &sh.project_name {
+                left = left.child(badge(proj.clone()));
             }
-            row = row
-                .child(compact_action("看终端 ↗", Variant::Quiet, move |_| {
-                    ui.open_terminal(tid_open.clone());
-                }))
-                .child(compact_action("关闭", Variant::Quiet, move |_| {
-                    close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone())
-                }));
-            box_view = box_view.child(row);
-        }
-    }
-
-    let mut wrapper = view().gap_0().child(box_view);
-    if !expanded && count > 1 {
-        wrapper = wrapper.child(stacked_deck_lip());
-    }
-    Some(wrapper)
-}
-
-fn render_carryover_stack(ui: Ui, cards: Vec<InboxCardWork>, day_start_ms: u64) -> Option<View> {
-    if cards.is_empty() {
-        return None;
-    }
-    let stack_id = "carryover".to_owned();
-    let expanded = ui
-        .inbox
-        .expanded_stacks
-        .with_untracked(|s| s.contains(&stack_id));
-    let count = cards.len();
-
-    let header = press_target()
-        .w_full()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2p5()
-        .bg(CLEAR)
-        .on_press(move |_: &()| toggle_stack(ui, stack_id.clone()))
-        .child(
-            icon_tinted(
-                if expanded {
-                    Icon::ChevronDown
-                } else {
-                    Icon::Forward
-                },
-                MUTED,
-            )
-            .w(px(14.))
-            .h(px(14.)),
-        )
-        .child(icon_tinted(Icon::History, MUTED).w(px(14.)).h(px(14.)))
-        .child(
-            label(format!("往日未完 ({count} 张 Card)"))
-                .font_weight(FontWeight::MEDIUM)
-                .text_size(px(12.5))
-                .text_color(MUTED),
-        )
-        .child(view().flex_1())
-        .child(muted("点击挑选拉入今天").text_size(px(11.5)));
-
-    let mut box_view = view()
-        .bg(SURFACE)
-        .border_1()
-        .border_color(BORDER)
-        .rounded(px(8.))
-        .overflow_hidden()
-        .child(header);
-
-    if expanded {
-        for c in cards {
-            let key_pin = c.key.clone();
-            let wm = c.watermark;
-            let cid_open = c.card_id.clone();
-            box_view = box_view.child(
+            if let Some(cmd) = &sh.shell_command {
+                left = left.child(
+                    muted(cmd.clone())
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5)),
+                );
+            }
+            if !rel.is_empty() {
+                left = left.child(muted(rel).text_size(px(11.)).flex_shrink_0());
+            }
+            container = container.child(
                 view()
                     .flex_row()
                     .items_center()
+                    .justify_between()
                     .gap_2()
-                    .px_3()
+                    .pl(px(46.))
+                    .pr_3p5()
                     .py_2()
                     .border_t_1()
                     .border_color(BORDER)
-                    .child(badge(c.project_name.clone()))
                     .child(
-                        muted(format!("#{}", c.card_number))
-                            .font_family(MONO_FONT)
-                            .text_size(px(12.)),
-                    )
-                    .child(
-                        label(c.card_title.clone())
-                            .text_size(px(12.5))
+                        press_target()
                             .flex_1()
-                            .truncate(),
+                            .min_w(px(0.))
+                            .bg(CLEAR)
+                            .rounded(px(4.))
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .on_press(move |_: &()| ui.open_terminal(tid_open.clone()))
+                            .child(left),
                     )
-                    .child(badge(c.stage.clone()))
-                    .child(compact_action(
-                        "拉入今天",
-                        Variant::Secondary,
-                        move |_| pin_to_today(ui, key_pin.clone(), day_start_ms, wm),
-                    ))
-                    .child(compact_action("打开 ↗", Variant::Quiet, move |_| {
-                        ui.open_card(cid_open.clone());
+                    .child(chrome_button(Icon::Close, "Close shell", move |_| {
+                        close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone())
                     })),
             );
         }
     }
+    Some(container)
+}
 
+/// Unified quiet bottom fold for older GitHub notifications (< today) & carry-over cards.
+fn render_earlier_and_carryover(
+    ui: Ui,
+    earlier_github: Vec<GitHubStackItem>,
+    carryover: Vec<InboxCardWork>,
+    day_start_ms: u64,
+    now_ms: u64,
+) -> Option<View> {
+    if earlier_github.is_empty() && carryover.is_empty() {
+        return None;
+    }
+    let stack_id = "earlier-carryover-stack".to_owned();
+    let expanded = ui.inbox.expanded_stacks.with(|s| s.contains(&stack_id));
+    let gh_count = earlier_github.len();
+    let card_count = carryover.len();
+
+    let mut summary_parts = Vec::new();
+    if gh_count > 0 {
+        summary_parts.push(format!("{gh_count} older GitHub"));
+    }
+    if card_count > 0 {
+        summary_parts.push(format!(
+            "{card_count} previous {}",
+            if card_count == 1 { "card" } else { "cards" }
+        ));
+    }
+
+    let gh_for_clear_all = earlier_github.clone();
+    let header = view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_3p5()
+        .py_2()
+        .child(
+            press_target()
+                .flex_1()
+                .min_w(px(0.))
+                .bg(CLEAR)
+                .rounded(px(5.))
+                .hover(|s| s.bg(CARD_HOVER))
+                .on_press(move |_: &()| toggle_stack(ui, stack_id.clone()))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            icon_tinted(
+                                if expanded {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::Forward
+                                },
+                                MUTED,
+                            )
+                            .w(px(14.))
+                            .h(px(14.)),
+                        )
+                        .child(
+                            label("Earlier & Carry-over")
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(MUTED),
+                        )
+                        .child(muted(summary_parts.join(" · ")).text_size(px(11.5))),
+                ),
+        )
+        .child(if gh_count > 0 {
+            compact_action("Mark older GitHub read ✓", Variant::Quiet, move |_| {
+                let mut keys = Vec::new();
+                for item in &gh_for_clear_all {
+                    if let Some(tid) = &item.thread_id
+                        && crate::backend::is_connected()
+                    {
+                        dispatch_complete(
+                            ui,
+                            "github.notification.done",
+                            json!({ "thread_id": tid }),
+                            |_| {},
+                        );
+                    }
+                    if let Some(cid) = &item.card_id
+                        && item.read_sequence > 0
+                    {
+                        crate::overview::mark_card_read(ui, cid.clone(), item.read_sequence);
+                    }
+                    keys.push((item.key.clone(), item.watermark));
+                }
+                let n = keys.len();
+                dismiss_items(ui, keys, format!("Cleared {n} older GitHub items"));
+            })
+            .into_element()
+        } else {
+            view().into_element()
+        });
+
+    let mut box_view = view()
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER)
+        .rounded(px(10.))
+        .overflow_hidden()
+        .child(header);
+
+    if expanded {
+        for item in earlier_github.into_iter().take(20) {
+            let rel = format_relative(item.timestamp_ms, now_ms);
+            let url = item.url.clone();
+            let cid_opt = item.card_id.clone();
+            let key_pin = item.key.clone();
+            let wm = item.watermark;
+            let item_dismiss = item.clone();
+
+            box_view = box_view.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3p5()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(BORDER)
+                    .bg(SURFACE)
+                    .child(
+                        press_target()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .bg(CLEAR)
+                            .rounded(px(4.))
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .on_press(move |_: &()| {
+                                if let Some(cid) = &cid_opt {
+                                    ui.open_card(cid.clone());
+                                } else if !url.is_empty() {
+                                    let _ = crate::platform::open_external(&url);
+                                }
+                            })
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w(px(0.))
+                                    .child(icon_tinted(Icon::GitHub, MUTED).w(px(14.)).h(px(14.)))
+                                    .child(badge(item.repository.clone()))
+                                    .child(
+                                        label(item.title.clone())
+                                            .text_size(px(12.5))
+                                            .truncate()
+                                            .flex_1()
+                                            .min_w(px(0.)),
+                                    )
+                                    .child(muted(item.subtitle.clone()).text_size(px(11.5)))
+                                    .child(muted(rel).text_size(px(11.)).flex_shrink_0()),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(compact_action("Add to Today", Variant::Quiet, move |_| {
+                                pin_to_today(ui, key_pin.clone(), day_start_ms, wm)
+                            }))
+                            .child(chrome_button(Icon::Check, "Mark read", move |_| {
+                                dismiss_github_item(ui, item_dismiss.clone())
+                            })),
+                    ),
+            );
+        }
+        for c in carryover.into_iter().take(20) {
+            let rel = format_relative(c.last_activity_at, now_ms);
+            let cid = c.card_id.clone();
+            let key_pin = c.key.clone();
+            let wm = c.watermark;
+            box_view = box_view.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3p5()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(BORDER)
+                    .bg(SURFACE)
+                    .child(
+                        press_target()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .bg(CLEAR)
+                            .rounded(px(4.))
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .on_press(move |_: &()| ui.open_card(cid.clone()))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w(px(0.))
+                                    .child(icon_tinted(Icon::Board, MUTED).w(px(14.)).h(px(14.)))
+                                    .child(badge(c.project_name.clone()))
+                                    .child(
+                                        muted(format!("#{}", c.card_number))
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(11.5)),
+                                    )
+                                    .child(
+                                        label(c.card_title.clone())
+                                            .text_size(px(12.5))
+                                            .truncate()
+                                            .flex_1()
+                                            .min_w(px(0.)),
+                                    )
+                                    .child(badge(c.stage.clone()))
+                                    .child(muted(rel).text_size(px(11.)).flex_shrink_0()),
+                            ),
+                    )
+                    .child(compact_action(
+                        "Add to Today",
+                        Variant::Secondary,
+                        move |_| pin_to_today(ui, key_pin.clone(), day_start_ms, wm),
+                    )),
+            );
+        }
+    }
     Some(box_view)
 }
 
-fn render_today_zero(ui: Ui, inbox: &DailyInbox) -> View {
+fn render_inbox_zero(ui: Ui, inbox: &DailyInbox) -> View {
     let done = inbox.completed_today;
     let deferred = inbox.deferred_items.len();
-    let mut actions = view()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .pt_2();
+    let cutoff = format_cutoff(inbox.cutoff_minutes);
+    let mut actions = view().flex_row().items_center().gap_2().pt_2();
     if deferred > 0 {
         actions = actions.child(action(
-            format!("查看已推迟 ({deferred})"),
+            format!("View deferred ({deferred})"),
             Variant::Secondary,
             move |_| ui.inbox.drawer.set("deferred".into()),
         ));
     }
-    actions = actions.child(action("前往 Board", Variant::Quiet, move |_| {
-        ui.open_board()
+    actions = actions.child(action("Open Board", Variant::Quiet, move |_| {
+        ui.navigate("board");
     }));
 
-    view()
-        .py_8()
+    sheet_container()
+        .py(px(48.))
         .px_6()
         .items_center()
         .gap_2()
-        .bg(SURFACE)
-        .border_1()
-        .border_color(BORDER)
-        .rounded(px(10.))
-        .child(tone_icon_badge(Icon::Check, Tone::Success, false))
+        .child(icon_tile_32(Icon::Check, SUCCESS_SURFACE, SUCCESS, None))
         .child(
-            label("今日已清零")
-                .text_size(px(16.))
-                .font_weight(FontWeight::SEMIBOLD),
+            label("All clear for today")
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(15.)),
         )
         .child(
             muted(format!(
-                "今天已完成 {done} 项 · 已推迟 {deferred} 项 · 下次日切 {}",
-                format_cutoff(inbox.cutoff_minutes)
+                "{done} completed · {deferred} deferred · Next cutoff at {cutoff}"
             ))
             .text_size(px(12.5)),
         )
@@ -1832,36 +2638,27 @@ fn render_today_zero(ui: Ui, inbox: &DailyInbox) -> View {
 
 fn render_deferred_drawer(ui: Ui, items: Vec<DeferredInboxItem>) -> View {
     if items.is_empty() {
-        return view()
-            .py_8()
+        return sheet_container()
+            .py(px(44.))
             .items_center()
             .gap_2()
-            .bg(SURFACE)
-            .border_1()
-            .border_color(BORDER)
-            .rounded(px(8.))
-            .child(muted("当前没有已推迟的事项。"))
-            .child(compact_action(
-                "返回今天",
-                Variant::Secondary,
-                move |_| ui.inbox.drawer.set("today".into()),
-            ));
+            .child(muted("No deferred items."))
+            .child(action("Back to Today", Variant::Secondary, move |_| {
+                ui.inbox.drawer.set("today".into())
+            }));
     }
-    let mut col = view().gap_2();
-    for item in items {
+    let mut list = sheet_container();
+    for (idx, item) in items.into_iter().enumerate() {
         let key_restore = item.key.clone();
-        let card_open = item.card_id.clone();
-        let term_open = item.terminal_id.clone();
-        let url_open = item.url.clone();
+        let cid_opt = item.card_id.clone();
+        let tid_opt = item.terminal_id.clone();
+        let url_opt = item.url.clone();
         let mut row = view()
+            .px_3p5()
+            .py_2p5()
             .flex_row()
             .items_center()
             .gap_2()
-            .p_3()
-            .bg(SURFACE)
-            .border_1()
-            .border_color(BORDER)
-            .rounded(px(8.))
             .child(badge(item.kind_label))
             .child(
                 view()
@@ -1869,71 +2666,63 @@ fn render_deferred_drawer(ui: Ui, items: Vec<DeferredInboxItem>) -> View {
                     .min_w(px(0.))
                     .gap_0p5()
                     .child(
-                        label(item.title)
+                        label(item.title.clone())
                             .font_weight(FontWeight::MEDIUM)
-                            .text_size(px(13.))
+                            .text_size(px(12.5))
                             .truncate(),
                     )
-                    .child(muted(item.context).text_size(px(11.5)).truncate()),
+                    .child(muted(item.context.clone()).text_size(px(11.5)).truncate()),
             )
             .child(status(
-                format!("唤醒 {}", format_defer_until(item.defer_until)),
+                format!("Until {}", format_defer_until(item.defer_until)),
                 Tone::Neutral,
             ))
-            .child(compact_action(
-                "恢复到今天",
-                Variant::Secondary,
-                move |_| restore_item(ui, key_restore.clone()),
-            ));
-        if let Some(cid) = card_open {
-            row = row.child(compact_action("打开 ↗", Variant::Quiet, move |_| {
+            .child(compact_action("Restore", Variant::Secondary, move |_| {
+                restore_item(ui, key_restore.clone())
+            }));
+        if idx > 0 {
+            row = row.border_t_1().border_color(BORDER);
+        }
+        if let Some(cid) = cid_opt {
+            row = row.child(compact_action("Open ↗", Variant::Quiet, move |_| {
                 ui.open_card(cid.clone())
             }));
-        } else if let Some(tid) = term_open {
-            row = row.child(compact_action("看终端 ↗", Variant::Quiet, move |_| {
+        } else if let Some(tid) = tid_opt {
+            row = row.child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
                 ui.open_terminal(tid.clone())
             }));
-        } else if let Some(url) = url_open {
+        } else if let Some(u) = url_opt {
             row = row.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
-                crate::github::open_url(ui, url.clone())
+                let _ = crate::platform::open_external(&u);
             }));
         }
-        col = col.child(row);
+        list = list.child(row);
     }
-    col
+    list
 }
 
 fn render_done_drawer(ui: Ui, items: Vec<DoneInboxItem>, now_ms: u64) -> View {
     if items.is_empty() {
-        return view()
-            .py_8()
+        return sheet_container()
+            .py(px(44.))
             .items_center()
             .gap_2()
-            .bg(SURFACE)
-            .border_1()
-            .border_color(BORDER)
-            .rounded(px(8.))
-            .child(muted("今天还没有已完成的记录。"))
-            .child(compact_action(
-                "返回今天",
-                Variant::Secondary,
-                move |_| ui.inbox.drawer.set("today".into()),
-            ));
+            .child(muted("Nothing completed yet today."))
+            .child(action("Back to Today", Variant::Secondary, move |_| {
+                ui.inbox.drawer.set("today".into())
+            }));
     }
-    let mut col = view().gap_2();
-    for item in items {
+    let mut list = sheet_container();
+    for (idx, item) in items.into_iter().enumerate() {
+        let rel = format_relative(item.completed_at, now_ms);
         let key_restore = item.key.clone();
-        let card_open = item.card_id.clone();
-        let rel = format_relative_zh(item.completed_at, now_ms);
+        let cid_opt = item.card_id.clone();
         let mut row = view()
+            .px_3p5()
+            .py_2p5()
             .flex_row()
             .items_center()
             .gap_2()
-            .p_3()
-            .bg(SURFACE)
-            .border_1()
-            .border_color(BORDER)
-            .rounded(px(8.))
             .child(icon_tinted(Icon::Check, SUCCESS).w(px(14.)).h(px(14.)))
             .child(badge(item.kind_label))
             .child(
@@ -1941,220 +2730,278 @@ fn render_done_drawer(ui: Ui, items: Vec<DoneInboxItem>, now_ms: u64) -> View {
                     .flex_1()
                     .min_w(px(0.))
                     .gap_0p5()
-                    .child(label(item.title).text_size(px(13.)).truncate())
-                    .child(muted(item.context).text_size(px(11.5)).truncate()),
+                    .child(label(item.title.clone()).text_size(px(12.5)).truncate())
+                    .child(muted(item.context.clone()).text_size(px(11.5)).truncate()),
             )
-            .child(muted(rel).text_size(px(11.5)));
+            .child(muted(rel).text_size(px(11.)).flex_shrink_0());
+        if idx > 0 {
+            row = row.border_t_1().border_color(BORDER);
+        }
         if item.can_restore {
-            row = row.child(compact_action("恢复", Variant::Quiet, move |_| {
+            row = row.child(compact_action("Restore", Variant::Quiet, move |_| {
                 restore_item(ui, key_restore.clone())
             }));
         }
-        if let Some(cid) = card_open {
-            row = row.child(compact_action("打开 ↗", Variant::Quiet, move |_| {
+        if let Some(cid) = cid_opt {
+            row = row.child(compact_action("Open ↗", Variant::Quiet, move |_| {
                 ui.open_card(cid.clone())
             }));
         }
-        col = col.child(row);
+        list = list.child(row);
     }
-    col
+    list
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
+    let gh_connected = computed(move || {
+        ui.github
+            .gh_status
+            .with(|s| s["state"].as_str() == Some("connected"))
+    });
+
     view()
         .flex_1()
         .min_w(px(0.))
         .min_h(px(0.))
         .bg(BACKGROUND)
         .child(
-            scroll().flex_1().min_h(px(0.)).p_5().child(
+            scroll().flex_1().min_h(px(0.)).child(
                 view()
                     .w_full()
                     .items_center()
+                    .px_5()
+                    .py_4()
                     .child(
                         view()
                             .w_full()
                             .max_w(px(880.))
-                            .pb_8()
                             .gap_4()
                             .child(render_undo_banner(ui))
                             .child(dynamic(move || {
                         let inbox = ui.daily_inbox.get();
-                        let drawer = ui.inbox.drawer.get();
-                        let _ = ui.inbox.expanded_stacks.get();
-                        let gh_error = ui.inbox.github_error.get();
-                        let gh_connected = ui.github.gh_status.with(|v| {
-                            v["state"].as_str() == Some("connected")
-                        }) || ui.github_account.with(|a| a.state == "connected");
-                        let now_ms = ui.utility_clock.get_untracked().saturating_mul(1000).max(canban_types::now());
+                        let active_drawer = ui.inbox.drawer.get();
+                        let now_ms = canban_types::now();
 
-                        if drawer == "deferred" {
+                        if active_drawer == "deferred" {
                             return render_deferred_drawer(ui, inbox.deferred_items.clone())
                                 .into_element();
                         }
-                        if drawer == "done" {
+                        if active_drawer == "done" {
                             return render_done_drawer(ui, inbox.done_today_items.clone(), now_ms)
                                 .into_element();
                         }
 
                         let mut col = view().gap_4();
 
-                        // 1. Today's Schedule Pulse Strip.
-                        if let Some(pulse) = render_schedule_pulse(ui, &inbox.schedule_pulse) {
-                            col = col.child(pulse);
+                        // 1. Calm single-line Schedule health strip
+                        if let Some(strip) = render_schedule_strip(ui, &inbox.schedule_pulse) {
+                            col = col.child(strip);
                         }
 
-                        // Subtle GitHub connect hint if disconnected and no GitHub items.
-                        if !gh_connected && inbox.github_stacks.is_empty() && !gh_error.is_empty() {
+                        // Subtle GitHub connect hint when gh CLI isn't configured yet
+                        if !gh_connected.get()
+                            && inbox.github_stacks.is_empty()
+                            && inbox.earlier_github.is_empty()
+                        {
                             col = col.child(
                                 view()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .px_3()
+                                    .px_3p5()
                                     .py_2()
                                     .bg(SURFACE)
                                     .border_1()
                                     .border_color(BORDER)
                                     .rounded(px(8.))
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
                                     .child(
                                         view()
                                             .flex_row()
                                             .items_center()
                                             .gap_2()
-                                            .child(icon_tinted(Icon::GitHub, MUTED).w(px(14.)).h(px(14.)))
                                             .child(
-                                                muted("连接 GitHub CLI (gh) 后，GitHub 通知将按项目自动叠放在此页")
+                                                icon_tinted(Icon::GitHub, MUTED)
+                                                    .w(px(14.))
+                                                    .h(px(14.)),
+                                            )
+                                            .child(
+                                                muted("Connect GitHub CLI (gh) to auto-stack PR & issue notifications by project here.")
                                                     .text_size(px(12.)),
                                             ),
                                     )
                                     .child(compact_action(
-                                        "GitHub 账号设置 →",
-                                        Variant::Secondary,
+                                        "GitHub Account →",
+                                        Variant::Quiet,
                                         move |_| ui.navigate("github-account"),
                                     )),
                             );
                         }
 
-                        // Inbox Zero state!
-                        if inbox.remaining_today == 0 {
-                            col = col.child(render_today_zero(ui, &inbox));
-                            if let Some(carry) = render_carryover_stack(
-                                ui,
-                                inbox.carryover_cards.clone(),
-                                inbox.day_start_ms,
-                            ) {
-                                col = col.child(carry);
+                        let all_today_empty = inbox.needs_you.is_empty()
+                            && inbox.github_stacks.is_empty()
+                            && inbox.schedule_stacks.is_empty()
+                            && inbox.open_cards.is_empty()
+                            && inbox.agent_terminals.is_empty()
+                            && inbox.plain_shells.is_empty();
+
+                        if all_today_empty {
+                            col = col.child(render_inbox_zero(ui, &inbox));
+                        } else {
+                            // 2. WAITING ON YOU (unified sheet, visual-archetype rows)
+                            if !inbox.needs_you.is_empty() {
+                                let count = inbox.needs_you.len();
+                                let defer_keys: Vec<(String, Option<u64>)> = inbox
+                                    .needs_you
+                                    .iter()
+                                    .map(|i| (i.key.clone(), i.watermark))
+                                    .collect();
+                                col = col.child(section_heading(
+                                    "WAITING ON YOU",
+                                    count,
+                                    Some(
+                                        compact_action("Defer all ▾", Variant::Quiet, move |_| {
+                                            open_defer_menu(
+                                                ui,
+                                                defer_keys.clone(),
+                                                format!("Waiting on You ({count})"),
+                                            )
+                                        })
+                                        .into_element(),
+                                    ),
+                                ));
+                                let mut sheet = sheet_container();
+                                for (idx, item) in inbox.needs_you.iter().cloned().enumerate() {
+                                    sheet =
+                                        sheet.child(render_needs_you_row(ui, item, now_ms, idx == 0));
+                                }
+                                col = col.child(sheet);
                             }
-                            return col.into_element();
+
+                            // 3. BUNDLES (GitHub by project including today's synced cards + Scheduled new cards)
+                            let stack_count =
+                                inbox.github_stacks.len() + inbox.schedule_stacks.len();
+                            if stack_count > 0 {
+                                col = col.child(section_heading("BUNDLES", stack_count, None));
+                                let mut stacks_col = view().gap_2p5();
+                                for stack in inbox.github_stacks.iter().cloned() {
+                                    stacks_col =
+                                        stacks_col.child(render_github_stack(ui, stack, now_ms));
+                                }
+                                for stack in inbox.schedule_stacks.iter().cloned() {
+                                    stacks_col =
+                                        stacks_col.child(render_schedule_stack(ui, stack, now_ms));
+                                }
+                                col = col.child(stacks_col);
+                            }
+
+                            // 4. OPEN TODAY (unclosed Agent Terminals + Cards worked on today grouped by project + Plain Shells)
+                            let open_work_count = inbox.agent_terminals.len()
+                                + inbox.open_cards.len()
+                                + usize::from(!inbox.plain_shells.is_empty());
+                            if open_work_count > 0 {
+                                let mut group_keys: Vec<(String, Option<u64>)> = Vec::new();
+                                for t in &inbox.agent_terminals {
+                                    group_keys.push((t.key.clone(), None));
+                                }
+                                for c in &inbox.open_cards {
+                                    group_keys.push((c.key.clone(), c.watermark));
+                                }
+                                for s in &inbox.plain_shells {
+                                    group_keys.push((s.key.clone(), None));
+                                }
+                                col = col.child(section_heading(
+                                    "OPEN TODAY",
+                                    open_work_count,
+                                    Some(
+                                        compact_action("Defer all ▾", Variant::Quiet, move |_| {
+                                            open_defer_menu(
+                                                ui,
+                                                group_keys.clone(),
+                                                format!("Open Today ({open_work_count})"),
+                                            )
+                                        })
+                                        .into_element(),
+                                    ),
+                                ));
+
+                                let mut open_sheet = sheet_container();
+                                let mut row_index = 0usize;
+
+                                for term in inbox.agent_terminals.iter().cloned() {
+                                    open_sheet = open_sheet.child(render_agent_terminal_row(
+                                        ui,
+                                        term,
+                                        now_ms,
+                                        row_index == 0,
+                                    ));
+                                    row_index += 1;
+                                }
+
+                                // Group today's open cards cleanly by project when multiple projects are present.
+                                let distinct_projects: std::collections::BTreeSet<&str> = inbox
+                                    .open_cards
+                                    .iter()
+                                    .map(|c| c.project_name.as_str())
+                                    .collect();
+                                let show_project_headers = distinct_projects.len() > 1;
+                                let mut current_proj = String::new();
+
+                                for card in inbox.open_cards.iter().cloned() {
+                                    if show_project_headers && card.project_name != current_proj {
+                                        current_proj = card.project_name.clone();
+                                        let mut hdr = view()
+                                            .px_3p5()
+                                            .py_1p5()
+                                            .bg(INSET)
+                                            .child(
+                                                label(current_proj.clone())
+                                                    .text_size(px(11.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(MUTED),
+                                            );
+                                        if row_index > 0 {
+                                            hdr = hdr.border_t_1().border_color(BORDER);
+                                        }
+                                        open_sheet = open_sheet.child(hdr);
+                                        row_index += 1;
+                                    }
+                                    open_sheet = open_sheet.child(render_open_card_row(
+                                        ui,
+                                        card,
+                                        now_ms,
+                                        row_index == 0,
+                                    ));
+                                    row_index += 1;
+                                }
+
+                                if let Some(shells_sec) = render_plain_shells_section(
+                                    ui,
+                                    inbox.plain_shells.clone(),
+                                    now_ms,
+                                    row_index == 0,
+                                ) {
+                                    open_sheet = open_sheet.child(shells_sec);
+                                }
+
+                                col = col.child(open_sheet);
+                            }
                         }
 
-                        // 2. Needs You (Direct, unstacked).
-                        if !inbox.needs_you.is_empty() {
-                            let group_keys: Vec<(String, Option<u64>)> = inbox
-                                .needs_you
-                                .iter()
-                                .map(|i| (i.key.clone(), i.watermark))
-                                .collect();
-                            let count = inbox.needs_you.len();
-                            let mut sec = view().gap_2().child(section_header(
-                                "需要你回应",
-                                count,
-                                Tone::Attention,
-                                Some(
-                                    compact_action("推迟本组 ▾", Variant::Quiet, move |_| {
-                                        open_defer_menu(
-                                            ui,
-                                            group_keys.clone(),
-                                            format!("需要你回应 ({count})"),
-                                        )
-                                    })
-                                    .into_element(),
-                                ),
-                            ));
-                            for item in inbox.needs_you.iter().cloned() {
-                                sec = sec.child(render_needs_you_item(ui, item, now_ms));
-                            }
-                            col = col.child(sec);
-                        }
-
-                        // 3. Auto-Stacked Bundles (GitHub by Project + Schedule New Cards).
-                        let bundle_count =
-                            inbox.github_stacks.len() + inbox.schedule_stacks.len();
-                        if bundle_count > 0 {
-                            let mut sec = view().gap_2p5().child(section_header(
-                                "自动归类",
-                                bundle_count,
-                                Tone::Info,
-                                None,
-                            ));
-                            for stack in inbox.github_stacks.iter().cloned() {
-                                sec = sec.child(render_github_stack(ui, stack, now_ms));
-                            }
-                            for stack in inbox.schedule_stacks.iter().cloned() {
-                                sec = sec.child(render_schedule_stack(ui, stack, now_ms));
-                            }
-                            col = col.child(sec);
-                        }
-
-                        // 4. Today's Open Work (Touched Cards + Unclosed Agent Terminals + Plain Shells Stack).
-                        let open_work_count = inbox.open_cards.len()
-                            + inbox.agent_terminals.len()
-                            + usize::from(!inbox.plain_shells.is_empty());
-                        if open_work_count > 0 {
-                            let mut group_keys: Vec<(String, Option<u64>)> = inbox
-                                .open_cards
-                                .iter()
-                                .map(|c| (c.key.clone(), c.watermark))
-                                .collect();
-                            for t in &inbox.agent_terminals {
-                                group_keys.push((t.key.clone(), None));
-                            }
-                            for s in &inbox.plain_shells {
-                                group_keys.push((s.key.clone(), None));
-                            }
-                            let mut sec = view().gap_2().child(section_header(
-                                "今天动过，还没收尾",
-                                open_work_count,
-                                Tone::Neutral,
-                                Some(
-                                    compact_action("推迟本组 ▾", Variant::Quiet, move |_| {
-                                        open_defer_menu(
-                                            ui,
-                                            group_keys.clone(),
-                                            format!("今天未收尾 ({open_work_count})"),
-                                        )
-                                    })
-                                    .into_element(),
-                                ),
-                            ));
-                            for card in inbox.open_cards.iter().cloned() {
-                                sec = sec.child(render_open_card(ui, card, now_ms));
-                            }
-                            for term in inbox.agent_terminals.iter().cloned() {
-                                sec = sec.child(render_agent_terminal_card(ui, term, now_ms));
-                            }
-                            if let Some(shells_stack) =
-                                render_plain_shells_stack(ui, inbox.plain_shells.clone())
-                            {
-                                sec = sec.child(shells_stack);
-                            }
-                            col = col.child(sec);
-                        }
-
-                        // 5. Carry-over Stack (Collapsed at bottom of Page 1).
-                        if let Some(carry) = render_carryover_stack(
+                        // 5. Quiet collapsed Earlier & Carry-over fold
+                        if let Some(earlier) = render_earlier_and_carryover(
                             ui,
+                            inbox.earlier_github.clone(),
                             inbox.carryover_cards.clone(),
                             inbox.day_start_ms,
+                            now_ms,
                         ) {
-                            col = col.child(carry);
+                            col = col.child(earlier);
                         }
 
                         col.into_element()
                     })),
-                    ),
+                ),
             ),
         )
 }

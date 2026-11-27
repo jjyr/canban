@@ -587,6 +587,38 @@ pub fn run(seed: u64) -> Result<u64> {
                     linked_card_id: None,
                     linked_card_number: None,
                 },
+                canban_notifications::GitHubInboxNotification {
+                    thread_id: "th-3".into(),
+                    repository: "acme/app".into(),
+                    kind: "issue".into(),
+                    number: Some(44),
+                    title: "Subscribed noise".into(),
+                    reason: "subscribed".into(),
+                    unread: true,
+                    updated_at_ms: now_deferred.saturating_sub(2_000),
+                    url: "https://github.com/acme/app/issues/44".into(),
+                    author: Some("carol".into()),
+                    body: None,
+                    linked_card_id: None,
+                    linked_card_number: None,
+                },
+                // Historical unread notification (< day_start_ms) must route to `earlier_github`,
+                // never polluting Today's bundle or actionable badge count.
+                canban_notifications::GitHubInboxNotification {
+                    thread_id: "th-old".into(),
+                    repository: "acme/app".into(),
+                    kind: "issue".into(),
+                    number: Some(12),
+                    title: "Two days ago".into(),
+                    reason: "mention".into(),
+                    unread: true,
+                    updated_at_ms: now_deferred.saturating_sub(2 * 86_400_000),
+                    url: "https://github.com/acme/app/issues/12".into(),
+                    author: Some("dave".into()),
+                    body: None,
+                    linked_card_id: None,
+                    linked_card_number: None,
+                },
             ],
             now_deferred,
             0,
@@ -601,10 +633,154 @@ pub fn run(seed: u64) -> Result<u64> {
         );
         ensure!(
             inbox_deferred.github_stacks.len() == 1
-                && inbox_deferred.github_stacks[0].items.len() == 2,
-            "Expected 2 GitHub notifications in same repo to stack into 1 bundle; got {:?}",
-            inbox_deferred.github_stacks
+                && inbox_deferred.github_stacks[0].items.len() == 3
+                && inbox_deferred.github_stacks[0].actionable_count == 2
+                && inbox_deferred.earlier_github.len() == 1
+                && inbox_deferred.earlier_github[0].number == Some(12),
+            "Expected 3 today GitHub notifications (2 actionable) + 1 earlier; got stacks={:?} earlier={:?}",
+            inbox_deferred.github_stacks,
+            inbox_deferred.earlier_github
         );
+        ensure!(
+            inbox_deferred.actionable_count == inbox_deferred.needs_you.len() + 2,
+            "Actionable badge count should exclude non-actionable GitHub & open cards: got {} (needs_you={})",
+            inbox_deferred.actionable_count,
+            inbox_deferred.needs_you.len()
+        );
+
+        // Verify newly synced GitHub cards never flood `open_cards`:
+        // - historical synced card -> `carryover_cards`
+        // - today-updated synced card -> bundled in `github_stacks` (`is_synced_card == true`)
+        {
+            let mut synced_snap = merged_deferred.clone();
+            let pid_first = synced_snap.projects[0].id.clone();
+            let old_iso = canban_notifications::format_rfc3339_utc_ms(
+                now_deferred.saturating_sub(3 * 86_400_000),
+            );
+            let today_iso = canban_notifications::format_rfc3339_utc_ms(now_deferred);
+            let mk_gh_card = |id: &str, num: u64, issue_id: u64| canban_types::Card {
+                id: id.into(),
+                project_id: pid_first.clone(),
+                number: num,
+                board_order: None,
+                title: format!("Synced #{issue_id}"),
+                body: String::new(),
+                stage: "backlog".into(),
+                revision: 1,
+                created_by: "github".into(),
+                assignee: None,
+                source_trust: Some("external".into()),
+                hold_auto_merge: false,
+                github_links: Vec::new(),
+                content: canban_types::CardContent::GitHubIssue {
+                    source: canban_types::GitHubIssueRef {
+                        repository_id: 1,
+                        repository: "acme/synced".into(),
+                        issue_id,
+                        number: issue_id,
+                        url: format!("https://github.com/acme/synced/issues/{issue_id}"),
+                    },
+                },
+                context_notes: None,
+                attention: None,
+                archived_at: None,
+                archive: None,
+                archive_error: None,
+                removed_at: None,
+                worktree: None,
+                branch: None,
+                base_commit: None,
+                human_gate: None,
+                pull_request: None,
+                pull_request_history: Vec::new(),
+                delivery_mode: None,
+                delivery: None,
+                resolution: None,
+                workspace: None,
+                workspace_history: Vec::new(),
+                schedule_source: None,
+                created_at: now_deferred, // Synced right now!
+            };
+            synced_snap.cards.push(mk_gh_card("gh-old-card", 901, 501));
+            synced_snap
+                .cards
+                .push(mk_gh_card("gh-today-card", 902, 502));
+            synced_snap
+                .github_issues
+                .push(canban_types::GitHubIssueSnapshot {
+                    id: format!("{pid_first}:501"),
+                    project_id: pid_first.clone(),
+                    source: canban_types::GitHubIssueRef {
+                        repository_id: 1,
+                        repository: "acme/synced".into(),
+                        issue_id: 501,
+                        number: 501,
+                        url: "https://github.com/acme/synced/issues/501".into(),
+                    },
+                    title: "Synced #501".into(),
+                    body: String::new(),
+                    state: "open".into(),
+                    author_id: 1,
+                    author_login: "ext".into(),
+                    labels: Vec::new(),
+                    assignees: Vec::new(),
+                    updated_at: old_iso,
+                    synced_at: now_deferred,
+                    pr_head_sha: None,
+                    pr_checks: None,
+                });
+            synced_snap
+                .github_issues
+                .push(canban_types::GitHubIssueSnapshot {
+                    id: format!("{pid_first}:502"),
+                    project_id: pid_first.clone(),
+                    source: canban_types::GitHubIssueRef {
+                        repository_id: 1,
+                        repository: "acme/synced".into(),
+                        issue_id: 502,
+                        number: 502,
+                        url: "https://github.com/acme/synced/issues/502".into(),
+                    },
+                    title: "Synced #502".into(),
+                    body: String::new(),
+                    state: "open".into(),
+                    author_id: 1,
+                    author_login: "ext".into(),
+                    labels: Vec::new(),
+                    assignees: Vec::new(),
+                    updated_at: today_iso,
+                    synced_at: now_deferred,
+                    pr_head_sha: None,
+                    pr_checks: None,
+                });
+            let synced_inbox =
+                canban_notifications::build_daily_inbox(&synced_snap, &[], now_deferred, 0, 360);
+            ensure!(
+                !synced_inbox
+                    .open_cards
+                    .iter()
+                    .any(|c| c.card_id == "gh-old-card" || c.card_id == "gh-today-card"),
+                "Untouched synced GitHub cards leaked into open_cards: {:?}",
+                synced_inbox.open_cards
+            );
+            ensure!(
+                synced_inbox
+                    .carryover_cards
+                    .iter()
+                    .any(|c| c.card_id == "gh-old-card"),
+                "Historical synced GitHub card missing from carryover_cards"
+            );
+            ensure!(
+                synced_inbox.github_stacks.iter().any(|s| {
+                    s.synced_card_count == 1
+                        && s.items.iter().any(|i| {
+                            i.card_id.as_deref() == Some("gh-today-card") && i.is_synced_card
+                        })
+                }),
+                "Today-updated synced GitHub card was not bundled into project github_stacks: {:?}",
+                synced_inbox.github_stacks
+            );
+        }
 
         // Advance past defer_until -> item automatically resurfaces in Today!
         world.advance(Duration::from_secs(35))?;

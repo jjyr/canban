@@ -1637,10 +1637,35 @@ impl AppServer {
         for (card_id, evs) in &by_card {
             let last_event_seq = evs.iter().map(|e| e.sequence).max().unwrap_or(0);
             let reply_count = evs.iter().filter(|e| is_narrative_event(e, evs)).count() as u32;
-            let last_activity_at = evs.iter().map(|e| e.created_at).max().unwrap_or(0);
+            let last_activity_at = evs
+                .iter()
+                .filter(|e| !e.kind.ends_with(".discovered"))
+                .map(|e| e.data["occurred_at"].as_u64().unwrap_or(e.created_at))
+                .max()
+                .unwrap_or(0);
             let last_user_activity_at = evs
                 .iter()
-                .filter(|e| e.actor == "user" || e.kind == "card.created")
+                .filter(|e| {
+                    if e.actor == "github"
+                        || e.actor.starts_with("github:")
+                        || e.kind.starts_with("github.")
+                    {
+                        return false;
+                    }
+                    e.actor == "user"
+                        || e.actor.starts_with("agent:")
+                        || matches!(
+                            e.kind.as_str(),
+                            "comment.added"
+                                | "comment.replied"
+                                | "card.stage_changed"
+                                | "execution.started"
+                                | "execution.continued"
+                                | "execution.reported"
+                                | "review.requested"
+                                | "review.approved"
+                        )
+                })
                 .map(|e| e.created_at)
                 .max()
                 .unwrap_or(0);

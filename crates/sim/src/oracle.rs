@@ -3390,13 +3390,35 @@ impl InvariantOracle {
                 inbox.next_cutoff_ms
             );
             let gh_items: usize = inbox.github_stacks.iter().map(|s| s.items.len()).sum();
+            let gh_actionable: usize = inbox.github_stacks.iter().map(|s| s.actionable_count).sum();
             let sched_cards: usize = inbox.schedule_stacks.iter().map(|s| s.cards.len()).sum();
+            let urgent_terms = inbox
+                .agent_terminals
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        canban_types::HerdrStatus::Blocked
+                            | canban_types::HerdrStatus::Error
+                            | canban_types::HerdrStatus::Disconnected
+                    )
+                })
+                .count();
+            let expected_actionable = inbox.needs_you.len() + urgent_terms + gh_actionable;
             let expected_remaining = inbox.needs_you.len()
                 + gh_items
                 + sched_cards
                 + inbox.open_cards.len()
                 + inbox.agent_terminals.len()
                 + usize::from(!inbox.plain_shells.is_empty());
+            ensure!(
+                inbox.actionable_count == expected_actionable
+                    && inbox.actionable_count <= inbox.remaining_today,
+                "[{client_name}] DailyInbox actionable_count mismatch: got={} expected={} rem={}",
+                inbox.actionable_count,
+                expected_actionable,
+                inbox.remaining_today
+            );
             ensure!(
                 inbox.remaining_today == expected_remaining
                     && inbox.total_today == inbox.remaining_today + inbox.completed_today,
