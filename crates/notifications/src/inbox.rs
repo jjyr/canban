@@ -1,4 +1,15 @@
-//! Pure, clock-injected Daily Inbox & Google-Inbox-style Auto-Stack projection engine.
+//! Pure, clock-injected 4-tier Daily Briefing projection engine.
+//!
+//! Signal tiers:
+//! - Tier 1 (`needs_you`, 1:1 with `actionable_count` and the left-rail Inbox badge):
+//!   Blocked/errored agents (card or standalone terminal), review/merge gates, explicit unread
+//!   agent replies/escalations, failed scheduled runs, and unread direct GitHub blockers
+//!   (live CI failure on your PR, `CHANGES_REQUESTED`, unread `review_requested`/`mention`/`assign`).
+//! - Tier 2 (`github_stacks` direct digest, `schedule_pulse`/`schedule_stacks`, `open_cards`,
+//!   `agent_terminals`, `plain_shells`): today's direct personal work counted in Today progress.
+//! - Tier 3 (`github_watching`): passive repository watch feeds (`subscribed`, `ci_activity`,
+//!   today-updated untouched synced cards) — excluded from rail badge, Today progress, and Defer rest.
+//! - Tier 4 (`earlier_github`, `carryover_cards`): older unread GitHub items and previous cards.
 use crate::{OverviewRow, overview_at};
 use canban_types::*;
 use serde::{Deserialize, Serialize};
@@ -86,6 +97,7 @@ pub fn defer_presets(now_ms: u64, tz_offset_secs: i64, cutoff_minutes: u16) -> V
     ]
 }
 
+/// Deterministic zero-dependency RFC3339 timestamp parser (UTC epoch milliseconds).
 pub fn parse_rfc3339_ms(raw: &str) -> Option<u64> {
     let s = raw.trim();
     if s.len() < 19 {
@@ -166,7 +178,7 @@ pub fn format_rfc3339_utc_ms(ms: u64) -> String {
 fn is_github_reason_review(reason: &str) -> bool {
     matches!(
         reason.to_ascii_lowercase().as_str(),
-        "review_requested" | "review requested" | "github.pr.reviewed"
+        "review_requested" | "review requested" | "changes_requested"
     )
 }
 
@@ -174,6 +186,17 @@ fn is_github_reason_mention(reason: &str) -> bool {
     matches!(
         reason.to_ascii_lowercase().as_str(),
         "mention" | "team_mention" | "@mention" | "team mention"
+    )
+}
+
+fn is_github_reason_assign(reason: &str) -> bool {
+    matches!(reason.to_ascii_lowercase().as_str(), "assign" | "assigned")
+}
+
+fn is_github_reason_watching(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        "subscribed" | "ci_activity" | "ci activity" | "manual" | "synced"
     )
 }
 
@@ -255,6 +278,14 @@ pub enum NeedsYouKind {
         report_path: Option<String>,
         terminal_id: Option<String>,
     },
+    Terminal {
+        terminal: Box<InboxTerminalWork>,
+    },
+    GitHub {
+        item: Box<GitHubStackItem>,
+        project_id: Option<String>,
+        project_name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -304,6 +335,7 @@ pub struct GitHubProjectStack {
     pub review_count: usize,
     pub mention_count: usize,
     pub synced_card_count: usize,
+    pub watching_count: usize,
     pub actionable_count: usize,
 }
 
@@ -359,17 +391,25 @@ pub struct InboxTerminalWork {
     pub agent_name: Option<String>,
     pub agent_engine: Option<String>,
     pub status: HerdrStatus,
+    pub agent_turn: Option<u64>,
+    pub waiting_title: Option<String>,
     pub status_detail: Option<String>,
     pub project_id: Option<String>,
     pub project_name: Option<String>,
     pub host_label: String,
     pub cwd: Option<String>,
     pub branch: Option<String>,
+    pub dirty: bool,
+    pub additions: u32,
+    pub deletions: u32,
+    pub ahead: u32,
+    pub behind: u32,
     pub card_id: Option<String>,
     pub card_number: Option<u64>,
     pub card_title: Option<String>,
     pub shell_command: Option<String>,
     pub shell_exit_code: Option<i32>,
+    pub started_at: Option<u64>,
     pub timestamp_ms: u64,
     pub is_agent: bool,
 }
@@ -402,18 +442,24 @@ pub struct DailyInbox {
     pub day_start_ms: u64,
     pub next_cutoff_ms: u64,
     pub cutoff_minutes: u16,
-    /// Items currently requiring direct user action (used for the left-rail Inbox badge).
+    /// Strictly 1:1 with `needs_you.len()` (left-rail Inbox badge & KPI #1).
     pub actionable_count: usize,
     pub completed_today: usize,
     pub remaining_today: usize,
     pub total_today: usize,
     pub schedule_pulse: Vec<SchedulePulseItem>,
+    /// Tier 1: All items currently demanding direct user action (1:1 with rail badge).
     pub needs_you: Vec<NeedsYouItem>,
+    /// Tier 2: Today's direct non-blocking GitHub updates grouped by project/repo.
     pub github_stacks: Vec<GitHubProjectStack>,
+    /// Tier 3: Passive repository watch feeds (`subscribed`, `ci_activity`, today synced cards)
+    /// — strictly excluded from rail badge, Today progress, and Defer rest.
+    pub github_watching: Vec<GitHubProjectStack>,
     pub schedule_stacks: Vec<ScheduleCardStack>,
     pub open_cards: Vec<InboxCardWork>,
     pub agent_terminals: Vec<InboxTerminalWork>,
     pub plain_shells: Vec<InboxTerminalWork>,
+    /// Tier 4: Older non-actionable GitHub items (`< day_start_ms`) & carry-over cards.
     pub earlier_github: Vec<GitHubStackItem>,
     pub carryover_cards: Vec<InboxCardWork>,
     pub deferred_items: Vec<DeferredInboxItem>,
@@ -421,7 +467,8 @@ pub struct DailyInbox {
 }
 
 impl DailyInbox {
-    /// Collect all currently active Today item keys (for one-click End-of-Day "Defer remaining all").
+    /// Collect all currently active Tier 1 & Tier 2 Today item keys for End-of-Day "Defer rest".
+    /// Passive `github_watching` and `earlier_github` / `carryover_cards` are intentionally excluded.
     pub fn remaining_triage_keys(&self) -> Vec<(String, Option<u64>)> {
         let mut out = Vec::new();
         for item in &self.needs_you {
@@ -441,10 +488,10 @@ impl DailyInbox {
             out.push((card.key.clone(), card.watermark));
         }
         for term in &self.agent_terminals {
-            out.push((term.key.clone(), None));
+            out.push((term.key.clone(), Some(term.timestamp_ms)));
         }
         for shell in &self.plain_shells {
-            out.push((shell.key.clone(), None));
+            out.push((shell.key.clone(), Some(shell.timestamp_ms)));
         }
         out
     }
@@ -524,13 +571,141 @@ fn terminal_host_label(snapshot: &Snapshot, terminal_id: &str) -> String {
         .map(String::as_str)
         .unwrap_or("local");
     if hid == "local" {
-        "This Mac".into()
+        "local".into()
     } else {
         snapshot.host_display_name(hid).to_owned()
     }
 }
 
-/// Pure, deterministic Daily Inbox projection from `Snapshot` + cached GitHub notifications.
+/// True when an `OverviewRow` genuinely demands direct user action right now
+/// (excludes passive interactive `idle`/`done` card agents with no gate or attention).
+fn row_needs_action_now(row: &OverviewRow) -> bool {
+    if !row.actionable() {
+        return false;
+    }
+    if row.card.human_gate.is_some() || row.card.attention.is_some() {
+        return true;
+    }
+    if row.reasons.iter().any(|r| {
+        matches!(
+            r.source.as_str(),
+            "review" | "human_gate" | "attention" | "recovery" | "delivery"
+        )
+    }) {
+        return true;
+    }
+    if let Some(a) = row.agent()
+        && (a.state == "blocked"
+            || a.state == "failed"
+            || a.lifecycle.waiting.is_some()
+            || a.trigger.is_automatic())
+    {
+        return true;
+    }
+    false
+}
+
+fn push_into_gh_map(
+    map: &mut BTreeMap<String, GitHubProjectStack>,
+    stack_key: String,
+    project_id: Option<String>,
+    display_name: String,
+    repository: String,
+    item: GitHubStackItem,
+) {
+    let ts = item.timestamp_ms;
+    let is_ci_failure = item.is_ci_failure;
+    let author = item.author.clone();
+    let stack = map
+        .entry(stack_key.clone())
+        .or_insert_with(|| GitHubProjectStack {
+            stack_id: format!("github-stack:{stack_key}"),
+            repository,
+            project_id,
+            display_name,
+            items: Vec::new(),
+            authors: Vec::new(),
+            preview: String::new(),
+            latest_at: ts,
+            has_ci_failure: false,
+            ci_failed_count: 0,
+            review_count: 0,
+            mention_count: 0,
+            synced_card_count: 0,
+            watching_count: 0,
+            actionable_count: 0,
+        });
+    stack.latest_at = stack.latest_at.max(ts);
+    stack.has_ci_failure |= is_ci_failure;
+    if let Some(a) = author
+        && !a.is_empty()
+        && !stack.authors.contains(&a)
+    {
+        stack.authors.push(a);
+    }
+    stack.items.push(item);
+}
+
+fn finalize_gh_stacks(map: BTreeMap<String, GitHubProjectStack>) -> Vec<GitHubProjectStack> {
+    let mut stacks: Vec<GitHubProjectStack> = map
+        .into_values()
+        .map(|mut stack| {
+            stack.items.sort_by(|a, b| {
+                let a_watch = is_github_reason_watching(&a.reason);
+                let b_watch = is_github_reason_watching(&b.reason);
+                b.is_ci_failure
+                    .cmp(&a.is_ci_failure)
+                    .then_with(|| b.is_actionable.cmp(&a.is_actionable))
+                    .then_with(|| a_watch.cmp(&b_watch))
+                    .then_with(|| b.timestamp_ms.cmp(&a.timestamp_ms))
+                    .then_with(|| a.key.cmp(&b.key))
+            });
+            stack.ci_failed_count = stack.items.iter().filter(|i| i.is_ci_failure).count();
+            stack.review_count = stack
+                .items
+                .iter()
+                .filter(|i| !i.is_ci_failure && is_github_reason_review(&i.reason))
+                .count();
+            stack.mention_count = stack
+                .items
+                .iter()
+                .filter(|i| !i.is_ci_failure && is_github_reason_mention(&i.reason))
+                .count();
+            stack.synced_card_count = stack.items.iter().filter(|i| i.is_synced_card).count();
+            stack.watching_count = stack
+                .items
+                .iter()
+                .filter(|i| {
+                    !i.is_ci_failure && !i.is_actionable && is_github_reason_watching(&i.reason)
+                })
+                .count();
+            stack.actionable_count = stack.items.iter().filter(|i| i.is_actionable).count();
+            stack.has_ci_failure = stack.ci_failed_count > 0;
+            stack.preview = stack
+                .items
+                .iter()
+                .take(3)
+                .map(|i| match i.number {
+                    Some(n) if i.is_ci_failure => format!("#{n} CI failed"),
+                    Some(n) => format!("#{n} {}", i.title),
+                    None => i.title.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            stack
+        })
+        .collect();
+    stacks.sort_by(|a, b| {
+        b.has_ci_failure
+            .cmp(&a.has_ci_failure)
+            .then_with(|| b.actionable_count.cmp(&a.actionable_count))
+            .then_with(|| b.latest_at.cmp(&a.latest_at))
+            .then_with(|| a.stack_id.cmp(&b.stack_id))
+    });
+    stacks
+}
+
+/// Pure, deterministic Daily Briefing projection from `Snapshot` + cached GitHub notifications.
 pub fn build_daily_inbox(
     snapshot: &Snapshot,
     github_notifications: &[GitHubInboxNotification],
@@ -567,7 +742,6 @@ pub fn build_daily_inbox(
             Some((repo.to_ascii_lowercase(), (p.id.as_str(), p.name.as_str())))
         })
         .collect();
-
     let gh_issue_updated_ms: BTreeMap<(&str, u64), u64> = snapshot
         .github_issues
         .iter()
@@ -589,7 +763,7 @@ pub fn build_daily_inbox(
     let mut deferred_keys: BTreeSet<String> = BTreeSet::new();
     let mut done_keys: BTreeSet<String> = BTreeSet::new();
 
-    // 1. Today's Schedule Pulse + Failed Runs + Schedule-created Card Stacks.
+    // 1. Today's Scheduled Runs + Failed Runs (latest failed per schedule if not superseded by a pass).
     let mut schedule_stacks_map: BTreeMap<String, ScheduleCardStack> = BTreeMap::new();
     let mut scheduled_card_ids_today: BTreeSet<String> = BTreeSet::new();
     let mut today_runs: Vec<&ScheduledRun> = snapshot
@@ -601,6 +775,14 @@ pub fn build_daily_inbox(
         })
         .collect();
     today_runs.sort_by(|a, b| b.scheduled_at.cmp(&a.scheduled_at).then(a.id.cmp(&b.id)));
+
+    // Track whether a schedule already succeeded more recently today so stale earlier failures don't stay urgent.
+    let mut passed_schedules: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for run in &today_runs {
+        if matches!(run.state.as_str(), "completed" | "succeeded") {
+            passed_schedules.insert((run.project_id.as_str(), run.schedule_id.as_str()));
+        }
+    }
 
     for run in today_runs {
         let proj_name = if is_global_project_id(&run.project_id) {
@@ -633,7 +815,9 @@ pub fn build_daily_inbox(
             .completed_at
             .unwrap_or(run.scheduled_at)
             .max(run.scheduled_at);
-        if matches!(run.state.as_str(), "failed" | "blocked") {
+        if matches!(run.state.as_str(), "failed" | "blocked")
+            && !passed_schedules.contains(&(run.project_id.as_str(), run.schedule_id.as_str()))
+        {
             match classify_triage(&triage_map, &sched_key, now_ms, day_start_ms, Some(ts)) {
                 TriageDisposition::Active | TriageDisposition::PinnedToday => {
                     if let Some(tid) = &run.terminal_id {
@@ -675,12 +859,12 @@ pub fn build_daily_inbox(
                 TriageDisposition::DismissedToday => {
                     if done_keys.insert(sched_key.clone()) {
                         inbox.done_today_items.push(DoneInboxItem {
-                            key: sched_key,
+                            key: sched_key.clone(),
                             title: format!("Schedule · {}", run.workflow_name),
                             context: proj_name,
                             kind_label: "Schedule",
                             completed_at: triage_map
-                                .get(&format!("schedule:{}", run.id) as &str)
+                                .get(sched_key.as_str())
                                 .map(|e| e.updated_at)
                                 .unwrap_or(ts),
                             card_id: run.card_id.clone(),
@@ -750,12 +934,12 @@ pub fn build_daily_inbox(
                     scheduled_card_ids_today.insert(card.id.clone());
                     if done_keys.insert(card_key.clone()) {
                         inbox.done_today_items.push(DoneInboxItem {
-                            key: card_key,
+                            key: card_key.clone(),
                             title: format!("#{} {}", card.number, card.title),
                             context: format!("{} · {}", run.workflow_name, proj_name),
                             kind_label: "Scheduled Card",
                             completed_at: triage_map
-                                .get(&format!("schedule-card:{}", card.id) as &str)
+                                .get(card_key.as_str())
                                 .map(|e| e.updated_at)
                                 .unwrap_or(ts),
                             card_id: Some(card.id.clone()),
@@ -769,25 +953,18 @@ pub fn build_daily_inbox(
             }
         }
     }
-    inbox.schedule_stacks = schedule_stacks_map.into_values().collect();
-    inbox.schedule_stacks.sort_by(|a, b| {
-        b.latest_at
-            .cmp(&a.latest_at)
-            .then(a.stack_id.cmp(&b.stack_id))
-    });
 
-    // 2. Needs You (Direct Unstacked Cards: human gates, blocked agents, unread @agent reports/replies).
+    // 2. Tier 1 Cards: human gates, attention, blocked/stalled agents, explicit unread replies/escalations.
     let overview_rows = overview_at(snapshot, now_ms);
     let mut actionable_by_card: BTreeMap<&str, &OverviewRow> = BTreeMap::new();
     for row in &overview_rows {
-        if row.card.active() && row.actionable() {
+        if row.card.active() && row_needs_action_now(row) {
             actionable_by_card
                 .entry(row.card.id.as_str())
                 .or_insert(row);
         }
     }
 
-    // Separate non-GitHub unread card reminders from GitHub PR card reminders.
     let mut non_gh_unread: BTreeMap<&str, Vec<&Reminder>> = BTreeMap::new();
     let mut gh_card_reminders: Vec<&Reminder> = Vec::new();
     for rem in &snapshot.reminders {
@@ -795,7 +972,9 @@ pub fn build_daily_inbox(
             if rem.unread {
                 gh_card_reminders.push(rem);
             }
-        } else if rem.unread {
+        } else if rem.unread && rem.audible_when_unread {
+            // Only explicit agent replies and blocked/failed/backlog escalations enter Tier 1;
+            // routine silent stage `completed` reports never inflate the left-rail badge.
             non_gh_unread
                 .entry(rem.card_id.as_str())
                 .or_default()
@@ -839,7 +1018,7 @@ pub fn build_daily_inbox(
                 let headline = if is_review {
                     "Waiting for review approval".into()
                 } else if is_blocked {
-                    "Agent waiting for your reply".into()
+                    "Waiting for your reply".into()
                 } else if let Some(r) = first_reason {
                     r.message.clone()
                 } else {
@@ -977,12 +1156,12 @@ pub fn build_daily_inbox(
                 handled_card_ids.insert(card.id.clone());
                 if done_keys.insert(key.clone()) {
                     inbox.done_today_items.push(DoneInboxItem {
-                        key,
+                        key: key.clone(),
                         title: format!("#{} {}", card.number, card.title),
                         context: proj_name,
                         kind_label: "Card",
                         completed_at: triage_map
-                            .get(&format!("card:{}", card.id) as &str)
+                            .get(key.as_str())
                             .map(|e| e.updated_at)
                             .unwrap_or(ts),
                         card_id: Some(card.id.clone()),
@@ -995,12 +1174,32 @@ pub fn build_daily_inbox(
             }
         }
     }
-    inbox
-        .needs_you
-        .sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms).then(a.key.cmp(&b.key)));
 
-    // 3. GitHub Auto-Stacked Bundles by Project / Repo (Google Inbox style, right on Page 1!).
-    let mut gh_stacks_map: BTreeMap<String, GitHubProjectStack> = BTreeMap::new();
+    // Deduplicate schedule_stacks against cards already surfaced in Tier 1 `needs_you`.
+    for stack in schedule_stacks_map.values_mut() {
+        stack
+            .cards
+            .retain(|c| !handled_card_ids.contains(&c.card_id));
+    }
+    inbox.schedule_stacks = schedule_stacks_map
+        .into_values()
+        .filter(|s| !s.cards.is_empty())
+        .collect();
+    inbox.schedule_stacks.sort_by(|a, b| {
+        b.latest_at
+            .cmp(&a.latest_at)
+            .then(a.stack_id.cmp(&b.stack_id))
+    });
+
+    // 3. GitHub Signal Classification:
+    //    - Tier 1 (`needs_you`): unread direct blockers (`CI failed`, `CHANGES_REQUESTED`,
+    //      unread `review_requested`, `@mention`, `team_mention`, `assign`).
+    //    - Tier 2 (`gh_direct_map` -> `github_stacks`): today's direct participating updates.
+    //    - Tier 3 (`gh_watching_map` -> `github_watching`): today's passive `subscribed`/`ci_activity`
+    //      & untouched today-updated synced cards (excluded from badge & Today progress).
+    //    - Tier 4 (`earlier_github`): older non-actionable GitHub items (`< day_start_ms`).
+    let mut gh_direct_map: BTreeMap<String, GitHubProjectStack> = BTreeMap::new();
+    let mut gh_watching_map: BTreeMap<String, GitHubProjectStack> = BTreeMap::new();
     let mut seen_gh_targets: BTreeSet<(String, u64)> = BTreeSet::new();
 
     // 3a. Live GitHub notifications from `github.browse(kind="notifications")`.
@@ -1015,9 +1214,12 @@ pub fn build_daily_inbox(
             .get(&repo_lower)
             .map(|(pid, pname)| (Some((*pid).to_owned()), (*pname).to_owned()))
             .unwrap_or_else(|| (None, notif.repository.clone()));
-        let is_review_req = is_github_reason_review(&notif.reason);
-        let is_mention = is_github_reason_mention(&notif.reason);
-        let is_actionable = is_review_req || is_mention;
+
+        let is_direct_blocker = notif.unread
+            && (is_github_reason_review(&notif.reason)
+                || is_github_reason_mention(&notif.reason)
+                || is_github_reason_assign(&notif.reason));
+        let is_watching = is_github_reason_watching(&notif.reason);
 
         let disp = classify_triage(&triage_map, &key, now_ms, day_start_ms, wm);
         match disp {
@@ -1032,7 +1234,7 @@ pub fn build_daily_inbox(
                     None => notif.reason.clone(),
                 };
                 let item = GitHubStackItem {
-                    key,
+                    key: key.clone(),
                     watermark: wm,
                     repository: notif.repository.clone(),
                     kind: notif.kind.clone(),
@@ -1050,45 +1252,51 @@ pub fn build_daily_inbox(
                     card_number: notif.linked_card_number,
                     read_sequence: 0,
                     is_ci_failure: false,
-                    is_actionable,
+                    is_actionable: is_direct_blocker,
                     is_synced_card: false,
                 };
                 let is_today =
                     disp == TriageDisposition::PinnedToday || notif.updated_at_ms >= day_start_ms;
-                if !is_today {
+
+                if is_direct_blocker && is_today {
+                    // Promote Tier 1 unread direct GitHub blocker directly into `Needs Action`!
+                    inbox.needs_you.push(NeedsYouItem {
+                        key,
+                        watermark: wm,
+                        timestamp_ms: notif.updated_at_ms,
+                        kind: NeedsYouKind::GitHub {
+                            item: Box::new(item),
+                            project_id,
+                            project_name: display_name,
+                        },
+                    });
+                } else if !is_today {
                     inbox.earlier_github.push(item);
-                    continue;
+                } else if is_watching {
+                    let stack_key = project_id
+                        .clone()
+                        .unwrap_or_else(|| format!("repo:{repo_lower}"));
+                    push_into_gh_map(
+                        &mut gh_watching_map,
+                        format!("watch:{stack_key}"),
+                        project_id,
+                        display_name,
+                        notif.repository.clone(),
+                        item,
+                    );
+                } else {
+                    let stack_key = project_id
+                        .clone()
+                        .unwrap_or_else(|| format!("repo:{repo_lower}"));
+                    push_into_gh_map(
+                        &mut gh_direct_map,
+                        stack_key,
+                        project_id,
+                        display_name,
+                        notif.repository.clone(),
+                        item,
+                    );
                 }
-                let stack_key = project_id
-                    .clone()
-                    .unwrap_or_else(|| format!("repo:{repo_lower}"));
-                let stack =
-                    gh_stacks_map
-                        .entry(stack_key.clone())
-                        .or_insert_with(|| GitHubProjectStack {
-                            stack_id: format!("github-stack:{stack_key}"),
-                            repository: notif.repository.clone(),
-                            project_id: project_id.clone(),
-                            display_name: display_name.clone(),
-                            items: Vec::new(),
-                            authors: Vec::new(),
-                            preview: String::new(),
-                            latest_at: notif.updated_at_ms,
-                            has_ci_failure: false,
-                            ci_failed_count: 0,
-                            review_count: 0,
-                            mention_count: 0,
-                            synced_card_count: 0,
-                            actionable_count: 0,
-                        });
-                stack.latest_at = stack.latest_at.max(notif.updated_at_ms);
-                if let Some(author) = &notif.author
-                    && !author.is_empty()
-                    && !stack.authors.contains(author)
-                {
-                    stack.authors.push(author.clone());
-                }
-                stack.items.push(item);
             }
             TriageDisposition::Deferred(until) => {
                 if deferred_keys.insert(key.clone()) {
@@ -1107,12 +1315,12 @@ pub fn build_daily_inbox(
             TriageDisposition::DismissedToday => {
                 if done_keys.insert(key.clone()) {
                     inbox.done_today_items.push(DoneInboxItem {
-                        key,
+                        key: key.clone(),
                         title: notif.title.clone(),
                         context: format!("GitHub · {display_name}"),
                         kind_label: "GitHub",
                         completed_at: triage_map
-                            .get(&format!("github:thread:{}", notif.thread_id) as &str)
+                            .get(key.as_str())
                             .map(|e| e.updated_at)
                             .unwrap_or(notif.updated_at_ms),
                         card_id: notif.linked_card_id.clone(),
@@ -1124,14 +1332,60 @@ pub fn build_daily_inbox(
         }
     }
 
-    // 3b. Unread GitHub PR Card reminders (CI failure, PR review, PR comment) grouped into the same Project stacks!
+    // 3b. Unread GitHub PR Card reminders for YOUR OWN published PRs (`card.pull_request.is_some()`),
+    //     collapsed to 1 row per PR and deduplicated against `handled_card_ids`.
+    let mut pr_rems_by_card: BTreeMap<&str, Vec<&Reminder>> = BTreeMap::new();
     for rem in gh_card_reminders {
         let Some(card) = cards_by_id.get(rem.card_id.as_str()) else {
             continue;
         };
-        if !card.active() {
+        if !card.active() || card.pull_request.is_none() || handled_card_ids.contains(&card.id) {
             continue;
         }
+        pr_rems_by_card
+            .entry(card.id.as_str())
+            .or_default()
+            .push(rem);
+    }
+    for (card_id, mut card_rems) in pr_rems_by_card {
+        let Some(card) = cards_by_id.get(card_id) else {
+            continue;
+        };
+        let live_ci_failing = card.pull_request.as_ref().is_some_and(|p| {
+            p.checks_summary
+                .as_ref()
+                .is_some_and(|c| c.state == "failure")
+                || p.checks.eq_ignore_ascii_case("failure")
+        });
+        card_rems.sort_by(|a, b| {
+            let prio = |r: &Reminder| match r
+                .event
+                .as_ref()
+                .map(|m| (m.kind.as_str(), m.state.as_deref()))
+            {
+                Some(("github.pr.ci_failed", _)) if live_ci_failing => 0u8,
+                Some(("github.pr.reviewed", Some("CHANGES_REQUESTED"))) => 1,
+                Some(("github.pr.reviewed", _)) => 2,
+                Some(("github.pr.commented", _)) => 3,
+                _ => 4,
+            };
+            prio(a)
+                .cmp(&prio(b))
+                .then_with(|| b.created_at.cmp(&a.created_at))
+                .then_with(|| b.sequence.cmp(&a.sequence))
+        });
+        let rem = card_rems[0];
+        let extra_count = card_rems.len().saturating_sub(1);
+        let max_seq = card_rems
+            .iter()
+            .map(|r| r.sequence)
+            .max()
+            .unwrap_or(rem.sequence);
+        let max_ts = card_rems
+            .iter()
+            .map(|r| r.created_at)
+            .max()
+            .unwrap_or(rem.created_at);
         let meta = rem.event.as_ref();
         let repo = meta
             .and_then(|m| m.repository.clone())
@@ -1147,17 +1401,20 @@ pub fn build_daily_inbox(
             .and_then(|m| m.pr_number)
             .or_else(|| card.pull_request.as_ref().map(|p| p.number))
             .or_else(|| card.github_issue().map(|s| s.number));
-        let is_ci_failure = meta.is_some_and(|m| m.kind == "github.pr.ci_failed");
-        let is_review_ev = meta.is_some_and(|m| m.kind == "github.pr.reviewed");
-        let is_actionable = is_ci_failure || is_review_ev;
+        let is_ci_failure =
+            live_ci_failing && meta.is_some_and(|m| m.kind == "github.pr.ci_failed");
+        let is_changes_requested = meta.is_some_and(|m| {
+            m.kind == "github.pr.reviewed" && m.state.as_deref() == Some("CHANGES_REQUESTED")
+        });
+        let is_actionable = is_ci_failure || is_changes_requested;
         if !is_ci_failure
             && let Some(n) = pr_num
             && seen_gh_targets.contains(&(repo.to_ascii_lowercase(), n))
         {
             continue;
         }
-        let key = format!("github:rem:{}", rem.id);
-        let wm = Some(rem.sequence.max(rem.created_at));
+        let key = format!("github:pr:{}", card.id);
+        let wm = Some(max_seq.max(max_ts));
         let proj_name = project_names
             .get(card.project_id.as_str())
             .cloned()
@@ -1179,16 +1436,27 @@ pub fn build_daily_inbox(
                     .or_else(|| card.pull_request.as_ref().map(|p| p.url.clone()))
                     .or_else(|| card.github_issue().map(|s| s.url.clone()))
                     .unwrap_or_default();
-                let subtitle = match (pr_num, meta.map(|m| m.kind.as_str())) {
+                let mut subtitle = match (pr_num, meta.map(|m| m.kind.as_str())) {
                     (Some(n), Some("github.pr.ci_failed")) => format!("PR #{n} · CI failed"),
                     (Some(n), Some("github.pr.ci_succeeded")) => format!("PR #{n} · CI passed"),
+                    (Some(n), Some("github.pr.reviewed")) if is_changes_requested => {
+                        format!("PR #{n} · Changes requested")
+                    }
                     (Some(n), Some("github.pr.reviewed")) => format!("PR #{n} · Review"),
                     (Some(n), Some("github.pr.commented")) => format!("PR #{n} · Comment"),
                     (Some(n), _) => format!("PR #{n} · Update"),
                     (None, _) => rem.message.clone(),
                 };
+                if extra_count > 0 {
+                    subtitle.push_str(&format!(" (+{extra_count})"));
+                }
+                let reason = if is_changes_requested {
+                    "changes_requested".into()
+                } else {
+                    meta.map(|m| m.kind.clone()).unwrap_or_default()
+                };
                 let item = GitHubStackItem {
-                    key,
+                    key: key.clone(),
                     watermark: wm,
                     repository: repo.clone(),
                     kind: "pr".into(),
@@ -1196,54 +1464,45 @@ pub fn build_daily_inbox(
                     title: card.title.clone(),
                     subtitle,
                     body: meta.and_then(|m| m.body.clone().or_else(|| m.summary.clone())),
-                    author: author.clone(),
-                    reason: meta.map(|m| m.kind.clone()).unwrap_or_default(),
+                    author,
+                    reason,
                     failed_checks: meta.map(|m| m.failed_checks.clone()).unwrap_or_default(),
                     url,
-                    timestamp_ms: rem.created_at,
+                    timestamp_ms: max_ts,
                     thread_id: None,
                     card_id: Some(card.id.clone()),
                     card_number: Some(card.number),
-                    read_sequence: rem.sequence,
+                    read_sequence: max_seq,
                     is_ci_failure,
                     is_actionable,
                     is_synced_card: false,
                 };
                 let is_today = disp == TriageDisposition::PinnedToday
                     || is_ci_failure
-                    || rem.created_at >= day_start_ms;
-                if !is_today {
-                    inbox.earlier_github.push(item);
-                    continue;
-                }
-                let stack_key = card.project_id.clone();
-                let stack =
-                    gh_stacks_map
-                        .entry(stack_key.clone())
-                        .or_insert_with(|| GitHubProjectStack {
-                            stack_id: format!("github-stack:{stack_key}"),
-                            repository: repo.clone(),
+                    || max_ts >= day_start_ms;
+                if is_actionable && is_today {
+                    inbox.needs_you.push(NeedsYouItem {
+                        key,
+                        watermark: wm,
+                        timestamp_ms: max_ts,
+                        kind: NeedsYouKind::GitHub {
+                            item: Box::new(item),
                             project_id: Some(card.project_id.clone()),
-                            display_name: proj_name.clone(),
-                            items: Vec::new(),
-                            authors: Vec::new(),
-                            preview: String::new(),
-                            latest_at: rem.created_at,
-                            has_ci_failure: false,
-                            ci_failed_count: 0,
-                            review_count: 0,
-                            mention_count: 0,
-                            synced_card_count: 0,
-                            actionable_count: 0,
-                        });
-                stack.latest_at = stack.latest_at.max(rem.created_at);
-                stack.has_ci_failure |= is_ci_failure;
-                if let Some(a) = &author
-                    && !stack.authors.contains(a)
-                {
-                    stack.authors.push(a.clone());
+                            project_name: proj_name,
+                        },
+                    });
+                } else if !is_today {
+                    inbox.earlier_github.push(item);
+                } else {
+                    push_into_gh_map(
+                        &mut gh_direct_map,
+                        card.project_id.clone(),
+                        Some(card.project_id.clone()),
+                        proj_name,
+                        repo,
+                        item,
+                    );
                 }
-                stack.items.push(item);
             }
             TriageDisposition::Deferred(until) => {
                 if deferred_keys.insert(key.clone()) {
@@ -1262,14 +1521,14 @@ pub fn build_daily_inbox(
             TriageDisposition::DismissedToday => {
                 if done_keys.insert(key.clone()) {
                     inbox.done_today_items.push(DoneInboxItem {
-                        key,
+                        key: key.clone(),
                         title: format!("#{} {}", card.number, card.title),
                         context: format!("GitHub · {proj_name}"),
                         kind_label: "GitHub",
                         completed_at: triage_map
-                            .get(&format!("github:rem:{}", rem.id) as &str)
+                            .get(key.as_str())
                             .map(|e| e.updated_at)
-                            .unwrap_or(rem.created_at),
+                            .unwrap_or(max_ts),
                         card_id: Some(card.id.clone()),
                         can_restore: true,
                     });
@@ -1279,8 +1538,9 @@ pub fn build_daily_inbox(
         }
     }
 
-    // 4. Today's Open Work (Unresolved Cards genuinely worked on today or pinned today)
-    //    & Auto-Stacked Today-Synced GitHub Cards & Carry-over Cards.
+    // 4. Today's Open Work (unresolved Cards genuinely worked on today or pinned today)
+    //    & Untouched Today-Updated Synced GitHub Cards (-> Tier 3 `github_watching`)
+    //    & Carry-over Cards (-> Tier 4 `carryover_cards`).
     let live_agent_cards: BTreeSet<&str> = snapshot
         .terminals
         .iter()
@@ -1380,12 +1640,12 @@ pub fn build_daily_inbox(
             TriageDisposition::DismissedToday => {
                 if done_keys.insert(key.clone()) {
                     inbox.done_today_items.push(DoneInboxItem {
-                        key,
+                        key: key.clone(),
                         title: format!("#{} {}", card.number, card.title),
                         context: proj_name,
                         kind_label: "Card",
                         completed_at: triage_map
-                            .get(&format!("card:{}", card.id) as &str)
+                            .get(key.as_str())
                             .map(|e| e.updated_at)
                             .unwrap_or(last_act),
                         card_id: Some(card.id.clone()),
@@ -1413,9 +1673,6 @@ pub fn build_daily_inbox(
                 });
             }
             TriageDisposition::Active => {
-                // Untouched synced GitHub issue/PR cards never flood Open Today:
-                // - Updated on GitHub today -> auto-stack into the project's GitHub bundle.
-                // - Historical synced card -> quiet Carry-over.
                 if let Some(src) = gh_source
                     && !has_local_work_today
                 {
@@ -1424,33 +1681,13 @@ pub fn build_daily_inbox(
                             .contains(&(src.repository.to_ascii_lowercase(), src.number))
                     {
                         seen_gh_targets.insert((src.repository.to_ascii_lowercase(), src.number));
-                        let stack_key = card.project_id.clone();
-                        let stack = gh_stacks_map.entry(stack_key.clone()).or_insert_with(|| {
-                            GitHubProjectStack {
-                                stack_id: format!("github-stack:{stack_key}"),
-                                repository: src.repository.clone(),
-                                project_id: Some(card.project_id.clone()),
-                                display_name: proj_name.clone(),
-                                items: Vec::new(),
-                                authors: Vec::new(),
-                                preview: String::new(),
-                                latest_at: gh_real_ts,
-                                has_ci_failure: false,
-                                ci_failed_count: 0,
-                                review_count: 0,
-                                mention_count: 0,
-                                synced_card_count: 0,
-                                actionable_count: 0,
-                            }
-                        });
-                        stack.latest_at = stack.latest_at.max(gh_real_ts);
                         let is_pr = card.is_github_pr();
                         let subtitle = if is_pr {
                             format!("Synced PR #{} · {}", src.number, card.stage)
                         } else {
                             format!("Synced Issue #{} · {}", src.number, card.stage)
                         };
-                        stack.items.push(GitHubStackItem {
+                        let item = GitHubStackItem {
                             key,
                             watermark: wm,
                             repository: src.repository.clone(),
@@ -1471,7 +1708,17 @@ pub fn build_daily_inbox(
                             is_ci_failure: false,
                             is_actionable: false,
                             is_synced_card: true,
-                        });
+                        };
+                        // Route untouched synced external cards to Tier 3 (`github_watching`)
+                        // so syncing an OSS repo never pollutes Today's progress or badge.
+                        push_into_gh_map(
+                            &mut gh_watching_map,
+                            format!("watch:{}", card.project_id),
+                            Some(card.project_id.clone()),
+                            proj_name,
+                            src.repository.clone(),
+                            item,
+                        );
                     } else {
                         inbox.carryover_cards.push(InboxCardWork {
                             key,
@@ -1518,54 +1765,13 @@ pub fn build_daily_inbox(
         }
     }
 
-    for stack in gh_stacks_map.values_mut() {
-        stack.items.sort_by(|a, b| {
-            b.is_ci_failure
-                .cmp(&a.is_ci_failure)
-                .then_with(|| b.is_actionable.cmp(&a.is_actionable))
-                .then_with(|| b.timestamp_ms.cmp(&a.timestamp_ms))
-                .then_with(|| a.key.cmp(&b.key))
-        });
-        stack.ci_failed_count = stack.items.iter().filter(|i| i.is_ci_failure).count();
-        stack.review_count = stack
-            .items
-            .iter()
-            .filter(|i| !i.is_ci_failure && is_github_reason_review(&i.reason))
-            .count();
-        stack.mention_count = stack
-            .items
-            .iter()
-            .filter(|i| !i.is_ci_failure && is_github_reason_mention(&i.reason))
-            .count();
-        stack.synced_card_count = stack.items.iter().filter(|i| i.is_synced_card).count();
-        stack.actionable_count = stack.items.iter().filter(|i| i.is_actionable).count();
-        stack.has_ci_failure = stack.ci_failed_count > 0;
-        stack.preview = stack
-            .items
-            .iter()
-            .take(3)
-            .map(|i| match i.number {
-                Some(n) if i.is_ci_failure => format!("#{n} CI failed"),
-                Some(n) => format!("#{n} {}", i.title),
-                None => i.title.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-    }
-    inbox.github_stacks = gh_stacks_map.into_values().collect();
-    inbox.github_stacks.sort_by(|a, b| {
-        b.has_ci_failure
-            .cmp(&a.has_ci_failure)
-            .then_with(|| b.actionable_count.cmp(&a.actionable_count))
-            .then_with(|| b.latest_at.cmp(&a.latest_at))
-            .then_with(|| a.stack_id.cmp(&b.stack_id))
-    });
+    inbox.github_stacks = finalize_gh_stacks(gh_direct_map);
+    inbox.github_watching = finalize_gh_stacks(gh_watching_map);
     inbox.earlier_github.sort_by(|a, b| {
         b.timestamp_ms
             .cmp(&a.timestamp_ms)
             .then_with(|| a.key.cmp(&b.key))
     });
-
     inbox.open_cards.sort_by(|a, b| {
         b.pinned_today
             .cmp(&a.pinned_today)
@@ -1579,7 +1785,11 @@ pub fn build_daily_inbox(
             .then_with(|| a.card_id.cmp(&b.card_id))
     });
 
-    // 5. Unclosed Terminals opened/used today (Agent Terminals surfaced directly; Plain Shells stacked).
+    // 5. Unclosed Terminals with structured Git/Turn telemetry:
+    //    - Blocked / Error standalone Agent Terminals promote to Tier 1 (`needs_you`)
+    //      so `actionable_count == needs_you.len()` (strict 1:1 with left-rail badge!).
+    //    - Active/Done Agent Terminals from today go to `agent_terminals`.
+    //    - Plain shells opened today go to `plain_shells`.
     let ctx_by_term: BTreeMap<&str, &TerminalContext> = snapshot
         .terminal_contexts
         .iter()
@@ -1614,15 +1824,15 @@ pub fn build_daily_inbox(
                     .max(entry.created_at)
             })
             .unwrap_or(entry.created_at);
-        // Include terminals created/used today OR any currently active/waiting agent terminal.
+        let is_urgent_term = is_agent
+            && (matches!(status, HerdrStatus::Blocked | HerdrStatus::Error)
+                || (status == HerdrStatus::Disconnected && ts >= day_start_ms));
+        // Only include terminals active/touched today OR currently Blocked/Working/Error.
         let relevant_today = ts >= day_start_ms
             || (is_agent
                 && matches!(
                     status,
-                    HerdrStatus::Blocked
-                        | HerdrStatus::Working
-                        | HerdrStatus::Done
-                        | HerdrStatus::Error
+                    HerdrStatus::Blocked | HerdrStatus::Working | HerdrStatus::Error
                 ));
         if !relevant_today {
             continue;
@@ -1644,10 +1854,9 @@ pub fn build_daily_inbox(
             .map(|a| a.card_id.clone())
             .or_else(|| ctx.and_then(|c| c.card_id.clone()))
             .or_else(|| entry.origin_card_id.clone());
-        // Avoid duplicating a card-bound blocked agent already surfaced in Waiting on You.
         if let Some(cid) = &card_id
             && handled_card_ids.contains(cid)
-            && matches!(status, HerdrStatus::Blocked | HerdrStatus::Error)
+            && is_urgent_term
         {
             continue;
         }
@@ -1660,8 +1869,21 @@ pub fn build_daily_inbox(
             .as_ref()
             .map(|a| format!("@{}", a.profile.id))
             .or_else(|| agent_engine.as_deref().map(friendly_agent_engine));
-        let status_detail = entry
-            .runtime_wait()
+        let agent_turn = entry
+            .runtime
+            .as_ref()
+            .and_then(|r| r.agent_turn)
+            .or_else(|| {
+                entry
+                    .agent
+                    .as_ref()
+                    .and_then(|a| a.observed.as_ref().and_then(|v| v["turn"].as_u64()))
+            });
+        let wait = entry.runtime_wait();
+        let waiting_title = wait
+            .map(|w| w.title.clone())
+            .filter(|s| !s.trim().is_empty());
+        let status_detail = wait
             .map(|w| {
                 if w.message.trim().is_empty() {
                     w.title.clone()
@@ -1675,31 +1897,55 @@ pub fn build_daily_inbox(
         let context_label = project_name
             .clone()
             .unwrap_or_else(|| cwd.clone().unwrap_or_else(|| host_label.clone()));
+        let started_at = entry
+            .agent
+            .as_ref()
+            .and_then(|a| a.started_at)
+            .or(Some(entry.created_at));
+        let term_wm = Some(ts);
 
-        match classify_triage(&triage_map, &key, now_ms, day_start_ms, None) {
+        match classify_triage(&triage_map, &key, now_ms, day_start_ms, term_wm) {
             TriageDisposition::Active | TriageDisposition::PinnedToday => {
                 let work = InboxTerminalWork {
-                    key,
+                    key: key.clone(),
                     terminal_id: entry.id.clone(),
                     title: entry.title(),
                     agent_name,
                     agent_engine,
                     status,
+                    agent_turn,
+                    waiting_title,
                     status_detail,
                     project_id,
                     project_name,
                     host_label,
                     cwd,
                     branch,
+                    dirty: ctx.is_some_and(|c| c.dirty),
+                    additions: ctx.map(|c| c.additions).unwrap_or(0),
+                    deletions: ctx.map(|c| c.deletions).unwrap_or(0),
+                    ahead: ctx.map(|c| c.ahead).unwrap_or(0),
+                    behind: ctx.map(|c| c.behind).unwrap_or(0),
                     card_id,
                     card_number: card.map(|c| c.number),
                     card_title: card.map(|c| c.title.clone()),
                     shell_command: shell_cmd.map(|c| c.label.clone()).filter(|s| !s.is_empty()),
                     shell_exit_code: shell_cmd.and_then(|c| c.exit_code),
+                    started_at,
                     timestamp_ms: ts,
                     is_agent,
                 };
-                if is_agent {
+                if is_urgent_term {
+                    // Promote blocked/errored standalone agent terminals directly into Tier 1 (`Needs Action`).
+                    inbox.needs_you.push(NeedsYouItem {
+                        key,
+                        watermark: term_wm,
+                        timestamp_ms: ts,
+                        kind: NeedsYouKind::Terminal {
+                            terminal: Box::new(work),
+                        },
+                    });
+                } else if is_agent {
                     inbox.agent_terminals.push(work);
                 } else {
                     inbox.plain_shells.push(work);
@@ -1722,12 +1968,12 @@ pub fn build_daily_inbox(
             TriageDisposition::DismissedToday => {
                 if done_keys.insert(key.clone()) {
                     inbox.done_today_items.push(DoneInboxItem {
-                        key,
+                        key: key.clone(),
                         title: entry.title(),
                         context: context_label,
                         kind_label: if is_agent { "Agent Terminal" } else { "Shell" },
                         completed_at: triage_map
-                            .get(&format!("terminal:{}", entry.id) as &str)
+                            .get(key.as_str())
                             .map(|e| e.updated_at)
                             .unwrap_or(ts),
                         card_id,
@@ -1739,13 +1985,27 @@ pub fn build_daily_inbox(
         }
     }
 
+    inbox.needs_you.sort_by(|a, b| {
+        let rank = |k: &NeedsYouKind| match k {
+            NeedsYouKind::Card {
+                is_blocked: true, ..
+            }
+            | NeedsYouKind::Terminal { .. } => 0u8,
+            NeedsYouKind::ScheduleFailed { .. } => 1,
+            NeedsYouKind::GitHub { item, .. } if item.is_ci_failure => 2,
+            NeedsYouKind::Card { .. } => 3,
+            NeedsYouKind::GitHub { .. } => 4,
+        };
+        rank(&a.kind)
+            .cmp(&rank(&b.kind))
+            .then_with(|| b.timestamp_ms.cmp(&a.timestamp_ms))
+            .then_with(|| a.key.cmp(&b.key))
+    });
     inbox.agent_terminals.sort_by(|a, b| {
         let rank = |s: HerdrStatus| match s {
-            HerdrStatus::Blocked => 0,
-            HerdrStatus::Error | HerdrStatus::Disconnected => 1,
-            HerdrStatus::Done => 2,
-            HerdrStatus::Working | HerdrStatus::Starting => 3,
-            _ => 4,
+            HerdrStatus::Working | HerdrStatus::Starting => 0,
+            HerdrStatus::Done => 1,
+            _ => 2,
         };
         rank(a.status)
             .cmp(&rank(b.status))
@@ -1764,24 +2024,15 @@ pub fn build_daily_inbox(
         .done_today_items
         .sort_by(|a, b| b.completed_at.cmp(&a.completed_at).then(a.key.cmp(&b.key)));
 
-    let gh_count: usize = inbox.github_stacks.iter().map(|s| s.items.len()).sum();
-    let gh_actionable: usize = inbox.github_stacks.iter().map(|s| s.actionable_count).sum();
+    // Strictly 1:1 invariant: rail badge == `Needs Action` section count!
+    inbox.actionable_count = inbox.needs_you.len();
+
+    // Today progress counts ONLY Tier 1 + Tier 2 direct work (passive `github_watching` excluded!).
+    let gh_direct_count: usize = inbox.github_stacks.iter().map(|s| s.items.len()).sum();
     let sched_card_count: usize = inbox.schedule_stacks.iter().map(|s| s.cards.len()).sum();
     let plain_shell_stack_count = usize::from(!inbox.plain_shells.is_empty());
-    let urgent_agent_terms = inbox
-        .agent_terminals
-        .iter()
-        .filter(|t| {
-            matches!(
-                t.status,
-                HerdrStatus::Blocked | HerdrStatus::Error | HerdrStatus::Disconnected
-            )
-        })
-        .count();
-
-    inbox.actionable_count = inbox.needs_you.len() + urgent_agent_terms + gh_actionable;
     inbox.remaining_today = inbox.needs_you.len()
-        + gh_count
+        + gh_direct_count
         + sched_card_count
         + inbox.open_cards.len()
         + inbox.agent_terminals.len()

@@ -418,7 +418,8 @@ impl AppServer {
                     .is_none_or(|d| d.request_key != format!("github:{}:{}", next.repository_id, next.number))
             {
                 newly_merged = true;
-                let resolved_at = now_ms;
+                let resolved_at =
+                    parse_github_timestamp_ms(remote["merged_at"].as_str()).unwrap_or(now_ms);
                 current.delivery = Some(Delivery {
                     target_branch: next.base_branch.clone(),
                     commit: remote["merge_commit_sha"]
@@ -1058,7 +1059,8 @@ impl AppServer {
                     .as_ref()
                     .is_none_or(|d| d.request_key != request_key);
                 if newly_merged {
-                    let resolved_at = self.now_ms();
+                    let resolved_at = parse_github_timestamp_ms(pr_data["merged_at"].as_str())
+                        .unwrap_or_else(|| self.now_ms());
                     current.delivery = Some(Delivery {
                         target_branch: base_branch.clone(),
                         commit: commit.clone(),
@@ -1548,6 +1550,7 @@ fn seed_pr_activity_cache(
                 json!({
                     "body": c["body"].as_str().unwrap_or(""),
                     "url": c["html_url"].as_str().unwrap_or(""),
+                    "created_at": c["created_at"].as_str().unwrap_or(""),
                 }),
             );
         }
@@ -1562,6 +1565,7 @@ fn seed_pr_activity_cache(
                     "url": c["html_url"].as_str().unwrap_or(""),
                     "path": c["path"].as_str().unwrap_or(""),
                     "line": c["line"].as_u64().or_else(|| c["original_line"].as_u64()),
+                    "created_at": c["created_at"].as_str().unwrap_or(""),
                 }),
             );
         }
@@ -1575,6 +1579,8 @@ fn seed_pr_activity_cache(
                     "body": r["body"].as_str().unwrap_or(""),
                     "url": r["html_url"].as_str().unwrap_or(""),
                     "state": r["state"].as_str().unwrap_or(""),
+                    "submitted_at": r["submitted_at"].as_str().unwrap_or(""),
+                    "created_at": r["created_at"].as_str().unwrap_or(""),
                 }),
             );
         }

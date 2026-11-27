@@ -24,7 +24,10 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             || 0,
             move |_| ui.show_search(false),
         ));
-    let inbox_count = computed(move || ui.daily_inbox.with(|i| i.remaining_today));
+    let inbox_count = computed(move || {
+        ui.daily_inbox
+            .with(|i| crate::inbox::state::current_inbox_count(i))
+    });
     let rail = rail
         .child(icon_action(
             Icon::Inbox,

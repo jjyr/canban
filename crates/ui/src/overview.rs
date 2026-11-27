@@ -210,13 +210,21 @@ pub fn running_agents_count_from(
     card_running + standalone_running
 }
 
-fn is_triaged_out_in_inbox(s: &canban_types::Snapshot, key: &str, now_ms: u64) -> bool {
+fn is_triaged_out_in_inbox(
+    s: &canban_types::Snapshot,
+    key: &str,
+    now_ms: u64,
+    watermark: Option<u64>,
+) -> bool {
     let Some(entry) = s.inbox_entries.iter().find(|e| e.id == key) else {
         return false;
     };
     match entry.state.as_str() {
         "deferred" => entry.defer_until.is_some_and(|t| t > now_ms),
-        "dismissed" => true,
+        "dismissed" => {
+            let superseded = watermark.is_some_and(|w| entry.watermark.is_some_and(|ew| w > ew));
+            !superseded
+        }
         _ => false,
     }
 }
@@ -233,7 +241,11 @@ fn live_pulse_summary(ui: Ui) -> (usize, usize, usize, usize) {
             let mut urgent_cards = std::collections::BTreeSet::new();
             for row in all_rows.iter().filter(|r| r.actionable()) {
                 let key = format!("card:{}", row.card.id);
-                if !is_triaged_out_in_inbox(s, &key, now_ms) {
+                let wm = s
+                    .card_summaries
+                    .get(&row.card.id)
+                    .map(|c| c.last_event_seq.max(c.last_activity_at));
+                if !is_triaged_out_in_inbox(s, &key, now_ms, wm) {
                     urgent_cards.insert(row.card.id.as_str());
                 }
             }
@@ -241,7 +253,12 @@ fn live_pulse_summary(ui: Ui) -> (usize, usize, usize, usize) {
                 .iter()
                 .filter(|e| {
                     standalone_terminal_needs_you(s, e)
-                        && !is_triaged_out_in_inbox(s, &format!("terminal:{}", e.saved.id), now_ms)
+                        && !is_triaged_out_in_inbox(
+                            s,
+                            &format!("terminal:{}", e.saved.id),
+                            now_ms,
+                            Some(e.saved.created_at),
+                        )
                 })
                 .count();
             let running = running_agents_count_from(s, &all_rows, entries, None);
@@ -257,8 +274,8 @@ fn live_pulse_summary(ui: Ui) -> (usize, usize, usize, usize) {
             (urgent_cards.len() + standalone_urgent, running, queued)
         })
     });
-    let inbox_remaining = ui.daily_inbox.with(|i| i.remaining_today);
-    (urgent, running, queued, inbox_remaining)
+    let inbox_actionable = ui.daily_inbox.with(|i| i.actionable_count);
+    (urgent, running, queued, inbox_actionable)
 }
 
 pub fn trigger_pill(ui: Ui) -> impl IntoElement {
@@ -404,7 +421,14 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                 .iter()
                 .filter(|r| {
                     r.actionable()
-                        && !is_triaged_out_in_inbox(s, &format!("card:{}", r.card.id), now_ms)
+                        && !is_triaged_out_in_inbox(
+                            s,
+                            &format!("card:{}", r.card.id),
+                            now_ms,
+                            s.card_summaries
+                                .get(&r.card.id)
+                                .map(|c| c.last_event_seq.max(c.last_activity_at)),
+                        )
                 })
                 .cloned()
                 .map(|r| prepare_overview_row(ui, s, &idx, &counts, &profiles, r, true))
@@ -413,7 +437,12 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                 .iter()
                 .filter(|e| {
                     standalone_terminal_needs_you(s, e)
-                        && !is_triaged_out_in_inbox(s, &format!("terminal:{}", e.saved.id), now_ms)
+                        && !is_triaged_out_in_inbox(
+                            s,
+                            &format!("terminal:{}", e.saved.id),
+                            now_ms,
+                            Some(e.saved.created_at),
+                        )
                 })
                 .map(|e| prepare_standalone_row(ui, s, e, true))
                 .collect();
@@ -648,11 +677,11 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                 .gap_2()
                                 .child(
                                     muted(move || {
-                                        let rem = stats.get().3;
-                                        if rem == 0 {
-                                            "Today's Inbox cleared ✓".into()
+                                        let actionable = stats.get().3;
+                                        if actionable == 0 {
+                                            "Daily Briefing: nothing blocked ✓".into()
                                         } else {
-                                            format!("{rem} remaining in Inbox")
+                                            format!("{actionable} waiting in Daily Briefing")
                                         }
                                     })
                                     .text_size(px(12.)),

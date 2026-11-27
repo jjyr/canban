@@ -118,13 +118,21 @@ pub fn format_cutoff(minutes: u16) -> String {
 }
 
 pub fn init(ui: Ui) {
+    // Hydrate GitHub notifications on startup/connect AND whenever the user visits Inbox or gh state changes,
+    // so the left-rail Inbox badge accurately reflects unread GitHub mentions/reviews immediately.
     effect(move || {
-        let on_inbox = ui.page.get() == "inbox";
         let _ = ui.inbox.gh_epoch.get();
-        if on_inbox && crate::backend::is_connected() {
+        let on_inbox = ui.page.get() == "inbox";
+        let gh_connected = ui
+            .github
+            .gh_status
+            .with(|s| s["state"].as_str() == Some("connected"));
+        if crate::backend::is_connected() && (on_inbox || gh_connected) {
             untracked(|| {
-                refresh_github_notifications(ui, false);
-                prefetch_agent_terminal_previews(ui);
+                let empty = ui.inbox.github_notifications.with_untracked(Vec::is_empty);
+                if on_inbox || empty {
+                    refresh_github_notifications(ui, false);
+                }
             });
         }
     });

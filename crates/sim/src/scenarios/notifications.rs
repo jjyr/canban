@@ -631,19 +631,24 @@ pub fn run(seed: u64) -> Result<u64> {
                 .any(|d| d.key == card_key),
             "Deferred card missing from inbox.deferred_items after bounce"
         );
+        let gh_needs_count = inbox_deferred
+            .needs_you
+            .iter()
+            .filter(|n| matches!(n.kind, canban_notifications::NeedsYouKind::GitHub { .. }))
+            .count();
         ensure!(
-            inbox_deferred.github_stacks.len() == 1
-                && inbox_deferred.github_stacks[0].items.len() == 3
-                && inbox_deferred.github_stacks[0].actionable_count == 2
+            gh_needs_count == 2
+                && inbox_deferred.github_watching.len() == 1
+                && inbox_deferred.github_watching[0].items.len() == 1
                 && inbox_deferred.earlier_github.len() == 1
                 && inbox_deferred.earlier_github[0].number == Some(12),
-            "Expected 3 today GitHub notifications (2 actionable) + 1 earlier; got stacks={:?} earlier={:?}",
-            inbox_deferred.github_stacks,
+            "Expected 2 unread direct GitHub blockers in Tier 1 needs_you, 1 passive subscribed in Tier 3 github_watching, and 1 historical in Tier 4 earlier_github; got gh_needs={gh_needs_count} watching={:?} earlier={:?}",
+            inbox_deferred.github_watching,
             inbox_deferred.earlier_github
         );
         ensure!(
-            inbox_deferred.actionable_count == inbox_deferred.needs_you.len() + 2,
-            "Actionable badge count should exclude non-actionable GitHub & open cards: got {} (needs_you={})",
+            inbox_deferred.actionable_count == inbox_deferred.needs_you.len(),
+            "Strict 1:1 parity: actionable_count ({}) must equal needs_you.len() ({})",
             inbox_deferred.actionable_count,
             inbox_deferred.needs_you.len()
         );
@@ -771,14 +776,14 @@ pub fn run(seed: u64) -> Result<u64> {
                 "Historical synced GitHub card missing from carryover_cards"
             );
             ensure!(
-                synced_inbox.github_stacks.iter().any(|s| {
+                synced_inbox.github_watching.iter().any(|s| {
                     s.synced_card_count == 1
                         && s.items.iter().any(|i| {
                             i.card_id.as_deref() == Some("gh-today-card") && i.is_synced_card
                         })
                 }),
-                "Today-updated synced GitHub card was not bundled into project github_stacks: {:?}",
-                synced_inbox.github_stacks
+                "Today-updated untouched synced GitHub card should route to Tier 3 github_watching: {:?}",
+                synced_inbox.github_watching
             );
         }
 
