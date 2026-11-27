@@ -768,6 +768,9 @@ impl Snapshot {
         for rd in &self.review_drafts {
             self.entity_hosts.insert(rd.card_id.clone(), h.clone());
         }
+        for sub in &self.event_subscriptions {
+            self.entity_hosts.insert(sub.id.clone(), h.clone());
+        }
     }
 
     pub fn merge_remote_snapshot(&mut self, mut remote: Snapshot, summary: HostSummary) {
@@ -826,10 +829,17 @@ impl Snapshot {
             .iter()
             .map(|d| d.card_id.clone())
             .collect();
+        let existing_event_subscriptions: HashSet<String> = self
+            .event_subscriptions
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
 
         let mut project_map: HashMap<String, String> = HashMap::new();
         let mut card_map: HashMap<String, String> = HashMap::new();
         let mut terminal_map: HashMap<String, String> = HashMap::new();
+        let mut config_session_map: HashMap<String, String> = HashMap::new();
+        let mut merge_batch_map: HashMap<String, String> = HashMap::new();
         let mut worktree_map: HashMap<String, String> = HashMap::new();
         let mut workflow_source_map: HashMap<String, String> = HashMap::new();
         let mut workflow_revision_map: HashMap<String, String> = HashMap::new();
@@ -914,11 +924,35 @@ impl Snapshot {
         }
 
         // 5. Terminals (and AgentRuns) & ScheduledRuns & ScheduleStates
-        // Pre-pass schedule_states/runs IDs and workflow_runs IDs so cross-references align.
+        // Pre-pass shared-ID entities (`scheduled_runs`, `configuration_sessions`, `merge_batches`,
+        // and `terminals`) together so cross-references and `id == terminal.id` joins stay aligned.
         for sr in &remote.scheduled_runs {
             let is_global = sr.project_id == GLOBAL_PROJECT_ID;
-            if is_global || existing_scheduled_runs.contains(&sr.id) {
-                scheduled_run_map.insert(sr.id.clone(), qualify_host_id(&host_id, &sr.id));
+            if is_global
+                || existing_scheduled_runs.contains(&sr.id)
+                || existing_terminals.contains(&sr.id)
+            {
+                let q = qualify_host_id(&host_id, &sr.id);
+                scheduled_run_map.insert(sr.id.clone(), q.clone());
+                terminal_map.insert(sr.id.clone(), q);
+            }
+        }
+        for cs in &remote.configuration_sessions {
+            let is_global = cs.project_id == GLOBAL_PROJECT_ID;
+            if is_global
+                || existing_config_sessions.contains(&cs.id)
+                || existing_terminals.contains(&cs.id)
+            {
+                let q = qualify_host_id(&host_id, &cs.id);
+                config_session_map.insert(cs.id.clone(), q.clone());
+                terminal_map.insert(cs.id.clone(), q);
+            }
+        }
+        for mb in &remote.merge_batches {
+            if existing_merge_batches.contains(&mb.id) || existing_terminals.contains(&mb.id) {
+                let q = qualify_host_id(&host_id, &mb.id);
+                merge_batch_map.insert(mb.id.clone(), q.clone());
+                terminal_map.insert(mb.id.clone(), q);
             }
         }
         for ss in &remote.schedule_states {
@@ -934,17 +968,22 @@ impl Snapshot {
         }
         for t in &remote.terminals {
             if existing_terminals.contains(&t.id) {
-                terminal_map.insert(t.id.clone(), qualify_host_id(&host_id, &t.id));
+                terminal_map
+                    .entry(t.id.clone())
+                    .or_insert_with(|| qualify_host_id(&host_id, &t.id));
             }
         }
 
-        // Fixup Card schedule_source refs now that schedule_map / scheduled_run_map are populated.
+        // Fixup Card schedule_source and human_gate refs now that maps are populated.
         for mut c_fix in std::mem::take(&mut self.cards) {
             if !existing_cards.contains(&c_fix.id) || card_map.values().any(|v| v == &c_fix.id) {
                 // Card either wasn't in `self` originally or was remapped for this remote host.
                 if let Some(ref mut ss_ref) = c_fix.schedule_source {
                     remap_string(&mut ss_ref.schedule_id, &schedule_map);
                     remap_string(&mut ss_ref.run_id, &scheduled_run_map);
+                }
+                if let Some(ref mut gate) = c_fix.human_gate {
+                    remap_opt(&mut gate.terminal_id, &terminal_map);
                 }
             }
             self.cards.push(c_fix);
@@ -1031,9 +1070,7 @@ impl Snapshot {
 
         for mut cs in remote.configuration_sessions {
             remap_string(&mut cs.project_id, &project_map);
-            if existing_config_sessions.contains(&cs.id) {
-                cs.id = qualify_host_id(&host_id, &cs.id);
-            }
+            remap_string(&mut cs.id, &config_session_map);
             self.entity_hosts
                 .entry(cs.id.clone())
                 .or_insert_with(|| host_id.clone());
@@ -1046,9 +1083,7 @@ impl Snapshot {
                 remap_string(&mut item.card_id, &card_map);
                 remap_string(&mut item.workflow_run_id, &workflow_run_map);
             }
-            if existing_merge_batches.contains(&mb.id) {
-                mb.id = qualify_host_id(&host_id, &mb.id);
-            }
+            remap_string(&mut mb.id, &merge_batch_map);
             self.entity_hosts
                 .entry(mb.id.clone())
                 .or_insert_with(|| host_id.clone());
@@ -1238,7 +1273,20 @@ impl Snapshot {
             }
         }
 
-        self.event_subscriptions.extend(remote.event_subscriptions);
+        for mut sub in remote.event_subscriptions {
+            remap_opt(&mut sub.selector.project_id, &project_map);
+            remap_opt(&mut sub.selector.card_id, &card_map);
+            if let SubscriptionTarget::Workflow { card_id, .. } = &mut sub.target {
+                remap_opt(card_id, &card_map);
+            }
+            if existing_event_subscriptions.contains(&sub.id) {
+                sub.id = qualify_host_id(&host_id, &sub.id);
+            }
+            self.entity_hosts
+                .entry(sub.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.event_subscriptions.push(sub);
+        }
     }
 
     pub fn host_of<'a>(&'a self, entity_id: &str) -> &'a str {

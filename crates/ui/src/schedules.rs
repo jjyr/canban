@@ -494,13 +494,24 @@ fn collect_scope_items(
         let latest_run = s
             .scheduled_runs
             .iter()
-            .filter(|r| r.schedule_id == st.id)
+            .filter(|r| {
+                let rh = if r.host_id.is_empty() {
+                    s.host_of(&r.id)
+                } else {
+                    r.host_id.as_str()
+                };
+                rh == host_id && r.schedule_id == st.id
+            })
             .max_by_key(|r| (r.scheduled_at, r.number))
             .cloned();
-        let active_blocked = s
-            .scheduled_runs
-            .iter()
-            .any(|r| r.schedule_id == st.id && r.state == "blocked");
+        let active_blocked = s.scheduled_runs.iter().any(|r| {
+            let rh = if r.host_id.is_empty() {
+                s.host_of(&r.id)
+            } else {
+                r.host_id.as_str()
+            };
+            rh == host_id && r.schedule_id == st.id && r.state == "blocked"
+        });
         items.push(ScheduleItem {
             key: schedule_key_for_host(scope_id, host_id, &st.filename, &st.rule_id),
             legacy_key: format!("{}::{}", st.filename, st.rule_id),

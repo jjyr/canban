@@ -3252,6 +3252,442 @@ steps:
             world.hit("client_pages.remote_last_project_preference");
         }
 
+        // 14. Cross-host entity scoping: unified shared-ID remapping across terminals/sessions/
+        //     batches/runs, `human_gate.terminal_id` & `event_subscriptions` remapping, qualified
+        //     special-session recognition, workflow config lookup, column automation isolation,
+        //     and `entries()` worktree host scoping.
+        {
+            let wf_snap = world.client_merged_snapshot()?;
+            let base_proj = wf_snap
+                .projects
+                .first()
+                .context("project expected in merged snapshot")?;
+            let base_card = wf_snap
+                .cards
+                .first()
+                .context("card expected in merged snapshot")?;
+            let mut local_snap = Snapshot::default();
+            let mut local_proj = base_proj.clone();
+            local_proj.id = "p-shared".into();
+            local_proj.name = "Shared Proj".into();
+            local_proj.directory = "/shared/proj".into();
+            local_snap.projects.push(local_proj);
+            let mut local_card = base_card.clone();
+            local_card.id = "c-shared".into();
+            local_card.project_id = "p-shared".into();
+            local_card.number = 1;
+            local_card.title = "Local Shared Card".into();
+            local_card.stage = "develop".into();
+            local_card.human_gate = None;
+            local_snap.cards.push(local_card);
+            local_snap.worktrees.push(canban_types::ManagedWorktree {
+                id: "wt-local".into(),
+                project_id: "p-shared".into(),
+                branch: "feat/local".into(),
+                base_branch: "main".into(),
+                base_commit: None,
+                path: "/shared/wt".into(),
+                directory: "/shared/proj".into(),
+                created_at: 1,
+            });
+            local_snap.terminals.push(serde_json::from_value(json!({
+                "id": "term-shared",
+                "conversation_id": null,
+                "number": 1,
+                "name": "Local Term",
+                "origin_project_id": "p-shared",
+                "runtime": { "state": "running", "connection": "connected", "terminal": "pty-l1" },
+                "created_at": 1
+            }))?);
+            local_snap
+                .configuration_sessions
+                .push(canban_types::ConfigurationSession {
+                    id: "configuration:p-shared:workflows:claude".into(),
+                    project_id: "p-shared".into(),
+                    profile_id: "claude".into(),
+                    provider_session_id: None,
+                    generation: 1,
+                    state: "finished".into(),
+                    prompt: "local".into(),
+                    error: None,
+                });
+            local_snap.merge_batches.push(canban_types::MergeBatch {
+                id: "merge-queue:p-shared:b1".into(),
+                project_id: "p-shared".into(),
+                profile_id: "claude".into(),
+                provider_session_id: None,
+                target_branch: "main".into(),
+                target_head: "abc".into(),
+                strategy: Default::default(),
+                sync_upstream: false,
+                test_command: None,
+                worktree: "/shared/wt-merge".into(),
+                state: "completed".into(),
+                failure_kind: None,
+                conflict_card_number: None,
+                conflict_files: Vec::new(),
+                test_output: None,
+                items: Vec::new(),
+                prompt: String::new(),
+                error: None,
+                queued_at: None,
+                started_at: None,
+                created_at: 1,
+                updated_at: 1,
+            });
+            let base_src = wf_snap
+                .workflow_sources
+                .iter()
+                .find(|ws| ws.filename == "development.yaml")
+                .context("default development.yaml workflow source expected")?;
+            let base_rev = wf_snap
+                .workflow_revisions
+                .iter()
+                .find(|wr| wr.id == base_src.revision_id)
+                .context("default development.yaml workflow revision expected")?;
+            let mut local_src = base_src.clone();
+            local_src.host_id = "local".into();
+            local_src.id = "ws-shared".into();
+            local_src.project_id = "p-shared".into();
+            local_src.workflow_id = "development".into();
+            local_src.revision = 1;
+            local_src.revision_id = "wr-shared".into();
+            local_src.enabled = true;
+            let mut local_rev = base_rev.clone();
+            local_rev.host_id = "local".into();
+            local_rev.id = "wr-shared".into();
+            local_rev.project_id = "p-shared".into();
+            local_rev.workflow_id = "development".into();
+            local_rev.revision = 1;
+            local_rev.definition.name = "Local Flow".into();
+            local_snap.workflow_sources.push(local_src);
+            local_snap.workflow_revisions.push(local_rev);
+            local_snap
+                .event_subscriptions
+                .push(serde_json::from_value(json!({
+                    "id": "sub-shared",
+                    "revision": 1,
+                    "selector": { "project_id": "p-shared", "column": "develop", "types": ["card.updated"] },
+                    "target": { "type": "workflow", "workflow_id": "development", "entry": "develop", "card_id": "c-shared" },
+                    "enabled": true,
+                    "cursor": 0,
+                    "created_at": 1
+                }))?);
+            local_snap.register_host_entities("local");
+
+            let mut remote_snap = Snapshot::default();
+            let mut remote_proj = base_proj.clone();
+            remote_proj.id = "p-shared".into();
+            remote_proj.name = "Shared Proj".into();
+            remote_proj.directory = "/shared/proj".into();
+            remote_snap.projects.push(remote_proj);
+            let mut remote_card_src = base_card.clone();
+            remote_card_src.id = "c-shared".into();
+            remote_card_src.project_id = "p-shared".into();
+            remote_card_src.number = 1;
+            remote_card_src.title = "Remote Shared Card".into();
+            remote_card_src.stage = "develop".into();
+            remote_card_src.human_gate = Some(HumanGate {
+                reason: "Approve".into(),
+                next_stage: Some("review".into()),
+                terminal_id: Some("term-shared".into()),
+            });
+            remote_snap.cards.push(remote_card_src);
+            remote_snap.terminals.push(serde_json::from_value(json!({
+                "id": "term-shared",
+                "conversation_id": null,
+                "number": 1,
+                "name": "Remote Shared Term",
+                "origin_project_id": "p-shared",
+                "runtime": { "state": "running", "connection": "connected", "terminal": "pty-r1" },
+                "created_at": 2
+            }))?);
+            // Remote special sessions whose IDs collide with local session/batch rows (not terminals)
+            // plus a remote __global scheduled run + matching terminal.
+            remote_snap
+                .configuration_sessions
+                .push(canban_types::ConfigurationSession {
+                    id: "configuration:p-shared:workflows:claude".into(),
+                    project_id: "p-shared".into(),
+                    profile_id: "claude".into(),
+                    provider_session_id: None,
+                    generation: 2,
+                    state: "running".into(),
+                    prompt: "remote".into(),
+                    error: None,
+                });
+            remote_snap.terminals.push(serde_json::from_value(json!({
+                "id": "configuration:p-shared:workflows:claude",
+                "conversation_id": null,
+                "number": 2,
+                "name": "Remote Config",
+                "origin_project_id": "p-shared",
+                "runtime": { "state": "running", "connection": "connected", "terminal": "pty-rcfg" },
+                "created_at": 2
+            }))?);
+            remote_snap.merge_batches.push(canban_types::MergeBatch {
+                id: "merge-queue:p-shared:b1".into(),
+                project_id: "p-shared".into(),
+                profile_id: "claude".into(),
+                provider_session_id: None,
+                target_branch: "main".into(),
+                target_head: "def".into(),
+                strategy: Default::default(),
+                sync_upstream: false,
+                test_command: None,
+                worktree: "/shared/wt-merge".into(),
+                state: "running".into(),
+                failure_kind: None,
+                conflict_card_number: None,
+                conflict_files: Vec::new(),
+                test_output: None,
+                items: Vec::new(),
+                prompt: String::new(),
+                error: None,
+                queued_at: None,
+                started_at: None,
+                created_at: 2,
+                updated_at: 2,
+            });
+            remote_snap.terminals.push(serde_json::from_value(json!({
+                "id": "merge-queue:p-shared:b1",
+                "conversation_id": null,
+                "number": 3,
+                "name": "Remote Merge",
+                "origin_project_id": "p-shared",
+                "runtime": { "state": "running", "connection": "connected", "terminal": "pty-rmb" },
+                "created_at": 2
+            }))?);
+            remote_snap.scheduled_runs.push(canban_types::ScheduledRun {
+                host_id: String::new(),
+                id: "scheduled:__global:r1".into(),
+                schedule_id: "schedule:__global:wf:r1".into(),
+                project_id: "__global".into(),
+                workflow_id: "global:wf".into(),
+                workflow_name: "Remote Global".into(),
+                filename: "gc.yaml".into(),
+                rule_id: "schedule".into(),
+                cron: "0 * * * *".into(),
+                number: 1,
+                trigger_kind: "cron".into(),
+                creates_card: false,
+                card_id: None,
+                card_number: None,
+                workflow_run_id: None,
+                start_step: None,
+                current_step: None,
+                profile_id: None,
+                provider_session_id: None,
+                terminal_id: Some("scheduled:__global:r1".into()),
+                cwd: "/shared/proj".into(),
+                state: "running".into(),
+                summary: None,
+                report_path: None,
+                output_path: None,
+                error: None,
+                steps: Vec::new(),
+                scheduled_at: 2,
+                started_at: None,
+                completed_at: None,
+                close_requested_at: None,
+                updated_at: 2,
+            });
+            remote_snap.terminals.push(serde_json::from_value(json!({
+                "id": "scheduled:__global:r1",
+                "conversation_id": null,
+                "number": 4,
+                "name": "Remote Global Sched",
+                "origin_project_id": "__global",
+                "runtime": { "state": "running", "connection": "connected", "terminal": "pty-rsched" },
+                "created_at": 2
+            }))?);
+            let mut remote_src = base_src.clone();
+            remote_src.host_id = "remote-a".into();
+            remote_src.id = "ws-shared".into();
+            remote_src.project_id = "p-shared".into();
+            remote_src.workflow_id = "development".into();
+            remote_src.revision = 1;
+            remote_src.revision_id = "wr-shared".into();
+            remote_src.enabled = true;
+            let mut remote_rev = base_rev.clone();
+            remote_rev.host_id = "remote-a".into();
+            remote_rev.id = "wr-shared".into();
+            remote_rev.project_id = "p-shared".into();
+            remote_rev.workflow_id = "development".into();
+            remote_rev.revision = 1;
+            remote_rev.definition.name = "Remote Flow".into();
+            remote_snap.workflow_sources.push(remote_src);
+            remote_snap.workflow_revisions.push(remote_rev);
+            remote_snap
+                .event_subscriptions
+                .push(serde_json::from_value(json!({
+                    "id": "sub-shared",
+                    "revision": 1,
+                    "selector": { "project_id": "p-shared", "card_id": "c-shared", "column": "develop", "types": ["remote.custom_event"] },
+                    "target": { "type": "workflow", "workflow_id": "development", "entry": "develop", "card_id": "c-shared" },
+                    "enabled": true,
+                    "cursor": 0,
+                    "created_at": 2
+                }))?);
+
+            let remote_summary = world
+                .client_host_summaries()
+                .into_iter()
+                .find(|h| h.id == "remote-a")
+                .context("remote-a host summary expected")?;
+            local_snap.merge_remote_snapshot(remote_snap, remote_summary);
+
+            // 14a. Shared-ID alignment across terminals / sessions / merge batches / global runs.
+            let q_cfg = "host::remote-a::configuration:p-shared:workflows:claude";
+            let q_mb = "host::remote-a::merge-queue:p-shared:b1";
+            let q_sched = "host::remote-a::scheduled:__global:r1";
+            ensure!(
+                local_snap
+                    .configuration_sessions
+                    .iter()
+                    .any(|c| c.id == q_cfg)
+                    && local_snap.terminals.iter().any(|t| t.id == q_cfg),
+                "remote configuration session and its terminal must stay ID-aligned"
+            );
+            ensure!(
+                local_snap.merge_batches.iter().any(|b| b.id == q_mb)
+                    && local_snap.terminals.iter().any(|t| t.id == q_mb),
+                "remote merge batch and its terminal must stay ID-aligned"
+            );
+            ensure!(
+                local_snap.scheduled_runs.iter().any(|r| r.id == q_sched)
+                    && local_snap.terminals.iter().any(|t| t.id == q_sched),
+                "remote __global scheduled run and its terminal must stay ID-aligned"
+            );
+
+            // 14b. Card human_gate.terminal_id and event_subscriptions remapping.
+            let remote_card = local_snap
+                .cards
+                .iter()
+                .find(|c| c.id == "host::remote-a::c-shared")
+                .context("qualified remote card expected")?;
+            ensure!(
+                remote_card
+                    .human_gate
+                    .as_ref()
+                    .and_then(|g| g.terminal_id.as_deref())
+                    == Some("host::remote-a::term-shared"),
+                "remote card human_gate.terminal_id must be remapped on collision: {:?}",
+                remote_card.human_gate
+            );
+            let remote_sub = local_snap
+                .event_subscriptions
+                .iter()
+                .find(|sub| sub.id == "host::remote-a::sub-shared")
+                .context("qualified remote event_subscription expected")?;
+            ensure!(
+                remote_sub.selector.project_id.as_deref() == Some("host::remote-a::p-shared")
+                    && remote_sub.selector.card_id.as_deref() == Some("host::remote-a::c-shared")
+                    && local_snap.host_of(&remote_sub.id) == "remote-a",
+                "remote event_subscription refs/host must be remapped: {remote_sub:?}"
+            );
+
+            // 14c. Qualified special-session & automated-terminal recognition.
+            for (tid, expected_kind) in [
+                (q_cfg, canban_types::ManagedTerminalKind::Configuration),
+                (q_mb, canban_types::ManagedTerminalKind::MergeQueue),
+                (q_sched, canban_types::ManagedTerminalKind::Scheduled),
+            ] {
+                let term = local_snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .context("qualified special terminal expected")?;
+                ensure!(
+                    term.is_special_session()
+                        && term.managed_kind() == Some(expected_kind)
+                        && canban_ui::activity::is_automated_terminal(&local_snap, tid),
+                    "qualified special terminal {tid} must be recognized as {expected_kind:?}"
+                );
+            }
+
+            // 14d. Workflow configuration session lookup by host/project.
+            let local_cfg = canban_ui::workflows::find_workflow_configuration_session(
+                &local_snap,
+                "p-shared",
+                "claude",
+            )
+            .context("local workflow config session expected")?;
+            let remote_cfg = canban_ui::workflows::find_workflow_configuration_session(
+                &local_snap,
+                "host::remote-a::p-shared",
+                "claude",
+            )
+            .context("remote workflow config session expected")?;
+            ensure!(
+                local_cfg.state == "finished" && remote_cfg.state == "running",
+                "workflow config session lookup must isolate local vs remote colliding projects"
+            );
+
+            // 14e. Column automation isolation across hosts with identical workflow_id/revision.
+            let local_auto =
+                canban_ui::workflows::project_column_automation(&local_snap, "p-shared", "develop")
+                    .context("local develop automation expected")?;
+            let remote_auto = canban_ui::workflows::project_column_automation(
+                &local_snap,
+                "host::remote-a::p-shared",
+                "develop",
+            )
+            .context("remote develop automation expected")?;
+            ensure!(
+                local_auto.tooltip.contains("Local Flow")
+                    && !local_auto.tooltip.contains("Remote Flow")
+                    && !local_auto.tooltip.contains("remote.custom_event"),
+                "local column automation leaked remote workflow/subscription: {}",
+                local_auto.tooltip
+            );
+            ensure!(
+                remote_auto.tooltip.contains("Remote Flow")
+                    && !remote_auto.tooltip.contains("Local Flow")
+                    && remote_auto.tooltip.contains("remote.custom_event"),
+                "remote column automation did not use remote workflow/subscription: {}",
+                remote_auto.tooltip
+            );
+
+            // 14f. `entries()` must not match a remote terminal's cwd against a local managed worktree
+            //      even when the remote terminal ID is not yet in `entity_hosts`.
+            let optimistic_remote_tid = "shell-remote-optimistic".to_owned();
+            local_snap.terminals.push(serde_json::from_value(json!({
+                "id": optimistic_remote_tid,
+                "conversation_id": null,
+                "number": 99,
+                "name": "Remote Optimistic",
+                "origin_project_id": "host::remote-a::p-shared",
+                "runtime": { "state": "running", "connection": "connected", "terminal": "pty-opt" },
+                "created_at": 3
+            }))?);
+            local_snap.terminal_contexts.push(TerminalContext {
+                terminal_id: optimistic_remote_tid.clone(),
+                core_id: "core-remote".into(),
+                terminal: "pty-opt".into(),
+                cwd: Some("/shared/wt".into()),
+                directory_root: Some("/shared/wt".into()),
+                project_id: Some("host::remote-a::p-shared".into()),
+                card_id: Some("host::remote-a::c-shared".into()),
+                ..Default::default()
+            });
+            let entries_now = canban_ui::terminals::entries(&local_snap);
+            let opt_entry = entries_now
+                .iter()
+                .find(|e| e.saved.id == optimistic_remote_tid)
+                .context("optimistic remote terminal entry expected")?;
+            ensure!(
+                opt_entry.host_id == "remote-a"
+                    && opt_entry.card.as_ref().map(|c| c.id.as_str())
+                        == Some("host::remote-a::c-shared"),
+                "remote terminal cwd matching local worktree path must not drop remote card association: host={} card={:?}",
+                opt_entry.host_id,
+                opt_entry.card.as_ref().map(|c| &c.id)
+            );
+
+            world.hit("client_pages.cross_host_entity_scoping");
+        }
+
         world.heal_and_quiesce(20_000)?;
         oracle.check_quiescent_invariants(world)?;
 

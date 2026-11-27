@@ -13,9 +13,10 @@ fn activity_flush_lock() -> &'static Mutex<()> {
 /// automated sessions (`configuration:*`, `merge-queue:*`, `scheduled:*`),
 /// which should be excluded from personal `Me · Terminal` dwell tracking.
 pub fn is_automated_terminal(snapshot: &Snapshot, terminal_id: &str) -> bool {
-    if terminal_id.starts_with("configuration:")
-        || terminal_id.starts_with("merge-queue:")
-        || terminal_id.starts_with("scheduled:")
+    let raw_id = canban_types::unqualified_entity_id(terminal_id);
+    if raw_id.starts_with("configuration:")
+        || raw_id.starts_with("merge-queue:")
+        || raw_id.starts_with("scheduled:")
     {
         return true;
     }

@@ -607,14 +607,14 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .get(&t.id)
             .map(String::as_str)
             .filter(|h| !h.is_empty());
+        let resolved_terminal_host = direct_host.unwrap_or_else(|| s.terminal_host(&t.id));
         let in_managed_worktree = location.as_ref().is_some_and(|loc| {
             loc.worktree_id
                 .as_ref()
                 .is_some_and(|wid| s.worktrees.iter().any(|w| &w.id == wid))
                 || loc.cwd.as_deref().is_some_and(|cwd| {
-                    let th = direct_host.unwrap_or("local");
                     s.worktrees.iter().any(|w| {
-                        s.host_of(&w.id) == th
+                        s.host_of(&w.id) == resolved_terminal_host
                             && (cwd == w.path
                                 || cwd.starts_with(&format!("{}/", w.path.trim_end_matches('/'))))
                     })

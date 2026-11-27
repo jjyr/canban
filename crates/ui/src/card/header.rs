@@ -759,18 +759,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .workflow_runs
                 .iter()
                 .any(|run| run.card_id.as_deref() == Some(c.id.as_str()) && run.active());
-            let files: Vec<_> = s
-                .workflow_sources
-                .iter()
-                .filter(|f| f.project_id == c.project_id)
-                .cloned()
-                .collect();
-            let auto = canban_workflow_engine::source::column_automation(
-                &next.id,
-                &files,
-                &s.workflow_revisions,
-                &s.event_subscriptions,
-            );
+            let auto = crate::workflows::project_column_automation(s, &c.project_id, &next.id);
             (active_wf, auto)
         });
         let pr_primary = !review_mode

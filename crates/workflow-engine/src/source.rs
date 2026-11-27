@@ -728,7 +728,14 @@ pub fn column_details(
     for f in files.iter().filter(|f| f.enabled) {
         let Some(w) = revisions
             .iter()
-            .find(|w| w.workflow_id == f.workflow_id && w.revision == f.revision)
+            .find(|w| !f.revision_id.is_empty() && w.id == f.revision_id)
+            .or_else(|| {
+                revisions.iter().find(|w| {
+                    w.project_id == f.project_id
+                        && w.workflow_id == f.workflow_id
+                        && w.revision == f.revision
+                })
+            })
         else {
             continue;
         };
@@ -746,15 +753,19 @@ pub fn column_details(
                 lines.push(format!("{text} → {} ({name})", rule.start_at));
             }
         }
-        for sub in subscriptions
-            .iter()
-            .filter(|s| s.enabled && s.selector.column.as_deref() == Some(column))
-        {
+        for sub in subscriptions.iter().filter(|s| {
+            s.enabled
+                && s.selector.column.as_deref() == Some(column)
+                && s.selector
+                    .project_id
+                    .as_deref()
+                    .is_none_or(|pid| pid == f.project_id)
+        }) {
             if let SubscriptionTarget::Workflow {
                 workflow_id, entry, ..
             } = &sub.target
                 && workflow_id == &f.workflow_id
-                && !sub.id.starts_with("source:")
+                && !canban_types::unqualified_entity_id(&sub.id).starts_with("source:")
             {
                 lines.push(format!("{} → {entry}", sub.selector.types.join(", ")));
             }
@@ -2525,7 +2536,14 @@ pub fn column_automation(
     for f in ordered {
         let Some(w) = revisions
             .iter()
-            .find(|w| w.workflow_id == f.workflow_id && w.revision == f.revision)
+            .find(|w| !f.revision_id.is_empty() && w.id == f.revision_id)
+            .or_else(|| {
+                revisions.iter().find(|w| {
+                    w.project_id == f.project_id
+                        && w.workflow_id == f.workflow_id
+                        && w.revision == f.revision
+                })
+            })
         else {
             continue;
         };
@@ -2579,15 +2597,19 @@ pub fn column_automation(
             }
         }
 
-        for sub in subscriptions
-            .iter()
-            .filter(|s| s.enabled && s.selector.column.as_deref() == Some(column))
-        {
+        for sub in subscriptions.iter().filter(|s| {
+            s.enabled
+                && s.selector.column.as_deref() == Some(column)
+                && s.selector
+                    .project_id
+                    .as_deref()
+                    .is_none_or(|pid| pid == f.project_id)
+        }) {
             if let SubscriptionTarget::Workflow {
                 workflow_id, entry, ..
             } = &sub.target
                 && workflow_id == &f.workflow_id
-                && !sub.id.starts_with("source:")
+                && !canban_types::unqualified_entity_id(&sub.id).starts_with("source:")
             {
                 let start_id = def
                     .entries

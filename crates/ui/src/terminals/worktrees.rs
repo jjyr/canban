@@ -953,24 +953,31 @@ pub fn sync_git_target(ui: Ui, target: GitSyncTarget) {
         let mut had_behind = false;
         let mut ahead_n = 0u32;
         let mut behind_n = 0u32;
+        let target_host = target.host_id.clone();
         ui.snapshot.update(|s| {
             let entries_now = super::entries(s);
-            let matching_ids: std::collections::BTreeSet<String> = entries_now
+            let mut matching_ids: std::collections::BTreeSet<String> = entries_now
                 .into_iter()
                 .filter(|e| {
-                    entry_scope(s, e).recent_key() == scope_key
-                        || e.location
-                            .as_ref()
-                            .and_then(|l| l.directory_root.as_deref().or(l.cwd.as_deref()))
-                            == Some(target_cwd.as_str())
+                    e.host_id == target_host
+                        && (entry_scope(s, e).recent_key() == scope_key
+                            || e.location
+                                .as_ref()
+                                .and_then(|l| l.directory_root.as_deref().or(l.cwd.as_deref()))
+                                == Some(target_cwd.as_str()))
                 })
                 .map(|e| e.saved.id)
                 .collect();
-            for ctx in &mut s.terminal_contexts {
-                if matching_ids.contains(&ctx.terminal_id)
-                    || ctx.directory_root.as_deref() == Some(target_cwd.as_str())
-                    || ctx.cwd.as_deref() == Some(target_cwd.as_str())
+            for ctx in &s.terminal_contexts {
+                if s.terminal_host(&ctx.terminal_id) == target_host
+                    && (ctx.directory_root.as_deref() == Some(target_cwd.as_str())
+                        || ctx.cwd.as_deref() == Some(target_cwd.as_str()))
                 {
+                    matching_ids.insert(ctx.terminal_id.clone());
+                }
+            }
+            for ctx in &mut s.terminal_contexts {
+                if matching_ids.contains(&ctx.terminal_id) {
                     if ctx.ahead > 0 {
                         had_ahead = true;
                         ahead_n = ahead_n.max(ctx.ahead);

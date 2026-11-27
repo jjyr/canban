@@ -1864,19 +1864,21 @@ pub struct TerminalReclaimStatus {
 
 impl TerminalEntry {
     pub fn is_special_session(&self) -> bool {
-        self.id.starts_with("configuration:")
-            || self.id.starts_with("merge-queue:")
-            || self.id.starts_with("scheduled:")
+        let raw = unqualified_entity_id(&self.id);
+        raw.starts_with("configuration:")
+            || raw.starts_with("merge-queue:")
+            || raw.starts_with("scheduled:")
     }
 
     pub fn managed_kind(&self) -> Option<ManagedTerminalKind> {
+        let raw = unqualified_entity_id(&self.id);
         if self.agent.is_some() {
             Some(ManagedTerminalKind::Agent)
-        } else if self.id.starts_with("scheduled:") {
+        } else if raw.starts_with("scheduled:") {
             Some(ManagedTerminalKind::Scheduled)
-        } else if self.id.starts_with("merge-queue:") {
+        } else if raw.starts_with("merge-queue:") {
             Some(ManagedTerminalKind::MergeQueue)
-        } else if self.id.starts_with("configuration:") {
+        } else if raw.starts_with("configuration:") {
             Some(ManagedTerminalKind::Configuration)
         } else {
             None

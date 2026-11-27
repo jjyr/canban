@@ -1057,6 +1057,55 @@ pub(crate) fn workflow_dialog(
                 ),
         )
 }
+pub fn find_workflow_configuration_session<'a>(
+    s: &'a canban_types::Snapshot,
+    project_id: &str,
+    profile_id: &str,
+) -> Option<&'a canban_types::ConfigurationSession> {
+    let project_host = s.project_host(project_id);
+    let raw_pid = canban_types::unqualified_entity_id(project_id);
+    let expected_raw_id = format!("configuration:{raw_pid}:workflows:{profile_id}");
+    s.configuration_sessions.iter().find(|c| {
+        s.host_of(&c.id) == project_host
+            && c.project_id == project_id
+            && canban_types::unqualified_entity_id(&c.id) == expected_raw_id
+    })
+}
+
+pub fn project_column_automation(
+    s: &canban_types::Snapshot,
+    project_id: &str,
+    column: &str,
+) -> Option<canban_workflow_engine::source::ColumnAutomation> {
+    let project_host = s.project_host(project_id);
+    let files: Vec<_> = s
+        .workflow_sources
+        .iter()
+        .filter(|f| f.project_id == project_id && s.workflow_source_host(&f.id) == project_host)
+        .cloned()
+        .collect();
+    let revisions: Vec<_> = s
+        .workflow_revisions
+        .iter()
+        .filter(|r| {
+            r.project_id == project_id
+                && (if r.host_id.is_empty() {
+                    s.host_of(&r.id)
+                } else {
+                    r.host_id.as_str()
+                }) == project_host
+        })
+        .cloned()
+        .collect();
+    let subscriptions: Vec<_> = s
+        .event_subscriptions
+        .iter()
+        .filter(|sub| s.host_of(&sub.id) == project_host)
+        .cloned()
+        .collect();
+    canban_workflow_engine::source::column_automation(column, &files, &revisions, &subscriptions)
+}
+
 /// Shared production panel, also exercised in the native Gallery.
 pub fn agent_panel(ui: Ui) -> impl IntoElement {
     let state = ui.workflows;
@@ -1080,8 +1129,19 @@ pub fn agent_panel(ui: Ui) -> impl IntoElement {
         .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
         .child(muted(move||state.copy_status.get()))
         .child(view().flex_row().flex_wrap().gap_2().child(action("Select all",Variant::Secondary,move|_|{if let Some(api)=prompt_editor.api::<nsh_base::EditorApi>(){api.focus();api.run(nsh_base::EditorCommand::SelectAll);}})).child(action("Copy prompt",Variant::Secondary,move|_|copy_prompt(ui))).child(view().flex_1()).child(action(move||{
-            let prof=default_prof.get();
-            let key=format!("configuration:{}:workflows:{prof}",ui.project.get());ui.snapshot.with(|s|{if let Some(c)=s.configuration_sessions.iter().find(|c|c.id==key){if c.state=="finished"{"Resume and open Terminal"}else{"Continue in Terminal"}}else{"Start and open Terminal"}})
+            let prof = default_prof.get();
+            let project = ui.project.get();
+            ui.snapshot.with(|s| {
+                if let Some(c) = find_workflow_configuration_session(s, &project, &prof) {
+                    if c.state == "finished" {
+                        "Resume and open Terminal"
+                    } else {
+                        "Continue in Terminal"
+                    }
+                } else {
+                    "Start and open Terminal"
+                }
+            })
         },Variant::Primary,move|_|launch(ui,false)).disabled(move||ui.pending.get()||default_prof.get().is_empty())).child(action("New conversation",Variant::Quiet,move|_|launch(ui,true)).disabled(move||ui.pending.get()||default_prof.get().is_empty()))), move || state.agent.set(false))
 }
 fn show_history(ui: Ui) {
@@ -1165,20 +1225,8 @@ fn history_panel(ui: Ui) -> impl IntoElement {
 pub fn column_automation_pill(ui: Ui, column: String) -> impl IntoElement {
     let info = computed(move || {
         let project = ui.project.get();
-        ui.snapshot.with(|s| {
-            let files: Vec<_> = s
-                .workflow_sources
-                .iter()
-                .filter(|f| f.project_id == project)
-                .cloned()
-                .collect();
-            canban_workflow_engine::source::column_automation(
-                &column,
-                &files,
-                &s.workflow_revisions,
-                &s.event_subscriptions,
-            )
-        })
+        ui.snapshot
+            .with(|s| project_column_automation(s, &project, &column))
     });
     when(
         move || info.get().is_some(),
