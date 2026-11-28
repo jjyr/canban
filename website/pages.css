@@ -425,6 +425,14 @@
   line-height: 1.55;
 }
 
+.install-mobile-gallery {
+  margin: 24px 0 18px;
+}
+
+.install-mobile-gallery .phone-card.is-featured {
+  transform: none;
+}
+
 .faq-item {
   padding: 10px 0;
 }

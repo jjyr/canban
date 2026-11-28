@@ -26,6 +26,7 @@ OBTAINIUM_URL = (
     "%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C"
     "%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"
 )
+IOS_ISSUE_URL = f"{REPOSITORY}/issues/2"
 
 LANGUAGES = (
     {
@@ -718,6 +719,7 @@ def localize_home(lang, strings):
         "md_url": md_route(lang, ""),
         "android_apk_url": html.escape(ANDROID_APK_URL, quote=True),
         "obtainium_url": html.escape(OBTAINIUM_URL, quote=True),
+        "ios_issue_url": html.escape(IOS_ISSUE_URL, quote=True),
         "cli_ecosystem_items": render_cli_ecosystem(),
         "tab_briefing_caption": html.escape(strings["tab_briefing_desc"], quote=True),
         "tab_board_caption": html.escape(strings["tab_board_desc"], quote=True),
@@ -729,6 +731,9 @@ def localize_home(lang, strings):
         "alt_terminals": html.escape(strings["alt_terminals"], quote=True),
         "alt_git_review": html.escape(strings["alt_git_review"], quote=True),
         "alt_workflows": html.escape(strings["alt_workflows"], quote=True),
+        "alt_mobile_inbox": html.escape(strings["alt_mobile_inbox"], quote=True),
+        "alt_mobile_board": html.escape(strings["alt_mobile_board"], quote=True),
+        "alt_mobile_terminal": html.escape(strings["alt_mobile_terminal"], quote=True),
     }.items():
         body = body.replace("{{" + key + "}}", value)
     return body
@@ -810,6 +815,17 @@ def install_body(lang, labels):
         ("Fedora", "sudo dnf install gtk4 gstreamer1 gstreamer1-plugins-base"),
     ))
     intro_shot = render_screenshot(labels.get("install_screenshot"))
+    mobile_shots = labels.get("mobile_screenshots") or []
+    mobile_gallery = ""
+    if mobile_shots:
+        phone_cards = "".join(
+            f'<figure class="phone-card"><div class="phone-frame">'
+            f'<img src="{html.escape(shot["src"], quote=True)}" alt="{html.escape(shot["alt"], quote=True)}" '
+            f'width="{int(shot.get("width", 780))}" height="{int(shot.get("height", 1688))}" decoding="async" loading="lazy">'
+            f'</div><figcaption class="phone-label">{html.escape(shot["label"])}</figcaption></figure>'
+            for shot in mobile_shots
+        )
+        mobile_gallery = f'<div class="mobile-phones install-mobile-gallery">{phone_cards}</div>'
     return f'''<div class="doc-shell">{header(lang, 'install', labels)}
     <main id="main" class="doc-main"><div class="doc-intro"><p class="eyebrow">CANBAN // INSTALL</p>
       <h1>{t('install_title')}</h1><p>{t('install_intro')}</p>{intro_shot}</div>
@@ -820,9 +836,11 @@ def install_body(lang, labels):
       <details><summary>{t('linux_deps')}</summary>{dependencies}</details></section>
     <section id="headless"><h2>{t('headless')}</h2><p>{t('headless_text')}</p>{command(HEADLESS, labels)}</section>
     <section id="mobile"><h2>{t('mobile')}</h2><h3>{t('android')}</h3><p>{t('android_text')}</p>
+      {mobile_gallery}
       <div class="action-row">
         <a class="action-btn is-primary" href="{ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer">{t('android_download')}</a>
         <a class="action-btn" href="{OBTAINIUM_URL}" target="_blank" rel="noopener noreferrer">{t('android_obtainium')}</a>
+        <a class="action-btn" href="{IOS_ISSUE_URL}" target="_blank" rel="noopener noreferrer">{t('need_ios')} →</a>
       </div>
       <a class="text-link" href="{REPOSITORY}/releases/latest" target="_blank" rel="noopener noreferrer">{t('android_releases_link')} →</a></section>
     <section id="updates"><h2>{t('updates')}</h2><p>{t('updates_text')}</p>
@@ -1113,6 +1131,7 @@ def render_home_markdown(lang, strings):
         f"- **{strings['tab_terminals']}**: {strings['tab_terminals_desc']}",
         f"- **{strings['tab_review']}**: {strings['tab_review_desc']}",
         f"- **{strings['tab_workflows']}**: {strings['tab_workflows_desc']}",
+        f"- **{strings['mob_eyebrow']}**: {strings['mob_title']} {strings['mob_sub']}",
         "",
         "## Install",
         "",

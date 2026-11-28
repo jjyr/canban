@@ -683,6 +683,99 @@ code, pre {
 }
 
 /* ========================================================================== */
+/* Mobile Companion Section (Homepage + /install/#mobile)                     */
+/* ========================================================================== */
+.mobile-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  gap: 44px;
+  align-items: center;
+}
+
+.mobile-copy {
+  min-width: 0;
+}
+
+.mobile-points {
+  list-style: none;
+  margin: 26px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+.mobile-points li {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mobile-points strong {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.mobile-points span {
+  font-size: 13.5px;
+  line-height: 1.58;
+  color: var(--fg-sec);
+}
+
+.mobile-actions {
+  margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-phones {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: end;
+  min-width: 0;
+}
+
+.phone-card {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.phone-card.is-featured {
+  transform: translateY(-10px);
+}
+
+.phone-frame {
+  width: 100%;
+  aspect-ratio: 780 / 1688;
+  border-radius: 22px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  overflow: hidden;
+  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.52);
+}
+
+.phone-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.phone-label {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+
+/* ========================================================================== */
 /* Flat Hairline Content Sections                                             */
 /* ========================================================================== */
 .band {
@@ -976,6 +1069,13 @@ code, pre {
 /* Responsive Breakpoints                                                     */
 /* ========================================================================== */
 @media (max-width: 960px) {
+  .mobile-grid {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+  .phone-card.is-featured {
+    transform: none;
+  }
   .cap-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1057,6 +1157,22 @@ code, pre {
   }
   .showcase-bar::-webkit-scrollbar {
     display: none;
+  }
+  .mobile-phones {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    gap: 12px;
+    padding: 4px 2px 8px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .mobile-phones::-webkit-scrollbar {
+    display: none;
+  }
+  .phone-card {
+    flex: 0 0 220px;
+    scroll-snap-align: start;
   }
   .band {
     padding: 44px 0;

@@ -33,7 +33,10 @@
         "https://canban.dev/screenshots/board.webp",
         "https://canban.dev/screenshots/terminals.webp",
         "https://canban.dev/screenshots/git-review.webp",
-        "https://canban.dev/screenshots/workflows.webp"
+        "https://canban.dev/screenshots/workflows.webp",
+        "https://canban.dev/screenshots/mobile-inbox.webp",
+        "https://canban.dev/screenshots/mobile-board.webp",
+        "https://canban.dev/screenshots/mobile-terminal.webp"
       ],
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "Lightweight Kanban & Native Agent CLI App",

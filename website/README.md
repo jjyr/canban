@@ -28,11 +28,11 @@ Static product site for [https://canban.dev/](https://canban.dev/), deployed via
 
 ## Capturing and compressing screenshots
 
-All 5 product screenshots (`daily-briefing.webp`, `board.webp`, `terminals.webp`, `git-review.webp`, `workflows.webp`) are captured uniformly from the standalone Canban Gallery (`examples/gallery`) using the shared `website_showcase` mock fixture (`Canban workspace` + `herdr`, `monokai` warm dark theme, dark native macOS chrome, zero personal paths or emails) and shared verbatim between `website/screenshots/` and `docs/assets/` (for `README.md` / `README.zh-CN.md`).
+All 5 desktop screenshots (`daily-briefing.webp`, `board.webp`, `terminals.webp`, `git-review.webp`, `workflows.webp`, `2880×1800`) and 3 mobile screenshots (`mobile-inbox.webp`, `mobile-board.webp`, `mobile-terminal.webp`, `780×1688`) are captured uniformly from the standalone Canban Gallery (`examples/gallery`) using the shared `website_showcase` mock fixture (`Canban workspace` + `herdr`, `monokai` warm dark theme, zero personal paths or emails) and shared verbatim between `website/screenshots/` and `docs/assets/` (for `README.md` / `README.zh-CN.md`).
 
-1. Build the Gallery binary (`cargo build --example gallery`) and launch each scene at `1440×900` logical points (`2880×1800` at 2x Retina) with `HC_*` stripped:
-   - `CANBAN_GALLERY_SCENE`: `website-inbox`, `website-board`, `website-terminals`, `website-review`, `website-workflows`
-   - `CANBAN_GALLERY_WIDTH=1440`, `CANBAN_GALLERY_HEIGHT=900`, `CANBAN_GALLERY_TERMINAL_PREVIEW=showcase`
+1. Build the Gallery binary (`cargo build --example gallery`) and launch each scene with `HC_*` stripped and `CANBAN_GALLERY_TERMINAL_PREVIEW=showcase`:
+   - **Desktop** (`CANBAN_GALLERY_WIDTH=1440`, `CANBAN_GALLERY_HEIGHT=900` → `2880×1800` @2x): `website-inbox`, `website-board`, `website-terminals`, `website-review`, `website-workflows`
+   - **Mobile** (`CANBAN_GALLERY_WIDTH=390`, `CANBAN_GALLERY_HEIGHT=844` → `780×1688` @2x): `website-mobile-inbox`, `website-mobile-board`, `website-mobile-terminal` (crop the bottom `780×1688` integer pixels to exclude the macOS window titlebar)
 2. Capture each window cleanly without macOS drop shadows at native 2x Retina resolution:
 
 ```sh
@@ -40,14 +40,14 @@ screencapture -l <window_id> -o -x raw.png
 ```
 
 3. **Do NOT resample or downscale the PNG before compressing** (avoid `sips --resampleWidth` or any fractional resize). Fractional downscaling blurs CoreText text and 1px UI dividers, and introduces anti-aliased intermediate pixels that nearly double lossless WebP size.
-4. Compress the unscaled native `2880×1800` PNG directly with lossless WebP at maximum effort:
+4. Compress the unscaled native Retina PNG directly with lossless WebP at maximum effort:
 
 ```sh
 cwebp -lossless -z 9 raw.png -o website/screenshots/<name>.webp
 cp website/screenshots/<name>.webp docs/assets/<name>.webp
 ```
 
-5. Keep `width: 2880` and `height: 1800` in sync across `templates/home.html`, `pages.json`, `docs/*.json`, and `scripts/test-website.py`.
+5. Keep `2880×1800` (desktop) and `780×1688` (mobile) dimensions in sync across `templates/home.html`, `pages.json`, `docs/*.json`, and `scripts/test-website.py`.
 
 ## Build and preview
 

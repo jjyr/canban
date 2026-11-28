@@ -265,7 +265,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                 focus_req,
             )
             .ui_command_keys(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"])
-            .read_only(|| true)
+            .read_only(move || !is_showcase)
             .input_status(move || {
                 if is_showcase {
                     String::new()

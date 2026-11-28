@@ -175,6 +175,40 @@ pub fn apply_scene(ui: Ui, state: MobileState, name: &str) {
     }
 }
 
+pub fn apply_website_showcase(ui: Ui, state: MobileState, name: &str) {
+    state.close_sheet();
+    state.force_onboarding.set(false);
+    state.stack.set(Vec::new());
+    state.board_stage.set(String::new());
+    state.terminal_fullscreen.set(false);
+    ui.inbox.drawer.set("today".into());
+    ui.inbox.focus_filter.set(String::new());
+    ui.inbox.undo_banner.set(None);
+    ui.sync_preview.set(Vec::new());
+
+    let (_, hosts) = fixtures::multi_host_workspace(false);
+    ui.hosts.set(hosts);
+    fixtures::website_showcase(ui, "website-inbox");
+
+    match name {
+        "website-mobile-inbox" => {
+            state.tab.set(MobileTab::Inbox);
+        }
+        "website-mobile-board" => {
+            fixtures::website_showcase(ui, "website-board");
+            state.tab.set(MobileTab::Board);
+            state.board_stage.set("develop".into());
+        }
+        "website-mobile-terminal" => {
+            state.tab.set(MobileTab::Terminals);
+            state.push_terminal("showcase-claude-1".into());
+        }
+        _ => {
+            state.tab.set(MobileTab::Inbox);
+        }
+    }
+}
+
 pub fn viewport_wrapper(
     ui: Ui,
     state: MobileState,

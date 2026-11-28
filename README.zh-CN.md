@@ -98,9 +98,18 @@ curl -fsSL https://canban.dev/install.sh | bash
 <p>
   <a href="https://github.com/jjyr/canban/releases/latest"><img src="https://img.shields.io/badge/Android-Download%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="下载 Android APK" /></a>
   <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"><img src="https://img.shields.io/badge/Get_it_on-Obtainium-3A7AFE?style=for-the-badge&logo=android&logoColor=white" alt="Get it on Obtainium" /></a>
+  <a href="https://github.com/jjyr/canban/issues/2"><img src="https://img.shields.io/badge/Need_iOS%3F-GitHub_Issue_%232-111111?style=for-the-badge&logo=apple&logoColor=white" alt="需要 iOS 版？" /></a>
 </p>
 
-全程端到端加密、无中转直连你的 macOS 或远程 Linux `canband` 主机，支持一次性 `canban://` 二维码配对，或可选配合 **Tailscale**（WhoIs 同账号免扫码直连），随时在手机端处理 Needs you 审批、看板、Git Diff 与原生 `libghostty-vt` 实时终端。
+全程端到端加密、无中转直连你的 macOS 或远程 Linux `canband` 主机，支持一次性 `canban://` 二维码配对，或可选配合 **Tailscale**（WhoIs 同账号免扫码直连），随时在手机端滑动分流每日简报收件箱、浏览看板卡片与 Git Diff，并直接接入原生 `libghostty-vt` 实时终端。
+
+<p align="center">
+  <img src="docs/assets/mobile-inbox.webp" alt="Canban 移动端每日简报收件箱：原生滑动分流与运行中 Agent 状态" width="31%" />
+  &nbsp;
+  <img src="docs/assets/mobile-board.webp" alt="Canban 移动端看板界面：按阶段浏览任务卡片与独立 Worktree 分支" width="31%" />
+  &nbsp;
+  <img src="docs/assets/mobile-terminal.webp" alt="Canban 移动端实时 libghostty-vt 终端运行 Claude Code 会话" width="31%" />
+</p>
 
 <details>
 <summary><strong>Linux 运行库要求与从源码构建</strong></summary>

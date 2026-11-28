@@ -166,7 +166,7 @@ class WebsiteTest(unittest.TestCase):
                             self.assertEqual(software["releaseNotes"], website.ORIGIN + website.route(lang, "changelog"))
                             screenshots = software["screenshot"]
                             self.assertIsInstance(screenshots, list)
-                            self.assertEqual(len(screenshots), 5)
+                            self.assertEqual(len(screenshots), 8)
                             for shot_url in screenshots:
                                 self.assertTrue(shot_url.startswith(website.ORIGIN + "/screenshots/"), shot_url)
                                 shot_path = self.output / urlsplit(shot_url).path.lstrip("/")
@@ -225,6 +225,7 @@ class WebsiteTest(unittest.TestCase):
                         hrefs = {attrs.get("href") for tag, attrs in page.elements if tag == "a"}
                         self.assertIn(website.ANDROID_APK_URL, hrefs, (lang, section))
                         self.assertIn(website.OBTAINIUM_URL, hrefs, (lang, section))
+                        self.assertIn(website.IOS_ISSUE_URL, hrefs, (lang, section))
                     if section in website.ARTICLE_PAGES and docs_by_lang[lang][section].get("faq_items"):
                         for question, answer in docs_by_lang[lang][section]["faq_items"]:
                             self.assertIn(question, visible)
@@ -245,6 +246,7 @@ class WebsiteTest(unittest.TestCase):
                         self.assertIn(f"{website.route(lang, 'install')}#mobile", hrefs, lang)
                         self.assertIn(website.ANDROID_APK_URL, hrefs, lang)
                         self.assertIn(website.OBTAINIUM_URL, hrefs, lang)
+                        self.assertIn(website.IOS_ISSUE_URL, hrefs, lang)
                         install_tabs = [
                             attrs.get("data-install-tab")
                             for tag, attrs in page.elements
@@ -264,6 +266,9 @@ class WebsiteTest(unittest.TestCase):
                                 "/screenshots/terminals.webp",
                                 "/screenshots/git-review.webp",
                                 "/screenshots/workflows.webp",
+                                "/screenshots/mobile-inbox.webp",
+                                "/screenshots/mobile-board.webp",
+                                "/screenshots/mobile-terminal.webp",
                             ],
                             lang,
                         )
@@ -466,6 +471,9 @@ class WebsiteTest(unittest.TestCase):
             "terminals.webp",
             "git-review.webp",
             "workflows.webp",
+            "mobile-inbox.webp",
+            "mobile-board.webp",
+            "mobile-terminal.webp",
         }
         source_shots = {
             path.name

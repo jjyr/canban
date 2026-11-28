@@ -84,7 +84,31 @@
     "no_notes": "See the GitHub release for details.",
     "all_releases": "All releases on GitHub",
     "copy": "Copy",
-    "latest": "Latest release"
+    "latest": "Latest release",
+    "mobile_screenshots": [
+      {
+        "src": "/screenshots/mobile-inbox.webp",
+        "alt": "Canban mobile Daily Briefing Inbox with KPI strip, merge approval card, and active Claude Code and Codex agents.",
+        "label": "Daily Inbox",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-board.webp",
+        "alt": "Canban mobile Kanban board showing Develop cards with running developer agent and Git worktree branches.",
+        "label": "Board",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-terminal.webp",
+        "alt": "Canban mobile live libghostty-vt terminal attached to a running Claude Code session with touch control keys.",
+        "label": "Live Terminal",
+        "width": 780,
+        "height": 1688
+      }
+    ],
+    "need_ios": "Need iOS?"
   },
   "zh": {
     "home": "工作台",
@@ -171,7 +195,31 @@
     "no_notes": "详情请查看 GitHub Release。",
     "all_releases": "在 GitHub 查看所有版本",
     "copy": "复制",
-    "latest": "最新版本"
+    "latest": "最新版本",
+    "mobile_screenshots": [
+      {
+        "src": "/screenshots/mobile-inbox.webp",
+        "alt": "Canban 移动端每日简报收件箱：顶部指标条、可合并 PR 卡片以及运行中的 Claude Code 与 Codex 会话。",
+        "label": "每日简报",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-board.webp",
+        "alt": "Canban 移动端看板：按列浏览 Develop 任务卡片、运行中 Agent 状态与独立 Git Worktree 分支。",
+        "label": "看板",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-terminal.webp",
+        "alt": "Canban 移动端实时 libghostty-vt 终端：直连运行中的 Claude Code 会话并附带触控快捷键栏。",
+        "label": "实时终端",
+        "width": 780,
+        "height": 1688
+      }
+    ],
+    "need_ios": "需要 iOS 版？"
   },
   "zh-tw": {
     "home": "工作台",
@@ -258,7 +306,31 @@
     "no_notes": "詳情請參閱 GitHub Release。",
     "all_releases": "在 GitHub 查看所有版本",
     "copy": "複製",
-    "latest": "最新版本"
+    "latest": "最新版本",
+    "mobile_screenshots": [
+      {
+        "src": "/screenshots/mobile-inbox.webp",
+        "alt": "Canban 行動端每日簡報收件匣：頂部指標列、可合併 PR 卡片以及執行中的 Claude Code 與 Codex 工作階段。",
+        "label": "每日簡報",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-board.webp",
+        "alt": "Canban 行動端看板：依欄瀏覽 Develop 任務卡片、執行中 Agent 狀態與獨立 Git Worktree 分支。",
+        "label": "看板",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-terminal.webp",
+        "alt": "Canban 行動端即時 libghostty-vt 終端機：直連執行中的 Claude Code 工作階段並附帶觸控快捷鍵列。",
+        "label": "即時終端機",
+        "width": 780,
+        "height": 1688
+      }
+    ],
+    "need_ios": "需要 iOS 版？"
   },
   "ja": {
     "home": "ワークベンチ",
@@ -345,7 +417,31 @@
     "no_notes": "詳細は GitHub Release をご確認ください。",
     "all_releases": "GitHub の全リリースを見る",
     "copy": "コピー",
-    "latest": "最新リリース"
+    "latest": "最新リリース",
+    "mobile_screenshots": [
+      {
+        "src": "/screenshots/mobile-inbox.webp",
+        "alt": "Canban モバイル Daily Briefing インボックス：KPI ストリップ、マージ承認カード、稼働中の Claude Code と Codex エージェント。",
+        "label": "Daily Inbox",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-board.webp",
+        "alt": "Canban モバイル カンバンボード：稼働中エージェントと Git Worktree ブランチ付き Develop カードを表示。",
+        "label": "ボード",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-terminal.webp",
+        "alt": "Canban モバイル ライブ libghostty-vt ターミナル：タッチ操作キー付きで稼働中の Claude Code セッションに接続。",
+        "label": "ライブ端末",
+        "width": 780,
+        "height": 1688
+      }
+    ],
+    "need_ios": "iOS 版が必要？"
   },
   "ko": {
     "home": "워크벤치",
@@ -432,6 +528,30 @@
     "no_notes": "자세한 내용은 GitHub Release를 확인하세요.",
     "all_releases": "GitHub에서 모든 릴리스 보기",
     "copy": "복사",
-    "latest": "최신 릴리스"
+    "latest": "최신 릴리스",
+    "mobile_screenshots": [
+      {
+        "src": "/screenshots/mobile-inbox.webp",
+        "alt": "Canban 모바일 데일리 브리핑 인박스: KPI 바, 병합 승인 카드, 실행 중인 Claude Code 및 Codex 에이전트.",
+        "label": "데일리 인박스",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-board.webp",
+        "alt": "Canban 모바일 칸반 보드: 실행 중인 에이전트와 Git Worktree 브랜치가 표시된 Develop 카드.",
+        "label": "보드",
+        "width": 780,
+        "height": 1688
+      },
+      {
+        "src": "/screenshots/mobile-terminal.webp",
+        "alt": "Canban 모바일 실시간 libghostty-vt 터미널: 터치 제어 키와 함께 실행 중인 Claude Code 세션에 연결.",
+        "label": "실시간 터미널",
+        "width": 780,
+        "height": 1688
+      }
+    ],
+    "need_ios": "iOS 버전이 필요하신가요?"
   }
 }

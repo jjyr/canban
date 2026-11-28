@@ -2702,6 +2702,19 @@ pub fn Gallery() -> impl IntoElement {
 
     if matches!(
         scene_env.as_str(),
+        "website-mobile-inbox" | "website-mobile-board" | "website-mobile-terminal"
+    ) {
+        mobile::apply_website_showcase(ui, mobile_state, &scene_env);
+        return view()
+            .flex_1()
+            .w_full()
+            .min_h(px(0.))
+            .bg(BACKGROUND)
+            .child(canban_ui::mobile::screen(ui, mobile_state))
+            .into_element();
+    }
+    if matches!(
+        scene_env.as_str(),
         "website-inbox"
             | "website-board"
             | "website-terminals"

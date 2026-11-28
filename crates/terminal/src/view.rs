@@ -301,7 +301,7 @@ impl IntoElement for TerminalView {
             el = match self.surface {
                 TerminalSurface::Preview(content) => el
                     .prop("content", json!(content))
-                    .prop("read_only", json!(true)),
+                    .prop("read_only", move || json!(read_only())),
                 TerminalSurface::Live(binding) => el
                     .prop("binding", move || match binding() {
                         Some(b) => {
@@ -358,6 +358,7 @@ impl IntoElement for TerminalView {
                         move || theme(),
                         move || font(),
                         move || focus(),
+                        move || read_only(),
                         move || input_status(),
                         move || notice_status(),
                         options,

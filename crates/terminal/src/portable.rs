@@ -1165,18 +1165,21 @@ pub fn preview_terminal_with_status(
         theme,
         font,
         focus,
+        || true,
         input_status,
         notice_status,
         PortableOptions::default(),
     )
 }
 
-/// Mounts a static read-only `<nsh_base::Terminal />` preview with configurable mobile options.
+/// Mounts a static `<nsh_base::Terminal />` preview with configurable mobile options.
+#[allow(clippy::too_many_arguments)]
 pub fn preview_terminal_with_options(
     content: impl Into<String>,
     theme: impl Fn() -> Value + 'static,
     font: impl Fn() -> Value + 'static,
     focus: impl Fn() -> FocusRequest + 'static,
+    read_only: impl Fn() -> bool + 'static,
     input_status: impl Fn() -> String + 'static,
     notice_status: impl Fn() -> String + 'static,
     options: PortableOptions,
@@ -1187,7 +1190,7 @@ pub fn preview_terminal_with_options(
         theme,
         font,
         focus,
-        || true,
+        read_only,
         input_status,
         notice_status,
         options,

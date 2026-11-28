@@ -98,9 +98,18 @@ Works out of the box with `git` and your existing Agent CLIs (`claude`, `codex`,
 <p>
   <a href="https://github.com/jjyr/canban/releases/latest"><img src="https://img.shields.io/badge/Android-Download%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Download Android APK" /></a>
   <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"><img src="https://img.shields.io/badge/Get_it_on-Obtainium-3A7AFE?style=for-the-badge&logo=android&logoColor=white" alt="Get it on Obtainium" /></a>
+  <a href="https://github.com/jjyr/canban/issues/2"><img src="https://img.shields.io/badge/Need_iOS%3F-GitHub_Issue_%232-111111?style=for-the-badge&logo=apple&logoColor=white" alt="Need iOS?" /></a>
 </p>
 
-Connects directly to your macOS or headless Linux `canband` host with end-to-end encryption and zero relay servers — using single-use `canban://` QR pairing or optionally **Tailscale** (zero-QR WhoIs auto-auth) — for live Needs-you triage, Kanban boards, Git diffs, and persistent `libghostty-vt` terminals.
+Connects directly to your macOS or headless Linux `canband` host with end-to-end encryption and zero relay servers — using single-use `canban://` QR pairing or optionally **Tailscale** (zero-QR WhoIs auto-auth) — for live Daily Briefing triage with native swipe gestures, Kanban boards, Git diffs, and persistent `libghostty-vt` terminals.
+
+<p align="center">
+  <img src="docs/assets/mobile-inbox.webp" alt="Canban mobile Daily Briefing Inbox with swipe triage and active agents" width="31%" />
+  &nbsp;
+  <img src="docs/assets/mobile-board.webp" alt="Canban mobile Kanban board showing active cards and worktree branches" width="31%" />
+  &nbsp;
+  <img src="docs/assets/mobile-terminal.webp" alt="Canban mobile live libghostty-vt terminal running Claude Code" width="31%" />
+</p>
 
 <details>
 <summary><strong>Linux runtime dependencies &amp; building from source</strong></summary>

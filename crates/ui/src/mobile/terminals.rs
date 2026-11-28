@@ -604,15 +604,53 @@ pub(crate) fn pushed_page(ui: Ui, state: MobileState, terminal_id: String) -> im
                 };
 
                 let term_view = if !crate::backend::is_connected() {
-                    TerminalView::preview(
+                    let is_showcase = std::env::var("CANBAN_GALLERY_TERMINAL_PREVIEW").as_deref()
+                        == Ok("showcase");
+                    let preview_content = if is_showcase {
+                        concat!(
+                            "\x1b[38;2;226;154;59m╭──────────────────────────────────────────╮\x1b[0m\r\n",
+                            "\x1b[38;2;226;154;59m│\x1b[0m \x1b[1;38;2;242;240;233mClaude Code\x1b[0m \x1b[38;2;140;138;130mopus-4-6\x1b[0m  \x1b[38;2;152;195;121m●\x1b[0m \x1b[38;2;166;164;155mfeat/search-ctx\x1b[0m  \x1b[38;2;226;154;59m│\x1b[0m\r\n",
+                            "\x1b[38;2;226;154;59m╰──────────────────────────────────────────╯\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[38;2;166;164;155m> Card #1: Improve search and preserve\x1b[0m\r\n",
+                            "\x1b[38;2;166;164;155m  the user's context across jumps.\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[38;2;152;195;121m●\x1b[0m \x1b[1;38;2;242;240;233mRead\x1b[0m(\x1b[38;2;166;164;155mquick_open/model.rs\x1b[0m)\r\n",
+                            "  \x1b[38;2;116;114;107m⎿  184 lines · ranked() scoring\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[38;2;152;195;121m●\x1b[0m \x1b[1;38;2;242;240;233mEdit\x1b[0m(\x1b[38;2;166;164;155mquick_open/model.rs\x1b[0m)\r\n",
+                            "  \x1b[38;2;224;108;117m- let score = fuzzy_score(fields, q)?;\x1b[0m\r\n",
+                            "  \x1b[38;2;152;195;121m+ let base = fuzzy_score(fields, q)?;\x1b[0m\r\n",
+                            "  \x1b[38;2;152;195;121m+ let boost = context_boost(c, proj);\x1b[0m\r\n",
+                            "  \x1b[38;2;152;195;121m+ let score = base.saturating_sub(b);\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[38;2;152;195;121m●\x1b[0m \x1b[1;38;2;242;240;233mBash\x1b[0m(\x1b[38;2;166;164;155mcanban-sim corpus\x1b[0m)\r\n",
+                            "  \x1b[38;2;152;195;121m✓\x1b[0m \x1b[38;2;242;240;233m14/14 scenarios passed\x1b[0m \x1b[38;2;116;114;107m(412ms)\x1b[0m\r\n",
+                            "  \x1b[38;2;152;195;121m✓\x1b[0m \x1b[38;2;242;240;233mmise run check:\x1b[0m \x1b[38;2;152;195;121mclean\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[38;2;226;154;59m●\x1b[0m \x1b[1;38;2;242;240;233mBash\x1b[0m(\x1b[38;2;166;164;155mcanban report --completed #1\x1b[0m)\r\n",
+                            "  \x1b[38;2;116;114;107m3 files, \x1b[38;2;152;195;121m+148\x1b[38;2;116;114;107m / \x1b[38;2;224;108;117m-27\x1b[0m\r\n",
+                            "\r\n",
+                            "\x1b[38;2;226;154;59m❯\x1b[0m \x1b[38;2;166;164;155mPosting PR #148 summary…\x1b[0m\r\n",
+                        )
+                        .to_owned()
+                    } else {
                         format!(
                             "\x1b[1;36m{}\x1b[0m · Portable Ghostty VT\r\n$ ls -la\r\ntotal 48\r\ndrwxr-xr-x  crates/\r\n-rw-r--r--  Cargo.toml\r\n> ",
                             entry.title()
-                        ),
+                        )
+                    };
+                    let tv = TerminalView::preview(
+                        preview_content,
                         crate::utilities::terminal_theme,
                         move || crate::utilities::terminal_font(ui),
                         focus_req,
-                    )
+                    );
+                    if is_showcase {
+                        tv.read_only(|| false).input_status(String::new)
+                    } else {
+                        tv
+                    }
                 } else {
                     let bind = entry.binding();
                     let core_id = bind
