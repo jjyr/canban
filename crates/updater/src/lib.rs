@@ -39,6 +39,13 @@ impl Build {
     pub fn is_release(&self) -> bool {
         feed::Version::parse(&self.version).is_ok()
     }
+
+    /// Returns `true` when background automatic update checks should run:
+    /// official release builds, or local builds explicitly pointed at a loopback
+    /// `CANBAN_UPDATE_API` test fixture.
+    pub fn allows_automatic_update_checks(&self) -> bool {
+        self.is_release() || std::env::var_os("CANBAN_UPDATE_API").is_some()
+    }
 }
 
 /// Published identities are ordered numerically; legacy/local builds use the API.

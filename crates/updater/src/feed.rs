@@ -315,7 +315,7 @@ pub fn check_automatically(home: &Path, client: Option<canban_github::Client>) -
 fn check_inner(home: &Path, client: Option<canban_github::Client>, automatic: bool) -> Result<()> {
     let _lock = lock(home, "operation.lock")?;
     ensure!(!handoff::active(home), "Upgrade is in progress");
-    if automatic && !Build::current().is_release() {
+    if automatic && !Build::current().allows_automatic_update_checks() {
         let _ = crate::recover_stale_state_with_op_lock(home)?;
         return Ok(());
     }
