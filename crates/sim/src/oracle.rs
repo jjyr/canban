@@ -3448,6 +3448,66 @@ impl InvariantOracle {
                     def.defer_until
                 );
             }
+            for pulse in &inbox.project_pulses {
+                let Some(proj) = merged.projects.iter().find(|p| p.id == pulse.project_id) else {
+                    bail!(
+                        "[{client_name}] DailyInbox project_pulse references unknown project {}",
+                        pulse.project_id
+                    );
+                };
+                for sc in &pulse.stage_counts {
+                    ensure!(
+                        sc.count > 0 && !sc.stage_name.trim().is_empty(),
+                        "[{client_name}] DailyInbox project_pulse {} has invalid stage count {:?}",
+                        pulse.project_id,
+                        sc
+                    );
+                    let expected = merged
+                        .cards
+                        .iter()
+                        .filter(|c| {
+                            c.active()
+                                && !c.resolved()
+                                && c.project_id == proj.id
+                                && c.stage == sc.stage_id
+                        })
+                        .count();
+                    ensure!(
+                        sc.count == expected,
+                        "[{client_name}] DailyInbox project_pulse {} stage {} count mismatch: got={} expected={expected}",
+                        pulse.project_id,
+                        sc.stage_id,
+                        sc.count
+                    );
+                }
+            }
+            for term in &inbox.agent_terminals {
+                if let Some(cid) = &term.card_id
+                    && let Some(card) = merged
+                        .cards
+                        .iter()
+                        .find(|c| c.id == *cid && c.removed_at.is_none())
+                {
+                    let card_branch = card
+                        .branch
+                        .as_deref()
+                        .or_else(|| card.workspace.as_ref().and_then(|w| w.branch.as_deref()));
+                    if card_branch.is_some() {
+                        ensure!(
+                            term.branch.is_some(),
+                            "[{client_name}] DailyInbox agent terminal {} linked to card {} lost branch",
+                            term.terminal_id,
+                            cid
+                        );
+                    }
+                    ensure!(
+                        term.project_name.is_some(),
+                        "[{client_name}] DailyInbox agent terminal {} linked to card {} lost project_name",
+                        term.terminal_id,
+                        cid
+                    );
+                }
+            }
         }
         Ok(())
     }

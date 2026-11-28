@@ -785,6 +785,93 @@ pub fn run(seed: u64) -> Result<u64> {
                 "Today-updated untouched synced GitHub card should route to Tier 3 github_watching: {:?}",
                 synced_inbox.github_watching
             );
+
+            // Verify ProjectPulseItem dynamically reads custom workflow column names (skipping
+            // the non-executing initial queue column) rather than hardcoding `dev` / `rev`.
+            let mut custom_snap = synced_snap.clone();
+            if let Some(proj) = custom_snap.projects.first_mut() {
+                let custom_pid = proj.id.clone();
+                proj.workflow.stages = vec![
+                    canban_types::Stage {
+                        id: "triage".into(),
+                        name: "Triage".into(),
+                        execute: false,
+                        profile: None,
+                        instruction: String::new(),
+                        on_completed: None,
+                        require_human_review: false,
+                    },
+                    canban_types::Stage {
+                        id: "spec".into(),
+                        name: "Spec".into(),
+                        execute: true,
+                        profile: None,
+                        instruction: String::new(),
+                        on_completed: Some("qa".into()),
+                        require_human_review: false,
+                    },
+                    canban_types::Stage {
+                        id: "qa".into(),
+                        name: "QA".into(),
+                        execute: false,
+                        profile: None,
+                        instruction: String::new(),
+                        on_completed: None,
+                        require_human_review: true,
+                    },
+                ];
+                custom_snap.cards.retain(|c| c.project_id != custom_pid);
+                for (cid, num, stg, br) in [
+                    ("custom-triage", 101, "triage", None),
+                    ("custom-spec-1", 102, "spec", Some("feat/custom-spec")),
+                    ("custom-qa-1", 103, "qa", Some("feat/custom-qa")),
+                ] {
+                    let mut c: canban_types::Card = serde_json::from_value(json!({
+                        "id": cid,
+                        "project_id": custom_pid,
+                        "number": num,
+                        "title": format!("Card {num}"),
+                        "body": "",
+                        "stage": stg,
+                        "revision": 1,
+                        "created_at": now_deferred.saturating_sub(60_000),
+                        "branch": br,
+                    }))?;
+                    c.branch = br.map(str::to_owned);
+                    custom_snap.cards.push(c);
+                }
+                let custom_inbox = canban_notifications::build_daily_inbox(
+                    &custom_snap,
+                    &[],
+                    now_deferred,
+                    0,
+                    360,
+                );
+                let pulse = custom_inbox
+                    .project_pulses
+                    .iter()
+                    .find(|p| p.project_id == custom_pid)
+                    .ok_or_else(|| anyhow::anyhow!("Missing custom project pulse"))?;
+                let pairs: Vec<(&str, usize)> = pulse
+                    .stage_counts
+                    .iter()
+                    .map(|s| (s.stage_name.as_str(), s.count))
+                    .collect();
+                ensure!(
+                    pairs == vec![("Spec", 1), ("QA", 1)],
+                    "Expected dynamic column names [('Spec', 1), ('QA', 1)], got {pairs:?}"
+                );
+                let qa_work = custom_inbox
+                    .open_cards
+                    .iter()
+                    .find(|c| c.card_id == "custom-qa-1");
+                ensure!(
+                    qa_work.is_some_and(
+                        |c| c.stage == "QA" && c.branch.as_deref() == Some("feat/custom-qa")
+                    ),
+                    "Expected InboxCardWork to carry resolved column name and branch, got {qa_work:?}"
+                );
+            }
         }
 
         // Advance past defer_until -> item automatically resurfaces in Today!

@@ -872,11 +872,10 @@ fn render_project_pulses(ui: Ui, pulses: &[ProjectPulseItem]) -> Option<View> {
             MUTED
         };
         let mut metrics = Vec::new();
-        if p.develop_count > 0 {
-            metrics.push(format!("{} dev", p.develop_count));
-        }
-        if p.review_count > 0 {
-            metrics.push(format!("{} rev", p.review_count));
+        for sc in &p.stage_counts {
+            if sc.count > 0 {
+                metrics.push(format!("{} {}", sc.count, sc.stage_name));
+            }
         }
         if p.open_pr_count > 0 {
             metrics.push(format!(
@@ -1024,9 +1023,14 @@ fn render_terminal_git_telemetry(term: &InboxTerminalWork) -> View {
 }
 
 fn render_terminal_diff_strip(term: &InboxTerminalWork) -> View {
-    let mut row = view().flex_row().flex_wrap().items_center().gap_2();
+    let mut row = view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .min_w(px(0.))
+        .overflow_hidden();
     if term.dirty || term.additions > 0 || term.deletions > 0 {
-        let mut diff_row = view().flex_row().items_center().gap_1();
+        let mut diff_row = view().flex_row().items_center().gap_1().flex_shrink_0();
         if term.additions > 0 {
             diff_row = diff_row.child(
                 label(format!("+{}", term.additions))
@@ -1045,17 +1049,20 @@ fn render_terminal_diff_strip(term: &InboxTerminalWork) -> View {
                     .text_color(DANGER),
             );
         }
-        diff_row = diff_row.child(muted("uncommitted").text_size(px(11.5)));
+        if term.additions == 0 && term.deletions == 0 {
+            diff_row = diff_row.child(muted("uncommitted").text_size(px(11.5)));
+        }
         row = row.child(diff_row);
     } else if term.branch.is_some() {
-        row = row.child(muted("clean tree").text_size(px(11.5)));
+        row = row.child(muted("clean").text_size(px(11.5)).flex_shrink_0());
     }
     if term.ahead > 0 {
         row = row.child(
             label(format!("↑{}", term.ahead))
                 .font_family(MONO_FONT)
                 .text_size(px(11.5))
-                .text_color(ACCENT),
+                .text_color(ACCENT)
+                .flex_shrink_0(),
         );
     }
     row
@@ -3014,67 +3021,203 @@ fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vi
             None => status_lbl.to_owned(),
         }
     } else if let Some(turn) = term.agent_turn.filter(|&t| t > 0) {
-        format!("{status_lbl} · Turn {turn}")
+        format!("{status_lbl} · T{turn}")
     } else {
         status_lbl.to_owned()
     };
 
     let tile = agent_glyph_28(term.agent_engine.as_deref(), Some(status_color));
 
-    let title_text = match (term.card_number, &term.card_title) {
-        (Some(n), Some(ct)) => format!("{} · #{n} {ct}", term.title),
-        _ => term.title.clone(),
-    };
+    // Row 1 (Eyebrow): Project + Branch on the left (fallback host + cwd when neither is known),
+    // status pill pinned on the right. Full branch/cwd disclosed on hover tooltip.
+    let mut ctx_tip_parts = Vec::new();
+    if let Some(proj) = &term.project_name {
+        ctx_tip_parts.push(proj.clone());
+    } else {
+        ctx_tip_parts.push(term.host_label.clone());
+    }
+    if let Some(br) = &term.branch {
+        ctx_tip_parts.push(br.clone());
+    }
+    if let Some(cwd) = &term.cwd {
+        ctx_tip_parts.push(shorten_path(cwd));
+    }
+    let ctx_tooltip = ctx_tip_parts.join(" · ");
 
-    let mut body = view()
+    let mut ctx_left = view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
         .flex_1()
         .min_w(px(0.))
-        .gap_1p5()
-        .child(
+        .overflow_hidden()
+        .tooltip(hint_tooltip(ctx_tooltip));
+    let scope_label = term
+        .project_name
+        .clone()
+        .unwrap_or_else(|| term.host_label.clone());
+    ctx_left = ctx_left.child(
+        label(scope_label)
+            .text_size(px(12.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(if term.project_name.is_some() {
+                TEXT
+            } else {
+                MUTED
+            })
+            .truncate()
+            .max_w(px(136.))
+            .flex_shrink_0(),
+    );
+    if let Some(br) = &term.branch {
+        ctx_left = ctx_left.child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_1()
+                .flex_1()
                 .min_w(px(0.))
-                .child(tile)
+                .overflow_hidden()
+                .child(icon_tinted(Icon::Branch, MUTED).w(px(11.5)).h(px(11.5)))
                 .child(
-                    label(title_text)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.))
-                        .text_color(TEXT)
+                    muted(br.clone())
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
                         .truncate()
                         .flex_1()
                         .min_w(px(0.)),
-                )
-                .child(if is_live {
-                    live_status(state_pill_text, status_tone)
-                } else {
-                    status(state_pill_text, status_tone)
-                }),
-        )
-        .child(render_terminal_git_telemetry(&term));
+                ),
+        );
+    } else if term.project_name.is_none()
+        && let Some(cwd) = &term.cwd
+    {
+        ctx_left = ctx_left.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .child(icon_tinted(Icon::Folder, MUTED).w(px(11.5)).h(px(11.5)))
+                .child(
+                    muted(shorten_path(cwd))
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.))
+                        .truncate()
+                        .flex_1()
+                        .min_w(px(0.)),
+                ),
+        );
+    }
 
-    if let Some(cmd) = &term.shell_command {
+    let eyebrow = view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .min_w(px(0.))
+        .child(ctx_left)
+        .child(view().flex_shrink_0().child(if is_live {
+            live_status(state_pill_text, status_tone)
+        } else {
+            status(state_pill_text, status_tone)
+        }));
+
+    // Row 2 (Primary identity): Card `#N Title` when linked to a Card, else terminal/session title.
+    let has_card = term.card_number.is_some() && term.card_title.is_some();
+    let primary_row: AnyElement = match (term.card_number, &term.card_title) {
+        (Some(n), Some(ct)) => view()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .min_w(px(0.))
+            .child(
+                label(format!("#{n}"))
+                    .font_family(MONO_FONT)
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(ACCENT)
+                    .flex_shrink_0(),
+            )
+            .child(
+                label(ct.clone())
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(TEXT)
+                    .truncate()
+                    .flex_1()
+                    .min_w(px(0.)),
+            )
+            .into_element(),
+        _ => label(term.title.clone())
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(TEXT)
+            .truncate()
+            .min_w(px(0.))
+            .into_element(),
+    };
+
+    // Row 3 (Secondary activity line): agent tag + current command or status detail.
+    let agent_tag = term
+        .agent_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| (!term.title.trim().is_empty()).then_some(term.title.as_str()));
+    let secondary_line: Option<(String, bool)> = if let Some(cmd) = &term.shell_command {
         let suffix = term
             .shell_exit_code
             .map(|c| format!(" (exit {c})"))
             .unwrap_or_default();
-        body = body.child(
-            muted(format!("{cmd}{suffix}"))
-                .font_family(MONO_FONT)
-                .text_size(px(11.5))
-                .truncate(),
-        );
+        let line = if has_card {
+            match agent_tag {
+                Some(a) => format!("{a} · {cmd}{suffix}"),
+                None => format!("{cmd}{suffix}"),
+            }
+        } else {
+            format!("{cmd}{suffix}")
+        };
+        Some((line, true))
     } else if let Some(detail) = &term.status_detail {
-        body = body.child(muted(detail.clone()).text_size(px(12.)).truncate());
-    }
+        let line = if has_card {
+            match agent_tag {
+                Some(a) => format!("{a} · {detail}"),
+                None => detail.clone(),
+            }
+        } else {
+            detail.clone()
+        };
+        Some((line, false))
+    } else if has_card {
+        agent_tag.map(|a| (a.to_owned(), false))
+    } else {
+        None
+    };
 
-    body = body.child(
+    let mut content = view()
+        .flex_1()
+        .min_w(px(0.))
+        .gap_1()
+        .child(eyebrow)
+        .child(primary_row);
+    if let Some((line, is_mono)) = secondary_line {
+        let mut lbl = muted(line)
+            .text_size(px(if is_mono { 11.5 } else { 12. }))
+            .truncate()
+            .min_w(px(0.));
+        if is_mono {
+            lbl = lbl.font_family(MONO_FONT);
+        }
+        content = content.child(lbl);
+    }
+    content = content.child(
         view()
             .flex_row()
             .items_center()
             .justify_between()
             .gap_2()
+            .min_w(px(0.))
             .child(render_terminal_diff_strip(&term))
             .child(
                 muted(age)
@@ -3084,9 +3227,18 @@ fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vi
             ),
     );
 
-    view()
-        .flex_1()
+    let body = view()
+        .flex_row()
+        .items_start()
+        .gap_2p5()
         .min_w(px(0.))
+        .child(tile)
+        .child(content);
+
+    view()
+        .w_full()
+        .min_w(px(0.))
+        .overflow_hidden()
         .bg(SURFACE)
         .rounded(px(10.))
         .px_3p5()
@@ -3098,6 +3250,7 @@ fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vi
             press_target()
                 .flex_1()
                 .min_w(px(0.))
+                .overflow_hidden()
                 .bg(CLEAR)
                 .rounded(px(6.))
                 .hover(|s| s.bg(CARD_HOVER))
@@ -3149,36 +3302,15 @@ fn render_active_work(
         None,
     ));
 
-    // 1. Live Agent Sessions (single-layer borderless `SURFACE` cards — 2-column grid on desktop)
+    // 1. Live Agent Sessions (strictly equal-width CSS Grid: `repeat(2, minmax(0, 1fr))` on desktop)
     if !agent_terminals.is_empty() {
-        let mut grid = view().gap_2p5();
-        if narrow || agent_terminals.len() == 1 {
-            for term in agent_terminals {
-                grid = grid.child(render_agent_session_card(ui, term, now_ms));
-            }
-        } else {
-            let mut iter = agent_terminals.into_iter();
-            while let Some(left_term) = iter.next() {
-                if let Some(right_term) = iter.next() {
-                    grid = grid.child(
-                        view()
-                            .flex_row()
-                            .items_stretch()
-                            .gap_3()
-                            .child(render_agent_session_card(ui, left_term, now_ms))
-                            .child(render_agent_session_card(ui, right_term, now_ms)),
-                    );
-                } else {
-                    grid = grid.child(
-                        view()
-                            .flex_row()
-                            .items_stretch()
-                            .gap_3()
-                            .child(render_agent_session_card(ui, left_term, now_ms))
-                            .child(view().flex_1().min_w(px(0.))),
-                    );
-                }
-            }
+        let mut grid = view()
+            .w_full()
+            .grid()
+            .grid_cols(if narrow { 1 } else { 2 })
+            .gap_3();
+        for term in agent_terminals {
+            grid = grid.child(render_agent_session_card(ui, term, now_ms));
         }
         sec = sec.child(grid);
     }
@@ -3227,12 +3359,31 @@ fn render_active_work(
                     muted(card.project_name.clone())
                         .text_size(px(11.5))
                         .flex_shrink_0(),
-                )
-                .child(
-                    muted(card.stage.clone())
-                        .text_size(px(11.5))
-                        .flex_shrink_0(),
                 );
+            if let Some(br) = card.branch {
+                let full_br = br.clone();
+                row_left = row_left.child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .tooltip(hint_tooltip(full_br))
+                        .child(icon_tinted(Icon::Branch, MUTED).w(px(11.5)).h(px(11.5)))
+                        .child(
+                            muted(br)
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.5))
+                                .max_w(px(148.))
+                                .truncate(),
+                        ),
+                );
+            }
+            row_left = row_left.child(
+                muted(card.stage.clone())
+                    .text_size(px(11.5))
+                    .flex_shrink_0(),
+            );
             if let Some(pr) = card.pr_summary {
                 let tone = match card.pr_ci_state.as_deref() {
                     Some("failure" | "error") => Tone::Danger,

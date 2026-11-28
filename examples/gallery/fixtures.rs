@@ -2838,6 +2838,155 @@ pub fn daily_inbox(ui: canban_ui::presenter::Ui, expand_github: bool) {
         ahead: 1,
         ..Default::default()
     });
+    // Card-linked live Agent on Row 1 (long branch name to verify truncation & fixed 2-col alignment).
+    let linked_card_id = snapshot.cards.first().map(|c| c.id.clone());
+    if let Some(first) = snapshot.cards.first_mut() {
+        first.branch = Some("feat/inbox-active-work-fixed-grid-alignment".into());
+    }
+    snapshot.terminals.push(TerminalEntry {
+        id: "inbox-card-claude-term".into(),
+        conversation_id: None,
+        number: 3,
+        name: Some("Claude 3".into()),
+        origin_card_id: linked_card_id.clone(),
+        agent_engine: Some("claude".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-claude-3".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(3),
+            observed_agent: Some("claude".into()),
+            waiting: None,
+            command: Some(ShellCommand {
+                label: "cargo".into(),
+                exit_code: None,
+            }),
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(600_000),
+    });
+    snapshot.terminal_contexts.push(TerminalContext {
+        terminal_id: "inbox-card-claude-term".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-claude-3".into(),
+        cwd: Some("/Users/jjy/Workspace/canban/.worktrees/inbox-grid".into()),
+        directory_root: Some("/Users/jjy/Workspace/canban".into()),
+        project_id: Some("gallery-project".into()),
+        card_id: linked_card_id,
+        branch: Some("feat/inbox-active-work-fixed-grid-alignment".into()),
+        dirty: true,
+        additions: 148,
+        deletions: 27,
+        ahead: 2,
+        ..Default::default()
+    });
+    // Second project with custom columns (`Triage`, `Spec`, `QA`) to verify dynamic Projects strip.
+    let mut custom_proj = snapshot.projects[0].clone();
+    custom_proj.id = "gallery-custom-project".into();
+    custom_proj.name = "herdr".into();
+    custom_proj.directory = "/Users/jjy/Workspace/herdr".into();
+    custom_proj.github = None;
+    custom_proj.workflow.stages = vec![
+        Stage {
+            id: "triage".into(),
+            name: "Triage".into(),
+            execute: false,
+            profile: None,
+            instruction: String::new(),
+            on_completed: None,
+            require_human_review: false,
+        },
+        Stage {
+            id: "spec".into(),
+            name: "Spec".into(),
+            execute: true,
+            profile: Some("developer".into()),
+            instruction: String::new(),
+            on_completed: Some("qa".into()),
+            require_human_review: false,
+        },
+        Stage {
+            id: "qa".into(),
+            name: "QA".into(),
+            execute: false,
+            profile: None,
+            instruction: String::new(),
+            on_completed: None,
+            require_human_review: true,
+        },
+    ];
+    snapshot.projects.push(custom_proj);
+    for (id, number, title, stage, branch) in [
+        (
+            "herdr-card-spec",
+            18,
+            "Spec streaming PTY resize ack",
+            "spec",
+            "feat/pty-resize-ack",
+        ),
+        (
+            "herdr-card-qa",
+            19,
+            "Verify reconnect backoff jitter",
+            "qa",
+            "fix/reconnect-jitter",
+        ),
+    ] {
+        let mut c: Card = serde_json::from_value(json!({
+            "id": id,
+            "project_id": "gallery-custom-project",
+            "number": number,
+            "title": title,
+            "body": "",
+            "stage": stage,
+            "revision": 1,
+            "created_at": now_ms.saturating_sub(1_200_000),
+            "branch": branch,
+        }))
+        .expect("gallery custom card");
+        c.branch = Some(branch.into());
+        snapshot.cards.push(c);
+    }
+    // Third active Agent on Row 2 (odd count -> tests exact column alignment with Row 1).
+    snapshot.terminals.push(TerminalEntry {
+        id: "inbox-gemini-term".into(),
+        conversation_id: None,
+        number: 4,
+        name: Some("Gemini 4".into()),
+        origin_card_id: None,
+        agent_engine: Some("gemini".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-gemini-4".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(1),
+            observed_agent: Some("gemini".into()),
+            waiting: None,
+            command: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(300_000),
+    });
+    snapshot.terminal_contexts.push(TerminalContext {
+        terminal_id: "inbox-gemini-term".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-gemini-4".into(),
+        cwd: Some("/Users/jjy/Workspace/herdr".into()),
+        directory_root: Some("/Users/jjy/Workspace/herdr".into()),
+        project_id: Some("gallery-custom-project".into()),
+        branch: Some("main".into()),
+        dirty: false,
+        additions: 0,
+        deletions: 0,
+        ahead: 0,
+        ..Default::default()
+    });
     ui.snapshot.set(snapshot);
     ui.github
         .gh_status

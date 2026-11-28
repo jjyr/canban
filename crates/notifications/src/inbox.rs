@@ -249,12 +249,18 @@ pub struct ShippedTodayItem {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagePulseCount {
+    pub stage_id: String,
+    pub stage_name: String,
+    pub count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectPulseItem {
     pub project_id: String,
     pub project_name: String,
     pub host_label: Option<String>,
-    pub develop_count: usize,
-    pub review_count: usize,
+    pub stage_counts: Vec<StagePulseCount>,
     pub open_pr_count: usize,
     pub live_agent_count: usize,
     pub attention_count: usize,
@@ -420,6 +426,7 @@ pub struct InboxCardWork {
     pub stage: String,
     pub project_id: String,
     pub project_name: String,
+    pub branch: Option<String>,
     pub host_label: Option<String>,
     pub pr_summary: Option<String>,
     pub pr_ci_state: Option<String>,
@@ -766,6 +773,20 @@ pub fn build_daily_inbox(
         .projects
         .iter()
         .map(|p| (p.id.as_str(), p.name.clone()))
+        .collect();
+    let stage_names: BTreeMap<(&str, &str), String> = snapshot
+        .projects
+        .iter()
+        .flat_map(|p| {
+            p.workflow.stages.iter().map(move |st| {
+                let label = if st.name.trim().is_empty() {
+                    st.id.clone()
+                } else {
+                    st.name.clone()
+                };
+                ((p.id.as_str(), st.id.as_str()), label)
+            })
+        })
         .collect();
     let cards_by_id: BTreeMap<&str, &Card> = snapshot
         .cards
@@ -1795,6 +1816,14 @@ pub fn build_daily_inbox(
             .pull_request
             .as_ref()
             .and_then(|pr| pr.checks_summary.as_ref().map(|c| c.state.clone()));
+        let card_stage_label = stage_names
+            .get(&(card.project_id.as_str(), card.stage.as_str()))
+            .cloned()
+            .unwrap_or_else(|| card.stage.clone());
+        let card_branch = card
+            .branch
+            .clone()
+            .or_else(|| card.workspace.as_ref().and_then(|w| w.branch.clone()));
 
         match disp {
             TriageDisposition::Deferred(until) => {
@@ -1835,9 +1864,10 @@ pub fn build_daily_inbox(
                     card_id: card.id.clone(),
                     card_number: card.number,
                     card_title: card.title.clone(),
-                    stage: card.stage.clone(),
+                    stage: card_stage_label,
                     project_id: card.project_id.clone(),
                     project_name: proj_name,
+                    branch: card_branch,
                     host_label: project_host_label(snapshot, &card.project_id),
                     pr_summary,
                     pr_ci_state,
@@ -1952,9 +1982,10 @@ pub fn build_daily_inbox(
                             card_id: card.id.clone(),
                             card_number: card.number,
                             card_title: card.title.clone(),
-                            stage: card.stage.clone(),
+                            stage: card_stage_label,
                             project_id: card.project_id.clone(),
                             project_name: proj_name,
+                            branch: card_branch,
                             host_label: project_host_label(snapshot, &card.project_id),
                             pr_summary,
                             pr_ci_state,
@@ -1972,9 +2003,10 @@ pub fn build_daily_inbox(
                     card_id: card.id.clone(),
                     card_number: card.number,
                     card_title: card.title.clone(),
-                    stage: card.stage.clone(),
+                    stage: card_stage_label,
                     project_id: card.project_id.clone(),
                     project_name: proj_name,
+                    branch: card_branch,
                     host_label: project_host_label(snapshot, &card.project_id),
                     pr_summary,
                     pr_ci_state,
@@ -2065,15 +2097,6 @@ pub fn build_daily_inbox(
         }
         let key = format!("terminal:{}", entry.id);
         let ctx = ctx_by_term.get(entry.id.as_str()).copied();
-        let project_id = snapshot.terminal_project_id(entry).map(str::to_owned);
-        let project_name = project_id
-            .as_deref()
-            .and_then(|pid| project_names.get(pid).cloned());
-        let host_label = terminal_host_label(snapshot, &entry.id);
-        let cwd = ctx
-            .and_then(|c| c.cwd.clone())
-            .or_else(|| entry.agent.as_ref().and_then(|a| a.directory.clone()));
-        let branch = ctx.and_then(|c| c.branch.clone());
         let card_id = entry
             .agent
             .as_ref()
@@ -2089,6 +2112,25 @@ pub fn build_daily_inbox(
         let card = card_id
             .as_deref()
             .and_then(|cid| cards_by_id.get(cid).copied());
+        let project_id = snapshot
+            .terminal_project_id(entry)
+            .map(str::to_owned)
+            .or_else(|| card.map(|c| c.project_id.clone()));
+        let project_name = project_id
+            .as_deref()
+            .and_then(|pid| project_names.get(pid).cloned());
+        let host_label = terminal_host_label(snapshot, &entry.id);
+        let cwd = ctx
+            .and_then(|c| c.cwd.clone())
+            .or_else(|| entry.agent.as_ref().and_then(|a| a.directory.clone()))
+            .or_else(|| card.and_then(|c| c.worktree.clone()));
+        let branch = ctx.and_then(|c| c.branch.clone()).or_else(|| {
+            card.and_then(|c| {
+                c.branch
+                    .clone()
+                    .or_else(|| c.workspace.as_ref().and_then(|w| w.branch.clone()))
+            })
+        });
         let agent_engine = entry.active_agent_engine().map(str::to_owned);
         let agent_name = entry
             .agent
@@ -2447,25 +2489,55 @@ pub fn build_daily_inbox(
     }
     inbox.has_projects = !snapshot.projects.is_empty();
     for proj in &snapshot.projects {
-        let mut develop_count = 0usize;
-        let mut review_count = 0usize;
+        let mut counts_by_stage: BTreeMap<&str, usize> = BTreeMap::new();
         let mut open_pr_count = 0usize;
         for c in snapshot
             .cards
             .iter()
             .filter(|c| c.active() && !c.resolved() && c.project_id == proj.id)
         {
-            let st = c.stage.to_ascii_lowercase();
-            if st == "develop" || st == "in_progress" {
-                develop_count += 1;
-            } else if st == "review" {
-                review_count += 1;
-            }
+            *counts_by_stage.entry(c.stage.as_str()).or_default() += 1;
             if c.pull_request
                 .as_ref()
                 .is_some_and(|p| !p.merged && p.state == "open")
             {
                 open_pr_count += 1;
+            }
+        }
+        let mut stage_counts = Vec::new();
+        let mut seen_stages: BTreeSet<&str> = BTreeSet::new();
+        for (idx, st) in proj.workflow.stages.iter().enumerate() {
+            seen_stages.insert(st.id.as_str());
+            let is_backlog = st.id.eq_ignore_ascii_case("backlog")
+                || (idx == 0 && !st.execute && proj.workflow.stages.len() > 1);
+            if is_backlog {
+                continue;
+            }
+            if let Some(&count) = counts_by_stage.get(st.id.as_str())
+                && count > 0
+            {
+                let stage_name = if st.name.trim().is_empty() {
+                    st.id.clone()
+                } else {
+                    st.name.clone()
+                };
+                stage_counts.push(StagePulseCount {
+                    stage_id: st.id.clone(),
+                    stage_name,
+                    count,
+                });
+            }
+        }
+        for (stage_id, count) in counts_by_stage {
+            if count > 0
+                && !seen_stages.contains(stage_id)
+                && !stage_id.eq_ignore_ascii_case("backlog")
+            {
+                stage_counts.push(StagePulseCount {
+                    stage_id: stage_id.to_owned(),
+                    stage_name: stage_id.to_owned(),
+                    count,
+                });
             }
         }
         let live_agent_count = live_agents_by_proj
@@ -2480,8 +2552,7 @@ pub fn build_daily_inbox(
             .get(proj.id.as_str())
             .copied()
             .unwrap_or(0);
-        if develop_count > 0
-            || review_count > 0
+        if !stage_counts.is_empty()
             || open_pr_count > 0
             || live_agent_count > 0
             || attention_count > 0
@@ -2491,8 +2562,7 @@ pub fn build_daily_inbox(
                 project_id: proj.id.clone(),
                 project_name: proj.name.clone(),
                 host_label: project_host_label(snapshot, &proj.id),
-                develop_count,
-                review_count,
+                stage_counts,
                 open_pr_count,
                 live_agent_count,
                 attention_count,
@@ -2501,13 +2571,12 @@ pub fn build_daily_inbox(
         }
     }
     inbox.project_pulses.sort_by(|a, b| {
+        let a_stages: usize = a.stage_counts.iter().map(|s| s.count).sum();
+        let b_stages: usize = b.stage_counts.iter().map(|s| s.count).sum();
         b.attention_count
             .cmp(&a.attention_count)
             .then_with(|| b.live_agent_count.cmp(&a.live_agent_count))
-            .then_with(|| {
-                (b.review_count + b.develop_count + b.open_pr_count)
-                    .cmp(&(a.review_count + a.develop_count + a.open_pr_count))
-            })
+            .then_with(|| (b_stages + b.open_pr_count).cmp(&(a_stages + a.open_pr_count)))
             .then_with(|| a.project_name.cmp(&b.project_name))
     });
 

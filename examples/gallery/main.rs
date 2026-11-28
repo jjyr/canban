@@ -2700,8 +2700,22 @@ pub fn Gallery() -> impl IntoElement {
         return canban_ui::frame::screen(ui).into_element();
     }
 
-    if matches!(scene_env.as_str(), "daily-inbox" | "daily-inbox-expanded") {
+    if matches!(
+        scene_env.as_str(),
+        "daily-inbox" | "daily-inbox-expanded" | "daily-inbox-active-work"
+    ) {
         fixtures::daily_inbox(ui, scene_env == "daily-inbox-expanded");
+        if scene_env == "daily-inbox-active-work" {
+            ui.snapshot.update(|s| {
+                s.scheduled_runs.retain(|r| r.state != "failed");
+                s.terminals.retain(|t| t.id != "inbox-agent-term");
+                for c in &mut s.cards {
+                    c.attention = None;
+                    c.human_gate = None;
+                }
+            });
+            ui.inbox.github_notifications.set(Vec::new());
+        }
         return canban_ui::frame::screen(ui).into_element();
     }
     if matches!(
