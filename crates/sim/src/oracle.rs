@@ -3572,6 +3572,85 @@ impl InvariantOracle {
                     );
                 }
             }
+            // Active Work project-grouping invariants: exact partition, valid project links, `Other` last.
+            let mut seen_group_ids: BTreeSet<&str> = BTreeSet::new();
+            let mut grouped_agents = 0usize;
+            let mut grouped_cards = 0usize;
+            let mut grouped_shells = 0usize;
+            let mut seen_other_group = false;
+            for grp in &inbox.active_work_groups {
+                ensure!(
+                    seen_group_ids.insert(grp.group_id.as_str()),
+                    "[{client_name}] Duplicate ActiveWorkProjectGroup id {}",
+                    grp.group_id
+                );
+                ensure!(
+                    !grp.agent_terminals.is_empty()
+                        || !grp.open_cards.is_empty()
+                        || !grp.plain_shells.is_empty(),
+                    "[{client_name}] Empty ActiveWorkProjectGroup {}",
+                    grp.group_id
+                );
+                if let Some(pid) = &grp.project_id {
+                    ensure!(
+                        !seen_other_group,
+                        "[{client_name}] Named ActiveWorkProjectGroup {pid} appeared after Other"
+                    );
+                    ensure!(
+                        merged.projects.iter().any(|p| &p.id == pid),
+                        "[{client_name}] ActiveWorkProjectGroup references unknown project {pid}"
+                    );
+                    ensure!(
+                        grp.agent_terminals
+                            .iter()
+                            .chain(grp.plain_shells.iter())
+                            .all(|t| t.project_id.as_deref() == Some(pid.as_str())),
+                        "[{client_name}] ActiveWorkProjectGroup {pid} contains mismatched terminal"
+                    );
+                    ensure!(
+                        grp.open_cards.iter().all(|c| c.project_id == *pid),
+                        "[{client_name}] ActiveWorkProjectGroup {pid} contains mismatched card"
+                    );
+                } else {
+                    seen_other_group = true;
+                    ensure!(
+                        grp.group_id == "other" && grp.display_name == "Other",
+                        "[{client_name}] Unexpected standalone group metadata: {} ({})",
+                        grp.group_id,
+                        grp.display_name
+                    );
+                }
+                let expected_live = grp
+                    .agent_terminals
+                    .iter()
+                    .filter(|t| {
+                        matches!(
+                            t.status,
+                            canban_types::HerdrStatus::Working
+                                | canban_types::HerdrStatus::Starting
+                                | canban_types::HerdrStatus::Queued
+                        )
+                    })
+                    .count();
+                ensure!(
+                    grp.live_agent_count == expected_live,
+                    "[{client_name}] ActiveWorkProjectGroup {} live_agent_count mismatch: got={} expected={expected_live}",
+                    grp.group_id,
+                    grp.live_agent_count
+                );
+                grouped_agents += grp.agent_terminals.len();
+                grouped_cards += grp.open_cards.len();
+                grouped_shells += grp.plain_shells.len();
+            }
+            ensure!(
+                grouped_agents == inbox.agent_terminals.len()
+                    && grouped_cards == inbox.open_cards.len()
+                    && grouped_shells == inbox.plain_shells.len(),
+                "[{client_name}] ActiveWorkProjectGroup partition mismatch: agents={grouped_agents}/{}, cards={grouped_cards}/{}, shells={grouped_shells}/{}",
+                inbox.agent_terminals.len(),
+                inbox.open_cards.len(),
+                inbox.plain_shells.len()
+            );
         }
         Ok(())
     }

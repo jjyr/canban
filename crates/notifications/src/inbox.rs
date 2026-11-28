@@ -489,6 +489,23 @@ pub struct DoneInboxItem {
     pub can_restore: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveWorkProjectGroup {
+    /// Stable group key (`"project:<id>"` or `"other"`).
+    pub group_id: String,
+    /// `Some(project_id)` for a known project; `None` for standalone (`Other`) items.
+    pub project_id: Option<String>,
+    /// Display name (project name or `"Other"`).
+    pub display_name: String,
+    /// Optional remote host label when multi-host is active and the project lives on a remote host.
+    pub host_label: Option<String>,
+    pub agent_terminals: Vec<InboxTerminalWork>,
+    pub open_cards: Vec<InboxCardWork>,
+    pub plain_shells: Vec<InboxTerminalWork>,
+    pub live_agent_count: usize,
+    pub latest_at: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DailyInbox {
     pub day_start_ms: u64,
@@ -517,6 +534,9 @@ pub struct DailyInbox {
     pub open_cards: Vec<InboxCardWork>,
     pub agent_terminals: Vec<InboxTerminalWork>,
     pub plain_shells: Vec<InboxTerminalWork>,
+    /// Active Work (`agent_terminals`, `open_cards`, `plain_shells`) grouped by Project
+    /// (plus trailing `Other` group for standalone terminals/shells).
+    pub active_work_groups: Vec<ActiveWorkProjectGroup>,
     /// Tier 4: Older non-actionable GitHub items (`< day_start_ms`) & carry-over cards.
     pub earlier_github: Vec<GitHubStackItem>,
     pub carryover_cards: Vec<InboxCardWork>,
@@ -2117,7 +2137,16 @@ pub fn build_daily_inbox(
         let project_id = snapshot
             .terminal_project_id(entry)
             .map(str::to_owned)
-            .or_else(|| card.map(|c| c.project_id.clone()));
+            .or_else(|| card.map(|c| c.project_id.clone()))
+            .or_else(|| {
+                ctx.and_then(|c| c.worktree_id.as_deref()).and_then(|wid| {
+                    snapshot
+                        .worktrees
+                        .iter()
+                        .find(|w| w.id == wid)
+                        .map(|w| w.project_id.clone())
+                })
+            });
         let project_name = project_id
             .as_deref()
             .and_then(|pid| project_names.get(pid).cloned());
@@ -2287,6 +2316,103 @@ pub fn build_daily_inbox(
             .cmp(&a.timestamp_ms)
             .then_with(|| a.terminal_id.cmp(&b.terminal_id))
     });
+
+    // Group Active Work (`agent_terminals`, `open_cards`, `plain_shells`) by Project
+    // (plus trailing `Other` group for standalone terminals/shells).
+    {
+        fn group_for<'a>(
+            map: &'a mut BTreeMap<String, ActiveWorkProjectGroup>,
+            snapshot: &Snapshot,
+            project_names: &BTreeMap<&str, String>,
+            pid: Option<&str>,
+        ) -> &'a mut ActiveWorkProjectGroup {
+            if let Some(id) = pid
+                && let Some(name) = project_names.get(id)
+            {
+                let key = format!("project:{id}");
+                return map
+                    .entry(key.clone())
+                    .or_insert_with(|| ActiveWorkProjectGroup {
+                        group_id: key,
+                        project_id: Some(id.to_owned()),
+                        display_name: name.clone(),
+                        host_label: project_host_label(snapshot, id),
+                        agent_terminals: Vec::new(),
+                        open_cards: Vec::new(),
+                        plain_shells: Vec::new(),
+                        live_agent_count: 0,
+                        latest_at: 0,
+                    });
+            }
+            map.entry("other".into())
+                .or_insert_with(|| ActiveWorkProjectGroup {
+                    group_id: "other".into(),
+                    project_id: None,
+                    display_name: "Other".into(),
+                    host_label: None,
+                    agent_terminals: Vec::new(),
+                    open_cards: Vec::new(),
+                    plain_shells: Vec::new(),
+                    live_agent_count: 0,
+                    latest_at: 0,
+                })
+        }
+
+        let mut group_map: BTreeMap<String, ActiveWorkProjectGroup> = BTreeMap::new();
+        for term in &inbox.agent_terminals {
+            let grp = group_for(
+                &mut group_map,
+                snapshot,
+                &project_names,
+                term.project_id.as_deref(),
+            );
+            if matches!(
+                term.status,
+                HerdrStatus::Working | HerdrStatus::Starting | HerdrStatus::Queued
+            ) {
+                grp.live_agent_count += 1;
+            }
+            grp.latest_at = grp.latest_at.max(term.timestamp_ms);
+            grp.agent_terminals.push(term.clone());
+        }
+        for card in &inbox.open_cards {
+            let grp = group_for(
+                &mut group_map,
+                snapshot,
+                &project_names,
+                Some(card.project_id.as_str()),
+            );
+            grp.latest_at = grp.latest_at.max(card.last_activity_at);
+            grp.open_cards.push(card.clone());
+        }
+        for shell in &inbox.plain_shells {
+            let grp = group_for(
+                &mut group_map,
+                snapshot,
+                &project_names,
+                shell.project_id.as_deref(),
+            );
+            grp.latest_at = grp.latest_at.max(shell.timestamp_ms);
+            grp.plain_shells.push(shell.clone());
+        }
+        let mut groups: Vec<ActiveWorkProjectGroup> = group_map.into_values().collect();
+        groups.sort_by(|a, b| {
+            b.project_id
+                .is_some()
+                .cmp(&a.project_id.is_some())
+                .then_with(|| b.live_agent_count.cmp(&a.live_agent_count))
+                .then_with(|| (!b.agent_terminals.is_empty()).cmp(&!a.agent_terminals.is_empty()))
+                .then_with(|| b.latest_at.cmp(&a.latest_at))
+                .then_with(|| {
+                    a.display_name
+                        .to_ascii_lowercase()
+                        .cmp(&b.display_name.to_ascii_lowercase())
+                })
+                .then_with(|| a.group_id.cmp(&b.group_id))
+        });
+        inbox.active_work_groups = groups;
+    }
+
     inbox
         .deferred_items
         .sort_by(|a, b| a.defer_until.cmp(&b.defer_until).then(a.key.cmp(&b.key)));

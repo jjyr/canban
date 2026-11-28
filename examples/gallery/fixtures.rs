@@ -2987,6 +2987,71 @@ pub fn daily_inbox(ui: canban_ui::presenter::Ui, expand_github: bool) {
         ahead: 0,
         ..Default::default()
     });
+    // Project-associated idle shell (grouped under `gallery-project`) + standalone shell (`Other`).
+    snapshot.terminals.push(TerminalEntry {
+        id: "inbox-proj-shell".into(),
+        conversation_id: None,
+        number: 5,
+        name: Some("zsh".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-shell-5".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+            command: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(900_000),
+    });
+    snapshot.terminal_contexts.push(TerminalContext {
+        terminal_id: "inbox-proj-shell".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-shell-5".into(),
+        cwd: Some("/Users/jjy/Workspace/canban".into()),
+        directory_root: Some("/Users/jjy/Workspace/canban".into()),
+        project_id: Some("gallery-project".into()),
+        branch: Some("main".into()),
+        ..Default::default()
+    });
+    snapshot.terminals.push(TerminalEntry {
+        id: "inbox-other-shell".into(),
+        conversation_id: None,
+        number: 6,
+        name: Some("zsh".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-shell-6".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+            command: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(420_000),
+    });
+    snapshot.terminal_contexts.push(TerminalContext {
+        terminal_id: "inbox-other-shell".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-shell-6".into(),
+        cwd: Some("/Users/jjy/Downloads".into()),
+        directory_root: Some("/Users/jjy/Downloads".into()),
+        project_id: None,
+        branch: None,
+        ..Default::default()
+    });
     ui.snapshot.set(snapshot);
     ui.github
         .gh_status

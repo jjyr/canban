@@ -11,9 +11,9 @@ pub use state::{
 
 use crate::presenter::*;
 use canban_notifications::{
-    DailyInbox, DeferredInboxItem, DoneInboxItem, GitHubProjectStack, GitHubStackItem,
-    InboxCardWork, InboxTerminalWork, NeedsYouItem, NeedsYouKind, ProjectPulseItem,
-    ScheduleCardStack, SchedulePulseItem, ShippedTodayItem, UpcomingScheduleItem,
+    ActiveWorkProjectGroup, DailyInbox, DeferredInboxItem, DoneInboxItem, GitHubProjectStack,
+    GitHubStackItem, InboxCardWork, InboxTerminalWork, NeedsYouItem, NeedsYouKind,
+    ProjectPulseItem, ScheduleCardStack, SchedulePulseItem, ShippedTodayItem, UpcomingScheduleItem,
 };
 use canban_types::HerdrStatus;
 use canban_ui_kit::{compact_home, tokens::*, *};
@@ -3286,7 +3286,12 @@ fn render_github_activity(
 }
 
 /// Single-layer borderless `SURFACE` card for a live Agent Terminal (no bare `Close` button; `⋯` menu only).
-fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> View {
+fn render_agent_session_card(
+    ui: Ui,
+    term: InboxTerminalWork,
+    now_ms: u64,
+    in_project_group: bool,
+) -> View {
     let term_for_menu = term.clone();
     let tid_open = term.terminal_id.clone();
     let card_open = term.card_id.clone();
@@ -3310,8 +3315,9 @@ fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vi
 
     let tile = agent_glyph_28(term.agent_engine.as_deref(), Some(status_color));
 
-    // Row 1 (Eyebrow): Project + Branch on the left (fallback host + cwd when neither is known),
-    // status pill pinned on the right. Full branch/cwd disclosed on hover tooltip.
+    // Row 1 (Eyebrow): When grouped under a named Project header, omit the redundant project name
+    // and dedicate the eyebrow to branch/cwd so parallel terminals in one project are easy to tell apart.
+    // Full project/branch/cwd is always disclosed on hover tooltip.
     let mut ctx_tip_parts = Vec::new();
     if let Some(proj) = &term.project_name {
         ctx_tip_parts.push(proj.clone());
@@ -3334,63 +3340,114 @@ fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vi
         .min_w(px(0.))
         .overflow_hidden()
         .tooltip(hint_tooltip(ctx_tooltip));
-    let scope_label = term
-        .project_name
-        .clone()
-        .unwrap_or_else(|| term.host_label.clone());
-    ctx_left = ctx_left.child(
-        label(scope_label)
-            .text_size(px(12.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(if term.project_name.is_some() {
-                TEXT
-            } else {
-                MUTED
-            })
-            .truncate()
-            .max_w(px(136.))
-            .flex_shrink_0(),
-    );
-    if let Some(br) = &term.branch {
+    if in_project_group {
+        if let Some(br) = &term.branch {
+            ctx_left = ctx_left.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(icon_tinted(Icon::Branch, MUTED).w(px(11.5)).h(px(11.5)))
+                    .child(
+                        muted(br.clone())
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5))
+                            .truncate()
+                            .flex_1()
+                            .min_w(px(0.)),
+                    ),
+            );
+        } else if let Some(cwd) = &term.cwd {
+            ctx_left = ctx_left.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(icon_tinted(Icon::Folder, MUTED).w(px(11.5)).h(px(11.5)))
+                    .child(
+                        muted(shorten_path(cwd))
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.))
+                            .truncate()
+                            .flex_1()
+                            .min_w(px(0.)),
+                    ),
+            );
+        } else {
+            ctx_left = ctx_left.child(
+                muted(term.host_label.clone())
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.5))
+                    .truncate()
+                    .flex_1()
+                    .min_w(px(0.)),
+            );
+        }
+    } else {
+        let scope_label = term
+            .project_name
+            .clone()
+            .unwrap_or_else(|| term.host_label.clone());
         ctx_left = ctx_left.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .flex_1()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .child(icon_tinted(Icon::Branch, MUTED).w(px(11.5)).h(px(11.5)))
-                .child(
-                    muted(br.clone())
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
-                        .truncate()
-                        .flex_1()
-                        .min_w(px(0.)),
-                ),
+            label(scope_label)
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if term.project_name.is_some() {
+                    TEXT
+                } else {
+                    MUTED
+                })
+                .truncate()
+                .max_w(px(136.))
+                .flex_shrink_0(),
         );
-    } else if term.project_name.is_none()
-        && let Some(cwd) = &term.cwd
-    {
-        ctx_left = ctx_left.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .flex_1()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .child(icon_tinted(Icon::Folder, MUTED).w(px(11.5)).h(px(11.5)))
-                .child(
-                    muted(shorten_path(cwd))
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.))
-                        .truncate()
-                        .flex_1()
-                        .min_w(px(0.)),
-                ),
-        );
+        if let Some(br) = &term.branch {
+            ctx_left = ctx_left.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(icon_tinted(Icon::Branch, MUTED).w(px(11.5)).h(px(11.5)))
+                    .child(
+                        muted(br.clone())
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5))
+                            .truncate()
+                            .flex_1()
+                            .min_w(px(0.)),
+                    ),
+            );
+        } else if term.project_name.is_none()
+            && let Some(cwd) = &term.cwd
+        {
+            ctx_left = ctx_left.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(icon_tinted(Icon::Folder, MUTED).w(px(11.5)).h(px(11.5)))
+                    .child(
+                        muted(shorten_path(cwd))
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.))
+                            .truncate()
+                            .flex_1()
+                            .min_w(px(0.)),
+                    ),
+            );
+        }
     }
 
     let eyebrow = view()
@@ -3550,33 +3607,41 @@ fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vi
         }))
 }
 
-/// Active Work chapter: 2-column borderless `SURFACE` Agent cards + Today's Cards + Idle Shells.
+/// Active Work chapter: project-grouped editorial sections with 2-column borderless `SURFACE`
+/// Agent cards, hairline Today's Cards rows, and per-project collapsible Idle Shells.
 fn render_active_work(
     ui: Ui,
-    agent_terminals: Vec<InboxTerminalWork>,
-    open_cards: Vec<InboxCardWork>,
-    plain_shells: Vec<InboxTerminalWork>,
+    groups: Vec<ActiveWorkProjectGroup>,
     now_ms: u64,
     narrow: bool,
 ) -> Option<View> {
-    if agent_terminals.is_empty() && open_cards.is_empty() && plain_shells.is_empty() {
+    if groups.is_empty() {
         return None;
     }
+    let total_agents: usize = groups.iter().map(|g| g.agent_terminals.len()).sum();
+    let total_cards: usize = groups.iter().map(|g| g.open_cards.len()).sum();
+    let total_shells: usize = groups.iter().map(|g| g.plain_shells.len()).sum();
     let mut sub_parts = Vec::new();
-    if !agent_terminals.is_empty() {
-        let n = agent_terminals.len();
-        sub_parts.push(format!("{n} {}", if n == 1 { "agent" } else { "agents" }));
+    if total_agents > 0 {
+        sub_parts.push(format!(
+            "{total_agents} {}",
+            if total_agents == 1 { "agent" } else { "agents" }
+        ));
     }
-    if !open_cards.is_empty() {
-        let n = open_cards.len();
-        sub_parts.push(format!("{n} {}", if n == 1 { "card" } else { "cards" }));
+    if total_cards > 0 {
+        sub_parts.push(format!(
+            "{total_cards} {}",
+            if total_cards == 1 { "card" } else { "cards" }
+        ));
     }
-    if !plain_shells.is_empty() {
-        let n = plain_shells.len();
-        sub_parts.push(format!("{n} {}", if n == 1 { "shell" } else { "shells" }));
+    if total_shells > 0 {
+        sub_parts.push(format!(
+            "{total_shells} {}",
+            if total_shells == 1 { "shell" } else { "shells" }
+        ));
     }
 
-    let mut sec = view().gap_3().child(chapter_header(
+    let mut sec = view().gap_4().child(chapter_header(
         Icon::Terminal,
         ACCENT,
         "Active Work",
@@ -3584,110 +3649,284 @@ fn render_active_work(
         None,
     ));
 
-    // 1. Live Agent Sessions (strictly equal-width CSS Grid: `repeat(2, minmax(0, 1fr))` on desktop)
-    if !agent_terminals.is_empty() {
-        let mut grid = view()
-            .w_full()
-            .grid()
-            .grid_cols(if narrow { 1 } else { 2 })
-            .gap_3();
-        for term in agent_terminals {
-            grid = grid.child(render_agent_session_card(ui, term, now_ms));
+    for group in groups {
+        let is_named_project = group.project_id.is_some();
+        let dot_color = if group.live_agent_count > 0 {
+            ACCENT
+        } else if group
+            .agent_terminals
+            .iter()
+            .any(|t| t.status == HerdrStatus::Done)
+        {
+            SUCCESS
+        } else {
+            MUTED
+        };
+
+        let mut grp_parts = Vec::new();
+        if !group.agent_terminals.is_empty() {
+            let n = group.agent_terminals.len();
+            grp_parts.push(format!("{n} {}", if n == 1 { "agent" } else { "agents" }));
         }
-        sec = sec.child(grid);
-    }
+        if !group.open_cards.is_empty() {
+            let n = group.open_cards.len();
+            grp_parts.push(format!("{n} {}", if n == 1 { "card" } else { "cards" }));
+        }
+        if !group.plain_shells.is_empty() {
+            let n = group.plain_shells.len();
+            grp_parts.push(format!("{n} {}", if n == 1 { "shell" } else { "shells" }));
+        }
 
-    // 2. Today's Cards (hairline-ruled table)
-    if !open_cards.is_empty() {
-        let count = open_cards.len();
-        let mut table = view().child(
-            view().py_1p5().border_b_1().border_color(BORDER).child(
-                muted(format!("TODAY'S CARDS ({count})"))
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD),
-            ),
-        );
-        for card in open_cards {
-            let age = format_age_compact(card.last_activity_at, now_ms);
-            let cid_open = card.card_id.clone();
-            let cid_resolve = card.card_id.clone();
-            let key_defer = card.key.clone();
-            let key_dismiss = card.key.clone();
-            let wm = card.watermark;
-            let label_title = format!("#{} {}", card.card_number, card.card_title);
-            let label_dismiss = label_title.clone();
+        let name_el: AnyElement = if let Some(pid) = group.project_id.clone() {
+            press_target()
+                .bg(CLEAR)
+                .rounded(px(4.))
+                .hover(|s| s.bg(CARD_HOVER))
+                .on_press(move |_: &()| {
+                    ui.project.set(pid.clone());
+                    ui.navigate("board");
+                })
+                .child(
+                    label(group.display_name.clone())
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(TEXT),
+                )
+                .into_element()
+        } else {
+            label(group.display_name.clone())
+                .text_size(px(12.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(MUTED)
+                .into_element()
+        };
 
-            let mut row_left = view()
-                .flex_row()
-                .items_center()
-                .gap_2p5()
-                .min_w(px(0.))
-                .child(
-                    muted(format!("#{}", card.card_number))
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
-                        .w(px(46.))
-                        .flex_shrink_0(),
-                )
-                .child(
-                    label(card.card_title.clone())
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .truncate()
-                        .flex_1()
-                        .min_w(px(0.)),
-                )
-                .child(
-                    muted(card.project_name.clone())
-                        .text_size(px(11.5))
-                        .flex_shrink_0(),
-                );
-            if let Some(br) = card.branch {
-                let full_br = br.clone();
-                row_left = row_left.child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .flex_shrink_0()
-                        .tooltip(hint_tooltip(full_br))
-                        .child(icon_tinted(Icon::Branch, MUTED).w(px(11.5)).h(px(11.5)))
-                        .child(
-                            muted(br)
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
-                                .max_w(px(148.))
-                                .truncate(),
-                        ),
-                );
-            }
-            row_left = row_left.child(
-                muted(card.stage.clone())
-                    .text_size(px(11.5))
-                    .flex_shrink_0(),
-            );
-            if let Some(pr) = card.pr_summary {
-                let tone = match card.pr_ci_state.as_deref() {
-                    Some("failure" | "error") => Tone::Danger,
-                    Some("success") => Tone::Success,
-                    _ => Tone::Neutral,
-                };
-                row_left = row_left.child(status(pr, tone));
-            }
-            if let Some(h) = card.host_label {
-                row_left = row_left.child(muted(h).font_family(MONO_FONT).text_size(px(11.)));
-            }
-            row_left = row_left.child(
-                muted(age)
+        let mut hdr_left = view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .child(status_dot(dot_color))
+            .child(name_el);
+        if let Some(h) = &group.host_label {
+            hdr_left = hdr_left.child(
+                muted(h.clone())
                     .font_family(MONO_FONT)
                     .text_size(px(11.))
                     .flex_shrink_0(),
             );
+        }
+        if !grp_parts.is_empty() {
+            hdr_left = hdr_left.child(
+                muted(grp_parts.join(" · "))
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.))
+                    .truncate()
+                    .min_w(px(0.)),
+            );
+        }
 
-            table = table.child(
+        let mut hdr = view()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .py_1()
+            .border_b_1()
+            .border_color(BORDER)
+            .child(hdr_left);
+        if let Some(pid) = group.project_id.clone() {
+            hdr = hdr.child(compact_action("Board →", Variant::Quiet, move |_| {
+                ui.project.set(pid.clone());
+                ui.navigate("board");
+            }));
+        }
+
+        let has_agents = !group.agent_terminals.is_empty();
+        let has_cards = !group.open_cards.is_empty();
+        let mut group_block = view().gap_2p5().child(hdr);
+
+        // 1. Live Agent Sessions (strictly equal-width CSS Grid: `repeat(2, minmax(0, 1fr))` on desktop)
+        if has_agents {
+            let mut grid = view()
+                .w_full()
+                .grid()
+                .grid_cols(if narrow { 1 } else { 2 })
+                .gap_3();
+            for term in group.agent_terminals {
+                grid = grid.child(render_agent_session_card(
+                    ui,
+                    term,
+                    now_ms,
+                    is_named_project,
+                ));
+            }
+            group_block = group_block.child(grid);
+        }
+
+        // 2. Today's Cards for this project (hairline-ruled table)
+        if has_cards {
+            let mut table = view();
+            if has_agents {
+                table = table.border_t_1().border_color(BORDER);
+            }
+            for card in group.open_cards {
+                let age = format_age_compact(card.last_activity_at, now_ms);
+                let cid_open = card.card_id.clone();
+                let cid_resolve = card.card_id.clone();
+                let key_defer = card.key.clone();
+                let key_dismiss = card.key.clone();
+                let wm = card.watermark;
+                let label_title = format!("#{} {}", card.card_number, card.card_title);
+                let label_dismiss = label_title.clone();
+
+                let mut row_left = view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2p5()
+                    .min_w(px(0.))
+                    .child(
+                        muted(format!("#{}", card.card_number))
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5))
+                            .w(px(46.))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        label(card.card_title.clone())
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .flex_1()
+                            .min_w(px(0.)),
+                    );
+                if let Some(br) = card.branch {
+                    let full_br = br.clone();
+                    row_left = row_left.child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .tooltip(hint_tooltip(full_br))
+                            .child(icon_tinted(Icon::Branch, MUTED).w(px(11.5)).h(px(11.5)))
+                            .child(
+                                muted(br)
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.5))
+                                    .max_w(px(148.))
+                                    .truncate(),
+                            ),
+                    );
+                }
+                row_left = row_left.child(
+                    muted(card.stage.clone())
+                        .text_size(px(11.5))
+                        .flex_shrink_0(),
+                );
+                if let Some(pr) = card.pr_summary {
+                    let tone = match card.pr_ci_state.as_deref() {
+                        Some("failure" | "error") => Tone::Danger,
+                        Some("success") => Tone::Success,
+                        _ => Tone::Neutral,
+                    };
+                    row_left = row_left.child(status(pr, tone));
+                }
+                if let Some(h) = card.host_label
+                    && group.host_label.is_none()
+                {
+                    row_left = row_left.child(muted(h).font_family(MONO_FONT).text_size(px(11.)));
+                }
+                row_left = row_left.child(
+                    muted(age)
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.))
+                        .flex_shrink_0(),
+                );
+
+                table = table.child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(BORDER)
+                        .child(
+                            press_target()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .bg(CLEAR)
+                                .rounded(px(4.))
+                                .hover(|s| s.bg(CARD_HOVER))
+                                .on_press(move |_: &()| ui.open_card(cid_open.clone()))
+                                .child(row_left),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .flex_shrink_0()
+                                .child(compact_action("Resolve", Variant::Quiet, move |_| {
+                                    if let Some(c) = ui.snapshot.with_untracked(|s| {
+                                        s.cards.iter().find(|x| x.id == cid_resolve).cloned()
+                                    }) {
+                                        dispatch(
+                                            ui,
+                                            "card.resolve",
+                                            json!({ "card_id": c.id, "revision": c.revision }),
+                                        );
+                                        ui.notify(format!("Resolved #{}", c.number));
+                                    }
+                                }))
+                                .child(chrome_button(Icon::Clock, "Defer", move |_| {
+                                    open_defer_menu(
+                                        ui,
+                                        vec![(key_defer.clone(), wm)],
+                                        label_title.clone(),
+                                    )
+                                }))
+                                .child(chrome_button(Icon::Close, "Hide", move |_| {
+                                    dismiss_items(
+                                        ui,
+                                        vec![(key_dismiss.clone(), wm)],
+                                        format!("Hidden · {label_dismiss}"),
+                                    )
+                                })),
+                        ),
+                );
+            }
+            group_block = group_block.child(table);
+        }
+
+        // 3. Per-project borderless Idle Shells collapsible row (no bare Close; `⋯` menu per shell)
+        if !group.plain_shells.is_empty() {
+            let stack_id = format!("plain-shells-stack:{}", group.group_id);
+            let expanded = ui.inbox.expanded_stacks.with(|s| s.contains(&stack_id));
+            let count = group.plain_shells.len();
+            let preview = group
+                .plain_shells
+                .iter()
+                .take(3)
+                .map(|s| {
+                    s.cwd
+                        .as_deref()
+                        .map(shorten_path)
+                        .unwrap_or_else(|| s.host_label.clone())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let mut band = view();
+            if has_agents && !has_cards {
+                band = band.border_t_1().border_color(BORDER);
+            }
+            band = band.child(
                 view()
                     .flex_row()
                     .items_center()
+                    .justify_between()
                     .gap_2()
                     .py_2()
                     .border_b_1()
@@ -3699,174 +3938,102 @@ fn render_active_work(
                             .bg(CLEAR)
                             .rounded(px(4.))
                             .hover(|s| s.bg(CARD_HOVER))
-                            .on_press(move |_: &()| ui.open_card(cid_open.clone()))
-                            .child(row_left),
-                    )
-                    .child(
+                            .on_press(move |_: &()| toggle_stack(ui, stack_id.clone()))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w(px(0.))
+                                    .child(
+                                        icon_tinted(
+                                            if expanded {
+                                                Icon::ChevronDown
+                                            } else {
+                                                Icon::Forward
+                                            },
+                                            MUTED,
+                                        )
+                                        .w(px(12.))
+                                        .h(px(12.)),
+                                    )
+                                    .child(
+                                        label(format!("Idle shells · {count}"))
+                                            .text_size(px(12.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(MUTED),
+                                    )
+                                    .child(
+                                        muted(preview)
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(11.5))
+                                            .truncate()
+                                            .flex_1(),
+                                    ),
+                            ),
+                    ),
+            );
+
+            if expanded {
+                for sh in group.plain_shells {
+                    let sh_menu = sh.clone();
+                    let tid_open = sh.terminal_id.clone();
+                    let age = format_age_compact(sh.timestamp_ms, now_ms);
+                    let cwd = sh
+                        .cwd
+                        .as_deref()
+                        .map(shorten_path)
+                        .unwrap_or_else(|| "—".into());
+                    band = band.child(
                         view()
                             .flex_row()
                             .items_center()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .child(compact_action("Resolve", Variant::Quiet, move |_| {
-                                if let Some(c) = ui.snapshot.with_untracked(|s| {
-                                    s.cards.iter().find(|x| x.id == cid_resolve).cloned()
-                                }) {
-                                    dispatch(
-                                        ui,
-                                        "card.resolve",
-                                        json!({ "card_id": c.id, "revision": c.revision }),
-                                    );
-                                    ui.notify(format!("Resolved #{}", c.number));
-                                }
-                            }))
-                            .child(chrome_button(Icon::Clock, "Defer", move |_| {
-                                open_defer_menu(
-                                    ui,
-                                    vec![(key_defer.clone(), wm)],
-                                    label_title.clone(),
-                                )
-                            }))
-                            .child(chrome_button(Icon::Close, "Hide", move |_| {
-                                dismiss_items(
-                                    ui,
-                                    vec![(key_dismiss.clone(), wm)],
-                                    format!("Hidden · {label_dismiss}"),
-                                )
+                            .justify_between()
+                            .gap_2()
+                            .pl(px(20.))
+                            .py_1p5()
+                            .border_b_1()
+                            .border_color(BORDER)
+                            .child(
+                                press_target()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .bg(CLEAR)
+                                    .rounded(px(4.))
+                                    .hover(|s| s.bg(CARD_HOVER))
+                                    .on_press(move |_: &()| ui.open_terminal(tid_open.clone()))
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .min_w(px(0.))
+                                            .child(label(sh.title.clone()).text_size(px(12.)))
+                                            .child(
+                                                muted(cwd)
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(11.5))
+                                                    .truncate()
+                                                    .flex_1(),
+                                            )
+                                            .child(
+                                                muted(age)
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(11.))
+                                                    .flex_shrink_0(),
+                                            ),
+                                    ),
+                            )
+                            .child(chrome_button(Icon::More, "Shell options", move |_| {
+                                open_terminal_menu(ui, sh_menu.clone())
                             })),
-                    ),
-            );
-        }
-        sec = sec.child(table);
-    }
-
-    // 3. Borderless Idle Shells collapsible row (no bare Close; `⋯` menu per shell)
-    if !plain_shells.is_empty() {
-        let stack_id = "plain-shells-stack".to_owned();
-        let expanded = ui.inbox.expanded_stacks.with(|s| s.contains(&stack_id));
-        let count = plain_shells.len();
-        let preview = plain_shells
-            .iter()
-            .take(3)
-            .map(|s| {
-                s.cwd
-                    .as_deref()
-                    .map(shorten_path)
-                    .unwrap_or_else(|| s.host_label.clone())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let mut band = view().child(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .py_2()
-                .border_b_1()
-                .border_color(BORDER)
-                .child(
-                    press_target()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .bg(CLEAR)
-                        .rounded(px(4.))
-                        .hover(|s| s.bg(CARD_HOVER))
-                        .on_press(move |_: &()| toggle_stack(ui, stack_id.clone()))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .min_w(px(0.))
-                                .child(
-                                    icon_tinted(
-                                        if expanded {
-                                            Icon::ChevronDown
-                                        } else {
-                                            Icon::Forward
-                                        },
-                                        MUTED,
-                                    )
-                                    .w(px(12.))
-                                    .h(px(12.)),
-                                )
-                                .child(
-                                    label(format!("Idle shells · {count}"))
-                                        .text_size(px(12.))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(MUTED),
-                                )
-                                .child(
-                                    muted(preview)
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(11.5))
-                                        .truncate()
-                                        .flex_1(),
-                                ),
-                        ),
-                ),
-        );
-
-        if expanded {
-            for sh in plain_shells {
-                let sh_menu = sh.clone();
-                let tid_open = sh.terminal_id.clone();
-                let age = format_age_compact(sh.timestamp_ms, now_ms);
-                let cwd = sh
-                    .cwd
-                    .as_deref()
-                    .map(shorten_path)
-                    .unwrap_or_else(|| "—".into());
-                band = band.child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .pl(px(20.))
-                        .py_1p5()
-                        .border_b_1()
-                        .border_color(BORDER)
-                        .child(
-                            press_target()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .bg(CLEAR)
-                                .rounded(px(4.))
-                                .hover(|s| s.bg(CARD_HOVER))
-                                .on_press(move |_: &()| ui.open_terminal(tid_open.clone()))
-                                .child(
-                                    view()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_2()
-                                        .min_w(px(0.))
-                                        .child(label(sh.title.clone()).text_size(px(12.)))
-                                        .child(
-                                            muted(cwd)
-                                                .font_family(MONO_FONT)
-                                                .text_size(px(11.5))
-                                                .truncate()
-                                                .flex_1(),
-                                        )
-                                        .child(
-                                            muted(age)
-                                                .font_family(MONO_FONT)
-                                                .text_size(px(11.))
-                                                .flex_shrink_0(),
-                                        ),
-                                ),
-                        )
-                        .child(chrome_button(Icon::More, "Shell options", move |_| {
-                            open_terminal_menu(ui, sh_menu.clone())
-                        })),
-                );
+                    );
+                }
             }
+            group_block = group_block.child(band);
         }
-        sec = sec.child(band);
+
+        sec = sec.child(group_block);
     }
 
     Some(sec)
@@ -4664,9 +4831,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                         }
                                         if let Some(work) = render_active_work(
                                             ui,
-                                            inbox.agent_terminals.clone(),
-                                            inbox.open_cards.clone(),
-                                            inbox.plain_shells.clone(),
+                                            inbox.active_work_groups.clone(),
                                             now_ms,
                                             narrow,
                                         ) {
@@ -4780,12 +4945,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     col = col.child(sec);
                                 }
 
-                                // 4. Active Work (2-column borderless `SURFACE` Agent cards + Today's Cards + Idle Shells)
+                                // 4. Active Work (project-grouped 2-column borderless `SURFACE` Agent cards + Today's Cards + Idle Shells)
                                 if let Some(work) = render_active_work(
                                     ui,
-                                    inbox.agent_terminals.clone(),
-                                    inbox.open_cards.clone(),
-                                    inbox.plain_shells.clone(),
+                                    inbox.active_work_groups.clone(),
                                     now_ms,
                                     narrow,
                                 ) {

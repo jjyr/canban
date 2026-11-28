@@ -871,6 +871,150 @@ pub fn run(seed: u64) -> Result<u64> {
                     ),
                     "Expected InboxCardWork to carry resolved column name and branch, got {qa_work:?}"
                 );
+
+                // Verify Active Work groups multiple same-project terminals + cards + project shells
+                // together under their Project, and places standalone shells under trailing `Other`.
+                let second_pid = custom_snap.projects.get(1).map(|p| p.id.clone());
+                custom_snap.terminals.clear();
+                custom_snap.terminal_contexts.clear();
+                let push_sim_term = |snap: &mut canban_types::Snapshot,
+                                     id: &str,
+                                     num: u64,
+                                     engine: Option<&str>,
+                                     agent_status: Option<&str>,
+                                     pid: Option<&str>,
+                                     cwd: &str,
+                                     branch: Option<&str>,
+                                     created_at: u64| {
+                    snap.terminals.push(canban_types::TerminalEntry {
+                        id: id.into(),
+                        conversation_id: None,
+                        number: num,
+                        name: Some(id.into()),
+                        origin_card_id: None,
+                        agent_engine: engine.map(str::to_owned),
+                        runtime: Some(canban_types::TerminalRuntime {
+                            core_id: Some("sim-core".into()),
+                            terminal: Some(format!("pty-{id}")),
+                            state: "live".into(),
+                            connection: "connected".into(),
+                            error: None,
+                            agent_status: agent_status.map(str::to_owned),
+                            agent_turn: engine.map(|_| 1),
+                            observed_agent: engine.map(str::to_owned),
+                            waiting: None,
+                            command: None,
+                        }),
+                        agent: None,
+                        created_at,
+                    });
+                    snap.terminal_contexts.push(canban_types::TerminalContext {
+                        terminal_id: id.into(),
+                        core_id: "sim-core".into(),
+                        terminal: format!("pty-{id}"),
+                        cwd: Some(cwd.into()),
+                        directory_root: Some(cwd.into()),
+                        project_id: pid.map(str::to_owned),
+                        branch: branch.map(str::to_owned),
+                        ..Default::default()
+                    });
+                };
+                push_sim_term(
+                    &mut custom_snap,
+                    "grp-agent-1",
+                    1,
+                    Some("codex"),
+                    Some("working"),
+                    Some(&custom_pid),
+                    "/tmp/proj-a",
+                    Some("feat/a1"),
+                    now_deferred.saturating_sub(30_000),
+                );
+                push_sim_term(
+                    &mut custom_snap,
+                    "grp-agent-2",
+                    2,
+                    Some("claude"),
+                    Some("done"),
+                    Some(&custom_pid),
+                    "/tmp/proj-a",
+                    Some("feat/a2"),
+                    now_deferred.saturating_sub(45_000),
+                );
+                push_sim_term(
+                    &mut custom_snap,
+                    "grp-shell-proj",
+                    3,
+                    None,
+                    None,
+                    Some(&custom_pid),
+                    "/tmp/proj-a",
+                    None,
+                    now_deferred.saturating_sub(50_000),
+                );
+                if let Some(ref pid2) = second_pid {
+                    push_sim_term(
+                        &mut custom_snap,
+                        "grp-shell-proj2",
+                        4,
+                        None,
+                        None,
+                        Some(pid2),
+                        "/tmp/proj-b",
+                        None,
+                        now_deferred.saturating_sub(20_000),
+                    );
+                }
+                push_sim_term(
+                    &mut custom_snap,
+                    "grp-shell-other",
+                    5,
+                    None,
+                    None,
+                    None,
+                    "/tmp/scratch",
+                    None,
+                    now_deferred.saturating_sub(10_000),
+                );
+
+                let grouped_inbox = canban_notifications::build_daily_inbox(
+                    &custom_snap,
+                    &[],
+                    now_deferred,
+                    0,
+                    360,
+                );
+                let first_grp = grouped_inbox
+                    .active_work_groups
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("Expected grouped Active Work"))?;
+                ensure!(
+                    first_grp.project_id.as_deref() == Some(custom_pid.as_str())
+                        && first_grp.live_agent_count == 1
+                        && first_grp.agent_terminals.len() == 2
+                        && first_grp.open_cards.len() == 3
+                        && first_grp.plain_shells.len() == 1,
+                    "Expected project {custom_pid} first with 2 agents, 3 cards, 1 shell; got {first_grp:?}"
+                );
+                let last_grp = grouped_inbox.active_work_groups.last().unwrap();
+                ensure!(
+                    last_grp.project_id.is_none()
+                        && last_grp.group_id == "other"
+                        && last_grp.plain_shells.len() == 1
+                        && last_grp.plain_shells[0].terminal_id == "grp-shell-other",
+                    "Expected standalone shell in trailing Other group; got {last_grp:?}"
+                );
+                if let Some(pid2) = second_pid {
+                    ensure!(
+                        grouped_inbox.active_work_groups.iter().any(|g| {
+                            g.project_id.as_deref() == Some(pid2.as_str())
+                                && g.plain_shells.len() == 1
+                                && g.plain_shells[0].terminal_id == "grp-shell-proj2"
+                        }),
+                        "Expected second project shell in its own group; got {:?}",
+                        grouped_inbox.active_work_groups
+                    );
+                }
             }
         }
 
