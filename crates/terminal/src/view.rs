@@ -304,13 +304,20 @@ impl IntoElement for TerminalView {
                     .prop("read_only", json!(true)),
                 TerminalSurface::Live(binding) => el
                     .prop("binding", move || match binding() {
-                        Some(b) => json!({
-                            "host_id": b.host_id,
-                            "config": b.config,
-                            "terminal": b.terminal,
-                            "core_id": b.core_id,
-                            "epoch": b.session_epoch,
-                        }),
+                        Some(b) => {
+                            let transport_id = b
+                                .transport
+                                .as_ref()
+                                .map(crate::apple::macos::register_transport_weak);
+                            json!({
+                                "host_id": b.host_id,
+                                "config": b.config,
+                                "terminal": b.terminal,
+                                "core_id": b.core_id,
+                                "epoch": b.session_epoch,
+                                "transport_id": transport_id,
+                            })
+                        }
                         None => Value::Null,
                     })
                     .prop("read_only", move || json!(read_only())),

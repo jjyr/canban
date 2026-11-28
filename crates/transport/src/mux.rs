@@ -392,6 +392,7 @@ fn spawn_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 ) -> (Option<MuxClient>, Option<MuxServer>) {
     let mut cfg = yamux::Config::default();
     cfg.set_max_num_streams(512);
+    cfg.set_split_send_size(64 * 1024);
     let conn = yamux::Connection::new(TokioCompat(io), cfg, mode);
     let (open_tx, open_rx) = mpsc::channel(128);
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel();

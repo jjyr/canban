@@ -18,7 +18,8 @@ pub const ATTACH_RESIZE_COALESCE: Duration = Duration::from_millis(75);
 pub const ATTACH_RESIZE_SYNC_CAP: Duration = Duration::from_millis(160);
 const ATTACH_POST_SNAPSHOT_BURST: Duration = Duration::from_millis(2);
 const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_millis(15);
-pub const MAX_POOLED_SESSIONS: usize = 8;
+const MAX_VT_LOCK_SLICE_BYTES: usize = 32 * 1024;
+pub const MAX_POOLED_SESSIONS: usize = 24;
 
 static LAST_VIEWPORT_SIZE: AtomicU32 = AtomicU32::new(0);
 static LAST_CELL_METRICS_MILLI: AtomicU64 = AtomicU64::new(0);
@@ -498,6 +499,7 @@ pub struct LiveSession {
     pub wake: Arc<WakeHub>,
     pub input: mpsc::Sender<Input>,
     pub stop: Arc<AtomicBool>,
+    pub exited: Arc<AtomicBool>,
 }
 
 impl Drop for LiveSession {
@@ -885,6 +887,7 @@ fn spawn_session_with_timings(
     let size_cv = Arc::new(Condvar::new());
     let wake = Arc::new(WakeHub::new());
     let stop = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
     let rx = Arc::new(Mutex::new(rx));
 
@@ -918,6 +921,7 @@ fn spawn_session_with_timings(
         wake: wake.clone(),
         input: tx,
         stop: stop.clone(),
+        exited: exited.clone(),
     });
 
     std::thread::spawn(move || {
@@ -1096,10 +1100,14 @@ fn spawn_session_with_timings(
                 };
                 match next_event {
                     Ok(Some(PtyEvent::Data(first_data))) => {
+                        let mut total_len = first_data.len();
                         let mut chunks = vec![first_data];
-                        while chunks.len() < 32 {
+                        while chunks.len() < 32 && total_len < MAX_VT_LOCK_SLICE_BYTES {
                             match attach.recv(Duration::ZERO) {
-                                Ok(Some(PtyEvent::Data(more))) => chunks.push(more),
+                                Ok(Some(PtyEvent::Data(more))) => {
+                                    total_len += more.len();
+                                    chunks.push(more);
+                                }
                                 Ok(None) => break,
                                 other => {
                                     pending_event = Some(other);
@@ -1107,8 +1115,7 @@ fn spawn_session_with_timings(
                                 }
                             }
                         }
-                        let total_len: usize = chunks.iter().map(Vec::len).sum();
-                        let (replies, should_wake) = {
+                        let (replies, should_wake) = if total_len <= MAX_VT_LOCK_SLICE_BYTES {
                             let mut s = state.lock().unwrap();
                             for chunk in &chunks {
                                 s.model.write(chunk);
@@ -1124,8 +1131,46 @@ fn spawn_session_with_timings(
                             if outcome.released {
                                 s.model.revision += 1;
                             }
-                            let should_wake = outcome.should_wake;
-                            (s.model.replies(), should_wake)
+                            (s.model.replies(), outcome.should_wake)
+                        } else {
+                            // Feed large bursts in bounded lock slices so the UI thread never
+                            // stalls behind a multi-hundred-KB history replay.
+                            let mut replies = Vec::new();
+                            let mut remaining = total_len;
+                            let mut should_wake = false;
+                            for chunk in &chunks {
+                                let mut offset = 0;
+                                while offset < chunk.len() {
+                                    let end = (offset + MAX_VT_LOCK_SLICE_BYTES).min(chunk.len());
+                                    let slice = &chunk[offset..end];
+                                    offset = end;
+                                    remaining -= slice.len();
+                                    let is_last = remaining == 0;
+                                    {
+                                        let mut s = state.lock().unwrap();
+                                        s.model.write(slice);
+                                        replies.extend_from_slice(&s.model.replies());
+                                        if is_last {
+                                            let render_held = s.model.is_render_held();
+                                            let render_dirty = s.model.render_state_dirty();
+                                            let outcome = settle.on_data(
+                                                Instant::now(),
+                                                &mut s.attach_settle_until,
+                                                render_held,
+                                                render_dirty,
+                                            );
+                                            if outcome.released {
+                                                s.model.revision += 1;
+                                            }
+                                            should_wake = outcome.should_wake;
+                                        }
+                                    }
+                                    if !is_last {
+                                        std::thread::yield_now();
+                                    }
+                                }
+                            }
+                            (replies, should_wake)
                         };
                         if should_wake {
                             wake.notify();
@@ -1151,6 +1196,7 @@ fn spawn_session_with_timings(
                         }
                     }
                     Ok(Some(PtyEvent::Closed(reason))) => {
+                        exited.store(true, Ordering::Release);
                         {
                             let mut s = state.lock().unwrap();
                             s.connected = false;
@@ -1242,7 +1288,7 @@ pub fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
     let _span = canban_profiler::Span::new("terminal.attach");
     let next_transport_key = transport_key(&init.transport, &init.config);
     let mut pool = session_pool().lock().unwrap();
-    pool.retain(|s| !s.stop.load(Ordering::SeqCst) && !s.state.lock().unwrap().exited);
+    pool.retain(|s| !s.stop.load(Ordering::SeqCst) && !s.exited.load(Ordering::Acquire));
     if let Some(idx) = pool
         .iter()
         .position(|s| s.key.0 == init.core && s.key.1 == init.terminal)

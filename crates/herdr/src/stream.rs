@@ -156,8 +156,13 @@ impl Client {
             let supports_get = hello["result"]["methods"]
                 .as_array()
                 .is_some_and(|v| v.iter().any(|x| x == "terminal.get"));
+            let history = if self.config.relay_endpoint.is_some() {
+                400
+            } else {
+                2000
+            };
             let mut attach_params =
-                json!({"terminal":terminal,"cols":cols,"rows":rows,"history":2000});
+                json!({"terminal":terminal,"cols":cols,"rows":rows,"history":history});
             if let Some(d) = display.filter(|d| !d.is_empty()) {
                 attach_params["display"] = d.to_json();
             }

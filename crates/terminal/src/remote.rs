@@ -23,6 +23,7 @@ use tokio::{
 
 const MAX_HERDR_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const REMOTE_ATTACH_HISTORY_LINES: u32 = 400;
 
 fn shared_remote_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -70,6 +71,115 @@ async fn write_frame_async<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+struct ZstdFrameReader {
+    reader: BufReader<ReadHalf<TransportStream>>,
+    decoder: zstd::stream::raw::Decoder<'static>,
+    raw_buf: Vec<u8>,
+    raw_pos: usize,
+    raw_len: usize,
+    out_scratch: Vec<u8>,
+    plain_buf: Vec<u8>,
+    plain_pos: usize,
+}
+
+impl ZstdFrameReader {
+    fn new(reader: BufReader<ReadHalf<TransportStream>>) -> Result<Self> {
+        Ok(Self {
+            reader,
+            decoder: zstd::stream::raw::Decoder::new()?,
+            raw_buf: vec![0u8; 64 * 1024],
+            raw_pos: 0,
+            raw_len: 0,
+            out_scratch: vec![0u8; 64 * 1024],
+            plain_buf: Vec::new(),
+            plain_pos: 0,
+        })
+    }
+
+    async fn read_exact(&mut self, dst: &mut [u8]) -> Result<()> {
+        use zstd::stream::raw::{InBuffer, Operation, OutBuffer};
+        let mut filled = 0usize;
+        while filled < dst.len() {
+            if self.plain_pos < self.plain_buf.len() {
+                let avail = self.plain_buf.len() - self.plain_pos;
+                let take = avail.min(dst.len() - filled);
+                dst[filled..filled + take]
+                    .copy_from_slice(&self.plain_buf[self.plain_pos..self.plain_pos + take]);
+                self.plain_pos += take;
+                filled += take;
+                if self.plain_pos == self.plain_buf.len() {
+                    self.plain_buf.clear();
+                    self.plain_pos = 0;
+                }
+                continue;
+            }
+            if self.raw_pos == self.raw_len {
+                let n = self.reader.read(&mut self.raw_buf).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Remote compressed PTY stream closed",
+                    )
+                    .into());
+                }
+                self.raw_pos = 0;
+                self.raw_len = n;
+            }
+            let mut in_buf = InBuffer::around(&self.raw_buf[self.raw_pos..self.raw_len]);
+            let mut out_buf = OutBuffer::around(&mut self.out_scratch);
+            self.decoder.run(&mut in_buf, &mut out_buf)?;
+            let consumed = in_buf.pos();
+            let produced = out_buf.pos();
+            self.raw_pos += consumed;
+            if produced > 0 {
+                self.plain_buf
+                    .extend_from_slice(&self.out_scratch[..produced]);
+            } else if consumed == 0 {
+                bail!("Unexpected stall decoding compressed PTY stream");
+            }
+        }
+        Ok(())
+    }
+}
+
+enum FrameStream {
+    Raw(BufReader<ReadHalf<TransportStream>>),
+    Zstd(ZstdFrameReader),
+}
+
+impl FrameStream {
+    fn new(reader: BufReader<ReadHalf<TransportStream>>, compressed: bool) -> Result<Self> {
+        if compressed {
+            Ok(Self::Zstd(ZstdFrameReader::new(reader)?))
+        } else {
+            Ok(Self::Raw(reader))
+        }
+    }
+
+    async fn read_exact(&mut self, dst: &mut [u8]) -> Result<()> {
+        match self {
+            Self::Raw(r) => {
+                r.read_exact(dst).await?;
+                Ok(())
+            }
+            Self::Zstd(z) => z.read_exact(dst).await,
+        }
+    }
+
+    async fn read_frame(&mut self) -> Result<(u32, u8, Vec<u8>)> {
+        let mut header = [0u8; 9];
+        self.read_exact(&mut header).await?;
+        let channel = u32::from_le_bytes(header[..4].try_into().unwrap());
+        let len = u32::from_le_bytes(header[5..].try_into().unwrap()) as usize;
+        ensure!(len <= MAX_HERDR_FRAME_BYTES, "Invalid Herdr frame length");
+        let mut body = vec![0u8; len];
+        if len > 0 {
+            self.read_exact(&mut body).await?;
+        }
+        Ok((channel, header[4], body))
+    }
+}
+
 async fn read_frame_async<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(u32, u8, Vec<u8>)> {
@@ -88,23 +198,27 @@ async fn read_frame_async<R: tokio::io::AsyncRead + Unpin>(
 async fn connect_and_attach(
     transport: &ClientTransport,
     params: &PtyAttachParams,
-) -> Result<(
-    BufReader<ReadHalf<TransportStream>>,
-    WriteHalf<TransportStream>,
-    u32,
-    bool,
-    bool,
-)> {
+) -> Result<(FrameStream, WriteHalf<TransportStream>, u32, bool, bool)> {
     let stream = transport.open_async_stream().await?;
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
     // `herdr.connect` MUST be the first frame with zero pipelined bytes.
+    let mut attach_spec = json!({
+        "cols": params.cols,
+        "rows": params.rows,
+        "history": REMOTE_ATTACH_HISTORY_LINES,
+    });
+    if !params.display.is_empty() {
+        attach_spec["display"] = params.display.to_json();
+    }
     let mut hc_params = serde_json::Map::new();
     hc_params.insert("terminal".into(), json!(params.terminal));
     if !params.core_id.is_empty() {
         hc_params.insert("expected_core_id".into(), json!(params.core_id));
     }
+    hc_params.insert("compression".into(), json!("zstd-s2c"));
+    hc_params.insert("attach".into(), attach_spec);
     let connect_req = json!({
         "jsonrpc": "2.0",
         "id": 0,
@@ -125,8 +239,26 @@ async fn connect_and_attach(
         connect_reply["result"]["ready"] == true,
         "herdr.connect handshake failed: {connect_reply}"
     );
+    let use_zstd = connect_reply["result"]["compression"].as_str() == Some("zstd-s2c");
+    if connect_reply["result"]["attached"] == true {
+        let channel = u32::try_from(
+            connect_reply["result"]["channel"]
+                .as_u64()
+                .context("Herdr fast-attach channel missing")?,
+        )?;
+        let automatic_input = connect_reply["result"]["automatic_input"] == true;
+        let resized_on_attach = connect_reply["result"]["resized_on_attach"] == true;
+        let frame_stream = FrameStream::new(reader, use_zstd)?;
+        return Ok((
+            frame_stream,
+            write_half,
+            channel,
+            automatic_input,
+            resized_on_attach,
+        ));
+    }
 
-    // Generation-1 Herdr hello + framed upgrade on the relayed PTY socket.
+    // Legacy server fallback: Generation-1 Herdr hello + framed attach on the relayed socket.
     let hello_req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -157,7 +289,7 @@ async fn connect_and_attach(
         "terminal": params.terminal,
         "cols": params.cols,
         "rows": params.rows,
-        "history": 2000,
+        "history": REMOTE_ATTACH_HISTORY_LINES,
     });
     if !params.display.is_empty() {
         attach_params["display"] = params.display.to_json();
@@ -228,7 +360,7 @@ async fn connect_and_attach(
     let automatic_input = hello_auto && attach_result["automatic_input"] == true;
     let resized_on_attach = prior_size.is_some_and(|(c, r)| c != params.cols || r != params.rows);
     Ok((
-        reader,
+        FrameStream::new(reader, use_zstd)?,
         write_half,
         channel,
         automatic_input,
@@ -431,7 +563,7 @@ impl PtyTransport for RemotePtyTransport {
         let (event_tx, event_rx) = mpsc::channel(64);
         let reader_handle = runtime.spawn(async move {
             loop {
-                match read_frame_async(&mut reader).await {
+                match reader.read_frame().await {
                     Ok((c, kind, data)) if c == channel => {
                         let event = match kind {
                             0 => PtyEvent::Data(data),

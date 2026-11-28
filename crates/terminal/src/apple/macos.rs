@@ -196,6 +196,30 @@ pub fn evict_session(core_id: &str, terminal: &str) {
     session::evict_session(core_id, terminal);
 }
 
+type WeakTransportMap = std::collections::HashMap<u64, std::sync::Weak<dyn session::PtyTransport>>;
+
+fn transport_registry() -> &'static Mutex<WeakTransportMap> {
+    static REGISTRY: std::sync::OnceLock<Mutex<WeakTransportMap>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(Default::default)
+}
+
+pub(crate) fn register_transport_weak(transport: &Arc<dyn session::PtyTransport>) -> u64 {
+    let key = Arc::as_ptr(transport) as *const () as usize as u64;
+    let mut map = transport_registry().lock().unwrap();
+    map.retain(|_, weak| weak.strong_count() > 0);
+    map.insert(key, Arc::downgrade(transport));
+    key
+}
+
+fn resolve_transport_weak(key: u64) -> Option<Arc<dyn session::PtyTransport>> {
+    let mut map = transport_registry().lock().unwrap();
+    let upgraded = map.get(&key).and_then(std::sync::Weak::upgrade);
+    if upgraded.is_none() {
+        map.remove(&key);
+    }
+    upgraded
+}
+
 fn attach_nsview_wake(wake: &WakeHub, ptr: *mut NSView) {
     let p = ptr as usize;
     if p == 0 {
@@ -235,8 +259,17 @@ struct Host {
 
 impl Host {
     fn new() -> Self {
+        let (init_cols, init_rows) = session::last_viewport_size().unwrap_or((80, 24));
+        let mut initial_state = State::new(init_cols, init_rows);
+        if let Some((cw_milli, ch_milli)) = session::last_cell_metrics_milli() {
+            let cw = ((cw_milli + 500) / 1000).max(1);
+            let ch = ((ch_milli + 500) / 1000).max(1);
+            let _ = initial_state
+                .model
+                .resize_with_metrics(init_cols, init_rows, cw, ch, 6, 6, 6, 6);
+        }
         Self {
-            state: Arc::new(Mutex::new(State::new(80, 24))),
+            state: Arc::new(Mutex::new(initial_state)),
             size_cv: Arc::new(Condvar::new()),
             wake: Arc::new(WakeHub::new()),
             input: None,
@@ -360,6 +393,9 @@ impl Host {
             return self.reset_unbound(prev_cols, prev_rows, prev_focused, theme);
         };
 
+        let transport = value["transport_id"]
+            .as_u64()
+            .and_then(resolve_transport_weak);
         let session = get_or_spawn_session(SessionInit {
             host_id,
             config,
@@ -371,7 +407,7 @@ impl Host {
             size_ready: prev_ready,
             focused: prev_focused,
             theme,
-            transport: None,
+            transport,
             session_epoch,
         });
         if !self.view_ptr.is_null() {
@@ -1491,8 +1527,8 @@ mod tests {
             );
             assert_eq!(
                 (s.model.cols, s.model.height),
-                (80, 24),
-                "NSZeroRect callbacks must not shrink model to 2 columns"
+                (96, 38),
+                "NSZeroRect callbacks must keep the prior viewport geometry instead of shrinking to 2 columns"
             );
         }
         let mut rgba = vec![0u8; 480 * 240 * 4];

@@ -562,6 +562,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "zeroize",
+ "zstd 0.13.4",
 ]
 
 [[package]]
@@ -787,6 +788,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "zstd 0.13.4",
 ]
 
 [[package]]

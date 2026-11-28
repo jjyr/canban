@@ -895,6 +895,240 @@ async fn github_sync_loop(
     }
 }
 
+struct FastAttachInfo {
+    channel: u32,
+    automatic_input: bool,
+    resized_on_attach: bool,
+}
+
+fn encode_herdr_frame_into(
+    buf: &mut Vec<u8>,
+    channel: u32,
+    kind: u8,
+    payload: &[u8],
+) -> Result<()> {
+    ensure!(payload.len() <= 16 * 1024 * 1024, "Herdr frame too large");
+    buf.extend_from_slice(&channel.to_le_bytes());
+    buf.push(kind);
+    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf.extend_from_slice(payload);
+    Ok(())
+}
+
+async fn read_herdr_frame_async<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<(u32, u8, Vec<u8>)> {
+    let mut header = [0u8; 9];
+    reader.read_exact(&mut header).await?;
+    let channel = u32::from_le_bytes(header[..4].try_into().unwrap());
+    let len = u32::from_le_bytes(header[5..].try_into().unwrap()) as usize;
+    ensure!(len <= 16 * 1024 * 1024, "Invalid Herdr frame length");
+    let mut body = vec![0u8; len];
+    if len > 0 {
+        reader.read_exact(&mut body).await?;
+    }
+    Ok((channel, header[4], body))
+}
+
+async fn server_fast_attach_herdr(
+    child_stdin: &mut tokio::process::ChildStdin,
+    child_stdout: tokio::process::ChildStdout,
+    terminal: &str,
+    attach_spec: &Value,
+) -> Result<(tokio::process::ChildStdout, Vec<u8>, FastAttachInfo)> {
+    let mut reader = tokio::io::BufReader::new(child_stdout);
+    let hello_req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hello",
+        "params": {
+            "generation": 1,
+            "framed": true,
+            "features": ["automatic_input"],
+        },
+    });
+    write_json_line_async(child_stdin, &hello_req).await?;
+    let hello_line =
+        canban_transport::read_bounded_line(&mut reader, canban_transport::MAX_FRAME_BYTES)
+            .await?
+            .context("Herdr closed connection during fast-attach handshake")?;
+    let hello_reply: Value = serde_json::from_str(&hello_line)?;
+    ensure!(
+        hello_reply.get("error").is_none(),
+        "Herdr handshake: {hello_reply}"
+    );
+    let hello_auto = hello_reply["result"]["features"]
+        .as_array()
+        .is_some_and(|v| v.iter().any(|x| x == "automatic_input"));
+    let supports_get = hello_reply["result"]["methods"]
+        .as_array()
+        .is_some_and(|v| v.iter().any(|x| x == "terminal.get"));
+
+    let cols = attach_spec["cols"]
+        .as_u64()
+        .and_then(|v| u16::try_from(v).ok())
+        .unwrap_or(80)
+        .max(2);
+    let rows = attach_spec["rows"]
+        .as_u64()
+        .and_then(|v| u16::try_from(v).ok())
+        .unwrap_or(24)
+        .max(1);
+    let history = attach_spec["history"].as_u64().unwrap_or(400).min(2000);
+    let mut attach_params = json!({
+        "terminal": terminal,
+        "cols": cols,
+        "rows": rows,
+        "history": history,
+    });
+    if attach_spec["display"].is_object() {
+        attach_params["display"] = attach_spec["display"].clone();
+    }
+
+    let attach_id: u64 = if supports_get {
+        let get_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "terminal.get",
+            "params": { "terminal": terminal },
+        });
+        let attach_req = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "terminal.attach",
+            "params": attach_params,
+        });
+        let mut batch = Vec::new();
+        encode_herdr_frame_into(&mut batch, 0, 0, &serde_json::to_vec(&get_req)?)?;
+        encode_herdr_frame_into(&mut batch, 0, 0, &serde_json::to_vec(&attach_req)?)?;
+        child_stdin.write_all(&batch).await?;
+        child_stdin.flush().await?;
+        3
+    } else {
+        let attach_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "terminal.attach",
+            "params": attach_params,
+        });
+        let mut batch = Vec::new();
+        encode_herdr_frame_into(&mut batch, 0, 0, &serde_json::to_vec(&attach_req)?)?;
+        child_stdin.write_all(&batch).await?;
+        child_stdin.flush().await?;
+        2
+    };
+
+    let mut prior_size: Option<(u16, u16)> = None;
+    let mut early_frames = Vec::new();
+    let attach_result = loop {
+        let (channel, kind, data) = read_herdr_frame_async(&mut reader).await?;
+        if channel == 0 && kind == 0 {
+            let value: Value = serde_json::from_slice(&data)?;
+            if supports_get && value["id"] == 2 {
+                if value.get("error").is_none()
+                    && let (Some(c), Some(r)) = (
+                        value["result"]["cols"]
+                            .as_u64()
+                            .and_then(|v| u16::try_from(v).ok()),
+                        value["result"]["rows"]
+                            .as_u64()
+                            .and_then(|v| u16::try_from(v).ok()),
+                    )
+                    && c > 0
+                    && r > 0
+                {
+                    prior_size = Some((c, r));
+                }
+                continue;
+            }
+            if value["id"] == attach_id {
+                ensure!(value.get("error").is_none(), "Herdr attach: {value}");
+                break value["result"].clone();
+            }
+        } else {
+            encode_herdr_frame_into(&mut early_frames, channel, kind, &data)?;
+        }
+    };
+    let channel = u32::try_from(
+        attach_result["channel"]
+            .as_u64()
+            .context("Herdr attach channel missing")?,
+    )?;
+    let automatic_input = hello_auto && attach_result["automatic_input"] == true;
+    let resized_on_attach = prior_size.is_some_and(|(c, r)| c != cols || r != rows);
+    early_frames.extend_from_slice(reader.buffer());
+    Ok((
+        reader.into_inner(),
+        early_frames,
+        FastAttachInfo {
+            channel,
+            automatic_input,
+            resized_on_attach,
+        },
+    ))
+}
+
+async fn write_zstd_flushed<W: tokio::io::AsyncWriteExt + Unpin>(
+    encoder: &mut zstd::stream::raw::Encoder<'_>,
+    data: &[u8],
+    out_buf: &mut [u8],
+    writer: &mut W,
+) -> Result<()> {
+    use zstd::stream::raw::{InBuffer, Operation, OutBuffer};
+    let mut in_buf = InBuffer::around(data);
+    while in_buf.pos() < in_buf.src.len() {
+        let mut out = OutBuffer::around(out_buf);
+        encoder.run(&mut in_buf, &mut out)?;
+        if out.pos() > 0 {
+            writer.write_all(out.as_slice()).await?;
+        }
+    }
+    loop {
+        let mut out = OutBuffer::around(out_buf);
+        let rem = encoder.flush(&mut out)?;
+        if out.pos() > 0 {
+            writer.write_all(out.as_slice()).await?;
+        }
+        if rem == 0 {
+            break;
+        }
+    }
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn copy_zstd_to_client<R, W>(prefix: Vec<u8>, mut source: R, writer: &mut W) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWriteExt + Unpin,
+{
+    use zstd::stream::raw::{Encoder, Operation, OutBuffer};
+    let mut encoder = Encoder::new(1)?;
+    let mut out_buf = vec![0u8; 64 * 1024];
+    if !prefix.is_empty() {
+        write_zstd_flushed(&mut encoder, &prefix, &mut out_buf, writer).await?;
+    }
+    let mut in_buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = source.read(&mut in_buf).await?;
+        if n == 0 {
+            loop {
+                let mut out = OutBuffer::around(&mut out_buf);
+                let rem = encoder.finish(&mut out, true)?;
+                if out.pos() > 0 {
+                    writer.write_all(out.as_slice()).await?;
+                }
+                if rem == 0 {
+                    break;
+                }
+            }
+            writer.flush().await?;
+            return Ok(());
+        }
+        write_zstd_flushed(&mut encoder, &in_buf[..n], &mut out_buf, writer).await?;
+    }
+}
+
 async fn handle_herdr_connect(
     server: Arc<AppServer>,
     read_half: tokio::io::ReadHalf<TransportStream>,
@@ -904,7 +1138,9 @@ async fn handle_herdr_connect(
 ) -> Result<()> {
     let terminal = params["terminal"].as_str().map(str::to_owned);
     let expected_core_id = params["expected_core_id"].as_str().map(str::to_owned);
-    let (target, _viewer) = if let Some(terminal) = terminal {
+    let want_zstd = params["compression"].as_str() == Some("zstd-s2c");
+    let attach_spec = params.get("attach").filter(|v| v.is_object()).cloned();
+    let (target, _viewer) = if let Some(terminal) = terminal.as_ref() {
         let srv = server.clone();
         let core_res = tokio::task::spawn_blocking(move || srv.verified_core_id()).await?;
         let core_id = match core_res {
@@ -932,7 +1168,7 @@ async fn handle_herdr_connect(
             }
         };
         let target = Some((core_id.clone(), terminal.clone()));
-        let viewer = Some(canban_herdr::activity::Viewer::new(&core_id, &terminal));
+        let viewer = Some(canban_herdr::activity::Viewer::new(&core_id, terminal));
         (target, viewer)
     } else {
         (None, None)
@@ -962,14 +1198,61 @@ async fn handle_herdr_connect(
         }
     };
     let mut child_stdin = child.stdin.take().unwrap();
-    let mut child_stdout = child.stdout.take().unwrap();
+    let child_stdout = child.stdout.take().unwrap();
 
-    write_json_line_async(&mut writer, &json!({"result":{"ready":true}})).await?;
+    let (mut child_stdout, stdout_prefix, fast_attach) = if let (Some(term), Some(spec)) =
+        (terminal.as_deref(), attach_spec.as_ref())
+    {
+        match tokio::time::timeout(
+            Duration::from_secs(12),
+            server_fast_attach_herdr(&mut child_stdin, child_stdout, term, spec),
+        )
+        .await
+        {
+            Ok(Ok((stdout, prefix, info))) => (stdout, prefix, Some(info)),
+            Ok(Err(e)) => {
+                let _ = write_json_line_async(
+                        &mut writer,
+                        &json!({"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":format!("{e:#}")}}),
+                    )
+                    .await;
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(e);
+            }
+            Err(_) => {
+                let err = anyhow::anyhow!("Timed out attaching to local Herdr PTY {term}");
+                let _ = write_json_line_async(
+                        &mut writer,
+                        &json!({"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":format!("{err:#}")}}),
+                    )
+                    .await;
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(err);
+            }
+        }
+    } else {
+        (child_stdout, Vec::new(), None)
+    };
 
+    let mut reply_result = json!({"ready": true});
+    if let Some(info) = &fast_attach {
+        reply_result["attached"] = json!(true);
+        reply_result["channel"] = json!(info.channel);
+        reply_result["automatic_input"] = json!(info.automatic_input);
+        reply_result["resized_on_attach"] = json!(info.resized_on_attach);
+    }
+    if want_zstd {
+        reply_result["compression"] = json!("zstd-s2c");
+    }
+    write_json_line_async(&mut writer, &json!({"result": reply_result})).await?;
+
+    let expect_hello = fast_attach.is_none();
     let mut to_herdr = tokio::spawn(async move {
         let mut source = read_half;
         let res = if target.is_some() {
-            relay_input_async(&mut source, &mut child_stdin, target).await
+            relay_input_async(&mut source, &mut child_stdin, target, expect_hello).await
         } else {
             tokio::io::copy(&mut source, &mut child_stdin)
                 .await
@@ -982,10 +1265,25 @@ async fn handle_herdr_connect(
     });
 
     let mut to_client = tokio::spawn(async move {
-        let res = tokio::io::copy(&mut child_stdout, &mut writer)
-            .await
-            .map(|_| ())
-            .map_err(anyhow::Error::from);
+        let res = if want_zstd {
+            copy_zstd_to_client(stdout_prefix, child_stdout, &mut writer).await
+        } else {
+            let prefix_res: Result<()> = if stdout_prefix.is_empty() {
+                Ok(())
+            } else {
+                writer
+                    .write_all(&stdout_prefix)
+                    .await
+                    .map_err(anyhow::Error::from)
+            };
+            match prefix_res {
+                Ok(()) => tokio::io::copy(&mut child_stdout, &mut writer)
+                    .await
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from),
+                Err(e) => Err(e),
+            }
+        };
         let _ = writer.shutdown().await;
         res
     });
@@ -1029,20 +1327,23 @@ async fn relay_input_async<R, W>(
     source: R,
     writer: &mut W,
     target: Option<(String, String)>,
+    expect_hello: bool,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     let mut reader = tokio::io::BufReader::new(source);
-    let mut hello = Vec::new();
-    (&mut reader)
-        .take(65536)
-        .read_until(b'\n', &mut hello)
-        .await?;
-    ensure!(hello.last() == Some(&b'\n'), "Invalid viewer greeting");
-    writer.write_all(&hello).await?;
-    writer.flush().await?;
+    if expect_hello {
+        let mut hello = Vec::new();
+        (&mut reader)
+            .take(65536)
+            .read_until(b'\n', &mut hello)
+            .await?;
+        ensure!(hello.last() == Some(&b'\n'), "Invalid viewer greeting");
+        writer.write_all(&hello).await?;
+        writer.flush().await?;
+    }
     loop {
         let mut header = [0; 9];
         if let Err(e) = reader.read_exact(&mut header).await {
@@ -2828,6 +3129,7 @@ mod tests {
             non_human.as_slice(),
             &mut forwarded_non_human,
             Some((core.clone(), terminal.clone())),
+            true,
         ))
         .unwrap();
         assert_eq!(forwarded_non_human, non_human);
@@ -2843,6 +3145,7 @@ mod tests {
             human.as_slice(),
             &mut forwarded_human,
             Some((core.clone(), terminal.clone())),
+            true,
         ))
         .unwrap();
         assert_eq!(forwarded_human, human);
