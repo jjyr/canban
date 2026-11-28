@@ -78,6 +78,7 @@ impl HeatmapMetric {
 pub enum ProjectSort {
     #[default]
     Time,
+    Leverage,
     Merged,
     Created,
     Wip,
@@ -182,6 +183,26 @@ pub struct TimeTotals {
     pub prev_dwell_total_ms: u64,
     pub agent_total_ms: u64,
     pub prev_agent_total_ms: u64,
+}
+
+impl TimeTotals {
+    pub fn total_active_ms(&self) -> u64 {
+        self.dwell_total_ms.saturating_add(self.agent_total_ms)
+    }
+
+    pub fn prev_total_active_ms(&self) -> u64 {
+        self.prev_dwell_total_ms
+            .saturating_add(self.prev_agent_total_ms)
+    }
+
+    pub fn leverage(&self) -> Option<f64> {
+        (self.dwell_total_ms > 0).then(|| self.agent_total_ms as f64 / self.dwell_total_ms as f64)
+    }
+
+    pub fn prev_leverage(&self) -> Option<f64> {
+        (self.prev_dwell_total_ms > 0)
+            .then(|| self.prev_agent_total_ms as f64 / self.prev_dwell_total_ms as f64)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -527,6 +548,7 @@ pub struct Dashboard {
     pub reference_days: usize,
     pub project_stats: Vec<ProjectStat>,
     pub host_stats: Vec<HostStat>,
+    pub peak_parallel: usize,
     pub providers: usize,
     pub used_profiles: usize,
     pub used_runs: usize,
@@ -632,14 +654,30 @@ pub struct HostStat {
     pub dwell_ms: u64,
     pub agent_ms: u64,
     pub agent_runs: usize,
+    pub completed_runs: usize,
+    pub blocked_runs: usize,
+    pub failed_runs: usize,
+    pub active_runs: usize,
     pub created: usize,
     pub merged: usize,
     pub wip: usize,
+    pub peak_parallel: usize,
+    pub top_projects: Vec<(String, u64)>,
+    pub load_bars: Vec<u64>,
 }
 
 impl HostStat {
     pub fn total_time_ms(&self) -> u64 {
         self.dwell_ms.saturating_add(self.agent_ms)
+    }
+
+    pub fn leverage(&self) -> Option<f64> {
+        (self.dwell_ms > 0).then(|| self.agent_ms as f64 / self.dwell_ms as f64)
+    }
+
+    pub fn pass_rate_pct(&self) -> Option<usize> {
+        let resolved = self.completed_runs + self.blocked_runs + self.failed_runs;
+        (resolved > 0).then(|| (self.completed_runs * 100 + resolved / 2) / resolved)
     }
 }
 
@@ -657,6 +695,11 @@ pub struct ProjectStat {
     pub wip_review: usize,
     pub wip_gated: usize,
     pub agent_runs: usize,
+    pub completed_runs: usize,
+    pub blocked_runs: usize,
+    pub failed_runs: usize,
+    pub active_runs: usize,
+    pub human_asks: usize,
     pub dwell_ms: u64,
     pub agent_ms: u64,
     pub cards: BTreeSet<String>,
@@ -672,6 +715,48 @@ impl ProjectStat {
     pub fn total_time_ms(&self) -> u64 {
         self.dwell_ms.saturating_add(self.agent_ms)
     }
+
+    pub fn leverage(&self) -> Option<f64> {
+        (self.dwell_ms > 0).then(|| self.agent_ms as f64 / self.dwell_ms as f64)
+    }
+
+    pub fn pass_rate_pct(&self) -> Option<usize> {
+        let resolved = self.completed_runs + self.blocked_runs + self.failed_runs;
+        (resolved > 0).then(|| (self.completed_runs * 100 + resolved / 2) / resolved)
+    }
+}
+
+fn compute_peak_parallel(intervals: &[(u64, u64)]) -> usize {
+    let mut points: Vec<(u64, i32)> = Vec::with_capacity(intervals.len() * 2);
+    for &(s, e) in intervals {
+        if e > s {
+            points.push((s, 1));
+            points.push((e, -1));
+        }
+    }
+    points.sort_by_key(|&(t, d)| (t, d));
+    let mut cur = 0i32;
+    let mut peak = 0i32;
+    for (_, d) in points {
+        cur += d;
+        if cur > peak {
+            peak = cur;
+        }
+    }
+    peak.max(0) as usize
+}
+
+fn downsample_bars(raw: &[u64], max_bars: usize) -> Vec<u64> {
+    if raw.len() <= max_bars || max_bars == 0 {
+        return raw.to_vec();
+    }
+    let mut out = vec![0u64; max_bars];
+    let n = raw.len();
+    for (i, &val) in raw.iter().enumerate() {
+        let slot = (i * max_bars) / n;
+        out[slot] = out[slot].saturating_add(val);
+    }
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2352,6 +2437,11 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
                 *daily_touches.entry(d).or_default() += 1;
                 if current(ev.created_at) {
                     human_asks_period += 1;
+                    if let Some(card) = valid_cards.get(cid)
+                        && let Some(p) = projects.get_mut(&card.project_id)
+                    {
+                        p.human_asks += 1;
+                    }
                     if ev.kind == "execution.input_required" {
                         let tid = ev.data["terminal_id"].as_str().unwrap_or_default();
                         let prof = extract_profile_from_terminal_or_actor(cid, tid, &ev.actor);
@@ -2420,6 +2510,8 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             .or_insert_with(|| ProjectStat {
                 id: card.project_id.clone(),
                 name: card.project_id.clone(),
+                host_id: snapshot.project_host(&card.project_id).to_owned(),
+                host_badge: snapshot.project_host_badge(&card.project_id),
                 ..Default::default()
             });
 
@@ -2779,6 +2871,8 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
     let mut trigger_counts: BTreeMap<TriggerKind, usize> = BTreeMap::new();
     let mut agent_touched_cards: BTreeSet<String> = BTreeSet::new();
     let mut used_runs = 0;
+    let mut global_run_intervals: Vec<(u64, u64)> = Vec::new();
+    let mut host_run_intervals: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
 
     for run in &runs {
         let Some(began) = run.started_at.filter(|t| *t > 0 && *t <= now_ms) else {
@@ -2796,13 +2890,33 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             prev_scheduled_total += 1;
             prev_outcomes[index] += 1;
         }
-        let overlaps = began < until && run.ended_at.unwrap_or(now_ms) >= from;
+        let run_end = run.ended_at.unwrap_or(now_ms).min(now_ms);
+        let overlaps = began < until && run_end >= from;
+        if overlaps {
+            let s = began.max(from);
+            let e = run_end.min(until);
+            if e > s {
+                global_run_intervals.push((s, e));
+                let hid = snapshot.project_host(&run.project_id);
+                let hkey = if hid.is_empty() { "local" } else { hid };
+                host_run_intervals
+                    .entry(hkey.to_owned())
+                    .or_default()
+                    .push((s, e));
+            }
+        }
         if current(began) {
             scheduled_total += 1;
             outcomes[index] += 1;
             *trigger_counts.entry(run.trigger).or_default() += 1;
             if let Some(p) = projects.get_mut(&run.project_id) {
                 p.agent_runs += 1;
+                match index {
+                    0 => p.completed_runs += 1,
+                    1 => p.blocked_runs += 1,
+                    2 => p.failed_runs += 1,
+                    _ => p.active_runs += 1,
+                }
             }
         }
         let provider = run
@@ -3179,16 +3293,32 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
     for hid in snapshot.host_summaries.keys() {
         ensure_host(&mut host_map, hid);
     }
+    let mut host_projects: BTreeMap<String, Vec<(String, u64, usize, usize)>> = BTreeMap::new();
     for p in &project_stats {
-        ensure_host(&mut host_map, &p.host_id);
-        if let Some(hs) = host_map.get_mut(&p.host_id) {
+        let hkey = if p.host_id.is_empty() {
+            "local"
+        } else {
+            p.host_id.as_str()
+        };
+        ensure_host(&mut host_map, hkey);
+        if let Some(hs) = host_map.get_mut(hkey) {
             hs.created = hs.created.saturating_add(p.created);
             hs.merged = hs.merged.saturating_add(p.merged);
             hs.wip = hs.wip.saturating_add(p.total_wip());
             hs.agent_runs = hs.agent_runs.saturating_add(p.agent_runs);
+            hs.completed_runs = hs.completed_runs.saturating_add(p.completed_runs);
+            hs.blocked_runs = hs.blocked_runs.saturating_add(p.blocked_runs);
+            hs.failed_runs = hs.failed_runs.saturating_add(p.failed_runs);
+            hs.active_runs = hs.active_runs.saturating_add(p.active_runs);
             hs.dwell_ms = hs.dwell_ms.saturating_add(p.dwell_ms);
             hs.agent_ms = hs.agent_ms.saturating_add(p.agent_ms);
         }
+        host_projects.entry(hkey.to_owned()).or_default().push((
+            p.name.clone(),
+            p.total_time_ms(),
+            p.merged,
+            p.agent_runs,
+        ));
     }
     for (hid, (dwell, agent)) in &activity.host_totals {
         ensure_host(&mut host_map, hid);
@@ -3197,6 +3327,91 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             hs.agent_ms = hs.agent_ms.max(*agent);
         }
     }
+
+    let mut global_seg_intervals: Vec<(u64, u64)> = Vec::new();
+    let mut host_seg_intervals: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
+    let mut host_load_raw: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    if range == RangeWindow::Today {
+        let day_span = until.saturating_sub(from).max(1);
+        for hid in host_map.keys() {
+            host_load_raw.insert(hid.clone(), vec![0u64; 8]);
+        }
+        for seg in &cur_segments {
+            let dur = seg.duration_ms();
+            if dur == 0 {
+                continue;
+            }
+            let hkey = seg
+                .project_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|pid| snapshot.project_host(pid))
+                .filter(|h| !h.is_empty())
+                .unwrap_or("local");
+            if seg.kind == ActivityKind::Agent {
+                let s = seg.start_ms.max(from);
+                let e = seg.end_ms.min(until);
+                if e > s {
+                    global_seg_intervals.push((s, e));
+                    host_seg_intervals
+                        .entry(hkey.to_owned())
+                        .or_default()
+                        .push((s, e));
+                }
+            }
+            let slot = (((seg.start_ms.saturating_sub(from)) as u128 * 8) / day_span as u128).min(7)
+                as usize;
+            if let Some(bars) = host_load_raw.get_mut(hkey) {
+                bars[slot] = bars[slot].saturating_add(dur);
+            }
+        }
+    } else if !cur_buckets.is_empty() {
+        let n_buckets = cur_buckets.len();
+        for hid in host_map.keys() {
+            host_load_raw.insert(hid.clone(), vec![0u64; n_buckets]);
+        }
+        for (idx, b) in cur_buckets.iter().enumerate() {
+            for (pid, pt) in &b.by_project {
+                let hkey = snapshot.project_host(pid);
+                let hkey = if hkey.is_empty() { "local" } else { hkey };
+                if let Some(bars) = host_load_raw.get_mut(hkey) {
+                    bars[idx] = bars[idx].saturating_add(pt.dwell_ms.saturating_add(pt.agent_ms));
+                }
+            }
+        }
+    }
+
+    let peak_parallel = compute_peak_parallel(&global_run_intervals)
+        .max(compute_peak_parallel(&global_seg_intervals));
+
+    for (hid, hs) in &mut host_map {
+        let run_peak = host_run_intervals
+            .get(hid)
+            .map(|v| compute_peak_parallel(v))
+            .unwrap_or(0);
+        let seg_peak = host_seg_intervals
+            .get(hid)
+            .map(|v| compute_peak_parallel(v))
+            .unwrap_or(0);
+        hs.peak_parallel = run_peak.max(seg_peak);
+        if let Some(mut plist) = host_projects.remove(hid) {
+            plist.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| b.2.cmp(&a.2))
+                    .then_with(|| b.3.cmp(&a.3))
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            hs.top_projects = plist
+                .into_iter()
+                .take(3)
+                .map(|(name, ms, _, _)| (name, ms))
+                .collect();
+        }
+        if let Some(raw) = host_load_raw.remove(hid) {
+            hs.load_bars = downsample_bars(&raw, 14);
+        }
+    }
+
     let mut host_stats: Vec<HostStat> = host_map.into_values().collect();
     host_stats.sort_by(|a, b| {
         b.total_time_ms()
@@ -3508,6 +3723,7 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
         reference_days,
         project_stats,
         host_stats,
+        peak_parallel,
         providers,
         used_profiles,
         used_runs,
