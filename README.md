@@ -15,7 +15,7 @@
 
 <p align="center">
   <strong>Organize with Kanban. Work with native agent CLIs.</strong><br/>
-  A lightweight, native <strong>Rust + <code>libghostty</code></strong> app for <strong>Claude Code, Codex, Cursor CLI, Antigravity (<code>agy</code>), and more</strong> — zero Electron, zero chat wrapper, with restart-safe PTYs, an attention inbox (<code>⌘I</code>), and per-card Git worktree review.
+  A lightweight, native <strong>Rust + <code>libghostty</code></strong> app for <strong>Claude Code, Codex, Cursor CLI, Antigravity (<code>agy</code>), and more</strong> — zero Electron, zero chat wrapper, with a noise-filtered Daily Briefing Inbox, restart-safe PTYs, and per-card Git worktree review.
 </p>
 
 <h3 align="center"><a href="#installation"><ins>Quick Install</ins></a> · <a href="https://canban.dev"><ins>canban.dev</ins></a> · <a href="https://canban.dev/docs/"><ins>Docs</ins></a></h3>
@@ -26,13 +26,26 @@
 
 ## Why Canban?
 
-- **Lightweight & native**: Built in Rust + NSH + `libghostty-vt`. No Electron, no Chromium, no cloud account — just a fast local app backed by SQLite that stays out of your way.
+- **Start from one Daily Briefing**: One noise-filtered Inbox across all projects, GitHub PRs, scheduled runs, and remote hosts — unblock waiting agents inline, merge green PRs in one click, and keep passive noise folded out of sight.
 - **Organize with Kanban**: One board per local directory or Git repo (`Backlog → Develop → Review`). Keep task specs, comments, worktrees, and inline diffs together on one card with zero setup ceremony.
-- **Work with native agent CLIs**: Run your real `claude`, `codex`, `agy`, `cursor-agent`, or `pi` CLI inside restart-safe persistent PTYs. Full native TUI, permissions, MCPs, skills, and session resume — plus a global `⌘I` inbox whenever an agent needs you.
+- **Work with native agent CLIs**: Run your real `claude`, `codex`, `agy`, `cursor-agent`, or `pi` CLI inside restart-safe persistent PTYs. Full native TUI, permissions, MCPs, skills, and session resume.
+- **Lightweight & native**: Built in Rust + NSH + `libghostty-vt`. No Electron, no Chromium, no cloud account — just a fast local app backed by SQLite that scales directly to remote Linux `canband` hosts and Android.
 
 ## Features
 
 <table>
+<tr>
+<td width="50%" valign="middle">
+
+### Daily Briefing Inbox
+
+Start every session from one calm, noise-filtered briefing across all projects, worktrees, GitHub PRs, scheduled runs, and remote hosts. Triage with clickable decision filters (`Waiting On You`, `Ready to Merge`, `Agents`, `Shipped Today`), reply to blocked agents or PRs inline, read PR descriptions and CI checks without leaving the app, and jump straight into any Card or live terminal.
+
+</td>
+<td width="50%">
+  <img src="docs/assets/notification-center.jpg" alt="Canban Daily Briefing Inbox triaging waiting agents, ready-to-merge PRs, and live sessions" width="100%" />
+</td>
+</tr>
 <tr>
 <td width="50%" valign="middle">
 
@@ -62,18 +75,6 @@ No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor
 <tr>
 <td width="50%" valign="middle">
 
-### Attention Inbox (`⌘I`)
-
-Never miss a blocked agent again. One global notification center across all projects, worktrees, and remote hosts catches `[Y/n]` permissions, follow-up questions, and completed runs — and jumps straight to its Card and live terminal in one keystroke.
-
-</td>
-<td width="50%">
-  <img src="docs/assets/notification-center.jpg" alt="Canban Notification Center showing waiting agents and one-click jump to Card and terminal" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
-
 ### Per-Card Worktrees &amp; Inline Diff Review
 
 Inspect commits and isolated per-card worktree diffs without switching to an external editor. Leave inline review comments directly on changed lines and send focused revision requests straight back to `@Agent`.
@@ -88,15 +89,15 @@ Inspect commits and isolated per-card worktree diffs without switching to an ext
 <tr>
 <td width="50%" valign="middle">
 
-### Programmable Workflows (Optional)
+### Scheduled Runs &amp; Workflows (Optional)
 
-Want to automate the loop when you're ready? Opt in to GitHub Actions-like local YAML combining shell scripts and `agent` + prompt steps, cron schedules, and a serialized merge queue.
+Run recurring agent tasks on a cron schedule and inspect results or retry failures straight from your Inbox. When you're ready for deeper automation, opt in to GitHub Actions-like local YAML workflows combining shell scripts, `agent` + prompt steps, and a serialized merge queue.
 
 [Docs →](https://canban.dev/docs/workflows/)
 
 </td>
 <td width="50%">
-  <img src="website/screenshots/workflow-studio.png" alt="Canban Programmable Workflows: Visual Studio and Vibe Mode pipeline" width="100%" />
+  <img src="website/screenshots/workflow-studio.png" alt="Canban Scheduled Runs and Programmable Workflows pipeline" width="100%" />
 </td>
 </tr>
 <tr>
@@ -104,7 +105,7 @@ Want to automate the loop when you're ready? Opt in to GitHub Actions-like local
 
 ### Multi-Machine &amp; Mobile (Direct E2E)
 
-Offload heavy builds and agent runs to remote Linux boxes. Connect your lightweight desktop or mobile app directly to headless `canband` hosts with mandatory end-to-end encryption and zero relay servers — optionally paired with **Tailscale** or **SSH** — to control remote boards, workflows, and live 120Hz terminals seamlessly.
+Offload heavy builds and agent runs to remote Linux boxes. Connect your lightweight desktop or mobile app directly to headless `canband` hosts with mandatory end-to-end encryption and zero relay servers — optionally paired with **Tailscale** or **SSH** — to control remote boards, Inbox triage, workflows, and live 120Hz terminals seamlessly.
 
 [Docs →](https://canban.dev/docs/remote-hosts/)
 
