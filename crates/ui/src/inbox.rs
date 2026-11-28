@@ -1,7 +1,8 @@
-//! Daily Briefing: flat editorial engineering report on `BACKGROUND` canvas with
-//! borderless 4-column hairline KPI strip, 1:1 `Needs Action` <-> rail-badge parity,
-//! tabular Scheduled Runs, toggleable Markdown GitHub PR reader with avatars, CI & comments,
-//! and structured Agent Terminal telemetry (zero nested borders, zero explanatory copy).
+//! Daily Briefing: substantial, single-layer editorial engineering report with
+//! 4-column KPI strip (`NEEDS ACTION | SCHEDULED RUNS | ACTIVE WORK | SHIPPED TODAY`),
+//! live hosts/quota pulse, active project shortcuts, 2-column borderless `SURFACE` Agent cards,
+//! toggleable Markdown GitHub PR reader with colored PR state/CI/comments/avatars,
+//! upcoming schedules, Shipped Today log, floating auto-dismiss Undo toast, and First-Run launchpad.
 pub mod state;
 pub use state::{
     GitHubItemDetail, State, cutoff_minutes_from_utility, defer_remaining_all, init,
@@ -11,8 +12,8 @@ pub use state::{
 use crate::presenter::*;
 use canban_notifications::{
     DailyInbox, DeferredInboxItem, DoneInboxItem, GitHubProjectStack, GitHubStackItem,
-    InboxCardWork, InboxTerminalWork, NeedsYouItem, NeedsYouKind, ScheduleCardStack,
-    SchedulePulseItem,
+    InboxCardWork, InboxTerminalWork, NeedsYouItem, NeedsYouKind, ProjectPulseItem,
+    ScheduleCardStack, SchedulePulseItem, ShippedTodayItem, UpcomingScheduleItem,
 };
 use canban_types::HerdrStatus;
 use canban_ui_kit::{compact_home, tokens::*, *};
@@ -146,7 +147,49 @@ fn github_avatar(login: &str, avatar_url: Option<&str>, size: f32) -> View {
         )
 }
 
-/// Compact inline CI indicator (`✓ 12/12`, `✗ 2`, `● 3/12`).
+/// Colored semantic PR/Issue state mark (`Open` green, `Merged` purple, `Draft` muted, `Closed` danger).
+fn gh_state_mark(kind: &str, pr_state: Option<&str>, merged: bool, draft: bool) -> AnyElement {
+    if kind == "pr" {
+        if merged || pr_state.is_some_and(|s| s.eq_ignore_ascii_case("merged")) {
+            return icon_tinted(Icon::GitMerge, HIGHLIGHT)
+                .w(px(14.))
+                .h(px(14.))
+                .flex_shrink_0()
+                .into_element();
+        }
+        if draft || pr_state.is_some_and(|s| s.eq_ignore_ascii_case("draft")) {
+            return icon_tinted(Icon::GitMerge, MUTED)
+                .w(px(14.))
+                .h(px(14.))
+                .flex_shrink_0()
+                .into_element();
+        }
+        if pr_state.is_some_and(|s| s.eq_ignore_ascii_case("closed")) {
+            return icon_tinted(Icon::Close, DANGER)
+                .w(px(13.))
+                .h(px(13.))
+                .flex_shrink_0()
+                .into_element();
+        }
+        return icon_tinted(Icon::GitMerge, SUCCESS)
+            .w(px(14.))
+            .h(px(14.))
+            .flex_shrink_0()
+            .into_element();
+    }
+    let tint = if pr_state.is_some_and(|s| s.eq_ignore_ascii_case("closed")) {
+        HIGHLIGHT
+    } else {
+        ACCENT
+    };
+    icon_tinted(Icon::GitHub, tint)
+        .w(px(13.))
+        .h(px(13.))
+        .flex_shrink_0()
+        .into_element()
+}
+
+/// Compact inline CI indicator (`✓ 12/12`, `✗ 2/12`, `● 3/12`).
 fn ci_indicator(
     state: Option<&str>,
     passed: u32,
@@ -242,35 +285,37 @@ fn comments_indicator(count: u32) -> View {
         )
 }
 
-/// Borderless icon glyph (24×24 soft surface or plain colored provider mark).
-fn glyph_24(kind: Icon, bg: ThemeColor, fg: ThemeColor) -> View {
+/// Borderless icon glyph (28×28 soft surface).
+fn glyph_28(kind: Icon, bg: ThemeColor, fg: ThemeColor) -> View {
     view()
         .flex_shrink_0()
-        .w(px(24.))
-        .h(px(24.))
-        .rounded(px(6.))
+        .w(px(28.))
+        .h(px(28.))
+        .rounded(px(7.))
         .bg(bg)
         .items_center()
         .justify_center()
         .pointer_events(PointerEvents::None)
-        .child(icon_tinted(kind, fg).w(px(14.)).h(px(14.)))
+        .child(icon_tinted(kind, fg).w(px(15.)).h(px(15.)))
 }
 
-/// Borderless full-color Agent provider icon with optional small status dot.
-fn agent_glyph_24(engine: Option<&str>, dot: Option<ThemeColor>) -> View {
+/// Borderless full-color Agent provider icon with optional status dot.
+fn agent_glyph_28(engine: Option<&str>, dot: Option<ThemeColor>) -> View {
     let glyph = if let Some(eng) = engine {
-        icon_colored(engine_icon(Some(eng)), 18.).into_element()
+        icon_colored(engine_icon(Some(eng)), 20.).into_element()
     } else {
         icon_tinted(Icon::Terminal, MUTED)
-            .w(px(15.))
-            .h(px(15.))
+            .w(px(16.))
+            .h(px(16.))
             .into_element()
     };
     let mut box_v = view()
         .relative()
         .flex_shrink_0()
-        .w(px(24.))
-        .h(px(24.))
+        .w(px(28.))
+        .h(px(28.))
+        .rounded(px(7.))
+        .bg(INSET)
         .items_center()
         .justify_center()
         .pointer_events(PointerEvents::None)
@@ -279,15 +324,15 @@ fn agent_glyph_24(engine: Option<&str>, dot: Option<ThemeColor>) -> View {
         box_v = box_v.child(
             view()
                 .absolute()
-                .right(px(0.))
-                .bottom(px(0.))
-                .w(px(8.))
-                .h(px(8.))
+                .right(px(-1.))
+                .bottom(px(-1.))
+                .w(px(9.))
+                .h(px(9.))
                 .rounded_full()
-                .bg(BACKGROUND)
+                .bg(SURFACE)
                 .items_center()
                 .justify_center()
-                .child(view().w(px(5.5)).h(px(5.5)).rounded_full().bg(color)),
+                .child(view().w(px(6.)).h(px(6.)).rounded_full().bg(color)),
         );
     }
     box_v
@@ -307,10 +352,10 @@ fn chapter_header(
         .items_center()
         .gap_2()
         .min_w(px(0.))
-        .child(icon_tinted(kind, tint).w(px(14.)).h(px(14.)))
+        .child(icon_tinted(kind, tint).w(px(15.)).h(px(15.)))
         .child(
             label(title.into())
-                .text_size(px(13.))
+                .text_size(px(14.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(TEXT),
         );
@@ -462,7 +507,71 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
         )
 }
 
-/// Editorial Masthead + Borderless 4-column Hairline KPI Strip on `BACKGROUND` (no progress bar).
+/// Compact live hosts + AI quota strip for the top-right Masthead.
+fn render_environment_pulse(ui: Ui) -> View {
+    let hosts = ui.hosts.get();
+    let mut host_row = view().flex_row().items_center().gap_2p5();
+    if hosts.is_empty() {
+        host_row = host_row.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(status_dot(SUCCESS))
+                .child(muted("local").font_family(MONO_FONT).text_size(px(11.5))),
+        );
+    } else {
+        for h in hosts.iter().take(4) {
+            let ok = h.is_local || h.connection.is_connected();
+            let dot = if ok { SUCCESS } else { DANGER };
+            let name = if h.is_local {
+                "local".to_owned()
+            } else {
+                h.name.clone()
+            };
+            host_row = host_row.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(status_dot(dot))
+                    .child(
+                        muted(name)
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5))
+                            .text_color(if ok { MUTED } else { DANGER }),
+                    ),
+            );
+        }
+    }
+
+    let usage_val = ui.usage.get();
+    let readings = crate::utilities::readings(&usage_val);
+    let mut quota_parts = Vec::new();
+    for (prov, lbl) in [("claude", "Claude"), ("codex", "Codex")] {
+        let max_used = readings
+            .iter()
+            .filter(|r| r["provider"] == prov)
+            .flat_map(|r| r["windows"].as_array().into_iter().flatten())
+            .filter_map(|w| w["used"].as_f64())
+            .reduce(f64::max);
+        if let Some(pct) = max_used {
+            quota_parts.push(format!("{lbl} {:.0}%", pct.clamp(0.0, 100.0)));
+        }
+    }
+
+    let mut col = view().items_end().gap_0p5().child(host_row);
+    if !quota_parts.is_empty() {
+        col = col.child(
+            muted(quota_parts.join(" · "))
+                .font_family(MONO_FONT)
+                .text_size(px(11.)),
+        );
+    }
+    col
+}
+
+/// Editorial Masthead + 4-column Hairline KPI Strip (`NEEDS ACTION | SCHEDULED RUNS | ACTIVE WORK | SHIPPED TODAY`).
 fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
     let rem = inbox.remaining_today;
 
@@ -499,7 +608,7 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         k1_parts.join(" · ")
     };
 
-    // KPI #2: Scheduled Runs
+    // KPI #2: Scheduled Runs (passed/total + failed + upcoming)
     let sched_total = inbox.schedule_pulse.len();
     let sched_passed = inbox
         .schedule_pulse
@@ -516,7 +625,7 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         .iter()
         .filter(|r| matches!(r.state.as_str(), "running" | "starting" | "queued"))
         .count();
-    let sched_cards: usize = inbox.schedule_stacks.iter().map(|s| s.cards.len()).sum();
+    let upcoming_n = inbox.upcoming_schedules.len();
     let k2_val = if sched_total == 0 {
         "0".to_owned()
     } else {
@@ -529,11 +638,8 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
     if sched_running > 0 {
         k2_parts.push(format!("{sched_running} running"));
     }
-    if sched_cards > 0 {
-        k2_parts.push(format!(
-            "{sched_cards} {}",
-            if sched_cards == 1 { "card" } else { "cards" }
-        ));
+    if upcoming_n > 0 {
+        k2_parts.push(format!("{upcoming_n} upcoming"));
     }
     let k2_sub = if k2_parts.is_empty() {
         "—".to_owned()
@@ -541,47 +647,52 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         k2_parts.join(" · ")
     };
 
-    // KPI #3: GitHub Today
-    let gh_direct_total: usize = inbox.github_stacks.iter().map(|s| s.items.len()).sum();
-    let gh_direct_all = gh_direct_total + gh_n;
-    let gh_watching_total: usize = inbox.github_watching.iter().map(|s| s.items.len()).sum();
-    let gh_watching_repos = inbox.github_watching.len();
-    let k3_val = format!("{gh_direct_all} direct");
-    let k3_sub = if gh_watching_total > 0 {
-        format!(
-            "+{gh_watching_total} watching ({gh_watching_repos} {})",
-            if gh_watching_repos == 1 {
-                "repo"
-            } else {
-                "repos"
-            }
-        )
-    } else {
-        "—".to_owned()
-    };
-
-    // KPI #4: Active Work
+    // KPI #3: Active Work
     let live_agents = inbox.agent_terminals.len();
     let open_cards = inbox.open_cards.len();
     let shells = inbox.plain_shells.len();
-    let k4_val = format!("{} live", live_agents + open_cards);
-    let mut k4_parts = Vec::new();
+    let k3_val = format!("{} live", live_agents + open_cards);
+    let mut k3_parts = Vec::new();
     if live_agents > 0 {
-        k4_parts.push(format!(
+        k3_parts.push(format!(
             "{live_agents} {}",
             if live_agents == 1 { "agent" } else { "agents" }
         ));
     }
     if open_cards > 0 {
-        k4_parts.push(format!(
+        k3_parts.push(format!(
             "{open_cards} {}",
             if open_cards == 1 { "card" } else { "cards" }
         ));
     }
     if shells > 0 {
-        k4_parts.push(format!(
+        k3_parts.push(format!(
             "{shells} {}",
             if shells == 1 { "shell" } else { "shells" }
+        ));
+    }
+    let k3_sub = if k3_parts.is_empty() {
+        "—".to_owned()
+    } else {
+        k3_parts.join(" · ")
+    };
+
+    // KPI #4: Shipped Today (merged PRs + resolved cards)
+    let shipped_prs = inbox.shipped_today.iter().filter(|s| s.is_pr).count();
+    let shipped_cards = inbox.shipped_today.iter().filter(|s| !s.is_pr).count();
+    let shipped_total = inbox.shipped_today.len();
+    let k4_val = shipped_total.to_string();
+    let mut k4_parts = Vec::new();
+    if shipped_prs > 0 {
+        k4_parts.push(format!(
+            "{shipped_prs} {} merged",
+            if shipped_prs == 1 { "PR" } else { "PRs" }
+        ));
+    }
+    if shipped_cards > 0 {
+        k4_parts.push(format!(
+            "{shipped_cards} {}",
+            if shipped_cards == 1 { "card" } else { "cards" }
         ));
     }
     let k4_sub = if k4_parts.is_empty() {
@@ -618,7 +729,21 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         meta_line = meta_line.child(muted(format!("· {deferred_n} deferred")).text_size(px(12.)));
     }
 
-    let mut masthead = view()
+    let mut right_bar = view()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .child(render_environment_pulse(ui));
+    if rem > 0 {
+        right_bar = right_bar.child(compact_action_with_icon(
+            Icon::Clock,
+            "Defer rest ▾",
+            Variant::Quiet,
+            move |_| defer_remaining_all(ui),
+        ));
+    }
+
+    let masthead = view()
         .flex_row()
         .items_center()
         .justify_between()
@@ -628,20 +753,13 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
                 .gap_0p5()
                 .child(
                     label(format_today_date_long())
-                        .text_size(px(20.))
+                        .text_size(px(22.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(TEXT),
                 )
                 .child(meta_line),
-        );
-    if rem > 0 {
-        masthead = masthead.child(compact_action_with_icon(
-            Icon::Clock,
-            "Defer rest ▾",
-            Variant::Quiet,
-            move |_| defer_remaining_all(ui),
-        ));
-    }
+        )
+        .child(right_bar);
 
     let kpi_cell = |heading_lbl: &'static str,
                     value: String,
@@ -652,7 +770,7 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         let mut val_row = view().flex_row().items_center().gap_2().child(
             label(value)
                 .font_family(MONO_FONT)
-                .text_size(px(20.))
+                .text_size(px(22.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(val_color),
         );
@@ -713,65 +831,158 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
             false,
         ))
         .child(kpi_cell(
-            "GITHUB TODAY",
+            "ACTIVE WORK",
             k3_val,
-            if inbox.needs_you.iter().any(|n| {
-                matches!(
-                    &n.kind,
-                    NeedsYouKind::GitHub { item, .. } if item.is_ci_failure
-                )
-            }) {
-                DANGER
-            } else {
-                TEXT
-            },
+            if live_agents > 0 { ACCENT } else { TEXT },
             k3_sub,
             None,
             false,
         ))
-        .child(kpi_cell("ACTIVE WORK", k4_val, TEXT, k4_sub, None, false));
+        .child(kpi_cell(
+            "SHIPPED TODAY",
+            k4_val,
+            if shipped_total > 0 { SUCCESS } else { TEXT },
+            k4_sub,
+            None,
+            false,
+        ));
 
     view().gap_3().child(masthead).child(kpi_strip)
 }
 
-fn render_undo_banner(ui: Ui) -> impl IntoElement {
+/// Active Projects quick-jump strip (single-layer borderless `SURFACE` pills).
+fn render_project_pulses(ui: Ui, pulses: &[ProjectPulseItem]) -> Option<View> {
+    if pulses.is_empty() {
+        return None;
+    }
+    let mut row = view().flex_row().flex_wrap().items_center().gap_2().child(
+        muted("PROJECTS")
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD),
+    );
+    for p in pulses.iter().take(6) {
+        let pid = p.project_id.clone();
+        let dot_color = if p.attention_count > 0 {
+            ATTENTION
+        } else if p.live_agent_count > 0 {
+            ACCENT
+        } else if p.merged_today_count > 0 {
+            SUCCESS
+        } else {
+            MUTED
+        };
+        let mut metrics = Vec::new();
+        if p.develop_count > 0 {
+            metrics.push(format!("{} dev", p.develop_count));
+        }
+        if p.review_count > 0 {
+            metrics.push(format!("{} rev", p.review_count));
+        }
+        if p.open_pr_count > 0 {
+            metrics.push(format!(
+                "{} {}",
+                p.open_pr_count,
+                if p.open_pr_count == 1 { "PR" } else { "PRs" }
+            ));
+        }
+        if p.live_agent_count > 0 {
+            metrics.push(format!(
+                "{} {}",
+                p.live_agent_count,
+                if p.live_agent_count == 1 {
+                    "agent"
+                } else {
+                    "agents"
+                }
+            ));
+        }
+        if metrics.is_empty() && p.merged_today_count > 0 {
+            metrics.push(format!("{} shipped", p.merged_today_count));
+        }
+        let mut pill = view()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_2p5()
+            .py_1()
+            .child(status_dot(dot_color))
+            .child(
+                label(p.project_name.clone())
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(TEXT),
+            );
+        if !metrics.is_empty() {
+            pill = pill.child(
+                muted(metrics.join(" · "))
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.)),
+            );
+        }
+        row = row.child(
+            press_target()
+                .bg(SURFACE)
+                .rounded(px(7.))
+                .hover(|s| s.bg(CARD_HOVER))
+                .on_press(move |_: &()| {
+                    ui.project.set(pid.clone());
+                    ui.navigate("board");
+                })
+                .child(pill),
+        );
+    }
+    Some(row)
+}
+
+/// Floating bottom-center Undo toast (auto-dismisses after 4s via root Owner timer).
+fn render_floating_undo_toast(ui: Ui) -> impl IntoElement {
     dynamic(move || {
         let Some(banner) = ui.inbox.undo_banner.get() else {
             return view().into_element();
         };
         view()
-            .flex_row()
+            .absolute()
+            .bottom(px(20.))
+            .left(px(0.))
+            .right(px(0.))
             .items_center()
-            .justify_between()
-            .gap_2()
-            .pl_3p5()
-            .pr_2()
-            .py_2()
-            .bg(SELECTED)
-            .border_l_1()
-            .border_color(ACCENT)
+            .pointer_events(PointerEvents::None)
             .child(
                 view()
+                    .pointer_events(PointerEvents::Auto)
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .child(icon_tinted(Icon::Check, ACCENT).w(px(14.)).h(px(14.)))
-                    .child(label(banner.label).text_size(px(12.5))),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_1p5()
-                    .child(compact_action_with_icon(
-                        Icon::Undo,
-                        "Undo",
-                        Variant::Primary,
-                        move |_| undo_last(ui),
-                    ))
-                    .child(chrome_button(Icon::Close, "Dismiss", move |_| {
-                        ui.inbox.undo_banner.set(None);
-                    })),
+                    .gap_3()
+                    .px_3p5()
+                    .py_2()
+                    .bg(SURFACE)
+                    .border_1()
+                    .border_color(ACCENT)
+                    .rounded(px(9.))
+                    .shadow_lg()
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(icon_tinted(Icon::Check, ACCENT).w(px(14.)).h(px(14.)))
+                            .child(label(banner.label).text_size(px(12.5))),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(compact_action_with_icon(
+                                Icon::Undo,
+                                "Undo",
+                                Variant::Primary,
+                                move |_| undo_last(ui),
+                            ))
+                            .child(chrome_button(Icon::Close, "Dismiss", move |_| {
+                                ui.inbox.undo_banner.set(None);
+                            })),
+                    ),
             )
             .into_element()
     })
@@ -785,20 +996,6 @@ fn render_terminal_git_telemetry(term: &InboxTerminalWork) -> View {
     } else {
         row = row.child(muted(term.host_label.clone()).text_size(px(11.5)));
     }
-    if let Some(cwd) = &term.cwd {
-        row = row.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(icon_tinted(Icon::Folder, MUTED).w(px(12.)).h(px(12.)))
-                .child(
-                    muted(shorten_path(cwd))
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5)),
-                ),
-        );
-    }
     if let Some(br) = &term.branch {
         row = row.child(
             view()
@@ -809,7 +1006,25 @@ fn render_terminal_git_telemetry(term: &InboxTerminalWork) -> View {
                 .child(muted(br.clone()).font_family(MONO_FONT).text_size(px(11.5))),
         );
     }
+    if let Some(cwd) = &term.cwd {
+        row = row.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(icon_tinted(Icon::Folder, MUTED).w(px(12.)).h(px(12.)))
+                .child(
+                    muted(shorten_path(cwd))
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.)),
+                ),
+        );
+    }
+    row
+}
 
+fn render_terminal_diff_strip(term: &InboxTerminalWork) -> View {
+    let mut row = view().flex_row().flex_wrap().items_center().gap_2();
     if term.dirty || term.additions > 0 || term.deletions > 0 {
         let mut diff_row = view().flex_row().items_center().gap_1();
         if term.additions > 0 {
@@ -817,6 +1032,7 @@ fn render_terminal_git_telemetry(term: &InboxTerminalWork) -> View {
                 label(format!("+{}", term.additions))
                     .font_family(MONO_FONT)
                     .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(SUCCESS),
             );
         }
@@ -825,13 +1041,14 @@ fn render_terminal_git_telemetry(term: &InboxTerminalWork) -> View {
                 label(format!("-{}", term.deletions))
                     .font_family(MONO_FONT)
                     .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(DANGER),
             );
         }
         diff_row = diff_row.child(muted("uncommitted").text_size(px(11.5)));
         row = row.child(diff_row);
     } else if term.branch.is_some() {
-        row = row.child(muted("clean").text_size(px(11.5)));
+        row = row.child(muted("clean tree").text_size(px(11.5)));
     }
     if term.ahead > 0 {
         row = row.child(
@@ -850,6 +1067,7 @@ fn render_expanded_github_detail(ui: Ui, item: &GitHubStackItem) -> AnyElement {
     let key_collapse = item.key.clone();
     let static_body = item.body.clone();
     let static_author = item.author.clone();
+    let static_pr_state = item.pr_state.clone();
     let static_ci_state = item.ci_state.clone();
     let static_ci_passed = item.ci_passed;
     let static_ci_total = item.ci_total;
@@ -902,7 +1120,6 @@ fn render_expanded_github_detail(ui: Ui, item: &GitHubStackItem) -> AnyElement {
             .or_else(|| static_body.clone())
             .unwrap_or_default();
 
-        // Top metadata bar: author avatar + @login + PR state + CI + comments + branch/diff + actions
         let mut meta_left = view()
             .flex_row()
             .flex_wrap()
@@ -925,8 +1142,8 @@ fn render_expanded_github_detail(ui: Ui, item: &GitHubStackItem) -> AnyElement {
                     ),
             );
         }
-        if let Some(d) = &detail {
-            let state_badge = if d.merged {
+        let state_badge = if let Some(d) = &detail {
+            if d.merged {
                 Some(("Merged", Tone::Highlight))
             } else if d.draft {
                 Some(("Draft", Tone::Neutral))
@@ -936,10 +1153,18 @@ fn render_expanded_github_detail(ui: Ui, item: &GitHubStackItem) -> AnyElement {
                 Some(("Closed", Tone::Neutral))
             } else {
                 None
-            };
-            if let Some((lbl, tone)) = state_badge {
-                meta_left = meta_left.child(status(lbl, tone));
             }
+        } else {
+            match static_pr_state.as_deref() {
+                Some("merged") => Some(("Merged", Tone::Highlight)),
+                Some("draft") => Some(("Draft", Tone::Neutral)),
+                Some("open") => Some(("Open", Tone::Success)),
+                Some("closed") => Some(("Closed", Tone::Neutral)),
+                _ => None,
+            }
+        };
+        if let Some((lbl, tone)) = state_badge {
+            meta_left = meta_left.child(status(lbl, tone));
         }
         if let Some(ci_el) = ci_indicator(
             ci_state.as_deref(),
@@ -1054,7 +1279,7 @@ fn render_expanded_github_detail(ui: Ui, item: &GitHubStackItem) -> AnyElement {
     .into_element()
 }
 
-/// Tier 1: Flat `Needs Action` row (strictly 1:1 with left-rail badge, no outer box border).
+/// Tier 1: Single-layer `SURFACE` row with 3px left semantic bar (no outer box border, no bare `Close`).
 fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
     let key_defer = item.key.clone();
     let key_dismiss = item.key.clone();
@@ -1066,9 +1291,9 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             .flex_row()
             .items_stretch()
             .min_w(px(0.))
+            .rounded(px(9.))
+            .overflow_hidden()
             .bg(SURFACE)
-            .border_b_1()
-            .border_color(BORDER)
             .child(view().w(px(3.)).flex_shrink_0().bg(accent))
     };
 
@@ -1120,15 +1345,15 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             };
 
             let left_tile = if is_blocked {
-                agent_glyph_24(agent_engine.as_deref(), Some(ATTENTION))
+                agent_glyph_28(agent_engine.as_deref(), Some(ATTENTION))
             } else if can_quick_merge {
-                glyph_24(Icon::GitMerge, SELECTED, ACCENT)
+                glyph_28(Icon::GitMerge, SELECTED, ACCENT)
             } else if is_review {
-                glyph_24(Icon::Eye, HIGHLIGHT_SURFACE, HIGHLIGHT)
+                glyph_28(Icon::Eye, HIGHLIGHT_SURFACE, HIGHLIGHT)
             } else if agent_engine.is_some() {
-                agent_glyph_24(agent_engine.as_deref(), None)
+                agent_glyph_28(agent_engine.as_deref(), None)
             } else {
-                glyph_24(Icon::MessageSquare, SELECTED, ACCENT)
+                glyph_28(Icon::MessageSquare, SELECTED, ACCENT)
             };
 
             let intent_line = if is_blocked {
@@ -1250,6 +1475,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                         .py_1p5()
                         .pr_2()
                         .bg(INSET)
+                        .rounded(px(5.))
                         .child(label(ex).text_size(px(12.5)).text_color(TEXT).select_text()),
                 );
             }
@@ -1329,7 +1555,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_3p5()
+                    .px_4()
                     .py_3()
                     .flex_row()
                     .items_start()
@@ -1353,11 +1579,12 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
         }
         NeedsYouKind::Terminal { terminal } => {
             let term = *terminal;
+            let term_for_menu = term.clone();
             let tid = term.terminal_id.clone();
             let tid_open = tid.clone();
-            let tid_close = tid.clone();
+            let tid_btn = tid.clone();
             let card_open = term.card_id.clone();
-            let title_close = term.title.clone();
+            let card_btn = term.card_id.clone();
             let defer_title = term.title.clone();
             let dismiss_title = term.title.clone();
             let is_err = matches!(term.status, HerdrStatus::Error | HerdrStatus::Disconnected);
@@ -1368,7 +1595,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             };
             let reply_target_btn = reply_target.clone();
 
-            let left_tile = agent_glyph_24(term.agent_engine.as_deref(), Some(accent));
+            let left_tile = agent_glyph_28(term.agent_engine.as_deref(), Some(accent));
 
             let intent_line = if is_err {
                 "Error".to_owned()
@@ -1422,7 +1649,15 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                                 .child(label(intent_line).text_size(px(12.)).text_color(accent)),
                         ),
                 )
-                .child(render_terminal_git_telemetry(&term));
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_3()
+                        .child(render_terminal_git_telemetry(&term))
+                        .child(render_terminal_diff_strip(&term)),
+                );
 
             if let Some(detail) = &term.status_detail {
                 let mut detail_lbl = label(detail.clone())
@@ -1438,10 +1673,12 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                         .py_1p5()
                         .pr_2()
                         .bg(if is_err { BACKGROUND } else { INSET })
+                        .rounded(px(5.))
                         .child(detail_lbl),
                 );
             }
 
+            // Safe actions only (no bare `Close` next to `Dismiss`; terminate lives inside `⋯` menu).
             let left_actions = view()
                 .flex_row()
                 .items_center()
@@ -1452,8 +1689,12 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                     Variant::Primary,
                     move |_| start_inline_reply(ui, reply_target_btn.clone()),
                 ))
-                .child(compact_action("Close", Variant::Quiet, move |_| {
-                    close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone())
+                .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
+                    if let Some(cid) = &card_btn {
+                        ui.open_card_with_terminal(cid.clone(), Some(tid_btn.clone()));
+                    } else {
+                        ui.open_terminal(tid_btn.clone());
+                    }
                 }));
 
             let right_triage = view()
@@ -1464,19 +1705,22 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                 .child(chrome_button(Icon::Clock, "Defer", move |_| {
                     open_defer_menu(ui, vec![(key_defer.clone(), wm)], defer_title.clone())
                 }))
-                .child(chrome_button(Icon::Check, "Dismiss", move |_| {
+                .child(chrome_button(Icon::Check, "Hide from Today", move |_| {
                     dismiss_items(
                         ui,
                         vec![(key_dismiss.clone(), wm)],
-                        format!("Dismissed {dismiss_title}"),
+                        format!("Hidden · {dismiss_title}"),
                     )
+                }))
+                .child(chrome_button(Icon::More, "Terminal options", move |_| {
+                    open_terminal_menu(ui, term_for_menu.clone())
                 }));
 
             row_base(accent).child(
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_3p5()
+                    .px_4()
                     .py_3()
                     .flex_row()
                     .items_start()
@@ -1529,7 +1773,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             } else {
                 ATTENTION
             };
-            let left_tile = glyph_24(
+            let left_tile = glyph_28(
                 if is_ci {
                     Icon::TriangleAlert
                 } else if is_rev {
@@ -1781,7 +2025,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_3p5()
+                    .px_4()
                     .py_3()
                     .flex_row()
                     .items_start()
@@ -1811,7 +2055,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             let is_failed = state == "failed";
             let accent = if is_failed { DANGER } else { ATTENTION };
 
-            let left_tile = glyph_24(
+            let left_tile = glyph_28(
                 Icon::TriangleAlert,
                 if is_failed {
                     DANGER_SURFACE
@@ -1910,13 +2154,19 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             );
             if let Some(err) = detail_text {
                 col = col.child(
-                    view().pl_3().py_1p5().pr_2().bg(BACKGROUND).child(
-                        label(format!("> {err}"))
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.5))
-                            .text_color(accent)
-                            .select_text(),
-                    ),
+                    view()
+                        .pl_3()
+                        .py_1p5()
+                        .pr_2()
+                        .bg(BACKGROUND)
+                        .rounded(px(5.))
+                        .child(
+                            label(format!("> {err}"))
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.5))
+                                .text_color(accent)
+                                .select_text(),
+                        ),
                 );
             }
             col = col.child(
@@ -1934,7 +2184,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_3p5()
+                    .px_4()
                     .py_3()
                     .flex_row()
                     .items_start()
@@ -1946,13 +2196,14 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
     }
 }
 
-/// Hairline-ruled `Scheduled Runs` report table on `BACKGROUND` + inline `Created cards` sub-list.
+/// Hairline-ruled `Today's Schedule` report table (past/live runs + upcoming ticks today + created cards).
 fn render_schedules_report(
     ui: Ui,
     runs: &[SchedulePulseItem],
+    upcoming: &[UpcomingScheduleItem],
     stacks: Vec<ScheduleCardStack>,
 ) -> Option<View> {
-    if runs.is_empty() && stacks.is_empty() {
+    if runs.is_empty() && upcoming.is_empty() && stacks.is_empty() {
         return None;
     }
     let show_all = ui.inbox.schedule_expanded.get();
@@ -1979,6 +2230,9 @@ fn render_schedules_report(
     }
     if running > 0 {
         summary_parts.push(format!("{running} running"));
+    }
+    if !upcoming.is_empty() {
+        summary_parts.push(format!("{} upcoming", upcoming.len()));
     }
     if new_cards_total > 0 {
         summary_parts.push(format!(
@@ -2019,12 +2273,12 @@ fn render_schedules_report(
     let mut sec = view().gap_2().child(chapter_header(
         Icon::Trigger,
         if failed > 0 { DANGER } else { ACCENT },
-        "Scheduled Runs",
+        "Today's Schedule",
         summary_parts.join(" · "),
         Some(trailing.into_element()),
     ));
 
-    if !runs.is_empty() {
+    if !runs.is_empty() || !upcoming.is_empty() {
         let mut table = view().child(
             view()
                 .flex_row()
@@ -2043,7 +2297,7 @@ fn render_schedules_report(
                     muted("SCHEDULE")
                         .text_size(px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .w(px(230.)),
+                        .w(px(240.)),
                 )
                 .child(
                     muted("OUTCOME")
@@ -2147,7 +2401,7 @@ fn render_schedules_report(
                                     )
                                     .child(
                                         view()
-                                            .w(px(230.))
+                                            .w(px(240.))
                                             .flex_shrink_0()
                                             .flex_row()
                                             .items_center()
@@ -2181,6 +2435,76 @@ fn render_schedules_report(
                             ),
                     )
                     .child(right),
+            );
+        }
+
+        // Upcoming ticks still scheduled for later today
+        for up in upcoming.iter().take(3) {
+            let time_str = format_clock_hm(up.next_run_at);
+            let pid = up.project_id.clone();
+            let sid = up.schedule_id.clone();
+            table = table.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(
+                        press_target()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .bg(CLEAR)
+                            .rounded(px(4.))
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .on_press(move |_: &()| {
+                                crate::schedules::open(ui, Some(pid.clone()), Some(sid.clone()));
+                            })
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_3()
+                                    .min_w(px(0.))
+                                    .child(
+                                        muted(time_str)
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(11.5))
+                                            .w(px(48.))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child(
+                                        view()
+                                            .w(px(240.))
+                                            .flex_shrink_0()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .min_w(px(0.))
+                                            .child(status_dot(MUTED))
+                                            .child(
+                                                muted(up.schedule_name.clone())
+                                                    .text_size(px(12.5))
+                                                    .text_color(TEXT)
+                                                    .truncate(),
+                                            )
+                                            .child(
+                                                muted(format!("· {}", up.project_name))
+                                                    .text_size(px(11.5))
+                                                    .truncate(),
+                                            ),
+                                    )
+                                    .child(
+                                        muted(up.cron.clone())
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(11.5))
+                                            .flex_1()
+                                            .min_w(px(0.)),
+                                    ),
+                            ),
+                    )
+                    .child(status("Upcoming", Tone::Neutral)),
             );
         }
         sec = sec.child(table);
@@ -2291,9 +2615,8 @@ fn render_schedules_report(
     Some(sec)
 }
 
-/// Unified borderless GitHub PR/Issue row (Direct, Watching child, and Earlier).
-/// Shows expand chevron, `#number`, title, labels, CI state, comment icon+count, avatar+@author, age,
-/// and toggles an indented Markdown reader on click.
+/// Unified borderless GitHub PR/Issue row with colored state mark, expand chevron,
+/// labels, CI state, comment icon+count, avatar+@author, age, and toggleable Markdown reader.
 fn render_github_row(
     ui: Ui,
     item: GitHubStackItem,
@@ -2312,6 +2635,7 @@ fn render_github_row(
     let item_for_toggle = item.clone();
     let item_for_dismiss = item.clone();
     let defer_title = item.title.clone();
+    let kind_str = item.kind.clone();
     let is_pr = item.kind == "pr";
     let has_number = item.number.is_some();
     let reply_target = item.number.map(|num| ReplyTarget::GitHub {
@@ -2330,6 +2654,7 @@ fn render_github_row(
     let repo_label = item.repository.clone();
     let title_text = item.title.clone();
     let static_author = item.author.clone();
+    let static_pr_state = item.pr_state.clone();
     let static_ci_state = item.ci_state.clone();
     let static_ci_passed = item.ci_passed;
     let static_ci_total = item.ci_total;
@@ -2352,6 +2677,19 @@ fn render_github_row(
             .and_then(|d| d.author_login.clone())
             .or_else(|| static_author.clone());
         let avatar_url = detail.as_ref().and_then(|d| d.author_avatar_url.clone());
+        let merged = detail.as_ref().is_some_and(|d| d.merged)
+            || static_pr_state
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("merged"));
+        let draft = detail.as_ref().is_some_and(|d| d.draft)
+            || static_pr_state
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("draft"));
+        let pr_state_ref = detail
+            .as_ref()
+            .map(|d| d.state.as_str())
+            .filter(|s| !s.is_empty())
+            .or(static_pr_state.as_deref());
         let ci_state = detail
             .as_ref()
             .and_then(|d| d.ci_state.clone())
@@ -2389,9 +2727,8 @@ fn render_github_row(
                 .w(px(12.))
                 .h(px(12.)),
             );
-        } else {
-            left = left.child(icon_tinted(Icon::GitHub, MUTED).w(px(13.)).h(px(13.)));
         }
+        left = left.child(gh_state_mark(&kind_str, pr_state_ref, merged, draft));
         if show_repo {
             left = left.child(
                 muted(repo_label.clone())
@@ -2410,13 +2747,18 @@ fn render_github_row(
             )
             .child(
                 label(title_text.clone())
-                    .text_size(px(12.5))
+                    .text_size(px(13.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(TEXT)
                     .truncate()
                     .flex_1()
                     .min_w(px(0.)),
             );
+        if is_pr && merged {
+            left = left.child(status("Merged", Tone::Highlight));
+        } else if is_pr && draft {
+            left = left.child(status("Draft", Tone::Neutral));
+        }
         for lbl in labels.into_iter().take(2) {
             left = left.child(badge(lbl));
         }
@@ -2502,7 +2844,7 @@ fn render_github_row(
     wrapper
 }
 
-/// GitHub Activity chapter: flat borderless hairline rows for both Direct & collapsed Watching feeds.
+/// GitHub & PRs chapter: Direct updates + collapsible Watching feeds.
 fn render_github_activity(
     ui: Ui,
     direct_stacks: Vec<GitHubProjectStack>,
@@ -2525,12 +2867,11 @@ fn render_github_activity(
     let mut sec = view().gap_2p5().child(chapter_header(
         Icon::GitHub,
         TEXT,
-        "GitHub Activity",
+        "GitHub & PRs",
         sub_parts.join(" · "),
         None,
     ));
 
-    // Direct updates (unfolded, grouped by repo on crisp hairlines)
     for stack in direct_stacks {
         let count = stack.items.len();
         let stack_dismiss = stack.clone();
@@ -2569,7 +2910,6 @@ fn render_github_activity(
         sec = sec.child(repo_block);
     }
 
-    // Watching feeds (flat borderless collapsible hairline rows — no outer box border, no explanatory banner)
     if !watching_stacks.is_empty() {
         let mut watch_list = view();
         for stack in watching_stacks {
@@ -2656,13 +2996,11 @@ fn render_github_activity(
     Some(sec)
 }
 
-/// Flat borderless Live Agent Session row (no outer box, no bordered tile, structured Git/Turn telemetry).
-fn render_agent_session_row(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> View {
-    let tid = term.terminal_id.clone();
-    let tid_open = tid.clone();
-    let tid_close = tid.clone();
+/// Single-layer borderless `SURFACE` card for a live Agent Terminal (no bare `Close` button; `⋯` menu only).
+fn render_agent_session_card(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> View {
+    let term_for_menu = term.clone();
+    let tid_open = term.terminal_id.clone();
     let card_open = term.card_id.clone();
-    let title_close = term.title.clone();
     let age = format_age_compact(term.timestamp_ms, now_ms);
     let (status_lbl, status_tone, is_live, status_color) = terminal_status_visual(term.status);
 
@@ -2681,43 +3019,39 @@ fn render_agent_session_row(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vie
         status_lbl.to_owned()
     };
 
-    let tile = agent_glyph_24(term.agent_engine.as_deref(), Some(status_color));
+    let tile = agent_glyph_28(term.agent_engine.as_deref(), Some(status_color));
 
     let title_text = match (term.card_number, &term.card_title) {
         (Some(n), Some(ct)) => format!("{} · #{n} {ct}", term.title),
         _ => term.title.clone(),
     };
 
-    let header = view()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .min_w(px(0.))
-        .child(
-            label(title_text)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(13.))
-                .truncate()
-                .flex_1()
-                .min_w(px(0.)),
-        )
-        .child(if is_live {
-            live_status(state_pill_text, status_tone)
-        } else {
-            status(state_pill_text, status_tone)
-        })
-        .child(
-            muted(age)
-                .font_family(MONO_FONT)
-                .text_size(px(11.))
-                .flex_shrink_0(),
-        );
-
-    let mut col = view()
+    let mut body = view()
         .flex_1()
         .min_w(px(0.))
-        .gap_1()
-        .child(header)
+        .gap_1p5()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
+                .child(tile)
+                .child(
+                    label(title_text)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(13.))
+                        .text_color(TEXT)
+                        .truncate()
+                        .flex_1()
+                        .min_w(px(0.)),
+                )
+                .child(if is_live {
+                    live_status(state_pill_text, status_tone)
+                } else {
+                    status(state_pill_text, status_tone)
+                }),
+        )
         .child(render_terminal_git_telemetry(&term));
 
     if let Some(cmd) = &term.shell_command {
@@ -2725,29 +3059,47 @@ fn render_agent_session_row(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vie
             .shell_exit_code
             .map(|c| format!(" (exit {c})"))
             .unwrap_or_default();
-        col = col.child(
+        body = body.child(
             muted(format!("{cmd}{suffix}"))
                 .font_family(MONO_FONT)
                 .text_size(px(11.5))
                 .truncate(),
         );
     } else if let Some(detail) = &term.status_detail {
-        col = col.child(muted(detail.clone()).text_size(px(12.)).truncate());
+        body = body.child(muted(detail.clone()).text_size(px(12.)).truncate());
     }
 
+    body = body.child(
+        view()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(render_terminal_diff_strip(&term))
+            .child(
+                muted(age)
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.))
+                    .flex_shrink_0(),
+            ),
+    );
+
     view()
+        .flex_1()
+        .min_w(px(0.))
+        .bg(SURFACE)
+        .rounded(px(10.))
+        .px_3p5()
+        .py_3()
         .flex_row()
-        .items_center()
-        .gap_3()
-        .py_2p5()
-        .border_b_1()
-        .border_color(BORDER)
+        .items_start()
+        .gap_1p5()
         .child(
             press_target()
                 .flex_1()
                 .min_w(px(0.))
                 .bg(CLEAR)
-                .rounded(px(4.))
+                .rounded(px(6.))
                 .hover(|s| s.bg(CARD_HOVER))
                 .on_press(move |_: &()| {
                     if let Some(cid) = &card_open {
@@ -2756,27 +3108,21 @@ fn render_agent_session_row(ui: Ui, term: InboxTerminalWork, now_ms: u64) -> Vie
                         ui.open_terminal(tid_open.clone());
                     }
                 })
-                .child(
-                    view()
-                        .flex_row()
-                        .items_start()
-                        .gap_2p5()
-                        .child(tile)
-                        .child(col),
-                ),
+                .child(body),
         )
-        .child(compact_action("Close", Variant::Quiet, move |_| {
-            close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone())
+        .child(chrome_button(Icon::More, "Terminal options", move |_| {
+            open_terminal_menu(ui, term_for_menu.clone())
         }))
 }
 
-/// Active Work chapter: borderless hairline Agent Sessions + Today's Cards + Idle Shells.
+/// Active Work chapter: 2-column borderless `SURFACE` Agent cards + Today's Cards + Idle Shells.
 fn render_active_work(
     ui: Ui,
     agent_terminals: Vec<InboxTerminalWork>,
     open_cards: Vec<InboxCardWork>,
     plain_shells: Vec<InboxTerminalWork>,
     now_ms: u64,
+    narrow: bool,
 ) -> Option<View> {
     if agent_terminals.is_empty() && open_cards.is_empty() && plain_shells.is_empty() {
         return None;
@@ -2795,7 +3141,7 @@ fn render_active_work(
         sub_parts.push(format!("{n} {}", if n == 1 { "shell" } else { "shells" }));
     }
 
-    let mut sec = view().gap_2p5().child(chapter_header(
+    let mut sec = view().gap_3().child(chapter_header(
         Icon::Terminal,
         ACCENT,
         "Active Work",
@@ -2803,13 +3149,38 @@ fn render_active_work(
         None,
     ));
 
-    // 1. Live Agent Sessions (flat borderless hairline list — zero box-in-box)
+    // 1. Live Agent Sessions (single-layer borderless `SURFACE` cards — 2-column grid on desktop)
     if !agent_terminals.is_empty() {
-        let mut list = view().border_t_1().border_color(BORDER);
-        for term in agent_terminals {
-            list = list.child(render_agent_session_row(ui, term, now_ms));
+        let mut grid = view().gap_2p5();
+        if narrow || agent_terminals.len() == 1 {
+            for term in agent_terminals {
+                grid = grid.child(render_agent_session_card(ui, term, now_ms));
+            }
+        } else {
+            let mut iter = agent_terminals.into_iter();
+            while let Some(left_term) = iter.next() {
+                if let Some(right_term) = iter.next() {
+                    grid = grid.child(
+                        view()
+                            .flex_row()
+                            .items_stretch()
+                            .gap_3()
+                            .child(render_agent_session_card(ui, left_term, now_ms))
+                            .child(render_agent_session_card(ui, right_term, now_ms)),
+                    );
+                } else {
+                    grid = grid.child(
+                        view()
+                            .flex_row()
+                            .items_stretch()
+                            .gap_3()
+                            .child(render_agent_session_card(ui, left_term, now_ms))
+                            .child(view().flex_1().min_w(px(0.))),
+                    );
+                }
+            }
         }
-        sec = sec.child(list);
+        sec = sec.child(grid);
     }
 
     // 2. Today's Cards (hairline-ruled table)
@@ -2846,7 +3217,7 @@ fn render_active_work(
                 )
                 .child(
                     label(card.card_title.clone())
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .font_weight(FontWeight::MEDIUM)
                         .truncate()
                         .flex_1()
@@ -2936,12 +3307,11 @@ fn render_active_work(
         sec = sec.child(table);
     }
 
-    // 3. Borderless Idle Shells collapsible row
+    // 3. Borderless Idle Shells collapsible row (no bare Close; `⋯` menu per shell)
     if !plain_shells.is_empty() {
         let stack_id = "plain-shells-stack".to_owned();
         let expanded = ui.inbox.expanded_stacks.with(|s| s.contains(&stack_id));
         let count = plain_shells.len();
-        let shells_close_all = plain_shells.clone();
         let preview = plain_shells
             .iter()
             .take(3)
@@ -3003,17 +3373,13 @@ fn render_active_work(
                                         .flex_1(),
                                 ),
                         ),
-                )
-                .child(compact_action("Close all", Variant::Quiet, move |_| {
-                    close_all_plain_shells(ui, shells_close_all.clone())
-                })),
+                ),
         );
 
         if expanded {
             for sh in plain_shells {
+                let sh_menu = sh.clone();
                 let tid_open = sh.terminal_id.clone();
-                let tid_close = sh.terminal_id.clone();
-                let title_close = sh.title.clone();
                 let age = format_age_compact(sh.timestamp_ms, now_ms);
                 let cwd = sh
                     .cwd
@@ -3060,8 +3426,8 @@ fn render_active_work(
                                         ),
                                 ),
                         )
-                        .child(chrome_button(Icon::Close, "Close", move |_| {
-                            close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone())
+                        .child(chrome_button(Icon::More, "Shell options", move |_| {
+                            open_terminal_menu(ui, sh_menu.clone())
                         })),
                 );
             }
@@ -3070,6 +3436,128 @@ fn render_active_work(
     }
 
     Some(sec)
+}
+
+/// Shipped Today chapter: Merged PRs (purple `GitMerge` icon) & Resolved Cards today.
+fn render_shipped_today(ui: Ui, items: &[ShippedTodayItem], now_ms: u64) -> Option<View> {
+    if items.is_empty() {
+        return None;
+    }
+    let prs = items.iter().filter(|s| s.is_pr).count();
+    let cards = items.iter().filter(|s| !s.is_pr).count();
+    let mut parts = Vec::new();
+    if prs > 0 {
+        parts.push(format!(
+            "{prs} {} merged",
+            if prs == 1 { "PR" } else { "PRs" }
+        ));
+    }
+    if cards > 0 {
+        parts.push(format!(
+            "{cards} {} resolved",
+            if cards == 1 { "card" } else { "cards" }
+        ));
+    }
+
+    let mut list = view().border_t_1().border_color(BORDER);
+    for item in items.iter().take(12) {
+        let age = format_age_compact(item.shipped_at, now_ms);
+        let cid = item.card_id.clone();
+        let url = item.url.clone();
+        let ref_lbl = if let Some(n) = item.pr_number {
+            format!("#{n}")
+        } else if let Some(n) = item.card_number {
+            format!("#{n}")
+        } else {
+            "—".into()
+        };
+        let ctx = item
+            .repository
+            .clone()
+            .unwrap_or_else(|| item.project_name.clone());
+
+        let mut row = view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .child(if item.is_pr {
+                icon_tinted(Icon::GitMerge, HIGHLIGHT)
+                    .w(px(14.))
+                    .h(px(14.))
+                    .flex_shrink_0()
+            } else {
+                icon_tinted(Icon::Check, SUCCESS)
+                    .w(px(14.))
+                    .h(px(14.))
+                    .flex_shrink_0()
+            })
+            .child(
+                muted(ref_lbl)
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.5))
+                    .w(px(44.))
+                    .flex_shrink_0(),
+            )
+            .child(
+                label(item.title.clone())
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(TEXT)
+                    .truncate()
+                    .flex_1()
+                    .min_w(px(0.)),
+            )
+            .child(muted(ctx).text_size(px(11.5)).flex_shrink_0());
+        if let Some(a) = &item.author {
+            row = row.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .child(github_avatar(a, None, 16.))
+                    .child(muted(format!("@{a}")).text_size(px(11.5))),
+            );
+        }
+        row = row.child(
+            muted(age)
+                .font_family(MONO_FONT)
+                .text_size(px(11.))
+                .flex_shrink_0(),
+        );
+
+        list = list.child(
+            view().py_2().border_b_1().border_color(BORDER).child(
+                press_target()
+                    .w_full()
+                    .bg(CLEAR)
+                    .rounded(px(4.))
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .on_press(move |_: &()| {
+                        if let Some(c) = &cid {
+                            ui.open_card(c.clone());
+                        } else if let Some(u) = &url {
+                            let _ = crate::platform::open_external(u);
+                        }
+                    })
+                    .child(row),
+            ),
+        );
+    }
+
+    Some(
+        view()
+            .gap_2()
+            .child(chapter_header(
+                Icon::Check,
+                SUCCESS,
+                "Shipped Today",
+                parts.join(" · "),
+                None,
+            ))
+            .child(list),
+    )
 }
 
 /// Borderless bottom fold for older GitHub items (< today) & carry-over cards.
@@ -3246,6 +3734,108 @@ fn render_earlier_section(
     Some(band)
 }
 
+/// First-run launchpad for brand-new users (no projects, no terminals yet — hides all-zero KPIs & fake "All clear").
+fn render_first_run(ui: Ui, gh_connected: bool) -> View {
+    let launch_card = |icon_kind: Icon,
+                       tint: ThemeColor,
+                       bg_tint: ThemeColor,
+                       title: &'static str,
+                       sub: &'static str,
+                       on_click: Box<dyn Fn()>| {
+        press_target()
+            .flex_1()
+            .min_w(px(180.))
+            .bg(SURFACE)
+            .rounded(px(10.))
+            .p_4()
+            .hover(|s| s.bg(CARD_HOVER))
+            .on_press(move |_: &()| on_click())
+            .child(
+                view()
+                    .gap_2()
+                    .child(glyph_28(icon_kind, bg_tint, tint))
+                    .child(
+                        view()
+                            .gap_0p5()
+                            .child(
+                                label(title)
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(TEXT),
+                            )
+                            .child(muted(sub).text_size(px(12.))),
+                    ),
+            )
+    };
+
+    view()
+        .gap_6()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .pb_4()
+                .border_b_1()
+                .border_color(BORDER)
+                .child(
+                    label(format_today_date_long())
+                        .text_size(px(22.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(TEXT),
+                )
+                .child(render_environment_pulse(ui)),
+        )
+        .child(
+            view()
+                .pt_6()
+                .gap_4()
+                .child(
+                    label("Get Started")
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(TEXT),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(launch_card(
+                            Icon::Plus,
+                            ACCENT,
+                            SELECTED,
+                            "Add Project",
+                            "Local repository",
+                            Box::new(move || ui.navigate("new-project")),
+                        ))
+                        .child(launch_card(
+                            Icon::GitHub,
+                            if gh_connected { SUCCESS } else { TEXT },
+                            if gh_connected { SUCCESS_SURFACE } else { INSET },
+                            if gh_connected {
+                                "GitHub Connected"
+                            } else {
+                                "Connect GitHub"
+                            },
+                            "PRs & reviews",
+                            Box::new(move || ui.navigate("github-account")),
+                        ))
+                        .child(launch_card(
+                            Icon::Terminal,
+                            HIGHLIGHT,
+                            HIGHLIGHT_SURFACE,
+                            "New Terminal",
+                            "Agent or shell",
+                            Box::new(move || {
+                                ui.navigate("terminals");
+                                crate::terminals::new_tab(ui);
+                            }),
+                        )),
+                ),
+        )
+}
+
 fn render_inbox_zero(ui: Ui, inbox: &DailyInbox) -> View {
     let done = inbox.completed_today;
     let deferred = inbox.deferred_items.len();
@@ -3262,11 +3852,11 @@ fn render_inbox_zero(ui: Ui, inbox: &DailyInbox) -> View {
     }));
 
     view()
-        .py(px(44.))
+        .py(px(36.))
         .px_6()
         .items_center()
         .gap_2()
-        .child(glyph_24(Icon::Check, SUCCESS_SURFACE, SUCCESS))
+        .child(glyph_28(Icon::Check, SUCCESS_SURFACE, SUCCESS))
         .child(
             label("All clear")
                 .font_weight(FontWeight::SEMIBOLD)
@@ -3401,6 +3991,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     });
 
     view()
+        .relative()
         .flex_1()
         .min_w(px(0.))
         .min_h(px(0.))
@@ -3410,12 +4001,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 view().w_full().items_center().px_6().py_5().child(
                     view()
                         .w_full()
-                        .max_w(px(900.))
-                        .gap(px(28.))
-                        .child(render_undo_banner(ui))
+                        .max_w(px(1060.))
+                        .pb_10()
                         .child(dynamic(move || {
                             let inbox = ui.daily_inbox.get();
                             let active_drawer = ui.inbox.drawer.get();
+                            let narrow = ui.narrow.get();
                             let now_ms = canban_types::now();
 
                             if active_drawer == "deferred" {
@@ -3431,10 +4022,31 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 .into_element();
                             }
 
-                            let mut col = view().gap(px(28.));
+                            let is_first_run = !inbox.has_projects
+                                && inbox.agent_terminals.is_empty()
+                                && inbox.plain_shells.is_empty()
+                                && inbox.needs_you.is_empty()
+                                && inbox.github_stacks.is_empty()
+                                && inbox.github_watching.is_empty()
+                                && inbox.shipped_today.is_empty()
+                                && inbox.schedule_pulse.is_empty()
+                                && inbox.upcoming_schedules.is_empty();
 
-                            // 1. Editorial Masthead + Borderless 4-Column Hairline KPI Strip
+                            if is_first_run {
+                                return render_first_run(ui, gh_connected.get()).into_element();
+                            }
+
+                            let mut col = view().gap(px(26.));
+
+                            // 1. Editorial Masthead + 4-Column KPI Strip (NEEDS ACTION | SCHEDULED RUNS | ACTIVE WORK | SHIPPED TODAY)
                             col = col.child(render_editorial_masthead(ui, &inbox));
+
+                            // 2. Active Projects quick-jump strip
+                            if let Some(proj_strip) =
+                                render_project_pulses(ui, &inbox.project_pulses)
+                            {
+                                col = col.child(proj_strip);
+                            }
 
                             if !gh_connected.get()
                                 && inbox.github_stacks.is_empty()
@@ -3472,29 +4084,30 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 );
                             }
 
-                            let all_today_empty = inbox.needs_you.is_empty()
+                            let all_active_empty = inbox.needs_you.is_empty()
                                 && inbox.github_stacks.is_empty()
                                 && inbox.github_watching.is_empty()
                                 && inbox.schedule_stacks.is_empty()
                                 && inbox.schedule_pulse.is_empty()
+                                && inbox.upcoming_schedules.is_empty()
                                 && inbox.open_cards.is_empty()
                                 && inbox.agent_terminals.is_empty()
                                 && inbox.plain_shells.is_empty();
 
-                            if all_today_empty {
+                            if all_active_empty {
                                 col = col.child(render_inbox_zero(ui, &inbox));
                             } else {
-                                // 2. Needs Action (flat hairline list with 3px left semantic bar)
+                                // 3. Needs Action (single-layer `SURFACE` rows with 3px semantic left bar)
                                 if !inbox.needs_you.is_empty() {
                                     let count = inbox.needs_you.len();
-                                    let mut sec = view().gap_2().child(chapter_header(
+                                    let mut sec = view().gap_2p5().child(chapter_header(
                                         Icon::ShieldAlert,
                                         ATTENTION,
                                         "Needs Action",
                                         format!("{count}"),
                                         None,
                                     ));
-                                    let mut list = view().border_t_1().border_color(BORDER);
+                                    let mut list = view().gap_2();
                                     for item in inbox.needs_you.iter().cloned() {
                                         list = list.child(render_needs_you_row(ui, item, now_ms));
                                     }
@@ -3502,16 +4115,19 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     col = col.child(sec);
                                 }
 
-                                // 3. Scheduled Runs
-                                if let Some(sched) = render_schedules_report(
+                                // 4. Active Work (2-column borderless `SURFACE` Agent cards + Today's Cards + Idle Shells)
+                                if let Some(work) = render_active_work(
                                     ui,
-                                    &inbox.schedule_pulse,
-                                    inbox.schedule_stacks.clone(),
+                                    inbox.agent_terminals.clone(),
+                                    inbox.open_cards.clone(),
+                                    inbox.plain_shells.clone(),
+                                    now_ms,
+                                    narrow,
                                 ) {
-                                    col = col.child(sched);
+                                    col = col.child(work);
                                 }
 
-                                // 4. GitHub Activity (Direct + Watching)
+                                // 5. GitHub & PRs (colored PR state, CI, comments, avatars, toggleable Markdown reader)
                                 if let Some(gh) = render_github_activity(
                                     ui,
                                     inbox.github_stacks.clone(),
@@ -3521,19 +4137,25 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     col = col.child(gh);
                                 }
 
-                                // 5. Active Work (Agent Sessions + Today's Cards + Idle Shells)
-                                if let Some(work) = render_active_work(
+                                // 6. Today's Schedule (past/live runs + upcoming ticks + created cards)
+                                if let Some(sched) = render_schedules_report(
                                     ui,
-                                    inbox.agent_terminals.clone(),
-                                    inbox.open_cards.clone(),
-                                    inbox.plain_shells.clone(),
-                                    now_ms,
+                                    &inbox.schedule_pulse,
+                                    &inbox.upcoming_schedules,
+                                    inbox.schedule_stacks.clone(),
                                 ) {
-                                    col = col.child(work);
+                                    col = col.child(sched);
                                 }
                             }
 
-                            // 6. Earlier fold
+                            // 7. Shipped Today (merged PRs & resolved cards today — shown even on Inbox Zero!)
+                            if let Some(shipped) =
+                                render_shipped_today(ui, &inbox.shipped_today, now_ms)
+                            {
+                                col = col.child(shipped);
+                            }
+
+                            // 8. Earlier fold
                             if let Some(earlier) = render_earlier_section(
                                 ui,
                                 inbox.earlier_github.clone(),
@@ -3549,4 +4171,5 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 ),
             ),
         )
+        .child(render_floating_undo_toast(ui))
 }

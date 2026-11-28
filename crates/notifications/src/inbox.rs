@@ -223,6 +223,45 @@ pub struct GitHubInboxNotification {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpcomingScheduleItem {
+    pub schedule_id: String,
+    pub schedule_name: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub next_run_at: u64,
+    pub cron: String,
+    pub creates_card: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShippedTodayItem {
+    pub key: String,
+    pub is_pr: bool,
+    pub title: String,
+    pub repository: Option<String>,
+    pub pr_number: Option<u64>,
+    pub card_id: Option<String>,
+    pub card_number: Option<u64>,
+    pub project_name: String,
+    pub author: Option<String>,
+    pub url: Option<String>,
+    pub shipped_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectPulseItem {
+    pub project_id: String,
+    pub project_name: String,
+    pub host_label: Option<String>,
+    pub develop_count: usize,
+    pub review_count: usize,
+    pub open_pr_count: usize,
+    pub live_agent_count: usize,
+    pub attention_count: usize,
+    pub merged_today_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchedulePulseItem {
     pub run_id: String,
     pub schedule_id: String,
@@ -308,6 +347,7 @@ pub struct GitHubStackItem {
     pub body: Option<String>,
     pub author: Option<String>,
     pub reason: String,
+    pub pr_state: Option<String>,
     pub ci_state: Option<String>,
     pub ci_passed: u32,
     pub ci_total: u32,
@@ -452,7 +492,11 @@ pub struct DailyInbox {
     pub completed_today: usize,
     pub remaining_today: usize,
     pub total_today: usize,
+    pub has_projects: bool,
     pub schedule_pulse: Vec<SchedulePulseItem>,
+    pub upcoming_schedules: Vec<UpcomingScheduleItem>,
+    pub project_pulses: Vec<ProjectPulseItem>,
+    pub shipped_today: Vec<ShippedTodayItem>,
     /// Tier 1: All items currently demanding direct user action (1:1 with rail badge).
     pub needs_you: Vec<NeedsYouItem>,
     /// Tier 2: Today's direct non-blocking GitHub updates grouped by project/repo.
@@ -1284,6 +1328,19 @@ pub fn build_daily_inbox(
                 let labels = matched_issue
                     .map(|gi| gi.labels.clone())
                     .unwrap_or_default();
+                let pr_state = matched_pr
+                    .map(|p| {
+                        if p.merged {
+                            "merged".to_owned()
+                        } else {
+                            p.state.to_ascii_lowercase()
+                        }
+                    })
+                    .or_else(|| {
+                        matched_issue
+                            .map(|gi| gi.state.to_ascii_lowercase())
+                            .filter(|s| !s.is_empty())
+                    });
                 let item = GitHubStackItem {
                     key: key.clone(),
                     watermark: wm,
@@ -1299,6 +1356,7 @@ pub fn build_daily_inbox(
                     }),
                     author,
                     reason: notif.reason.clone(),
+                    pr_state,
                     ci_state,
                     ci_passed,
                     ci_total,
@@ -1550,6 +1608,21 @@ pub fn build_daily_inbox(
                 let labels = matched_issue
                     .map(|gi| gi.labels.clone())
                     .unwrap_or_default();
+                let pr_state = card
+                    .pull_request
+                    .as_ref()
+                    .map(|p| {
+                        if p.merged {
+                            "merged".to_owned()
+                        } else {
+                            p.state.to_ascii_lowercase()
+                        }
+                    })
+                    .or_else(|| {
+                        matched_issue
+                            .map(|gi| gi.state.to_ascii_lowercase())
+                            .filter(|s| !s.is_empty())
+                    });
                 let item = GitHubStackItem {
                     key: key.clone(),
                     watermark: wm,
@@ -1561,6 +1634,7 @@ pub fn build_daily_inbox(
                     body: meta.and_then(|m| m.body.clone().or_else(|| m.summary.clone())),
                     author,
                     reason,
+                    pr_state,
                     ci_state,
                     ci_passed,
                     ci_total,
@@ -1818,6 +1892,21 @@ pub fn build_daily_inbox(
                         let labels = matched_issue
                             .map(|gi| gi.labels.clone())
                             .unwrap_or_default();
+                        let pr_state = card
+                            .pull_request
+                            .as_ref()
+                            .map(|p| {
+                                if p.merged {
+                                    "merged".to_owned()
+                                } else {
+                                    p.state.to_ascii_lowercase()
+                                }
+                            })
+                            .or_else(|| {
+                                matched_issue
+                                    .map(|gi| gi.state.to_ascii_lowercase())
+                                    .filter(|s| !s.is_empty())
+                            });
                         let item = GitHubStackItem {
                             key,
                             watermark: wm,
@@ -1829,6 +1918,7 @@ pub fn build_daily_inbox(
                             body: (!card.body.trim().is_empty()).then(|| card.body.clone()),
                             author,
                             reason: "synced".into(),
+                            pr_state,
                             ci_state,
                             ci_passed,
                             ci_total,
@@ -2159,6 +2249,267 @@ pub fn build_daily_inbox(
     inbox
         .done_today_items
         .sort_by(|a, b| b.completed_at.cmp(&a.completed_at).then(a.key.cmp(&b.key)));
+
+    // 6. Upcoming schedules remaining today (`schedule_states` with `next_run_at` in `[now_ms, next_cutoff_ms)`).
+    for st in &snapshot.schedule_states {
+        if !st.enabled {
+            continue;
+        }
+        let Some(next_at) = st.next_run_at else {
+            continue;
+        };
+        if next_at >= now_ms && next_at < next_cutoff_ms {
+            let proj_name = if is_global_project_id(&st.project_id) {
+                "Global".into()
+            } else {
+                project_names
+                    .get(st.project_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| st.project_id.clone())
+            };
+            inbox.upcoming_schedules.push(UpcomingScheduleItem {
+                schedule_id: st.id.clone(),
+                schedule_name: st.workflow_name.clone(),
+                project_id: st.project_id.clone(),
+                project_name: proj_name,
+                next_run_at: next_at,
+                cron: st.cron.clone(),
+                creates_card: st.creates_card,
+            });
+        }
+    }
+    inbox.upcoming_schedules.sort_by(|a, b| {
+        a.next_run_at
+            .cmp(&b.next_run_at)
+            .then_with(|| a.schedule_id.cmp(&b.schedule_id))
+    });
+
+    // 7. Shipped Today: merged PRs (delivery PRs, synced PRs, or archived-after-merge cards) + resolved Cards today.
+    let mut seen_shipped_prs: BTreeSet<(String, u64)> = BTreeSet::new();
+    let mut seen_shipped_cards: BTreeSet<String> = BTreeSet::new();
+    let mut merged_today_by_project: BTreeMap<String, usize> = BTreeMap::new();
+
+    for card in &snapshot.cards {
+        if card.removed_at.is_some() {
+            continue;
+        }
+        let proj_name = project_names
+            .get(card.project_id.as_str())
+            .cloned()
+            .unwrap_or_else(|| card.project_id.clone());
+        let delivery_pr = card.pull_request.as_ref().filter(|p| p.merged);
+        let gh_src = card.github_issue();
+        let matched_issue = gh_src.and_then(|s| {
+            gh_issue_by_repo_num
+                .get(&(s.repository.to_ascii_lowercase(), s.number))
+                .copied()
+        });
+        let synced_pr_merged = card.is_github_pr()
+            && matched_issue.is_some_and(|gi| gi.state.eq_ignore_ascii_case("merged"));
+        let res_ts = card
+            .resolved_at()
+            .or_else(|| card.delivery.as_ref().map(|d| d.merged_at))
+            .or_else(|| {
+                if synced_pr_merged {
+                    matched_issue.and_then(|gi| parse_rfc3339_ms(&gi.updated_at))
+                } else {
+                    None
+                }
+            });
+        let Some(shipped_at) = res_ts.filter(|&t| t >= day_start_ms && t < next_cutoff_ms) else {
+            continue;
+        };
+        if let Some(pr) = delivery_pr {
+            let repo_key = (pr.repository.to_ascii_lowercase(), pr.number);
+            if seen_shipped_prs.insert(repo_key) {
+                seen_shipped_cards.insert(card.id.clone());
+                *merged_today_by_project
+                    .entry(card.project_id.clone())
+                    .or_default() += 1;
+                inbox.shipped_today.push(ShippedTodayItem {
+                    key: format!("shipped:pr:{}:{}", pr.repository, pr.number),
+                    is_pr: true,
+                    title: card.title.clone(),
+                    repository: Some(pr.repository.clone()),
+                    pr_number: Some(pr.number),
+                    card_id: Some(card.id.clone()),
+                    card_number: Some(card.number),
+                    project_name: proj_name,
+                    author: matched_issue
+                        .map(|gi| gi.author_login.clone())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| snapshot.github.login.clone()),
+                    url: Some(pr.url.clone()),
+                    shipped_at,
+                });
+            }
+        } else if synced_pr_merged && let Some(src) = gh_src {
+            let repo_key = (src.repository.to_ascii_lowercase(), src.number);
+            if seen_shipped_prs.insert(repo_key) {
+                seen_shipped_cards.insert(card.id.clone());
+                *merged_today_by_project
+                    .entry(card.project_id.clone())
+                    .or_default() += 1;
+                inbox.shipped_today.push(ShippedTodayItem {
+                    key: format!("shipped:pr:{}:{}", src.repository, src.number),
+                    is_pr: true,
+                    title: card.title.clone(),
+                    repository: Some(src.repository.clone()),
+                    pr_number: Some(src.number),
+                    card_id: Some(card.id.clone()),
+                    card_number: Some(card.number),
+                    project_name: proj_name,
+                    author: matched_issue
+                        .map(|gi| gi.author_login.clone())
+                        .filter(|s| !s.is_empty()),
+                    url: Some(src.url.clone()),
+                    shipped_at,
+                });
+            }
+        } else if card.resolved() && seen_shipped_cards.insert(card.id.clone()) {
+            *merged_today_by_project
+                .entry(card.project_id.clone())
+                .or_default() += 1;
+            inbox.shipped_today.push(ShippedTodayItem {
+                key: format!("shipped:card:{}", card.id),
+                is_pr: false,
+                title: card.title.clone(),
+                repository: None,
+                pr_number: None,
+                card_id: Some(card.id.clone()),
+                card_number: Some(card.number),
+                project_name: proj_name,
+                author: None,
+                url: None,
+                shipped_at,
+            });
+        }
+    }
+    // Also capture merged PRs from `snapshot.github_issues` that had no active local Card.
+    for gi in &snapshot.github_issues {
+        if !gi.state.eq_ignore_ascii_case("merged") {
+            continue;
+        }
+        let Some(ts) = parse_rfc3339_ms(&gi.updated_at) else {
+            continue;
+        };
+        if ts < day_start_ms || ts >= next_cutoff_ms {
+            continue;
+        }
+        let repo_key = (gi.source.repository.to_ascii_lowercase(), gi.source.number);
+        if seen_shipped_prs.insert(repo_key) {
+            let proj_name = project_names
+                .get(gi.project_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| gi.source.repository.clone());
+            *merged_today_by_project
+                .entry(gi.project_id.clone())
+                .or_default() += 1;
+            inbox.shipped_today.push(ShippedTodayItem {
+                key: format!("shipped:pr:{}:{}", gi.source.repository, gi.source.number),
+                is_pr: true,
+                title: gi.title.clone(),
+                repository: Some(gi.source.repository.clone()),
+                pr_number: Some(gi.source.number),
+                card_id: None,
+                card_number: None,
+                project_name: proj_name,
+                author: (!gi.author_login.is_empty()).then(|| gi.author_login.clone()),
+                url: Some(gi.source.url.clone()),
+                shipped_at: ts,
+            });
+        }
+    }
+    inbox.shipped_today.sort_by(|a, b| {
+        b.shipped_at
+            .cmp(&a.shipped_at)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    // 8. Active Project Pulse (projects with active WIP, open PRs, live agents, attention, or shipped today).
+    let mut attention_by_proj: BTreeMap<&str, usize> = BTreeMap::new();
+    for ny in &inbox.needs_you {
+        let pid = match &ny.kind {
+            NeedsYouKind::Card { project_id, .. }
+            | NeedsYouKind::ScheduleFailed { project_id, .. } => Some(project_id.as_str()),
+            NeedsYouKind::GitHub { project_id, .. } => project_id.as_deref(),
+            NeedsYouKind::Terminal { terminal } => terminal.project_id.as_deref(),
+        };
+        if let Some(p) = pid {
+            *attention_by_proj.entry(p).or_default() += 1;
+        }
+    }
+    let mut live_agents_by_proj: BTreeMap<&str, usize> = BTreeMap::new();
+    for t in &inbox.agent_terminals {
+        if let Some(p) = t.project_id.as_deref() {
+            *live_agents_by_proj.entry(p).or_default() += 1;
+        }
+    }
+    inbox.has_projects = !snapshot.projects.is_empty();
+    for proj in &snapshot.projects {
+        let mut develop_count = 0usize;
+        let mut review_count = 0usize;
+        let mut open_pr_count = 0usize;
+        for c in snapshot
+            .cards
+            .iter()
+            .filter(|c| c.active() && !c.resolved() && c.project_id == proj.id)
+        {
+            let st = c.stage.to_ascii_lowercase();
+            if st == "develop" || st == "in_progress" {
+                develop_count += 1;
+            } else if st == "review" {
+                review_count += 1;
+            }
+            if c.pull_request
+                .as_ref()
+                .is_some_and(|p| !p.merged && p.state == "open")
+            {
+                open_pr_count += 1;
+            }
+        }
+        let live_agent_count = live_agents_by_proj
+            .get(proj.id.as_str())
+            .copied()
+            .unwrap_or(0);
+        let attention_count = attention_by_proj
+            .get(proj.id.as_str())
+            .copied()
+            .unwrap_or(0);
+        let merged_today_count = merged_today_by_project
+            .get(proj.id.as_str())
+            .copied()
+            .unwrap_or(0);
+        if develop_count > 0
+            || review_count > 0
+            || open_pr_count > 0
+            || live_agent_count > 0
+            || attention_count > 0
+            || merged_today_count > 0
+        {
+            inbox.project_pulses.push(ProjectPulseItem {
+                project_id: proj.id.clone(),
+                project_name: proj.name.clone(),
+                host_label: project_host_label(snapshot, &proj.id),
+                develop_count,
+                review_count,
+                open_pr_count,
+                live_agent_count,
+                attention_count,
+                merged_today_count,
+            });
+        }
+    }
+    inbox.project_pulses.sort_by(|a, b| {
+        b.attention_count
+            .cmp(&a.attention_count)
+            .then_with(|| b.live_agent_count.cmp(&a.live_agent_count))
+            .then_with(|| {
+                (b.review_count + b.develop_count + b.open_pr_count)
+                    .cmp(&(a.review_count + a.develop_count + a.open_pr_count))
+            })
+            .then_with(|| a.project_name.cmp(&b.project_name))
+    });
 
     // Strictly 1:1 invariant: rail badge == `Needs Action` section count!
     inbox.actionable_count = inbox.needs_you.len();

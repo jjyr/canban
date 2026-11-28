@@ -671,10 +671,14 @@ fn show_undo_banner(ui: Ui, label: String, keys: Vec<String>) {
             .undo_banner
             .set(Some(UndoBatch { label, keys, epoch }));
     });
-    set_timeout(std::time::Duration::from_secs(6), move || {
-        if ui.inbox.undo_epoch.try_get() == Some(epoch) {
-            let _ = ui.inbox.undo_banner.try_set(None);
-        }
+    // Bind timeout to the root window Owner so removing the clicked row from `dynamic(...)`
+    // does NOT dispose and cancel the auto-dismiss timer.
+    ui.owner.run(|| {
+        set_timeout(std::time::Duration::from_secs(4), move || {
+            if ui.inbox.undo_epoch.try_get() == Some(epoch) {
+                let _ = ui.inbox.undo_banner.try_set(None);
+            }
+        });
     });
 }
 
@@ -884,6 +888,45 @@ pub fn dismiss_github_stack(ui: Ui, stack: GitHubProjectStack) {
         keys,
         format!("Cleared GitHub · {} ({count})", stack.display_name),
     );
+}
+
+pub fn open_terminal_menu(ui: Ui, term: InboxTerminalWork) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    let tid_open = term.terminal_id.clone();
+    let cid_open = term.card_id.clone();
+    let key_defer = term.key.clone();
+    let key_hide = term.key.clone();
+    let ts = term.timestamp_ms;
+    let title_defer = term.title.clone();
+    let title_hide = term.title.clone();
+    let tid_close = term.terminal_id.clone();
+    let title_close = term.title.clone();
+    ui.spawn(async move {
+        popup_menu(vec![
+            MenuItem::new("Open Terminal").on_select(move || {
+                if let Some(cid) = &cid_open {
+                    ui.open_card_with_terminal(cid.clone(), Some(tid_open.clone()));
+                } else {
+                    ui.open_terminal(tid_open.clone());
+                }
+            }),
+            MenuItem::new("Defer…").on_select(move || {
+                open_defer_menu(ui, vec![(key_defer.clone(), Some(ts))], title_defer.clone());
+            }),
+            MenuItem::new("Hide from Today").on_select(move || {
+                dismiss_items(
+                    ui,
+                    vec![(key_hide.clone(), Some(ts))],
+                    format!("Hidden · {title_hide}"),
+                );
+            }),
+            MenuItem::separator(),
+            MenuItem::new("Terminate terminal").on_select(move || {
+                close_terminal_from_inbox(ui, tid_close.clone(), title_close.clone());
+            }),
+        ])
+        .await;
+    });
 }
 
 pub fn close_terminal_from_inbox(ui: Ui, terminal_id: String, title: String) {
