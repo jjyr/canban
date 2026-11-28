@@ -1381,6 +1381,14 @@ fn heading(title: &str) -> Text {
         .text_size(px(14.))
 }
 
+const INSIGHTS_TOOLTIP_DELAY_MS: f64 = 120.0;
+
+fn insights_tip(value: impl Into<String>) -> nsh_base::TooltipElement {
+    tooltip_box()
+        .delay(INSIGHTS_TOOLTIP_DELAY_MS)
+        .child(note(value))
+}
+
 fn note(value: impl Into<String>) -> Text {
     muted(value.into()).text_size(px(11.5))
 }
@@ -1504,7 +1512,7 @@ fn render_proportional_bar(segments: &[(String, u64, AdaptiveColor)], is_time: b
                 .min_w(px(3.))
                 .h_full()
                 .bg(*color)
-                .tooltip(tooltip_box().child(note(tip)))
+                .tooltip(insights_tip(tip))
                 .into_element()
         })
         .collect();
@@ -1571,7 +1579,7 @@ fn render_two_color_bar(agent_ms: u64, dwell_ms: u64, max_total_ms: u64) -> View
             .h(px(7.))
             .rounded(px(3.5))
             .bg(INSET)
-            .tooltip(tooltip_box().child(note(tip)));
+            .tooltip(insights_tip(tip));
     }
     let fill_ratio = (total as f32 / max_total_ms as f32).clamp(0.04, 1.0);
     let mut inner = view()
@@ -1611,7 +1619,7 @@ fn render_two_color_bar(agent_ms: u64, dwell_ms: u64, max_total_ms: u64) -> View
         .bg(INSET)
         .overflow_hidden()
         .flex_row()
-        .tooltip(tooltip_box().child(note(tip)))
+        .tooltip(insights_tip(tip))
         .child(inner)
         .child(
             view()
@@ -1634,7 +1642,7 @@ fn render_single_bar(value: u64, max_val: u64, color: AdaptiveColor, tip: String
         .bg(INSET)
         .overflow_hidden()
         .flex_row()
-        .tooltip(tooltip_box().child(note(tip)))
+        .tooltip(insights_tip(tip))
         .child(
             view()
                 .flex_grow(ratio)
@@ -1806,10 +1814,10 @@ fn render_summary_bar(ui: Ui, dash: &Dashboard) -> View {
         .child(left)
         .child(
             view()
-                .tooltip(tooltip_box().child(note(format!(
+                .tooltip(insights_tip(format!(
                     "{} · {}",
                     dash.comparison_label, dash.timezone
-                ))))
+                )))
                 .child(note(prior)),
         )
 }
