@@ -105,6 +105,39 @@ def service_file_matches_home(unit_path: Path, home: Path) -> bool:
     return str(home) in body or str(resolved) in body
 
 
+def clear_stale_update_state(home: Path) -> None:
+    home = home.expanduser()
+    updates_dir = home / "updates"
+    if (updates_dir / "install.json").exists():
+        return
+    state_path = updates_dir / "state.json"
+    if not state_path.is_file():
+        return
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(state, dict) or state.get("phase") == "manual_recovery":
+        return
+    if state.get("available") is None and state.get("phase") not in (
+        "available",
+        "error",
+        "checking",
+        "downloading",
+        "installing",
+    ):
+        return
+    state["phase"] = "current"
+    state["available"] = None
+    state["progress"] = 0
+    state["error"] = None
+    atomic_write_bytes(
+        state_path,
+        (json.dumps(state, indent=2) + "\n").encode("utf-8"),
+        mode=0o600,
+    )
+
+
 def restart_running_daemon(installed_cli: Path, home: Path, platform_kind: str) -> None:
     home = home.expanduser()
     if platform_kind == "darwin":
@@ -359,6 +392,7 @@ if platform_kind == "darwin":
         shutil.rmtree(staging_root, ignore_errors=True)
 
     if restart_home is not None:
+        clear_stale_update_state(restart_home)
         restart_running_daemon(dest / "Contents/MacOS/canban", restart_home, platform_kind)
 
     print(dest)
@@ -471,6 +505,7 @@ elif platform_kind == "linux":
             subprocess.run([update_icons, "-f", "-t", str(xdg_data_home / "icons/hicolor")], check=False, capture_output=True)
 
     if restart_home is not None:
+        clear_stale_update_state(restart_home)
         restart_running_daemon(dest / "bin/canban", restart_home, platform_kind)
 
     print(dest)

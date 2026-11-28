@@ -331,7 +331,9 @@ async fn update_checks_loop(
 ) {
     let mut next_ms = weak.upgrade().map_or(0, |s| s.now_ms());
     let mut last_active_payload: Option<Value> = None;
-    let allow_auto_check = !cfg!(test) && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none();
+    let allow_auto_check = !cfg!(test)
+        && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none()
+        && canban_updater::Build::current().is_release();
     while !*stop_rx.borrow() {
         let step_weak = weak.clone();
         let step_home = home.clone();

@@ -34,6 +34,11 @@ impl Build {
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         }
     }
+
+    /// Returns `true` when this binary was built from a versioned `YYYYMMDD-N` release tag.
+    pub fn is_release(&self) -> bool {
+        feed::Version::parse(&self.version).is_ok()
+    }
 }
 
 /// Published identities are ordered numerically; legacy/local builds use the API.
