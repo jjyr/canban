@@ -2430,7 +2430,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
     }
 }
 
-/// Hairline-ruled `Today's Schedule` report table (past/live runs + upcoming ticks today + created cards).
+/// Hairline-ruled `Scheduled Runs` report table (past/live runs + upcoming ticks today + created cards).
 fn render_schedules_report(
     ui: Ui,
     runs: &[SchedulePulseItem],
@@ -2505,9 +2505,9 @@ fn render_schedules_report(
     }
 
     let mut sec = view().gap_2().child(chapter_header(
-        Icon::Trigger,
+        Icon::Clock,
         if failed > 0 { DANGER } else { ACCENT },
-        "Today's Schedule",
+        "Scheduled Runs",
         summary_parts.join(" · "),
         Some(trailing.into_element()),
     ));
@@ -4746,7 +4746,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     col = col.child(gh);
                                 }
 
-                                // 6. Today's Schedule (past/live runs + upcoming ticks + created cards)
+                                // 6. Scheduled Runs (past/live runs + upcoming ticks + created cards)
                                 if let Some(sched) = render_schedules_report(
                                     ui,
                                     &inbox.schedule_pulse,
