@@ -489,6 +489,22 @@
   text-underline-offset: 3px;
 }
 
+.release-shot {
+  margin: 18px 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.release-shot img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+}
+
 .muted {
   color: var(--fg-muted);
   font-size: 13px;

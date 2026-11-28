@@ -27,6 +27,10 @@ OBTAINIUM_URL = (
     "%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"
 )
 IOS_ISSUE_URL = f"{REPOSITORY}/issues/2"
+ALLOWED_RELEASE_IMAGE_PREFIXES = (
+    ORIGIN + "/",
+    "https://raw.githubusercontent.com/jjyr/canban/",
+)
 
 LANGUAGES = (
     {
@@ -177,8 +181,15 @@ def inline_markdown(text, allow_relative=False):
     return "".join(output)
 
 
+def is_allowed_release_image(url):
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or ".." in parsed.path.split("/"):
+        return False
+    return any(url.startswith(prefix) for prefix in ALLOWED_RELEASE_IMAGE_PREFIXES)
+
+
 def release_markdown(text):
-    """Render untrusted GitHub release notes strictly (HTTP/HTTPS links only, no raw HTML)."""
+    """Render untrusted GitHub release notes strictly (HTTP/HTTPS links and allowlisted images only, no raw HTML)."""
     blocks, paragraph = [], []
     in_list = False
     code = None
@@ -202,6 +213,21 @@ def release_markdown(text):
             continue
         if code is not None:
             code.append(line)
+            continue
+        image = re.fullmatch(r"!\[([^\]]*)\]\(([^\s)]+)\)", line.strip())
+        if image:
+            flush()
+            if in_list:
+                blocks.append("</ul>")
+                in_list = False
+            alt, url = image.groups()
+            if is_allowed_release_image(url):
+                blocks.append(
+                    f'<figure class="release-shot"><img src="{html.escape(url, quote=True)}" '
+                    f'alt="{html.escape(alt, quote=True)}" loading="lazy" /></figure>'
+                )
+            else:
+                blocks.append("<p>" + html.escape(line.strip()) + "</p>")
             continue
         bullet = re.match(r"^\s*[-*] (.*)", line)
         if bullet:

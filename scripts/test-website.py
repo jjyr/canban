@@ -555,12 +555,26 @@ class WebsiteTest(unittest.TestCase):
     def test_unpublished_release_exclusion_and_safe_markdown(self):
         release = {"tag_name": "20261118-1", "published_at": "2026-11-18T01:00:00Z", "html_url": website.REPOSITORY + "/releases/tag/20261118-1", "draft": False}
         self.assertEqual(website.published_releases([dict(release, draft=True), dict(release, published_at=None), release]), [dict((key, release.get(key)) for key in ("tag_name", "name", "html_url", "published_at", "body", "prerelease"))])
-        body = website.release_markdown('## Changes\n- **Fix** `worktrees`\n- [Compare](https://github.com/jjyr/canban/compare/a...b)\n<script>alert(1)</script>\n[bad](javascript:alert)\n```html\n<img src=x onerror=alert(1)>\n```')
+        body = website.release_markdown('## Changes\n- **Fix** `worktrees`\n- [Compare](https://github.com/jjyr/canban/compare/a...b)\n![untrusted](https://evil.example/tracker.png)\n<script>alert(1)</script>\n[bad](javascript:alert)\n```html\n<img src=x onerror=alert(1)>\n```')
         self.assertIn('<a href="https://github.com/jjyr/canban/compare/a...b">', body)
         self.assertIn("<strong>Fix</strong>", body)
         self.assertNotIn("<script>", body)
         self.assertNotIn("<img", body)
         self.assertNotIn('href="javascript:', body)
+        with_images = website.release_markdown(
+            '![Daily Briefing Inbox](https://raw.githubusercontent.com/jjyr/canban/main/docs/assets/daily-briefing.webp)\n'
+            '![Mobile Companion](https://canban.dev/screenshots/mobile-inbox.webp)\n'
+            '![Traversal](https://canban.dev/screenshots/../secret.png)'
+        )
+        self.assertIn(
+            '<figure class="release-shot"><img src="https://raw.githubusercontent.com/jjyr/canban/main/docs/assets/daily-briefing.webp" alt="Daily Briefing Inbox" loading="lazy" /></figure>',
+            with_images,
+        )
+        self.assertIn(
+            '<figure class="release-shot"><img src="https://canban.dev/screenshots/mobile-inbox.webp" alt="Mobile Companion" loading="lazy" /></figure>',
+            with_images,
+        )
+        self.assertNotIn('secret.png"', with_images)
         with self.assertRaises(ValueError):
             website.published_releases([dict(release, html_url="https://example.com/")])
 
