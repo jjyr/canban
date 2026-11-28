@@ -504,6 +504,8 @@ pub struct DailyInbox {
     pub upcoming_schedules: Vec<UpcomingScheduleItem>,
     pub project_pulses: Vec<ProjectPulseItem>,
     pub shipped_today: Vec<ShippedTodayItem>,
+    /// Total merged PRs and resolved Cards over the preceding 7 full day windows (`[day_start - 7d, day_start)`).
+    pub shipped_prev_7d_total: usize,
     /// Tier 1: All items currently demanding direct user action (1:1 with rail badge).
     pub needs_you: Vec<NeedsYouItem>,
     /// Tier 2: Today's direct non-blocking GitHub updates grouped by project/repo.
@@ -2326,7 +2328,11 @@ pub fn build_daily_inbox(
             .then_with(|| a.schedule_id.cmp(&b.schedule_id))
     });
 
-    // 7. Shipped Today: merged PRs (delivery PRs, synced PRs, or archived-after-merge cards) + resolved Cards today.
+    // 7. Shipped Today: merged PRs (delivery PRs, synced PRs, or archived-after-merge cards) + resolved Cards today,
+    // plus preceding 7-day baseline count (`[day_start - 7d, day_start)`).
+    let prev_7d_start_ms = day_start_ms.saturating_sub(7 * 86_400 * MS_PER_SEC);
+    let mut seen_prev_7d_prs: BTreeSet<(String, u64)> = BTreeSet::new();
+    let mut seen_prev_7d_cards: BTreeSet<String> = BTreeSet::new();
     let mut seen_shipped_prs: BTreeSet<(String, u64)> = BTreeSet::new();
     let mut seen_shipped_cards: BTreeSet<String> = BTreeSet::new();
     let mut merged_today_by_project: BTreeMap<String, usize> = BTreeMap::new();
@@ -2358,9 +2364,30 @@ pub fn build_daily_inbox(
                     None
                 }
             });
-        let Some(shipped_at) = res_ts.filter(|&t| t >= day_start_ms && t < next_cutoff_ms) else {
+        let Some(shipped_at) = res_ts else {
             continue;
         };
+        if shipped_at >= prev_7d_start_ms && shipped_at < day_start_ms {
+            if let Some(pr) = delivery_pr {
+                let repo_key = (pr.repository.to_ascii_lowercase(), pr.number);
+                if seen_prev_7d_prs.insert(repo_key) {
+                    seen_prev_7d_cards.insert(card.id.clone());
+                    inbox.shipped_prev_7d_total += 1;
+                }
+            } else if synced_pr_merged && let Some(src) = gh_src {
+                let repo_key = (src.repository.to_ascii_lowercase(), src.number);
+                if seen_prev_7d_prs.insert(repo_key) {
+                    seen_prev_7d_cards.insert(card.id.clone());
+                    inbox.shipped_prev_7d_total += 1;
+                }
+            } else if card.resolved() && seen_prev_7d_cards.insert(card.id.clone()) {
+                inbox.shipped_prev_7d_total += 1;
+            }
+            continue;
+        }
+        if shipped_at < day_start_ms || shipped_at >= next_cutoff_ms {
+            continue;
+        }
         if let Some(pr) = delivery_pr {
             let repo_key = (pr.repository.to_ascii_lowercase(), pr.number);
             if seen_shipped_prs.insert(repo_key) {
@@ -2435,6 +2462,13 @@ pub fn build_daily_inbox(
         let Some(ts) = parse_rfc3339_ms(&gi.updated_at) else {
             continue;
         };
+        if ts >= prev_7d_start_ms && ts < day_start_ms {
+            let repo_key = (gi.source.repository.to_ascii_lowercase(), gi.source.number);
+            if seen_prev_7d_prs.insert(repo_key) {
+                inbox.shipped_prev_7d_total += 1;
+            }
+            continue;
+        }
         if ts < day_start_ms || ts >= next_cutoff_ms {
             continue;
         }

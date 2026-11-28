@@ -1,5 +1,5 @@
 //! Daily Briefing: substantial, single-layer editorial engineering report with
-//! 4-column KPI strip (`NEEDS ACTION | SCHEDULED RUNS | ACTIVE WORK | SHIPPED TODAY`),
+//! clickable 4-column decision KPI strip (`WAITING ON YOU | READY TO MERGE | AGENTS | SHIPPED TODAY`),
 //! live hosts/quota pulse, active project shortcuts, 2-column borderless `SURFACE` Agent cards,
 //! toggleable Markdown GitHub PR reader with colored PR state/CI/comments/avatars,
 //! upcoming schedules, Shipped Today log, floating auto-dismiss Undo toast, and First-Run launchpad.
@@ -485,19 +485,28 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                             "Today",
                             None,
                             move || drawer.with(|d| d == "today"),
-                            move |_| drawer.set("today".into()),
+                            move |_| {
+                                drawer.set("today".into());
+                                ui.inbox.focus_filter.set(String::new());
+                            },
                         ))
                         .child(compact_segment(
                             deferred_lbl,
                             None,
                             move || drawer.with(|d| d == "deferred"),
-                            move |_| drawer.set("deferred".into()),
+                            move |_| {
+                                drawer.set("deferred".into());
+                                ui.inbox.focus_filter.set(String::new());
+                            },
                         ))
                         .child(compact_segment(
                             done_lbl,
                             None,
                             move || drawer.with(|d| d == "done"),
-                            move |_| drawer.set("done".into()),
+                            move |_| {
+                                drawer.set("done".into());
+                                ui.inbox.focus_filter.set(String::new());
+                            },
                         ))
                         .into_element()
                 }))
@@ -571,16 +580,153 @@ fn render_environment_pulse(ui: Ui) -> View {
     col
 }
 
-/// Editorial Masthead + 4-column Hairline KPI Strip (`NEEDS ACTION | SCHEDULED RUNS | ACTIVE WORK | SHIPPED TODAY`).
-fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
+struct ReadyMergeSummary {
+    needs_you_items: Vec<NeedsYouItem>,
+    open_cards: Vec<InboxCardWork>,
+    gh_items: Vec<GitHubStackItem>,
+    refs: Vec<String>,
+}
+
+impl ReadyMergeSummary {
+    fn total(&self) -> usize {
+        self.needs_you_items.len() + self.open_cards.len() + self.gh_items.len()
+    }
+}
+
+fn toggle_focus_filter(ui: Ui, key: &'static str) {
+    ui.inbox.focus_filter.update(|cur| {
+        if cur == key {
+            cur.clear();
+        } else {
+            *cur = key.to_owned();
+        }
+    });
+}
+
+fn collect_ready_to_merge(
+    inbox: &DailyInbox,
+    gh_details: &std::collections::BTreeMap<String, GitHubItemDetail>,
+) -> ReadyMergeSummary {
+    let mut needs_you_items = Vec::new();
+    let mut open_cards = Vec::new();
+    let mut gh_items = Vec::new();
+    let mut refs = Vec::new();
+    let mut seen_card_ids = std::collections::BTreeSet::<String>::new();
+    let mut seen_pr_keys = std::collections::BTreeSet::<(String, u64)>::new();
+
+    for item in &inbox.needs_you {
+        if let NeedsYouKind::Card {
+            card_id,
+            card_number,
+            pr_number,
+            can_quick_merge: true,
+            ..
+        } = &item.kind
+        {
+            seen_card_ids.insert(card_id.clone());
+            if let Some(n) = pr_number {
+                refs.push(format!("#{n}"));
+            } else {
+                refs.push(format!("#{card_number}"));
+            }
+            needs_you_items.push(item.clone());
+        }
+    }
+
+    for card in &inbox.open_cards {
+        if card.stage == "review"
+            && card.pr_ci_state.as_deref() == Some("success")
+            && seen_card_ids.insert(card.card_id.clone())
+        {
+            refs.push(format!("#{}", card.card_number));
+            open_cards.push(card.clone());
+        }
+    }
+
+    let is_pr_green_open = |item: &GitHubStackItem| -> bool {
+        if item.kind != "pr" {
+            return false;
+        }
+        let detail = gh_details.get(&item.key);
+        let is_open = if let Some(d) = detail {
+            !d.merged && !d.draft && d.state.eq_ignore_ascii_case("open")
+        } else {
+            !matches!(
+                item.pr_state.as_deref(),
+                Some("merged") | Some("closed") | Some("draft")
+            )
+        };
+        if !is_open {
+            return false;
+        }
+        let ci = detail
+            .and_then(|d| d.ci_state.as_deref())
+            .or(item.ci_state.as_deref());
+        ci.is_some_and(|s| s.eq_ignore_ascii_case("success"))
+    };
+
+    let mut maybe_push_gh = |item: &GitHubStackItem| {
+        if !is_pr_green_open(item) {
+            return;
+        }
+        if let Some(cid) = &item.card_id
+            && seen_card_ids.contains(cid)
+        {
+            return;
+        }
+        if let Some(n) = item.number {
+            let k = (item.repository.to_ascii_lowercase(), n);
+            if !seen_pr_keys.insert(k) {
+                return;
+            }
+            refs.push(format!("#{n}"));
+        }
+        if let Some(cid) = &item.card_id {
+            seen_card_ids.insert(cid.clone());
+        }
+        gh_items.push(item.clone());
+    };
+
+    for item in &inbox.needs_you {
+        if let NeedsYouKind::GitHub { item: gh, .. } = &item.kind {
+            maybe_push_gh(gh);
+        }
+    }
+    for stack in &inbox.github_stacks {
+        for item in &stack.items {
+            maybe_push_gh(item);
+        }
+    }
+
+    ReadyMergeSummary {
+        needs_you_items,
+        open_cards,
+        gh_items,
+        refs,
+    }
+}
+
+/// Editorial Masthead + clickable 4-column decision KPI strip
+/// (`WAITING ON YOU | READY TO MERGE | AGENTS | SHIPPED TODAY`).
+fn render_editorial_masthead(
+    ui: Ui,
+    inbox: &DailyInbox,
+    ready: &ReadyMergeSummary,
+    active_focus: &str,
+    now_ms: u64,
+) -> View {
     let rem = inbox.remaining_today;
 
-    // KPI #1: Needs Action (strictly 1:1 with `needs_you.len()` & left-rail badge)
+    // KPI #1: Waiting On You (1:1 with `needs_you` + oldest waiting age)
     let mut card_n = 0usize;
     let mut term_n = 0usize;
     let mut gh_n = 0usize;
     let mut sched_fail_n = 0usize;
+    let mut oldest_wait_ts = u64::MAX;
     for item in &inbox.needs_you {
+        if item.timestamp_ms > 0 && item.timestamp_ms < now_ms {
+            oldest_wait_ts = oldest_wait_ts.min(item.timestamp_ms);
+        }
         match item.kind {
             NeedsYouKind::Card { .. } => card_n += 1,
             NeedsYouKind::Terminal { .. } => term_n += 1,
@@ -607,81 +753,147 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
     } else {
         k1_parts.join(" · ")
     };
-
-    // KPI #2: Scheduled Runs (passed/total + failed + upcoming)
-    let sched_total = inbox.schedule_pulse.len();
-    let sched_passed = inbox
-        .schedule_pulse
-        .iter()
-        .filter(|r| matches!(r.state.as_str(), "completed" | "succeeded"))
-        .count();
-    let sched_failed = inbox
-        .schedule_pulse
-        .iter()
-        .filter(|r| matches!(r.state.as_str(), "failed" | "blocked"))
-        .count();
-    let sched_running = inbox
-        .schedule_pulse
-        .iter()
-        .filter(|r| matches!(r.state.as_str(), "running" | "starting" | "queued"))
-        .count();
-    let upcoming_n = inbox.upcoming_schedules.len();
-    let k2_val = if sched_total == 0 {
-        "0".to_owned()
+    let k1_extra = if inbox.actionable_count > 0 && oldest_wait_ts < now_ms {
+        let dur = format_duration_short(oldest_wait_ts, now_ms);
+        if !dur.is_empty() {
+            let stale = now_ms.saturating_sub(oldest_wait_ts) >= 3_600_000;
+            Some(
+                label(format!("oldest {dur}"))
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(if stale { ATTENTION } else { MUTED })
+                    .into_element(),
+            )
+        } else {
+            None
+        }
     } else {
-        format!("{sched_passed}/{sched_total}")
+        None
     };
-    let mut k2_parts = Vec::new();
-    if sched_failed > 0 {
-        k2_parts.push(format!("{sched_failed} failed"));
-    }
-    if sched_running > 0 {
-        k2_parts.push(format!("{sched_running} running"));
-    }
-    if upcoming_n > 0 {
-        k2_parts.push(format!("{upcoming_n} upcoming"));
-    }
-    let k2_sub = if k2_parts.is_empty() {
+
+    // KPI #2: Ready to Merge (CI green PRs & quick-merge Cards)
+    let ready_n = ready.total();
+    let k2_val = ready_n.to_string();
+    let k2_extra = (ready_n > 0).then(|| {
+        label("CI green")
+            .font_family(MONO_FONT)
+            .text_size(px(11.))
+            .text_color(SUCCESS)
+            .into_element()
+    });
+    let k2_sub = if ready.refs.is_empty() {
         "—".to_owned()
+    } else if ready.refs.len() <= 3 {
+        ready.refs.join(" · ")
     } else {
-        k2_parts.join(" · ")
+        format!("{} +{}", ready.refs[..2].join(" · "), ready.refs.len() - 2)
     };
 
-    // KPI #3: Active Work
-    let live_agents = inbox.agent_terminals.len();
-    let open_cards = inbox.open_cards.len();
-    let shells = inbox.plain_shells.len();
-    let k3_val = format!("{} live", live_agents + open_cards);
-    let mut k3_parts = Vec::new();
-    if live_agents > 0 {
-        k3_parts.push(format!(
-            "{live_agents} {}",
-            if live_agents == 1 { "agent" } else { "agents" }
-        ));
+    // KPI #3: Agents (running vs waiting + per-machine distribution)
+    let mut seen_agent_ids = std::collections::BTreeSet::<String>::new();
+    let mut running_n = 0usize;
+    let mut waiting_n = 0usize;
+    let mut error_n = 0usize;
+    let mut idle_n = 0usize;
+    let mut by_host = std::collections::BTreeMap::<String, usize>::new();
+
+    let mut count_agent = |t: &InboxTerminalWork| {
+        if !t.is_agent || !seen_agent_ids.insert(t.terminal_id.clone()) {
+            return;
+        }
+        match t.status {
+            HerdrStatus::Working | HerdrStatus::Starting | HerdrStatus::Queued => running_n += 1,
+            HerdrStatus::Blocked => waiting_n += 1,
+            HerdrStatus::Error | HerdrStatus::Disconnected => error_n += 1,
+            _ => idle_n += 1,
+        }
+        *by_host.entry(t.host_label.clone()).or_default() += 1;
+    };
+    for item in &inbox.needs_you {
+        if let NeedsYouKind::Terminal { terminal } = &item.kind {
+            count_agent(terminal);
+        }
     }
-    if open_cards > 0 {
-        k3_parts.push(format!(
-            "{open_cards} {}",
-            if open_cards == 1 { "card" } else { "cards" }
-        ));
+    for t in &inbox.agent_terminals {
+        count_agent(t);
     }
-    if shells > 0 {
-        k3_parts.push(format!(
-            "{shells} {}",
-            if shells == 1 { "shell" } else { "shells" }
-        ));
-    }
-    let k3_sub = if k3_parts.is_empty() {
+
+    let total_agents = running_n + waiting_n + error_n + idle_n;
+    let (k3_val, k3_color) = if running_n > 0 {
+        (format!("{running_n} running"), ACCENT)
+    } else if waiting_n > 0 {
+        (format!("{waiting_n} waiting"), ATTENTION)
+    } else if error_n > 0 {
+        (format!("{error_n} error"), DANGER)
+    } else if total_agents > 0 {
+        (format!("{total_agents} idle"), TEXT)
+    } else {
+        ("0".to_owned(), MUTED)
+    };
+    let k3_extra = if running_n > 0 && waiting_n > 0 {
+        Some(
+            label(format!("{waiting_n} wait"))
+                .font_family(MONO_FONT)
+                .text_size(px(11.))
+                .text_color(ATTENTION)
+                .into_element(),
+        )
+    } else if error_n > 0 && (running_n > 0 || waiting_n > 0) {
+        Some(
+            label(format!("{error_n} err"))
+                .font_family(MONO_FONT)
+                .text_size(px(11.))
+                .text_color(DANGER)
+                .into_element(),
+        )
+    } else if running_n > 0 && idle_n > 0 {
+        Some(
+            label(format!("{idle_n} idle"))
+                .font_family(MONO_FONT)
+                .text_size(px(11.))
+                .text_color(MUTED)
+                .into_element(),
+        )
+    } else {
+        None
+    };
+
+    let k3_sub = if !by_host.is_empty() {
+        let mut hosts: Vec<(String, usize)> = by_host.into_iter().collect();
+        hosts.sort_by(|a, b| {
+            let a_local = a.0 == "local";
+            let b_local = b.0 == "local";
+            b_local
+                .cmp(&a_local)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        hosts
+            .into_iter()
+            .take(3)
+            .map(|(h, c)| format!("{h} {c}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    } else if !inbox.plain_shells.is_empty() {
+        let s = inbox.plain_shells.len();
+        format!("{s} {}", if s == 1 { "shell" } else { "shells" })
+    } else {
         "—".to_owned()
-    } else {
-        k3_parts.join(" · ")
     };
 
-    // KPI #4: Shipped Today (merged PRs + resolved cards)
+    // KPI #4: Shipped Today (merged PRs + resolved cards + 7D daily average pace)
     let shipped_prs = inbox.shipped_today.iter().filter(|s| s.is_pr).count();
     let shipped_cards = inbox.shipped_today.iter().filter(|s| !s.is_pr).count();
     let shipped_total = inbox.shipped_today.len();
     let k4_val = shipped_total.to_string();
+    let k4_extra = (inbox.shipped_prev_7d_total > 0).then(|| {
+        let avg = inbox.shipped_prev_7d_total as f64 / 7.0;
+        label(format!("avg {avg:.1}/d"))
+            .font_family(MONO_FONT)
+            .text_size(px(11.))
+            .text_color(MUTED)
+            .into_element()
+    });
     let mut k4_parts = Vec::new();
     if shipped_prs > 0 {
         k4_parts.push(format!(
@@ -701,18 +913,6 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         k4_parts.join(" · ")
     };
 
-    let mut sched_dots = view().flex_row().items_center().gap_1();
-    for run in inbox.schedule_pulse.iter().take(6) {
-        let c = match run.state.as_str() {
-            "completed" | "succeeded" => SUCCESS,
-            "failed" => DANGER,
-            "blocked" => ATTENTION,
-            "running" | "starting" | "queued" => ACCENT,
-            _ => MUTED,
-        };
-        sched_dots = sched_dots.child(view().w(px(6.)).h(px(6.)).rounded_full().bg(c));
-    }
-
     let cutoff_str = format_cutoff(inbox.cutoff_minutes);
     let deferred_n = inbox.deferred_items.len();
 
@@ -727,6 +927,11 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         ));
     if deferred_n > 0 {
         meta_line = meta_line.child(muted(format!("· {deferred_n} deferred")).text_size(px(12.)));
+    }
+    if !active_focus.is_empty() {
+        meta_line = meta_line.child(compact_action("Show all", Variant::Quiet, move |_| {
+            ui.inbox.focus_filter.set(String::new())
+        }));
     }
 
     let mut right_bar = view()
@@ -761,51 +966,66 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
         )
         .child(right_bar);
 
+    let v_sep = || view().w(px(1.)).my_1p5().bg(BORDER).flex_shrink_0();
+
     let kpi_cell = |heading_lbl: &'static str,
                     value: String,
                     val_color: ThemeColor,
                     sub: String,
                     inline_extra: Option<AnyElement>,
-                    first: bool| {
-        let mut val_row = view().flex_row().items_center().gap_2().child(
+                    selected: bool,
+                    on_click: Box<dyn Fn()>| {
+        let mut val_row = view().flex_row().items_baseline().gap_2().child(
             label(value)
                 .font_family(MONO_FONT)
-                .text_size(px(22.))
+                .text_size(px(21.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(val_color),
         );
         if let Some(el) = inline_extra {
             val_row = val_row.child(el);
         }
-        let mut cell = view()
+        press_target()
             .flex_1()
             .min_w(px(0.))
+            .px_2p5()
             .py_2()
-            .gap_0p5()
+            .rounded(px(7.))
+            .bg(if selected { SELECTED } else { CLEAR })
+            .hover(|s| s.bg(CARD_HOVER))
+            .accessibility_label(heading_lbl)
+            .on_press(move |_: &()| on_click())
             .child(
-                label(heading_lbl)
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(MUTED),
+                view()
+                    .w_full()
+                    .min_w(px(0.))
+                    .gap_0p5()
+                    .child(
+                        label(heading_lbl)
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if selected { ACCENT } else { MUTED }),
+                    )
+                    .child(val_row)
+                    .child(
+                        muted(sub)
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.))
+                            .truncate(),
+                    ),
             )
-            .child(val_row)
-            .child(muted(sub).text_size(px(11.5)).truncate());
-        if !first {
-            cell = cell.pl_4().border_l_1().border_color(BORDER);
-        }
-        cell
     };
 
     let kpi_strip = view()
         .flex_row()
         .items_stretch()
-        .gap_3()
-        .py_2p5()
+        .gap_2()
+        .py_2()
         .border_t_1()
         .border_b_1()
         .border_color(BORDER)
         .child(kpi_cell(
-            "NEEDS ACTION",
+            "WAITING ON YOU",
             inbox.actionable_count.to_string(),
             if inbox.actionable_count > 0 {
                 ATTENTION
@@ -813,38 +1033,45 @@ fn render_editorial_masthead(ui: Ui, inbox: &DailyInbox) -> View {
                 SUCCESS
             },
             k1_sub,
-            None,
-            true,
+            k1_extra,
+            active_focus == "waiting",
+            Box::new(move || toggle_focus_filter(ui, "waiting")),
         ))
+        .child(v_sep())
         .child(kpi_cell(
-            "SCHEDULED RUNS",
+            "READY TO MERGE",
             k2_val,
-            if sched_failed > 0 {
-                DANGER
-            } else if sched_total > 0 && sched_passed == sched_total {
-                SUCCESS
-            } else {
-                TEXT
-            },
+            if ready_n > 0 { SUCCESS } else { TEXT },
             k2_sub,
-            (!inbox.schedule_pulse.is_empty()).then(|| sched_dots.into_element()),
-            false,
+            k2_extra,
+            active_focus == "merge",
+            Box::new(move || toggle_focus_filter(ui, "merge")),
         ))
+        .child(v_sep())
         .child(kpi_cell(
-            "ACTIVE WORK",
+            "AGENTS",
             k3_val,
-            if live_agents > 0 { ACCENT } else { TEXT },
+            k3_color,
             k3_sub,
-            None,
-            false,
+            k3_extra,
+            active_focus == "agents",
+            Box::new(move || toggle_focus_filter(ui, "agents")),
         ))
+        .child(v_sep())
         .child(kpi_cell(
             "SHIPPED TODAY",
             k4_val,
             if shipped_total > 0 { SUCCESS } else { TEXT },
             k4_sub,
-            None,
-            false,
+            k4_extra,
+            active_focus == "shipped",
+            Box::new(move || {
+                if shipped_total > 0 {
+                    toggle_focus_filter(ui, "shipped");
+                } else {
+                    ui.navigate("insights");
+                }
+            }),
         ));
 
     view().gap_3().child(masthead).child(kpi_strip)
@@ -3705,10 +3932,114 @@ fn render_shipped_today(ui: Ui, items: &[ShippedTodayItem], now_ms: u64) -> Opti
                 SUCCESS,
                 "Shipped Today",
                 parts.join(" · "),
-                None,
+                Some(
+                    compact_action("Insights ↗", Variant::Quiet, move |_| {
+                        ui.navigate("insights");
+                    })
+                    .into_element(),
+                ),
             ))
             .child(list),
     )
+}
+
+/// Focused view when clicking `READY TO MERGE` KPI.
+fn render_ready_to_merge_focus(ui: Ui, ready: ReadyMergeSummary, now_ms: u64) -> View {
+    let total = ready.total();
+    let mut sec = view().gap_2p5().child(chapter_header(
+        Icon::GitMerge,
+        SUCCESS,
+        "Ready to Merge",
+        format!("{total}"),
+        Some(
+            compact_action("Show all", Variant::Quiet, move |_| {
+                ui.inbox.focus_filter.set(String::new());
+            })
+            .into_element(),
+        ),
+    ));
+
+    if total == 0 {
+        return sec.child(
+            view()
+                .py_6()
+                .items_center()
+                .gap_2()
+                .child(muted("No PRs ready to merge")),
+        );
+    }
+
+    if !ready.needs_you_items.is_empty() {
+        let mut list = view().gap_2();
+        for item in ready.needs_you_items {
+            list = list.child(render_needs_you_row(ui, item, now_ms));
+        }
+        sec = sec.child(list);
+    }
+
+    if !ready.open_cards.is_empty() {
+        let mut list = view().border_t_1().border_color(BORDER);
+        for c in ready.open_cards {
+            let cid = c.card_id.clone();
+            let age = format_age_compact(c.last_activity_at, now_ms);
+            list = list.child(
+                view().py_2().border_b_1().border_color(BORDER).child(
+                    press_target()
+                        .w_full()
+                        .bg(CLEAR)
+                        .rounded(px(4.))
+                        .hover(|s| s.bg(CARD_HOVER))
+                        .on_press(move |_: &()| ui.open_card(cid.clone()))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .min_w(px(0.))
+                                .child(
+                                    icon_tinted(Icon::GitMerge, SUCCESS)
+                                        .w(px(14.))
+                                        .h(px(14.))
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    muted(format!("#{}", c.card_number))
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(11.5))
+                                        .w(px(44.))
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    label(c.card_title)
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .truncate()
+                                        .flex_1()
+                                        .min_w(px(0.)),
+                                )
+                                .child(muted(c.project_name).text_size(px(11.5)).flex_shrink_0())
+                                .child(
+                                    muted(age)
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(11.))
+                                        .flex_shrink_0(),
+                                ),
+                        ),
+                ),
+            );
+        }
+        sec = sec.child(list);
+    }
+
+    if !ready.gh_items.is_empty() {
+        let mut list = view().border_t_1().border_color(BORDER);
+        for item in ready.gh_items {
+            list = list.child(render_github_row(ui, item, now_ms, true, 0., None));
+        }
+        sec = sec.child(list);
+    }
+
+    sec
 }
 
 /// Borderless bottom fold for older GitHub items (< today) & carry-over cards.
@@ -4187,10 +4518,137 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 return render_first_run(ui, gh_connected.get()).into_element();
                             }
 
+                            let focus = ui.inbox.focus_filter.get();
+                            let gh_details = ui.inbox.github_item_details.get();
+                            let ready = collect_ready_to_merge(&inbox, &gh_details);
+
                             let mut col = view().gap(px(26.));
 
-                            // 1. Editorial Masthead + 4-Column KPI Strip (NEEDS ACTION | SCHEDULED RUNS | ACTIVE WORK | SHIPPED TODAY)
-                            col = col.child(render_editorial_masthead(ui, &inbox));
+                            // 1. Editorial Masthead + clickable 4-Column Decision KPI Strip
+                            col = col.child(render_editorial_masthead(
+                                ui, &inbox, &ready, &focus, now_ms,
+                            ));
+
+                            if !focus.is_empty() {
+                                match focus.as_str() {
+                                    "waiting" => {
+                                        if !inbox.needs_you.is_empty() {
+                                            let count = inbox.needs_you.len();
+                                            let mut sec = view().gap_2p5().child(chapter_header(
+                                                Icon::ShieldAlert,
+                                                ATTENTION,
+                                                "Waiting On You",
+                                                format!("{count}"),
+                                                Some(
+                                                    compact_action(
+                                                        "Show all",
+                                                        Variant::Quiet,
+                                                        move |_| {
+                                                            ui.inbox.focus_filter.set(String::new())
+                                                        },
+                                                    )
+                                                    .into_element(),
+                                                ),
+                                            ));
+                                            let mut list = view().gap_2();
+                                            for item in inbox.needs_you.iter().cloned() {
+                                                list = list.child(render_needs_you_row(
+                                                    ui, item, now_ms,
+                                                ));
+                                            }
+                                            sec = sec.child(list);
+                                            col = col.child(sec);
+                                        } else {
+                                            col = col.child(render_inbox_zero(ui, &inbox));
+                                        }
+                                    }
+                                    "merge" => {
+                                        col = col.child(render_ready_to_merge_focus(
+                                            ui, ready, now_ms,
+                                        ));
+                                    }
+                                    "agents" => {
+                                        let blocked_terms: Vec<NeedsYouItem> = inbox
+                                            .needs_you
+                                            .iter()
+                                            .filter(|i| {
+                                                matches!(
+                                                    &i.kind,
+                                                    NeedsYouKind::Terminal { terminal } if terminal.is_agent
+                                                )
+                                            })
+                                            .cloned()
+                                            .collect();
+                                        let has_blocked = !blocked_terms.is_empty();
+                                        if has_blocked {
+                                            let mut sec = view().gap_2p5().child(chapter_header(
+                                                Icon::ShieldAlert,
+                                                ATTENTION,
+                                                "Waiting Agents",
+                                                format!("{}", blocked_terms.len()),
+                                                Some(
+                                                    compact_action(
+                                                        "Show all",
+                                                        Variant::Quiet,
+                                                        move |_| {
+                                                            ui.inbox.focus_filter.set(String::new())
+                                                        },
+                                                    )
+                                                    .into_element(),
+                                                ),
+                                            ));
+                                            let mut list = view().gap_2();
+                                            for item in blocked_terms {
+                                                list = list.child(render_needs_you_row(
+                                                    ui, item, now_ms,
+                                                ));
+                                            }
+                                            sec = sec.child(list);
+                                            col = col.child(sec);
+                                        }
+                                        if let Some(work) = render_active_work(
+                                            ui,
+                                            inbox.agent_terminals.clone(),
+                                            inbox.open_cards.clone(),
+                                            inbox.plain_shells.clone(),
+                                            now_ms,
+                                            narrow,
+                                        ) {
+                                            col = col.child(work);
+                                        } else if !has_blocked {
+                                            col = col.child(
+                                                view()
+                                                    .py_6()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(muted("No active agents")),
+                                            );
+                                        }
+                                    }
+                                    "shipped" => {
+                                        if let Some(shipped) =
+                                            render_shipped_today(ui, &inbox.shipped_today, now_ms)
+                                        {
+                                            col = col.child(shipped);
+                                        } else {
+                                            col = col.child(
+                                                view()
+                                                    .py_6()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(muted("Nothing shipped today"))
+                                                    .child(compact_action(
+                                                        "Open Insights ↗",
+                                                        Variant::Secondary,
+                                                        move |_| ui.navigate("insights"),
+                                                    )),
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                return col.into_element();
+                            }
 
                             // 2. Active Projects quick-jump strip
                             if let Some(proj_strip) =

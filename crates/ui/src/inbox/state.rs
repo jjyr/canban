@@ -72,6 +72,8 @@ pub struct UndoBatch {
 #[derive(Clone, Copy)]
 pub struct State {
     pub drawer: Signal<String>,
+    /// Optional KPI focus filter (`""`, `"waiting"`, `"merge"`, `"agents"`, `"shipped"`).
+    pub focus_filter: Signal<String>,
     pub schedule_expanded: Signal<bool>,
     pub expanded_stacks: Signal<BTreeSet<String>>,
     pub expanded_terminals: Signal<BTreeSet<String>>,
@@ -100,6 +102,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             drawer: signal("today".into()),
+            focus_filter: signal(String::new()),
             schedule_expanded: signal(false),
             expanded_stacks: signal(BTreeSet::new()),
             expanded_terminals: signal(BTreeSet::new()),
