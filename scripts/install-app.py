@@ -108,8 +108,17 @@ def service_file_matches_home(unit_path: Path, home: Path) -> bool:
 def clear_stale_update_state(home: Path) -> None:
     home = home.expanduser()
     updates_dir = home / "updates"
-    if (updates_dir / "install.json").exists():
-        return
+    journal_path = updates_dir / "install.json"
+    if journal_path.exists():
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(journal, dict) or journal.get("phase") not in (
+            "complete",
+            "rolled_back",
+        ):
+            return
     state_path = updates_dir / "state.json"
     if not state_path.is_file():
         return
