@@ -449,20 +449,20 @@ pub fn rail(ui: Ui) -> impl IntoElement {
                         .h_full()
                         .items_center()
                         .justify_center()
+                        .relative()
                         .rounded(px(RADIUS))
+                        .bg(move || {
+                            if ui.update.get()["state"]["phase"] == "downloading" {
+                                SELECTED
+                            } else {
+                                CLEAR
+                            }
+                        })
                         .border_1()
-                        .bg(move || match ui.update.get()["state"]["phase"].as_str() {
-                            Some("error") => ATTENTION_SURFACE,
-                            Some("manual_recovery") => DANGER_SURFACE,
-                            _ => ACCENT_FILL,
-                        })
-                        .border_color(move || match ui.update.get()["state"]["phase"].as_str() {
-                            Some("error") => ATTENTION,
-                            Some("manual_recovery") => DANGER,
-                            _ => CLEAR,
-                        })
-                        .hover(|s| s.opacity(0.88))
-                        .focus(|s| s.ring(px(2.)).ring_color(ACCENT))
+                        .border_color(CLEAR)
+                        .hover(|s| s.bg(INSET))
+                        .active(|s| s.opacity(0.7))
+                        .focus(|s| s.border_color(ACCENT))
                         .disabled(move || busy(ui))
                         .disabled_style(|s| s.opacity(0.72))
                         .accessibility_label(move || Some(hint(&ui.update.get()).into()))
@@ -473,9 +473,10 @@ pub fn rail(ui: Ui) -> impl IntoElement {
                                     "{}%",
                                     v["state"]["progress"].as_u64().unwrap_or(0)
                                 ))
+                                .font_family(MONO_FONT)
                                 .text_size(px(10.))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(ON_ACCENT)
+                                .text_color(ACCENT)
                                 .into_element(),
                                 Some("error") => {
                                     icon_tinted(Icon::Refresh, ATTENTION).into_element()
@@ -483,8 +484,25 @@ pub fn rail(ui: Ui) -> impl IntoElement {
                                 Some("manual_recovery") => {
                                     icon_tinted(Icon::TriangleAlert, DANGER).into_element()
                                 }
-                                _ => icon_tinted(Icon::Update, ON_ACCENT).into_element(),
+                                _ => icon_tinted(Icon::Update, ACCENT).into_element(),
                             }
+                        }))
+                        .child(dynamic(move || {
+                            let dot_color = match ui.update.get()["state"]["phase"].as_str() {
+                                Some("downloading") => return view().into_element(),
+                                Some("error") => ATTENTION,
+                                Some("manual_recovery") => DANGER,
+                                _ => ACCENT,
+                            };
+                            view()
+                                .absolute()
+                                .top(px(7.))
+                                .right(px(7.))
+                                .w(px(7.))
+                                .h(px(7.))
+                                .rounded_full()
+                                .bg(dot_color)
+                                .into_element()
                         }))
                         .on_press(move |_: &()| {
                             if ui.update.get()["state"]["phase"] == "manual_recovery" {

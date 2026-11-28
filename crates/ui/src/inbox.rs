@@ -2947,9 +2947,15 @@ fn render_github_row(
             .and_then(|d| d.comments_count)
             .or(static_comments);
 
-        let mut left = view().flex_row().items_center().gap_2().min_w(px(0.));
+        let mut title_group = view()
+            .flex_1()
+            .min_w(px(0.))
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .overflow_hidden();
         if has_number {
-            left = left.child(
+            title_group = title_group.child(
                 icon_tinted(
                     if expanded {
                         Icon::ChevronDown
@@ -2959,24 +2965,29 @@ fn render_github_row(
                     MUTED,
                 )
                 .w(px(12.))
-                .h(px(12.)),
+                .h(px(12.))
+                .flex_shrink_0(),
             );
+        } else {
+            title_group = title_group.child(view().w(px(12.)).h(px(12.)).flex_shrink_0());
         }
-        left = left.child(gh_state_mark(&kind_str, pr_state_ref, merged, draft));
+        title_group = title_group.child(gh_state_mark(&kind_str, pr_state_ref, merged, draft));
         if show_repo {
-            left = left.child(
+            title_group = title_group.child(
                 muted(repo_label.clone())
                     .font_family(MONO_FONT)
                     .text_size(px(11.))
+                    .max_w(px(140.))
+                    .truncate()
                     .flex_shrink_0(),
             );
         }
-        left = left
+        title_group = title_group
             .child(
                 muted(ref_col.clone())
                     .font_family(MONO_FONT)
                     .text_size(px(11.5))
-                    .w(px(44.))
+                    .w(px(46.))
                     .flex_shrink_0(),
             )
             .child(
@@ -2989,39 +3000,82 @@ fn render_github_row(
                     .min_w(px(0.)),
             );
         if is_pr && merged {
-            left = left.child(status("Merged", Tone::Highlight));
+            title_group = title_group.child(status("Merged", Tone::Highlight).flex_shrink_0());
         } else if is_pr && draft {
-            left = left.child(status("Draft", Tone::Neutral));
+            title_group = title_group.child(status("Draft", Tone::Neutral).flex_shrink_0());
         }
         for lbl in labels.into_iter().take(2) {
-            left = left.child(badge(lbl));
+            title_group = title_group.child(view().flex_shrink_0().child(badge(lbl)));
         }
+
+        let mut ci_slot = view()
+            .w(px(60.))
+            .flex_shrink_0()
+            .flex_row()
+            .items_center()
+            .justify_end();
         if let Some(ci_el) = ci_indicator(ci_state.as_deref(), ci_passed, ci_total, failed_n) {
-            left = left.child(ci_el);
+            ci_slot = ci_slot.child(ci_el);
         }
+
+        let mut comments_slot = view()
+            .w(px(34.))
+            .flex_shrink_0()
+            .flex_row()
+            .items_center()
+            .justify_end();
         if let Some(c) = comments
             && (is_pr || c > 0)
         {
-            left = left.child(comments_indicator(c));
+            comments_slot = comments_slot.child(comments_indicator(c));
         }
+
+        let mut author_slot = view()
+            .w(px(112.))
+            .flex_shrink_0()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .overflow_hidden();
         if let Some(a) = &author {
-            left = left.child(
+            author_slot = author_slot
+                .child(github_avatar(a, avatar_url.as_deref(), 16.))
+                .child(
+                    muted(format!("@{a}"))
+                        .text_size(px(11.5))
+                        .truncate()
+                        .flex_1()
+                        .min_w(px(0.)),
+                );
+        }
+
+        let age_slot = view()
+            .w(px(34.))
+            .flex_shrink_0()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .child(muted(age.clone()).font_family(MONO_FONT).text_size(px(11.)));
+
+        view()
+            .w_full()
+            .min_w(px(0.))
+            .flex_row()
+            .items_center()
+            .gap_2p5()
+            .child(title_group)
+            .child(
                 view()
                     .flex_row()
                     .items_center()
-                    .gap_1()
+                    .gap_2()
                     .flex_shrink_0()
-                    .child(github_avatar(a, avatar_url.as_deref(), 16.))
-                    .child(muted(format!("@{a}")).text_size(px(11.5))),
-            );
-        }
-        left = left.child(
-            muted(age.clone())
-                .font_family(MONO_FONT)
-                .text_size(px(11.))
-                .flex_shrink_0(),
-        );
-        left.into_element()
+                    .child(ci_slot)
+                    .child(comments_slot)
+                    .child(author_slot)
+                    .child(age_slot),
+            )
+            .into_element()
     });
 
     let mut right = view().flex_row().items_center().gap_1().flex_shrink_0();
@@ -3057,6 +3111,7 @@ fn render_github_row(
                     press_target()
                         .flex_1()
                         .min_w(px(0.))
+                        .overflow_hidden()
                         .bg(CLEAR)
                         .rounded(px(4.))
                         .hover(|s| s.bg(CARD_HOVER))
@@ -3715,6 +3770,7 @@ fn render_active_work(
                     press_target()
                         .flex_1()
                         .min_w(px(0.))
+                        .overflow_hidden()
                         .bg(CLEAR)
                         .rounded(px(4.))
                         .hover(|s| s.bg(CARD_HOVER))
