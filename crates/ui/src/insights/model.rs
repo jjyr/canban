@@ -16,6 +16,7 @@ pub enum RangeWindow {
     #[default]
     Today,
     Days7,
+    Days14,
     Days30,
     Days90,
 }
@@ -25,6 +26,7 @@ impl RangeWindow {
         match self {
             Self::Today => 1,
             Self::Days7 => 7,
+            Self::Days14 => 14,
             Self::Days30 => 30,
             Self::Days90 => 90,
         }
@@ -34,6 +36,7 @@ impl RangeWindow {
         match self {
             Self::Today => "1D",
             Self::Days7 => "7D",
+            Self::Days14 => "14D",
             Self::Days30 => "30D",
             Self::Days90 => "90D",
         }
@@ -43,10 +46,18 @@ impl RangeWindow {
         match self {
             Self::Today => "today",
             Self::Days7 => "last 7 days",
+            Self::Days14 => "last 14 days",
             Self::Days30 => "last 30 days",
             Self::Days90 => "last 90 days",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InsightsMetric {
+    #[default]
+    Time,
+    Tasks,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -664,6 +675,7 @@ pub struct HostStat {
     pub peak_parallel: usize,
     pub top_projects: Vec<(String, u64)>,
     pub load_bars: Vec<u64>,
+    pub task_bars: Vec<u64>,
 }
 
 impl HostStat {
@@ -705,6 +717,8 @@ pub struct ProjectStat {
     pub cards: BTreeSet<String>,
     pub profiles: BTreeSet<String>,
     pub recent_merges: Vec<usize>,
+    pub load_bars: Vec<u64>,
+    pub task_bars: Vec<u64>,
 }
 
 impl ProjectStat {
@@ -2873,6 +2887,8 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
     let mut used_runs = 0;
     let mut global_run_intervals: Vec<(u64, u64)> = Vec::new();
     let mut host_run_intervals: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
+    let mut project_daily_tasks: BTreeMap<String, BTreeMap<NaiveDate, u64>> = BTreeMap::new();
+    let mut host_daily_tasks: BTreeMap<String, BTreeMap<NaiveDate, u64>> = BTreeMap::new();
 
     for run in &runs {
         let Some(began) = run.started_at.filter(|t| *t > 0 && *t <= now_ms) else {
@@ -2884,7 +2900,8 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             OutcomeKind::Failed => 2,
             OutcomeKind::Active => 3,
         };
-        daily_runs.entry(local_date(began, tz)).or_default()[index] += 1;
+        let began_date = local_date(began, tz);
+        daily_runs.entry(began_date).or_default()[index] += 1;
         start_times.push(began);
         if previous(began) {
             prev_scheduled_total += 1;
@@ -2909,6 +2926,18 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             scheduled_total += 1;
             outcomes[index] += 1;
             *trigger_counts.entry(run.trigger).or_default() += 1;
+            *project_daily_tasks
+                .entry(run.project_id.clone())
+                .or_default()
+                .entry(began_date)
+                .or_default() += 1;
+            let hid = snapshot.project_host(&run.project_id);
+            let hkey = if hid.is_empty() { "local" } else { hid };
+            *host_daily_tasks
+                .entry(hkey.to_owned())
+                .or_default()
+                .entry(began_date)
+                .or_default() += 1;
             if let Some(p) = projects.get_mut(&run.project_id) {
                 p.agent_runs += 1;
                 match index {
@@ -3201,15 +3230,27 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
         })
         .collect();
 
+    let mut project_load_raw: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut other_dwell_ms = 0u64;
     let mut other_agent_ms = 0u64;
     if range == RangeWindow::Today {
+        let day_span = until.saturating_sub(from).max(1);
+        for pid in projects.keys() {
+            project_load_raw.insert(pid.clone(), vec![0u64; 8]);
+        }
         for seg in &cur_segments {
             let dur = seg.duration_ms();
             if dur == 0 {
                 continue;
             }
             let pid = seg.project_id.as_deref().filter(|s| !s.is_empty());
+            if let Some(id) = pid
+                && let Some(bars) = project_load_raw.get_mut(id)
+            {
+                let slot = (((seg.start_ms.saturating_sub(from)) as u128 * 8) / day_span as u128)
+                    .min(7) as usize;
+                bars[slot] = bars[slot].saturating_add(dur);
+            }
             match seg.kind {
                 ActivityKind::Dwell => {
                     if let Some(p) = pid.and_then(|id| projects.get_mut(id)) {
@@ -3228,7 +3269,13 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             }
         }
     } else {
-        for b in &cur_buckets {
+        let n_buckets = cur_buckets.len();
+        if n_buckets > 0 {
+            for pid in projects.keys() {
+                project_load_raw.insert(pid.clone(), vec![0u64; n_buckets]);
+            }
+        }
+        for (idx, b) in cur_buckets.iter().enumerate() {
             let mut matched_dwell = 0u64;
             let mut matched_agent = 0u64;
             for (pid, pt) in &b.by_project {
@@ -3237,6 +3284,9 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
                     p.agent_ms = p.agent_ms.saturating_add(pt.agent_ms);
                     matched_dwell = matched_dwell.saturating_add(pt.dwell_ms);
                     matched_agent = matched_agent.saturating_add(pt.agent_ms);
+                }
+                if let Some(bars) = project_load_raw.get_mut(pid) {
+                    bars[idx] = bars[idx].saturating_add(pt.dwell_ms.saturating_add(pt.agent_ms));
                 }
             }
             if scope.is_none() {
@@ -3248,6 +3298,7 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
         }
     }
 
+    let range_len_days = range.days().max(1);
     for p in projects.values_mut() {
         p.recent_merges = (0..7)
             .map(|i| {
@@ -3258,6 +3309,19 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
                     .unwrap_or(0)
             })
             .collect();
+        if let Some(raw) = project_load_raw.remove(&p.id) {
+            p.load_bars = downsample_bars(&raw, 14);
+        }
+        let raw_tasks: Vec<u64> = (0..range_len_days)
+            .map(|i| {
+                project_daily_tasks
+                    .get(&p.id)
+                    .and_then(|v| v.get(&(start + Duration::days(i))))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .collect();
+        p.task_bars = downsample_bars(&raw_tasks, 14);
     }
     let mut project_stats: Vec<_> = projects
         .into_values()
@@ -3410,6 +3474,16 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
         if let Some(raw) = host_load_raw.remove(hid) {
             hs.load_bars = downsample_bars(&raw, 14);
         }
+        let raw_host_tasks: Vec<u64> = (0..range_len_days)
+            .map(|i| {
+                host_daily_tasks
+                    .get(hid)
+                    .and_then(|v| v.get(&(start + Duration::days(i))))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .collect();
+        hs.task_bars = downsample_bars(&raw_host_tasks, 14);
     }
 
     let mut host_stats: Vec<HostStat> = host_map.into_values().collect();

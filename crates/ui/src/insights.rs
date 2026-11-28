@@ -1,6 +1,5 @@
-//! Efficiency-focused Insights cockpit: Agent Leverage & Active Time KPIs,
-//! Projects efficiency matrix, Machines workload & parallelism cards,
-//! Card flow (pipeline + delivery + daily trend / 1D timeline), and Agents table.
+//! Insights cockpit: Projects, Machines, and Agents usage cards with
+//! two-color total time (Agent + Me) and Time / Tasks mode switching.
 
 pub mod model;
 
@@ -11,9 +10,9 @@ use crate::{
 use canban_types::{ActivityBucket, ActivitySegment, AgentBucketStat, DwellBucketTotals};
 use canban_ui_kit::{tokens::*, *};
 use model::{
-    ActivityFetchPlan, ActivityInput, ActivityMetric, AgentGroup, Comparison, Dashboard, DayBucket,
-    HeatmapMetric, HostStat, ModelAgentStat, ProfileStat, ProjectSort, RangeWindow,
-    TimelineLaneKind, ViewOptions, format_duration_compact,
+    ActivityFetchPlan, ActivityInput, ActivityMetric, AgentGroup, Comparison, Dashboard,
+    HeatmapMetric, HostStat, InsightsMetric, ProjectSort, ProjectStat, RangeWindow, ViewOptions,
+    format_duration_compact,
 };
 use nsh_core::{
     element::{AdaptiveColor, rgb},
@@ -24,7 +23,6 @@ use std::rc::Rc;
 
 const ALL_PROJECTS_OPTION: &str = "__all__";
 const ALL_HOSTS_OPTION: &str = "__all_hosts__";
-const CHART_HEIGHT: f32 = 148.0;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ActivityCacheKey {
@@ -69,6 +67,7 @@ pub struct State {
     /// Skipped offline or unavailable hosts recorded during the latest Insights load.
     pub unavailable_hosts: Signal<Vec<(String, String)>>,
     pub range: Signal<RangeWindow>,
+    pub metric: Signal<InsightsMetric>,
     pub selected_date: Signal<Option<chrono::NaiveDate>>,
     pub date_text: Signal<String>,
     pub comparison: Signal<Comparison>,
@@ -111,7 +110,8 @@ impl State {
             scope_project: signal(String::new()),
             scope_host: signal(String::new()),
             unavailable_hosts: signal(Vec::new()),
-            range: signal(RangeWindow::Today),
+            range: signal(RangeWindow::Days7),
+            metric: signal(InsightsMetric::Time),
             selected_date: signal(None),
             date_text: signal(String::new()),
             comparison: signal(Comparison::Previous),
@@ -753,29 +753,6 @@ pub fn set_range(ui: Ui, next: RangeWindow) {
     ui.insights.drilldown.set(String::new());
 }
 
-fn nice_ceil_tick(max_val: usize) -> usize {
-    if max_val <= 2 {
-        2
-    } else if max_val <= 4 {
-        4
-    } else if max_val <= 6 {
-        6
-    } else if max_val <= 8 {
-        8
-    } else if max_val <= 10 {
-        10
-    } else {
-        let step = if max_val <= 25 {
-            5
-        } else if max_val <= 60 {
-            10
-        } else {
-            20
-        };
-        max_val.div_ceil(step) * step
-    }
-}
-
 fn alpha_tint(token: ThemeColor, alpha: f32) -> AdaptiveColor {
     let resolved = token.resolve();
     AdaptiveColor {
@@ -847,7 +824,9 @@ pub fn intent(ui: Ui, operation: &str) {
     match operation {
         "today" => {
             select_date(ui, None);
-            set_range(ui, RangeWindow::Today);
+            if ui.insights.range.get_untracked() == RangeWindow::Today {
+                set_range(ui, RangeWindow::Days7);
+            }
         }
         "previous-day" | "next-day" => {
             let actual = current_today(ui);
@@ -874,6 +853,8 @@ pub fn intent(ui: Ui, operation: &str) {
         "hourly-merged" => ui.insights.hourly_metric.set(ActivityMetric::Merged),
         "hourly-created" => ui.insights.hourly_metric.set(ActivityMetric::Created),
         "hourly-runs" => ui.insights.hourly_metric.set(ActivityMetric::Runs),
+        "metric-time" => ui.insights.metric.set(InsightsMetric::Time),
+        "metric-tasks" => ui.insights.metric.set(InsightsMetric::Tasks),
         "group-profile" => ui.insights.agent_group.set(AgentGroup::Profile),
         "group-model" => ui.insights.agent_group.set(AgentGroup::Model),
         "sort-time" => ui.insights.project_sort.set(ProjectSort::Time),
@@ -1254,8 +1235,8 @@ pub fn chrome_bar(ui: Ui) -> View {
         .border_color(BORDER)
         .children(
             [
-                RangeWindow::Today,
                 RangeWindow::Days7,
+                RangeWindow::Days14,
                 RangeWindow::Days30,
                 RangeWindow::Days90,
             ]
@@ -1266,6 +1247,35 @@ pub fn chrome_bar(ui: Ui) -> View {
                     None,
                     move || ui.insights.range.get() == rw,
                     move |_| set_range(ui, rw),
+                )
+                .min_h(px(22.))
+                .px_2()
+                .into_element()
+            })
+            .collect::<Vec<_>>(),
+        );
+
+    let metric_bar = view()
+        .flex_row()
+        .items_center()
+        .gap(px(2.))
+        .p(px(2.))
+        .rounded(px(7.))
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER)
+        .children(
+            [
+                (InsightsMetric::Time, "Time"),
+                (InsightsMetric::Tasks, "Tasks"),
+            ]
+            .into_iter()
+            .map(|(m, lbl)| {
+                compact_segment(
+                    lbl,
+                    None,
+                    move || ui.insights.metric.get() == m,
+                    move |_| ui.insights.metric.set(m),
                 )
                 .min_h(px(22.))
                 .px_2()
@@ -1339,6 +1349,7 @@ pub fn chrome_bar(ui: Ui) -> View {
                 )
                 .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
                 .child(range_bar)
+                .child(metric_bar)
                 .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
                 .child(when(
                     move || has_remote_hosts.get(),
@@ -1362,15 +1373,6 @@ fn section_wrap() -> View {
         .border_t_1()
         .border_color(BORDER)
         .gap_3()
-}
-
-fn legend_swatch(color: impl IntoReactive<AdaptiveColor> + 'static, title: &str) -> View {
-    view()
-        .flex_row()
-        .items_center()
-        .gap_1p5()
-        .child(view().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(color))
-        .child(muted(title.to_owned()).text_size(px(11.5)))
 }
 
 fn heading(title: &str) -> Text {
@@ -1407,18 +1409,7 @@ fn choice(ui: Ui, title: &'static str, op: &'static str, selected: bool) -> impl
     .accessibility_label(title)
 }
 
-fn format_leverage(val: Option<f64>) -> String {
-    match val {
-        Some(v) if v >= 10.0 => format!("{v:.0}×"),
-        Some(v) => format!("{v:.1}×"),
-        None => "—".into(),
-    }
-}
-
-fn host_color(index: usize, offline: bool) -> AdaptiveColor {
-    if offline {
-        return alpha_tint(MUTED, 0.55);
-    }
+fn palette_color(index: usize) -> AdaptiveColor {
     match index % 6 {
         0 => ACCENT.resolve(),
         1 => SUCCESS.resolve(),
@@ -1429,7 +1420,68 @@ fn host_color(index: usize, offline: bool) -> AdaptiveColor {
     }
 }
 
-fn render_proportional_bar(segments: &[(String, u64, AdaptiveColor)]) -> View {
+fn host_color(index: usize, offline: bool) -> AdaptiveColor {
+    if offline {
+        return alpha_tint(MUTED, 0.55);
+    }
+    palette_color(index)
+}
+
+fn agent_time_color() -> AdaptiveColor {
+    ACCENT.resolve()
+}
+
+fn me_time_color() -> AdaptiveColor {
+    alpha_tint(MUTED, 0.58)
+}
+
+fn time_breakdown_inline(agent_ms: u64, dwell_ms: u64) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .flex_shrink_0()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    view()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded(px(1.5))
+                        .bg(agent_time_color()),
+                )
+                .child(
+                    text(format!("Agent {}", format_duration_compact(agent_ms)))
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.))
+                        .text_color(MUTED),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    view()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded(px(1.5))
+                        .bg(me_time_color()),
+                )
+                .child(
+                    text(format!("Me {}", format_duration_compact(dwell_ms)))
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.))
+                        .text_color(MUTED),
+                ),
+        )
+}
+
+fn render_proportional_bar(segments: &[(String, u64, AdaptiveColor)], is_time: bool) -> View {
     let total: u64 = segments.iter().map(|(_, v, _)| *v).sum();
     if total == 0 {
         return view();
@@ -1440,7 +1492,12 @@ fn render_proportional_bar(segments: &[(String, u64, AdaptiveColor)]) -> View {
         .filter(|(_, v, _)| *v > 0)
         .map(|(name, v, color)| {
             let pct = ((*v as u128 * 100 + total as u128 / 2) / total as u128) as usize;
-            let tip = format!("{name} · {} ({pct}%)", format_duration_compact(*v));
+            let val_txt = if is_time {
+                format_duration_compact(*v)
+            } else {
+                format!("{v} {}", if *v == 1 { "task" } else { "tasks" })
+            };
+            let tip = format!("{name} · {val_txt} ({pct}%)");
             view()
                 .flex_grow((*v as f32).max(1.0))
                 .basis(px(0.))
@@ -1500,1110 +1557,97 @@ fn render_proportional_bar(segments: &[(String, u64, AdaptiveColor)]) -> View {
         )
 }
 
-fn render_compare_subbar(ui: Ui, dash: &Dashboard) -> View {
-    let notice_text = if dash.history_start.is_none_or(|h| h > dash.selected_date) {
-        Some("No retained history")
-    } else if dash
-        .history_start
-        .is_some_and(|h| h.to_string() > dash.window_start_key)
-    {
-        Some("Partial history")
-    } else {
-        None
-    };
-
-    let has_project_filter = !ui.insights.scope_project.get().is_empty();
-    let has_host_filter = !ui.insights.scope_host.get().is_empty();
-
-    let mut left_row = view().flex_row().flex_wrap().items_center().gap_2();
-    if let Some(msg) = notice_text {
-        left_row = left_row.child(note(msg));
-    }
-    if has_host_filter {
-        left_row = left_row.child(compact_action(
-            "Clear Host filter",
-            Variant::Quiet,
-            move |_| {
-                ui.insights.scope_host.set(String::new());
-            },
-        ));
-    }
-    if has_project_filter {
-        left_row = left_row.child(compact_action(
-            "Clear Project filter",
-            Variant::Quiet,
-            move |_| {
-                ui.insights.scope_project.set(String::new());
-            },
-        ));
-    }
-
-    let right = if dash.range == RangeWindow::Today {
-        let prev_label = if dash.selected_date == dash.annual_end {
-            "Yesterday so far"
-        } else {
-            "Previous day"
-        };
-        view()
-            .flex_row()
-            .items_center()
-            .gap_1p5()
-            .child(note("Compare:"))
-            .child(choice(
-                ui,
-                prev_label,
-                "compare-previous",
-                ui.insights.comparison.get() == Comparison::Previous,
-            ))
-            .child(choice(
-                ui,
-                "Last week",
-                "compare-week",
-                ui.insights.comparison.get() == Comparison::LastWeek,
-            ))
-            .into_element()
-    } else {
-        let prior = match dash.range {
-            RangeWindow::Days7 => "vs prior 7d",
-            RangeWindow::Days30 => "vs prior 30d",
-            RangeWindow::Days90 => "vs prior 90d",
-            RangeWindow::Today => "",
-        };
-        view()
-            .tooltip(tooltip_box().child(note(format!(
-                "{} · {}",
-                dash.comparison_label, dash.timezone
-            ))))
-            .child(note(prior))
-            .into_element()
-    };
-
-    view()
-        .w_full()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(left_row)
-        .child(right)
-}
-
-fn format_count_delta(current: usize, previous: usize, baseline_known: bool) -> (String, bool) {
-    if !baseline_known {
-        return (String::new(), true);
-    }
-    if current > previous {
-        (format!("▲{}", current - previous), true)
-    } else if current < previous {
-        (format!("▼{}", previous - current), false)
-    } else {
-        ("0".into(), true)
-    }
-}
-
-fn format_pct_delta(current: u64, previous: u64, baseline_known: bool, act_known: bool) -> String {
-    if !baseline_known || !act_known {
-        return String::new();
-    }
-    if previous == 0 {
-        if current == 0 {
-            return "0%".into();
-        }
-        return format!("▲{}", format_duration_compact(current));
-    }
-    if current == previous {
-        return "0%".into();
-    }
-    let diff = current.abs_diff(previous);
-    let pct = (diff * 100 + previous / 2) / previous;
-    if current > previous {
-        format!("▲{pct}%")
-    } else {
-        format!("▼{pct}%")
-    }
-}
-
-fn format_leverage_delta(
-    current: Option<f64>,
-    previous: Option<f64>,
-    baseline_known: bool,
-    act_known: bool,
-) -> (String, Option<bool>) {
-    if !baseline_known || !act_known {
-        return (String::new(), None);
-    }
-    let (Some(c), Some(p)) = (current, previous) else {
-        return (String::new(), None);
-    };
-    let diff = c - p;
-    if diff.abs() < 0.05 {
-        ("0.0×".into(), None)
-    } else if diff > 0.0 {
-        (format!("▲{diff:.1}×"), Some(true))
-    } else {
-        (format!("▼{:.1}×", -diff), Some(false))
-    }
-}
-
-fn kpi_cell(
-    title: &'static str,
-    value: String,
-    value_color: ThemeColor,
-    delta: String,
-    delta_positive: Option<bool>,
-    sub: String,
-    tip: String,
-) -> View {
-    let mut val_row = view().flex_row().items_baseline().gap_2().child(
-        text(value)
-            .font_family(MONO_FONT)
-            .text_size(px(24.))
-            .font_weight(FontWeight::BOLD)
-            .text_color(value_color),
+fn render_two_color_bar(agent_ms: u64, dwell_ms: u64, max_total_ms: u64) -> View {
+    let total = agent_ms.saturating_add(dwell_ms);
+    let tip = format!(
+        "Total {} · Agent {} · Me {}",
+        format_duration_compact(total),
+        format_duration_compact(agent_ms),
+        format_duration_compact(dwell_ms),
     );
-    if !delta.is_empty() {
-        let color = match delta_positive {
-            Some(true) => SUCCESS,
-            Some(false) => ATTENTION,
-            None => MUTED,
-        };
-        val_row = val_row.child(
-            text(delta)
-                .font_family(MONO_FONT)
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(color),
+    if total == 0 || max_total_ms == 0 {
+        return view()
+            .w_full()
+            .h(px(7.))
+            .rounded(px(3.5))
+            .bg(INSET)
+            .tooltip(tooltip_box().child(note(tip)));
+    }
+    let fill_ratio = (total as f32 / max_total_ms as f32).clamp(0.04, 1.0);
+    let mut inner = view()
+        .flex_grow(fill_ratio)
+        .basis(px(0.))
+        .h_full()
+        .rounded(px(3.5))
+        .overflow_hidden()
+        .flex_row();
+    if agent_ms > 0 && dwell_ms > 0 {
+        inner = inner.gap(px(1.5));
+    }
+    if agent_ms > 0 {
+        inner = inner.child(
+            view()
+                .flex_grow(agent_ms as f32)
+                .basis(px(0.))
+                .min_w(px(3.))
+                .h_full()
+                .bg(agent_time_color()),
+        );
+    }
+    if dwell_ms > 0 {
+        inner = inner.child(
+            view()
+                .flex_grow(dwell_ms as f32)
+                .basis(px(0.))
+                .min_w(px(3.))
+                .h_full()
+                .bg(me_time_color()),
         );
     }
     view()
-        .flex_1()
-        .min_w(px(160.))
-        .py_2()
-        .px_3()
-        .gap_1()
+        .w_full()
+        .h(px(7.))
+        .rounded(px(3.5))
+        .bg(INSET)
+        .overflow_hidden()
+        .flex_row()
+        .tooltip(tooltip_box().child(note(tip)))
+        .child(inner)
+        .child(
+            view()
+                .flex_grow((1.0 - fill_ratio).max(0.0))
+                .basis(px(0.))
+                .h_full(),
+        )
+}
+
+fn render_single_bar(value: u64, max_val: u64, color: AdaptiveColor, tip: String) -> View {
+    let ratio = if value == 0 || max_val == 0 {
+        0.0
+    } else {
+        (value as f32 / max_val as f32).clamp(0.04, 1.0)
+    };
+    view()
+        .w_full()
+        .h(px(7.))
+        .rounded(px(3.5))
+        .bg(INSET)
+        .overflow_hidden()
+        .flex_row()
         .tooltip(tooltip_box().child(note(tip)))
         .child(
-            muted(title)
-                .text_size(px(10.5))
-                .font_weight(FontWeight::SEMIBOLD),
-        )
-        .child(val_row)
-        .child(
-            text(sub)
-                .font_family(MONO_FONT)
-                .text_size(px(11.))
-                .text_color(MUTED)
-                .truncate(),
-        )
-}
-
-fn render_kpis(ui: Ui, dash: &Dashboard, narrow: bool) -> View {
-    let known = dash.history_start.is_some_and(|d| d <= dash.selected_date);
-    let act_known = known
-        && (dash.activity_loaded
-            || dash.time_totals.dwell_total_ms > 0
-            || dash.time_totals.agent_total_ms > 0);
-    let t = &dash.time_totals;
-
-    let my_time_str = if act_known {
-        format_duration_compact(t.dwell_total_ms)
-    } else {
-        "—".into()
-    };
-    let agent_time_str = if act_known {
-        format_duration_compact(t.agent_total_ms)
-    } else {
-        "—".into()
-    };
-
-    // 1. AGENT LEVERAGE
-    let lev_val = if act_known {
-        format_leverage(t.leverage())
-    } else {
-        "—".into()
-    };
-    let lev_color = match t.leverage() {
-        Some(v) if act_known && v >= 2.0 => SUCCESS,
-        _ => TEXT,
-    };
-    let (lev_delta, lev_pos) = format_leverage_delta(
-        t.leverage(),
-        t.prev_leverage(),
-        dash.baseline_known,
-        act_known,
-    );
-    let parallel_suffix = if dash.peak_parallel > 1 {
-        format!(" · peak {}∥", dash.peak_parallel)
-    } else {
-        String::new()
-    };
-    let lev_sub = format!("Agent {agent_time_str} / Me {my_time_str}{parallel_suffix}");
-    let lev_tip = format!(
-        "Agent {agent_time_str} · Me {my_time_str} · Peak {} parallel",
-        dash.peak_parallel
-    );
-    let leverage_cell = kpi_cell(
-        "AGENT LEVERAGE",
-        lev_val,
-        lev_color,
-        lev_delta,
-        lev_pos,
-        lev_sub,
-        lev_tip,
-    );
-
-    // 2. CARDS
-    let (res_delta, res_pos) = format_count_delta(
-        dash.merged_total,
-        dash.prev_merged_total,
-        dash.baseline_known,
-    );
-    let net_sign = if dash.net_wip_delta > 0 { "+" } else { "" };
-    let cards_sub = format!(
-        "+{} in · net {net_sign}{} · {} WIP",
-        dash.created_total, dash.net_wip_delta, dash.pipeline.active_wip
-    );
-    let cards_tip = format!(
-        "{} resolved ({} PR · {} local · {} manual) · +{} created · {} WIP (B {} / D {} / R {})",
-        dash.merged_total,
-        dash.pr_merges,
-        dash.local_merges,
-        dash.manual_resolutions,
-        dash.created_total,
-        dash.pipeline.active_wip,
-        dash.pipeline.backlog,
-        dash.pipeline.develop,
-        dash.pipeline.review,
-    );
-    let resolved_active = ui.insights.drilldown.get() == "merged";
-    let cards_cell = press_target()
-        .flex_1()
-        .min_w(px(160.))
-        .rounded(px(6.))
-        .bg(if resolved_active {
-            SELECTED.resolve()
-        } else {
-            AdaptiveColor::TRANSPARENT
-        })
-        .hover(|s| s.bg(CARD_HOVER))
-        .accessibility_label("Cards KPI")
-        .on_press(move |_: &()| intent(ui, "cards-merged"))
-        .child(kpi_cell(
-            "CARDS DONE",
-            if known {
-                dash.merged_total.to_string()
-            } else {
-                "—".into()
-            },
-            TEXT,
-            res_delta,
-            (dash.merged_total != dash.prev_merged_total).then_some(res_pos),
-            cards_sub,
-            cards_tip,
-        ));
-
-    // 3. AGENT PASS RATE
-    let pass_val = dash
-        .success_rate_pct
-        .map(|p| format!("{p}%"))
-        .unwrap_or_else(|| "—".into());
-    let pass_color = match dash.success_rate_pct {
-        Some(p) if p >= 85 => SUCCESS,
-        Some(p) if p < 60 => ATTENTION,
-        _ => TEXT,
-    };
-    let (pass_delta, pass_pos) = match (
-        dash.success_rate_pct,
-        dash.prev_success_rate_pct,
-        dash.baseline_known,
-    ) {
-        (Some(c), Some(p), true) => {
-            let diff = c as isize - p as isize;
-            if diff > 0 {
-                (format!("▲{diff}pt"), Some(true))
-            } else if diff < 0 {
-                (format!("▼{}pt", -diff), Some(false))
-            } else {
-                ("0pt".into(), None)
-            }
-        }
-        _ => (String::new(), None),
-    };
-    let resolved_runs = dash.completed_runs + dash.blocked_runs + dash.failed_runs;
-    let pass_sub = if resolved_runs > 0 {
-        format!(
-            "{}/{} runs · {} blocked · {} failed",
-            dash.completed_runs, resolved_runs, dash.blocked_runs, dash.failed_runs
-        )
-    } else if dash.active_runs > 0 {
-        format!("{} active runs", dash.active_runs)
-    } else {
-        "0 runs".into()
-    };
-    let pass_tip = format!(
-        "{} total runs · {} completed · {} blocked · {} failed · {} active · {} asks",
-        dash.scheduled_total,
-        dash.completed_runs,
-        dash.blocked_runs,
-        dash.failed_runs,
-        dash.active_runs,
-        dash.human_asks_period,
-    );
-    let pass_cell = kpi_cell(
-        "AGENT PASS RATE",
-        pass_val,
-        pass_color,
-        pass_delta,
-        pass_pos,
-        pass_sub,
-        pass_tip,
-    );
-
-    // 4. ACTIVE TIME
-    let active_val = if act_known {
-        format_duration_compact(t.total_active_ms())
-    } else {
-        "—".into()
-    };
-    let active_delta = format_pct_delta(
-        t.total_active_ms(),
-        t.prev_total_active_ms(),
-        dash.baseline_known,
-        act_known,
-    );
-    let active_sub = format!("Me {my_time_str} · Agent {agent_time_str}");
-    let active_tip = format!(
-        "Card {} · Terminal {} · Other {} · Agent {}",
-        format_duration_compact(t.dwell_card_ms),
-        format_duration_compact(t.dwell_terminal_ms),
-        format_duration_compact(t.dwell_other_ms),
-        agent_time_str,
-    );
-    let active_cell = kpi_cell(
-        "ACTIVE TIME",
-        active_val,
-        TEXT,
-        active_delta,
-        None,
-        active_sub,
-        active_tip,
-    );
-
-    let v_sep = || {
-        view()
-            .w(px(1.))
-            .my_2()
-            .bg(BORDER)
-            .opacity(0.65)
-            .flex_shrink_0()
-    };
-
-    if narrow {
-        view()
-            .pb_3()
-            .gap_1()
-            .child(
-                view()
-                    .flex_row()
-                    .items_stretch()
-                    .child(leverage_cell)
-                    .child(v_sep())
-                    .child(cards_cell),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .items_stretch()
-                    .child(pass_cell)
-                    .child(v_sep())
-                    .child(active_cell),
-            )
-    } else {
-        view()
-            .pb_3()
-            .flex_row()
-            .items_stretch()
-            .child(leverage_cell)
-            .child(v_sep())
-            .child(cards_cell)
-            .child(v_sep())
-            .child(pass_cell)
-            .child(v_sep())
-            .child(active_cell)
-    }
-}
-
-fn format_hhmm(ms: u64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
-        .unwrap_or_else(|| "—".into())
-}
-
-fn render_timeline_track_backdrop(
-    tick_count: usize,
-    active_ratio: Option<f32>,
-    is_all_future: bool,
-) -> View {
-    let mut backdrop = view()
-        .absolute()
-        .inset_0()
-        .pointer_events(PointerEvents::None);
-
-    if tick_count >= 2 {
-        backdrop = backdrop.child(
             view()
-                .absolute()
-                .inset_0()
-                .flex_row()
-                .justify_between()
-                .children((0..tick_count).map(|i| {
-                    if i == 0 || i + 1 == tick_count {
-                        view().w(px(1.)).h_full().into_element()
-                    } else {
-                        view()
-                            .w(px(1.))
-                            .h_full()
-                            .bg(BORDER)
-                            .opacity(0.30)
-                            .into_element()
-                    }
-                })),
-        );
-    }
-
-    if is_all_future {
-        backdrop = backdrop.child(view().w_full().h_full().bg(BACKGROUND).opacity(0.45));
-    } else if let Some(ratio) = active_ratio {
-        backdrop = backdrop.child(
-            view()
-                .absolute()
-                .inset_0()
-                .flex_row()
-                .child(view().flex_grow(ratio).basis(px(0.)).h_full())
-                .child(view().w(px(1.)).h_full().bg(ACCENT).opacity(0.65))
-                .child(
-                    view()
-                        .flex_grow((1.0 - ratio).max(0.0))
-                        .basis(px(0.))
-                        .h_full()
-                        .bg(BACKGROUND)
-                        .opacity(0.45),
-                ),
-        );
-    }
-    backdrop
-}
-
-fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
-    let tl = &dash.timeline;
-    let full_24h = ui.insights.timeline_full_24h.get();
-    let (start_h, end_h) = if full_24h {
-        (0u32, 24u32)
-    } else {
-        tl.visible_hour_window()
-    };
-    let win_start_ms = (tl.day_start_ms + u64::from(start_h) * 3_600_000).min(tl.day_end_ms);
-    let win_end_ms = if end_h >= 24 {
-        tl.day_end_ms
-    } else {
-        (tl.day_start_ms + u64::from(end_h) * 3_600_000).min(tl.day_end_ms)
-    }
-    .max(win_start_ms.saturating_add(1));
-    let span = (win_end_ms.saturating_sub(win_start_ms)).max(1) as f64;
-
-    let span_h = end_h.saturating_sub(start_h);
-    let step = if span_h <= 12 {
-        1usize
-    } else if span_h.is_multiple_of(3) {
-        3usize
-    } else if span_h.is_multiple_of(2) {
-        2usize
-    } else {
-        1usize
-    };
-    let ticks: Vec<u32> = (start_h..=end_h).step_by(step).collect();
-    let tick_count = ticks.len();
-
-    let is_all_future = tl.active_until_ms <= win_start_ms;
-    let active_ratio = (!is_all_future && tl.active_until_ms < win_end_ms).then(|| {
-        ((tl.active_until_ms.saturating_sub(win_start_ms)) as f64 / span).clamp(0.0, 1.0) as f32
-    });
-
-    let axis_row = view()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(view().w(px(168.)).flex_shrink_0())
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(0.))
-                .flex_row()
-                .justify_between()
-                .children(
-                    ticks
-                        .into_iter()
-                        .map(|h| {
-                            text(h.to_string())
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.))
-                                .text_color(MUTED)
-                                .into_element()
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-        )
-        .child(view().w(px(54.)).flex_shrink_0());
-
-    let mut seen_first_agent = false;
-    let lane_views = tl
-        .lanes
-        .iter()
-        .map(|lane| {
-            let mut cursor = 0.0f32;
-            let mut blocks_children: Vec<AnyElement> = Vec::new();
-            for b in &lane.blocks {
-                if b.end_ms <= win_start_ms || b.start_ms >= win_end_ms {
-                    continue;
-                }
-                let s_ms = b.start_ms.max(win_start_ms);
-                let e_ms = b.end_ms.min(win_end_ms);
-                let start_r = ((s_ms - win_start_ms) as f64 / span).clamp(0.0, 1.0) as f32;
-                let end_r = ((e_ms - win_start_ms) as f64 / span).clamp(0.0, 1.0) as f32;
-                let gap = (start_r - cursor).max(0.0);
-                if gap > 0.0 {
-                    blocks_children
-                        .push(view().flex_grow(gap).basis(px(0.)).h_full().into_element());
-                    cursor += gap;
-                }
-                let block_r = (end_r - cursor).max(0.0);
-                if block_r <= 0.0 && e_ms <= s_ms {
-                    continue;
-                }
-
-                let dur = b.active_ms;
-                let color = project_color(b.project_id.as_deref(), project_order);
-                let tip = format!(
-                    "{} · {} · {}–{} ({}){}",
-                    lane.label,
-                    b.label,
-                    format_hhmm(b.start_ms),
-                    format_hhmm(b.end_ms),
-                    format_duration_compact(dur),
-                    if b.open { " · Live" } else { "" }
-                );
-                let lane_kind = lane.kind;
-                let cid = b.card_id.clone();
-                let tid = b.terminal_id.clone();
-                let clickable = cid.is_some() || tid.is_some();
-
-                let mut block = press_target()
-                    .w_full()
-                    .h_full()
-                    .rounded(px(3.))
-                    .bg(color)
-                    .hover(|s| s.opacity(0.85));
-                if b.open {
-                    block = block.border_1().border_color(TEXT);
-                }
-                if clickable {
-                    block = block.on_press(move |_: &()| match lane_kind {
-                        TimelineLaneKind::MeTerminal => {
-                            if let Some(t) = tid.clone() {
-                                ui.open_terminal(t);
-                            } else if let Some(c) = cid.clone() {
-                                ui.open_card(c);
-                            }
-                        }
-                        _ => {
-                            if let Some(c) = cid.clone() {
-                                ui.open_card(c);
-                            } else if let Some(t) = tid.clone() {
-                                ui.open_terminal(t);
-                            }
-                        }
-                    });
-                }
-
-                blocks_children.push(
-                    view()
-                        .flex_grow(block_r.max(0.002))
-                        .basis(px(0.))
-                        .min_w(px(3.))
-                        .h_full()
-                        .tooltip(tooltip_box().child(note(tip)))
-                        .child(block)
-                        .into_element(),
-                );
-                cursor += block_r;
-            }
-            let tail = (1.0 - cursor).max(0.0);
-            if tail > 0.0 || blocks_children.is_empty() {
-                blocks_children.push(
-                    view()
-                        .flex_grow(tail.max(0.001))
-                        .basis(px(0.))
-                        .h_full()
-                        .into_element(),
-                );
-            }
-
-            let track = view()
-                .flex_1()
-                .min_w(px(0.))
-                .h(px(20.))
-                .rounded(px(4.))
-                .bg(INSET)
-                .relative()
-                .overflow_hidden()
-                .child(render_timeline_track_backdrop(
-                    tick_count,
-                    active_ratio,
-                    is_all_future,
-                ))
-                .child(
-                    view()
-                        .w_full()
-                        .h_full()
-                        .py(px(2.))
-                        .flex_row()
-                        .items_center()
-                        .children(blocks_children),
-                );
-
-            let (group_txt, item_txt) = match lane.kind {
-                TimelineLaneKind::MeCard => ("Me", "Card"),
-                TimelineLaneKind::MeTerminal => ("", "Terminal"),
-                TimelineLaneKind::MeOther => ("", "Other"),
-                TimelineLaneKind::Agent => {
-                    let g = if !seen_first_agent {
-                        seen_first_agent = true;
-                        "Agent"
-                    } else {
-                        ""
-                    };
-                    (g, lane.label.as_str())
-                }
-            };
-
-            let mut left_label = view()
-                .w(px(168.))
-                .flex_shrink_0()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    muted(group_txt)
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .w(px(46.))
-                        .flex_shrink_0(),
-                )
-                .child(
-                    label(item_txt.to_owned())
-                        .text_size(px(12.))
-                        .truncate()
-                        .flex_1()
-                        .min_w(px(0.)),
-                );
-            if let Some(sub) = lane.sublabel.as_deref() {
-                left_label = left_label
-                    .tooltip(tooltip_box().child(note(format!("{} ({sub})", lane.label))));
-            }
-
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(left_label)
-                .child(track)
-                .child(
-                    mono_val(
-                        if lane.total_ms > 0 {
-                            format_duration_compact(lane.total_ms)
-                        } else {
-                            "—".into()
-                        },
-                        11.5,
-                    )
-                    .w(px(54.))
-                    .flex_shrink_0(),
-                )
-                .into_element()
-        })
-        .collect::<Vec<_>>();
-
-    let mut merge_cursor = 0.0f32;
-    let mut merge_children: Vec<AnyElement> = Vec::new();
-    for m in &tl.merges {
-        if m.timestamp_ms < win_start_ms || m.timestamp_ms > win_end_ms {
-            continue;
-        }
-        let ratio =
-            ((m.timestamp_ms.saturating_sub(win_start_ms)) as f64 / span).clamp(0.0, 1.0) as f32;
-        let gap = (ratio - merge_cursor).max(0.0);
-        if gap > 0.0 {
-            merge_children.push(view().flex_grow(gap).basis(px(0.)).h_full().into_element());
-            merge_cursor += gap;
-        }
-        let tip = format!(
-            "#{} {} · merged at {}",
-            m.card_number,
-            m.title,
-            format_hhmm(m.timestamp_ms)
-        );
-        let cid = m.card_id.clone();
-        merge_children.push(
-            view()
-                .w(px(8.))
-                .h(px(8.))
-                .flex_shrink_0()
-                .tooltip(tooltip_box().child(note(tip)))
-                .child(
-                    press_target()
-                        .w(px(8.))
-                        .h(px(8.))
-                        .rounded(px(4.))
-                        .bg(SUCCESS)
-                        .hover(|s| s.border_1().border_color(TEXT))
-                        .on_press(move |_: &()| ui.open_card(cid.clone())),
-                )
-                .into_element(),
-        );
-    }
-    let merge_tail = (1.0 - merge_cursor).max(0.0);
-    if merge_tail > 0.0 || merge_children.is_empty() {
-        merge_children.push(
-            view()
-                .flex_grow(merge_tail.max(0.001))
+                .flex_grow(ratio)
                 .basis(px(0.))
                 .h_full()
-                .into_element(),
-        );
-    }
-
-    let merges_track = view()
-        .flex_1()
-        .min_w(px(0.))
-        .h(px(18.))
-        .rounded(px(4.))
-        .bg(INSET)
-        .relative()
-        .overflow_hidden()
-        .child(render_timeline_track_backdrop(
-            tick_count,
-            active_ratio,
-            is_all_future,
-        ))
+                .rounded(px(3.5))
+                .bg(color),
+        )
         .child(
             view()
-                .w_full()
-                .h_full()
-                .flex_row()
-                .items_center()
-                .children(merge_children),
-        );
-
-    let merges_row = view()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(
-            muted("Merges")
-                .text_size(px(11.5))
-                .font_weight(FontWeight::MEDIUM)
-                .w(px(168.))
-                .flex_shrink_0(),
-        )
-        .child(merges_track)
-        .child(
-            mono_val(tl.merges.len().to_string(), 11.5)
-                .w(px(54.))
-                .flex_shrink_0(),
-        );
-
-    let has_any = tl.lanes.iter().any(|l| !l.blocks.is_empty()) || !tl.merges.is_empty();
-    let mut panel = view()
-        .w_full()
-        .pt_2()
-        .gap_2()
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(note("Day timeline"))
-                .child(
-                    compact_action(
-                        "24h",
-                        if full_24h {
-                            Variant::Secondary
-                        } else {
-                            Variant::Quiet
-                        },
-                        move |_| intent(ui, "toggle-timeline-24h"),
-                    )
-                    .accessibility_label("24h"),
-                ),
-        )
-        .child(axis_row)
-        .children(lane_views)
-        .child(merges_row);
-
-    if !has_any {
-        panel = panel.child(note("No activity"));
-    }
-    panel
-}
-
-fn x_axis_ticks(days: &[DayBucket]) -> Vec<String> {
-    let n = days.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    if n <= 7 {
-        return days.iter().map(|d| d.short_label.clone()).collect();
-    }
-    let slots = 6usize;
-    (0..slots)
-        .map(|i| {
-            let idx = i * (n - 1) / (slots - 1);
-            days[idx].short_label.clone()
-        })
-        .collect()
-}
-
-fn chart_y_axis(top_tick: usize) -> View {
-    let mid_tick = top_tick / 2;
-    view()
-        .w(px(28.))
-        .h(px(CHART_HEIGHT))
-        .flex_shrink_0()
-        .justify_between()
-        .items_end()
-        .pr_1p5()
-        .child(
-            text(top_tick.to_string())
-                .font_family(MONO_FONT)
-                .text_size(px(10.5))
-                .text_color(MUTED),
-        )
-        .child(
-            text(mid_tick.to_string())
-                .font_family(MONO_FONT)
-                .text_size(px(10.5))
-                .text_color(MUTED),
-        )
-        .child(
-            text("0")
-                .font_family(MONO_FONT)
-                .text_size(px(10.5))
-                .text_color(MUTED),
-        )
-}
-
-fn plot_grid_frame(top_tick: usize, col_gap: f32, columns: Vec<AnyElement>) -> View {
-    view()
-        .flex_row()
-        .items_center()
-        .child(chart_y_axis(top_tick))
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(0.))
-                .h(px(CHART_HEIGHT))
-                .relative()
-                .child(
-                    view()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .top(px(4.))
-                        .h(px(1.))
-                        .bg(BORDER)
-                        .opacity(0.45)
-                        .pointer_events(PointerEvents::None),
-                )
-                .child(
-                    view()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .top(px(CHART_HEIGHT / 2.0))
-                        .h(px(1.))
-                        .bg(BORDER)
-                        .opacity(0.45)
-                        .pointer_events(PointerEvents::None),
-                )
-                .child(
-                    view()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .h(px(1.))
-                        .bg(BORDER)
-                        .pointer_events(PointerEvents::None),
-                )
-                .child(
-                    view()
-                        .w_full()
-                        .h_full()
-                        .flex_row()
-                        .items_end()
-                        .gap(px(col_gap))
-                        .children(columns),
-                ),
-        )
-}
-
-fn render_daily_output(ui: Ui, dash: &Dashboard) -> View {
-    let top_tick = nice_ceil_tick(dash.max_daily_kanban);
-    let n = dash.days.len();
-    let col_gap = if n > 45 {
-        1.0
-    } else if n > 14 {
-        2.0
-    } else {
-        6.0
-    };
-    let bar_max_w = if n > 45 {
-        4.0
-    } else if n > 14 {
-        7.0
-    } else {
-        14.0
-    };
-    let pair_gap = if n > 45 { 1.0 } else { 2.0 };
-    let usable_h = CHART_HEIGHT - 8.0;
-
-    let columns = dash
-        .days
-        .iter()
-        .enumerate()
-        .map(|(day_index, day)| {
-            let c_h = if day.created_cards == 0 {
-                0.0
-            } else {
-                (day.created_cards as f32 / top_tick as f32 * usable_h).max(3.0)
-            };
-            let m_h = if day.merged_cards == 0 {
-                0.0
-            } else {
-                (day.merged_cards as f32 / top_tick as f32 * usable_h).max(3.0)
-            };
-            let avg = dash.moving_average[day_index];
-            let tip = format!(
-                "{} ({}) · Resolved {} ({} local / {} PR) · Created {} · 7D mean {}",
-                day.date_key,
-                day.weekday_label,
-                day.merged_cards,
-                day.local_merges,
-                day.pr_merges,
-                day.created_cards,
-                avg.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into())
-            );
-            let date_parsed = chrono::NaiveDate::parse_from_str(&day.date_key, "%Y-%m-%d").ok();
-
-            view()
-                .flex_1()
-                .min_w(px(0.))
-                .h(px(CHART_HEIGHT))
-                .tooltip(tooltip_box().child(note(tip)))
-                .child(
-                    press_target()
-                        .w_full()
-                        .h_full()
-                        .rounded(px(4.))
-                        .hover(|s| s.bg(CARD_HOVER))
-                        .justify_end()
-                        .items_center()
-                        .on_press(move |_: &()| {
-                            if let Some(d) = date_parsed {
-                                select_date(ui, Some(d));
-                                set_range(ui, RangeWindow::Today);
-                            }
-                        })
-                        .relative()
-                        .child(if let Some(avg) = avg {
-                            view()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom(px((avg as f32 / top_tick as f32 * usable_h).min(usable_h)))
-                                .h(px(2.))
-                                .bg(ATTENTION)
-                                .pointer_events(PointerEvents::None)
-                                .into_element()
-                        } else {
-                            view().into_element()
-                        })
-                        .child(
-                            view()
-                                .w_full()
-                                .flex_row()
-                                .items_end()
-                                .justify_center()
-                                .gap(px(pair_gap))
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .max_w(px(bar_max_w))
-                                        .h(px(c_h))
-                                        .rounded(px(2.))
-                                        .bg(move || alpha_tint(ACCENT, 0.45)),
-                                )
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .max_w(px(bar_max_w))
-                                        .h(px(m_h))
-                                        .rounded(px(2.))
-                                        .bg(SUCCESS),
-                                ),
-                        ),
-                )
-                .into_element()
-        })
-        .collect::<Vec<_>>();
-
-    let ticks = x_axis_ticks(&dash.days);
-
-    view()
-        .w_full()
-        .pt_2()
-        .gap_2()
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(note("Daily created vs resolved"))
-                .child(
-                    row()
-                        .child(legend_swatch(move || alpha_tint(ACCENT, 0.45), "Created"))
-                        .child(legend_swatch(SUCCESS, "Resolved"))
-                        .child(legend_swatch(ATTENTION, "7D mean")),
-                ),
-        )
-        .child(plot_grid_frame(top_tick, col_gap, columns))
-        .child(
-            view().pl(px(28.)).flex_row().justify_between().children(
-                ticks
-                    .into_iter()
-                    .map(|t| {
-                        text(t)
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.5))
-                            .text_color(MUTED)
-                            .into_element()
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+                .flex_grow((1.0 - ratio).max(0.0))
+                .basis(px(0.))
+                .h_full(),
         )
 }
 
@@ -2639,169 +1683,233 @@ fn render_mini_sparkline(values: &[u64], max_val: u64, color: AdaptiveColor, hei
         .children(bars)
 }
 
-fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String], narrow: bool) -> View {
-    let sort_mode = ui.insights.project_sort.get();
-    let active_scope = ui.insights.scope_project.get();
-    let mut projects = dash.project_stats.clone();
-    match sort_mode {
-        ProjectSort::Time => {
-            projects.sort_by(|a, b| {
-                b.total_time_ms()
-                    .cmp(&a.total_time_ms())
-                    .then_with(|| b.merged.cmp(&a.merged))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
-        ProjectSort::Leverage => {
-            projects.sort_by(|a, b| {
-                let la = a.leverage().unwrap_or(-1.0);
-                let lb = b.leverage().unwrap_or(-1.0);
-                lb.total_cmp(&la)
-                    .then_with(|| b.agent_ms.cmp(&a.agent_ms))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
-        ProjectSort::Merged => {
-            projects.sort_by(|a, b| {
-                b.merged
-                    .cmp(&a.merged)
-                    .then_with(|| b.total_time_ms().cmp(&a.total_time_ms()))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
-        ProjectSort::Created => {
-            projects.sort_by(|a, b| {
-                b.created
-                    .cmp(&a.created)
-                    .then_with(|| b.merged.cmp(&a.merged))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
-        ProjectSort::Wip => {
-            projects.sort_by(|a, b| {
-                b.total_wip()
-                    .cmp(&a.total_wip())
-                    .then_with(|| b.merged.cmp(&a.merged))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
-        ProjectSort::Runs => {
-            projects.sort_by(|a, b| {
-                b.agent_runs
-                    .cmp(&a.agent_runs)
-                    .then_with(|| b.merged.cmp(&a.merged))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
+fn render_two_col_grid(narrow: bool, cards: Vec<AnyElement>) -> View {
+    if narrow || cards.len() <= 1 {
+        return view().w_full().gap_3().children(cards);
     }
-
-    let mut split_segments: Vec<(String, u64, AdaptiveColor)> = projects
-        .iter()
-        .filter(|p| p.total_time_ms() > 0)
-        .map(|p| {
-            (
-                p.name.clone(),
-                p.total_time_ms(),
-                project_color(Some(&p.id), project_order),
-            )
-        })
-        .collect();
-    let other_total = dash.other_dwell_ms.saturating_add(dash.other_agent_ms);
-    if active_scope.is_empty() && other_total > 0 {
-        split_segments.push(("Other".into(), other_total, alpha_tint(MUTED, 0.55)));
-    }
-
-    let spark_max = projects
-        .iter()
-        .flat_map(|p| p.recent_merges.iter().copied())
-        .max()
-        .unwrap_or(1)
-        .max(1) as u64;
-
-    let mut rows: Vec<AnyElement> = projects
-        .into_iter()
-        .map(|p| {
-            let pid = p.id.clone();
-            let is_scoped = active_scope == pid;
-            let dot_color = project_color(Some(&p.id), project_order);
-            let total_wip = p.total_wip();
-            let lev = p.leverage();
-            let lev_color = match lev {
-                Some(v) if v >= 2.0 => SUCCESS,
-                Some(_) => TEXT,
-                None => MUTED,
-            };
-            let (pass_txt, pass_color) = match p.pass_rate_pct() {
-                Some(pct) if pct >= 85 => (format!("{pct}%"), SUCCESS),
-                Some(pct) if pct < 60 => (format!("{pct}%"), ATTENTION),
-                Some(pct) => (format!("{pct}%"), TEXT),
-                None if p.active_runs > 0 => ("run".into(), ACCENT),
-                None => ("—".into(), MUTED),
-            };
-
-            let display_title = if let Some(ref badge_txt) = p.host_badge {
-                format!("{} · {badge_txt}", p.name)
-            } else {
-                p.name.clone()
-            };
-            let tip = format!(
-                "{display_title} · Me {} · Agent {} · Leverage {} · ✓{} done · +{} in · {} WIP (B {} / D {} / R {}) · {} runs · {} asks",
-                format_duration_compact(p.dwell_ms),
-                format_duration_compact(p.agent_ms),
-                format_leverage(lev),
-                p.merged,
-                p.created,
-                total_wip,
-                p.wip_backlog,
-                p.wip_develop,
-                p.wip_review,
-                p.agent_runs,
-                p.human_asks,
-            );
-
-            let spark_vals: Vec<u64> = p.recent_merges.iter().map(|&n| n as u64).collect();
-            let cards_cell = view()
-                .w(px(148.))
-                .flex_shrink_0()
+    let mut rows = Vec::new();
+    let mut iter = cards.into_iter();
+    while let Some(a) = iter.next() {
+        let row_el = if let Some(b) = iter.next() {
+            view()
+                .w_full()
                 .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    text(format!("+{}", p.created))
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
-                        .text_color(MUTED)
-                        .w(px(30.)),
-                )
-                .child(
-                    text(format!("✓{}", p.merged))
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
-                        .font_weight(if p.merged > 0 {
-                            FontWeight::MEDIUM
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(if p.merged > 0 { SUCCESS } else { MUTED })
-                        .w(px(36.)),
-                )
-                .child(
-                    text(format!("{total_wip} wip"))
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
-                        .text_color(if p.wip_gated > 0 { ATTENTION } else { MUTED })
-                        .flex_1(),
-                );
+                .items_stretch()
+                .gap_3()
+                .child(a)
+                .child(b)
+                .into_element()
+        } else {
+            view()
+                .w_full()
+                .flex_row()
+                .items_stretch()
+                .gap_3()
+                .child(a)
+                .child(view().flex_1().min_w(px(280.)))
+                .into_element()
+        };
+        rows.push(row_el);
+    }
+    view().w_full().gap_3().children(rows)
+}
 
-            let mut row_content = view()
+fn render_summary_bar(ui: Ui, dash: &Dashboard) -> View {
+    let t = &dash.time_totals;
+    let total_ms = t.total_active_ms();
+    let notice_text = if dash.history_start.is_none_or(|h| h > dash.selected_date) {
+        Some("No retained history")
+    } else if dash
+        .history_start
+        .is_some_and(|h| h.to_string() > dash.window_start_key)
+    {
+        Some("Partial history")
+    } else {
+        None
+    };
+
+    let has_project_filter = !ui.insights.scope_project.get().is_empty();
+    let has_host_filter = !ui.insights.scope_host.get().is_empty();
+
+    let mut left = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_2p5()
+        .child(
+            mono_val(format!("Total {}", format_duration_compact(total_ms)), 12.5)
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+        .child(time_breakdown_inline(t.agent_total_ms, t.dwell_total_ms))
+        .child(note("·"))
+        .child(mono_val(
+            format!(
+                "{} {}",
+                dash.scheduled_total,
+                if dash.scheduled_total == 1 {
+                    "task"
+                } else {
+                    "tasks"
+                }
+            ),
+            12.,
+        ))
+        .child(note("·"))
+        .child(
+            text(format!("{} merged", dash.merged_total))
+                .font_family(MONO_FONT)
+                .text_size(px(12.))
+                .text_color(if dash.merged_total > 0 {
+                    SUCCESS
+                } else {
+                    MUTED
+                }),
+        );
+
+    if let Some(msg) = notice_text {
+        left = left.child(note(format!("· {msg}")));
+    }
+    if has_host_filter {
+        left = left.child(compact_action(
+            "Clear Host filter",
+            Variant::Quiet,
+            move |_| {
+                ui.insights.scope_host.set(String::new());
+            },
+        ));
+    }
+    if has_project_filter {
+        left = left.child(compact_action(
+            "Clear Project filter",
+            Variant::Quiet,
+            move |_| {
+                ui.insights.scope_project.set(String::new());
+            },
+        ));
+    }
+
+    let prior = match dash.range {
+        RangeWindow::Days7 => "vs prior 7d",
+        RangeWindow::Days14 => "vs prior 14d",
+        RangeWindow::Days30 => "vs prior 30d",
+        RangeWindow::Days90 => "vs prior 90d",
+        RangeWindow::Today => "1D",
+    };
+
+    view()
+        .w_full()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(left)
+        .child(
+            view()
+                .tooltip(tooltip_box().child(note(format!(
+                    "{} · {}",
+                    dash.comparison_label, dash.timezone
+                ))))
+                .child(note(prior)),
+        )
+}
+
+fn render_project_card(
+    ui: Ui,
+    p: &ProjectStat,
+    total_all_val: u64,
+    max_card_val: u64,
+    dot_color: AdaptiveColor,
+    metric: InsightsMetric,
+    is_selected: bool,
+) -> impl IntoElement {
+    let pid = p.id.clone();
+    let total_ms = p.total_time_ms();
+    let total_wip = p.total_wip();
+    let card_val = match metric {
+        InsightsMetric::Time => total_ms,
+        InsightsMetric::Tasks => p.agent_runs as u64,
+    };
+    let share_pct = if total_all_val > 0 {
+        ((card_val as u128 * 100 + total_all_val as u128 / 2) / total_all_val as u128) as usize
+    } else {
+        0
+    };
+
+    let primary_val = match metric {
+        InsightsMetric::Time => format_duration_compact(total_ms),
+        InsightsMetric::Tasks => format!(
+            "{} {}",
+            p.agent_runs,
+            if p.agent_runs == 1 { "task" } else { "tasks" }
+        ),
+    };
+
+    let bar_el = match metric {
+        InsightsMetric::Time => render_two_color_bar(p.agent_ms, p.dwell_ms, max_card_val),
+        InsightsMetric::Tasks => render_single_bar(
+            p.agent_runs as u64,
+            max_card_val,
+            dot_color,
+            format!("{} tasks", p.agent_runs),
+        ),
+    };
+
+    let spark_data: &[u64] = match metric {
+        InsightsMetric::Time => &p.load_bars,
+        InsightsMetric::Tasks => &p.task_bars,
+    };
+    let spark_max = spark_data.iter().copied().max().unwrap_or(1).max(1);
+    let has_spark = spark_data.iter().any(|&v| v > 0);
+
+    let profiles_txt = if p.profiles.is_empty() {
+        "—".into()
+    } else {
+        p.profiles
+            .iter()
+            .take(3)
+            .map(|pr| {
+                if pr == "manual" {
+                    "Manual".to_owned()
+                } else {
+                    format!("@{pr}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+
+    let mut bottom_row = view()
+        .w_full()
+        .pt_2()
+        .border_t_1()
+        .border_color(alpha_tint(BORDER, 0.45))
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_3();
+    if has_spark {
+        bottom_row = bottom_row.child(view().w(px(96.)).flex_shrink_0().child(
+            render_mini_sparkline(spark_data, spark_max, dot_color, 18.0),
+        ));
+    }
+    bottom_row = bottom_row.child(note(profiles_txt).flex_1().min_w(px(0.)).truncate());
+
+    let card_body = view()
+        .w_full()
+        .gap_2p5()
+        // Row 1: Project identity + share %
+        .child(
+            view()
                 .w_full()
                 .flex_row()
                 .items_center()
-                .gap_3()
+                .justify_between()
+                .gap_2()
                 .child(
                     view()
                         .flex_1()
-                        .min_w(px(140.))
+                        .min_w(px(0.))
                         .flex_row()
                         .items_center()
                         .gap_2()
@@ -2815,195 +1923,184 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String], narrow: b
                         )
                         .child(
                             label(p.name.clone())
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(TEXT)
                                 .truncate()
                                 .min_w(px(0.)),
                         )
                         .child({
                             let has_badge = p.host_badge.is_some();
                             let b = p.host_badge.clone().unwrap_or_default();
-                            when(
-                                move || has_badge,
-                                move || {
-                                    muted(b.clone())
-                                        .text_size(px(11.))
-                                        .flex_shrink_0()
-                                },
-                            )
+                            when(move || has_badge, move || note(b.clone()).flex_shrink_0())
                         }),
                 )
                 .child(
-                    mono_val(
-                        if p.dwell_ms > 0 {
-                            format_duration_compact(p.dwell_ms)
-                        } else {
-                            "—".into()
-                        },
-                        11.5,
-                    )
-                    .w(px(68.))
+                    text(if total_all_val > 0 {
+                        format!("{share_pct}%")
+                    } else {
+                        "—".into()
+                    })
+                    .font_family(MONO_FONT)
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if is_selected { ACCENT } else { MUTED })
                     .flex_shrink_0(),
-                )
-                .child(
-                    mono_val(
-                        if p.agent_ms > 0 {
-                            format_duration_compact(p.agent_ms)
-                        } else {
-                            "—".into()
-                        },
-                        11.5,
-                    )
-                    .w(px(68.))
-                    .flex_shrink_0(),
-                )
-                .child(
-                    text(format_leverage(lev))
-                        .font_family(MONO_FONT)
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(lev_color)
-                        .w(px(68.))
-                        .flex_shrink_0(),
-                )
-                .child(cards_cell)
-                .child(
-                    text(pass_txt)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
-                        .text_color(pass_color)
-                        .w(px(52.))
-                        .flex_shrink_0(),
-                );
-
-            if !narrow {
-                row_content = row_content.child(
-                    view().w(px(62.)).flex_shrink_0().child(render_mini_sparkline(
-                        &spark_vals,
-                        spark_max,
-                        alpha_tint(SUCCESS, 0.85),
-                        16.0,
-                    )),
-                );
-            }
-
+                ),
+        )
+        // Row 2: Total + Agent/Me two-color breakdown
+        .child(
             view()
                 .w_full()
-                .tooltip(tooltip_box().child(note(tip)))
+                .flex_row()
+                .flex_wrap()
+                .items_baseline()
+                .justify_between()
+                .gap_2()
                 .child(
-                    press_target()
-                        .w_full()
-                        .px_2()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(alpha_tint(BORDER, 0.45))
-                        .bg(if is_scoped {
-                            SELECTED.resolve()
-                        } else {
-                            AdaptiveColor::TRANSPARENT
-                        })
-                        .hover(|s| s.bg(CARD_HOVER))
-                        .accessibility_label(format!("Insights Project: {display_title}"))
-                        .on_press(move |_: &()| {
-                            let cur = ui.insights.scope_project.get_untracked();
-                            if cur == pid {
-                                ui.insights.scope_project.set(String::new());
-                            } else {
-                                ui.insights.scope_project.set(pid.clone());
-                            }
-                        })
-                        .child(row_content),
+                    text(primary_val)
+                        .font_family(MONO_FONT)
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(TEXT),
                 )
-                .into_element()
+                .child(time_breakdown_inline(p.agent_ms, p.dwell_ms)),
+        )
+        // Row 3: Two-color total time bar (or Tasks bar)
+        .child(bar_el)
+        // Row 4: Plain stats
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2p5()
+                .child(
+                    text(format!(
+                        "{} {}",
+                        p.agent_runs,
+                        if p.agent_runs == 1 { "task" } else { "tasks" }
+                    ))
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.5))
+                    .text_color(TEXT),
+                )
+                .child(
+                    text(format!("{} merged", p.merged))
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .text_color(if p.merged > 0 { SUCCESS } else { MUTED }),
+                )
+                .child(
+                    text(format!("{total_wip} WIP"))
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .text_color(MUTED),
+                ),
+        )
+        // Row 5: Sparkline + active profiles
+        .child(bottom_row);
+
+    press_target()
+        .flex_1()
+        .min_w(px(280.))
+        .p_4()
+        .rounded(px(10.))
+        .bg(if is_selected {
+            SELECTED.resolve()
+        } else {
+            SURFACE.resolve()
+        })
+        .hover(|s| s.bg(CARD_HOVER))
+        .accessibility_label(format!("Insights Project: {}", p.name))
+        .on_press(move |_: &()| {
+            let cur = ui.insights.scope_project.get_untracked();
+            if cur == pid {
+                ui.insights.scope_project.set(String::new());
+            } else {
+                ui.insights.scope_project.set(pid.clone());
+            }
+        })
+        .child(card_body)
+}
+
+fn render_projects(
+    ui: Ui,
+    dash: &Dashboard,
+    project_order: &[String],
+    metric: InsightsMetric,
+    narrow: bool,
+) -> View {
+    let active_scope = ui.insights.scope_project.get();
+    let mut projects = dash.project_stats.clone();
+    match metric {
+        InsightsMetric::Time => {
+            projects.sort_by(|a, b| {
+                b.total_time_ms()
+                    .cmp(&a.total_time_ms())
+                    .then_with(|| b.agent_runs.cmp(&a.agent_runs))
+                    .then_with(|| b.merged.cmp(&a.merged))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        }
+        InsightsMetric::Tasks => {
+            projects.sort_by(|a, b| {
+                b.agent_runs
+                    .cmp(&a.agent_runs)
+                    .then_with(|| b.total_time_ms().cmp(&a.total_time_ms()))
+                    .then_with(|| b.merged.cmp(&a.merged))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        }
+    }
+
+    let is_time = metric == InsightsMetric::Time;
+    let other_total = dash.other_dwell_ms.saturating_add(dash.other_agent_ms);
+    let mut split_segments: Vec<(String, u64, AdaptiveColor)> = projects
+        .iter()
+        .filter_map(|p| {
+            let v = if is_time {
+                p.total_time_ms()
+            } else {
+                p.agent_runs as u64
+            };
+            (v > 0).then(|| (p.name.clone(), v, project_color(Some(&p.id), project_order)))
         })
         .collect();
-
-    if active_scope.is_empty() && other_total > 0 {
-        let mut other_row = view()
-            .w_full()
-            .px_2()
-            .py_1p5()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .child(note("Other").flex_1().min_w(px(140.)))
-            .child(
-                note(if dash.other_dwell_ms > 0 {
-                    format_duration_compact(dash.other_dwell_ms)
-                } else {
-                    "—".into()
-                })
-                .w(px(68.))
-                .flex_shrink_0(),
-            )
-            .child(
-                note(if dash.other_agent_ms > 0 {
-                    format_duration_compact(dash.other_agent_ms)
-                } else {
-                    "—".into()
-                })
-                .w(px(68.))
-                .flex_shrink_0(),
-            )
-            .child(note("—").w(px(68.)).flex_shrink_0())
-            .child(note("—").w(px(148.)).flex_shrink_0())
-            .child(note("—").w(px(52.)).flex_shrink_0());
-        if !narrow {
-            other_row = other_row.child(view().w(px(62.)).flex_shrink_0());
-        }
-        rows.push(other_row.into_element());
+    if is_time && active_scope.is_empty() && other_total > 0 {
+        split_segments.push(("Other".into(), other_total, alpha_tint(MUTED, 0.55)));
     }
 
-    let mut header_row = view()
-        .w_full()
-        .px_2()
-        .pb_1p5()
-        .border_b_1()
-        .border_color(BORDER)
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .child(note("Project").flex_1().min_w(px(140.)))
-        .child(note("My time").w(px(68.)).flex_shrink_0())
-        .child(note("Agent").w(px(68.)).flex_shrink_0())
-        .child(note("Leverage").w(px(68.)).flex_shrink_0())
-        .child(note("Cards").w(px(148.)).flex_shrink_0())
-        .child(note("Pass").w(px(52.)).flex_shrink_0());
-    if !narrow {
-        header_row = header_row.child(note("7D").w(px(62.)).flex_shrink_0());
-    }
+    let total_all_val: u64 = split_segments.iter().map(|(_, v, _)| *v).sum();
+    let max_card_val: u64 = projects
+        .iter()
+        .map(|p| {
+            if is_time {
+                p.total_time_ms()
+            } else {
+                p.agent_runs as u64
+            }
+        })
+        .max()
+        .unwrap_or(0);
 
-    let sort_controls = row()
-        .child(choice(
-            ui,
-            "Time",
-            "sort-time",
-            sort_mode == ProjectSort::Time,
-        ))
-        .child(choice(
-            ui,
-            "Leverage",
-            "sort-leverage",
-            sort_mode == ProjectSort::Leverage,
-        ))
-        .child(choice(
-            ui,
-            "Merged",
-            "sort-merged",
-            sort_mode == ProjectSort::Merged,
-        ))
-        .child(choice(ui, "WIP", "sort-wip", sort_mode == ProjectSort::Wip))
-        .child(choice(
-            ui,
-            "Runs",
-            "sort-runs",
-            sort_mode == ProjectSort::Runs,
-        ));
+    let header_right = if total_all_val > 0 {
+        let lbl = if is_time {
+            format!("Total {}", format_duration_compact(total_all_val))
+        } else {
+            format!(
+                "{total_all_val} {}",
+                if total_all_val == 1 { "task" } else { "tasks" }
+            )
+        };
+        note(lbl).into_element()
+    } else {
+        view().into_element()
+    };
 
     let mut sec = section_wrap().child(
         view()
             .flex_row()
-            .flex_wrap()
             .items_center()
             .justify_between()
             .gap_2()
@@ -3013,19 +2110,36 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String], narrow: b
                     .items_baseline()
                     .gap_2()
                     .child(heading("Projects"))
-                    .child(mono_val(dash.project_stats.len().to_string(), 11.5).text_color(MUTED)),
+                    .child(mono_val(projects.len().to_string(), 11.5).text_color(MUTED)),
             )
-            .child(sort_controls),
+            .child(header_right),
     );
 
     if !split_segments.is_empty() {
-        sec = sec.child(render_proportional_bar(&split_segments));
+        sec = sec.child(render_proportional_bar(&split_segments, is_time));
     }
 
-    if rows.is_empty() {
+    if projects.is_empty() {
         sec = sec.child(note("No project activity"));
     } else {
-        sec = sec.child(view().w_full().child(header_row).children(rows));
+        let cards: Vec<AnyElement> = projects
+            .iter()
+            .map(|p| {
+                let is_sel = active_scope == p.id;
+                let dot_color = project_color(Some(&p.id), project_order);
+                render_project_card(
+                    ui,
+                    p,
+                    total_all_val,
+                    max_card_val,
+                    dot_color,
+                    metric,
+                    is_sel,
+                )
+                .into_element()
+            })
+            .collect();
+        sec = sec.child(render_two_col_grid(narrow, cards));
     }
     sec
 }
@@ -3033,29 +2147,41 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String], narrow: b
 fn render_machine_card(
     ui: Ui,
     h: &HostStat,
-    total_all_hosts_ms: u64,
+    total_all_val: u64,
+    max_card_val: u64,
     accent_color: AdaptiveColor,
+    metric: InsightsMetric,
     is_selected: bool,
 ) -> impl IntoElement {
     let hid = h.id.clone();
-    let tot = h.total_time_ms();
-    let share_pct = if total_all_hosts_ms > 0 {
-        ((tot as u128 * 100 + total_all_hosts_ms as u128 / 2) / total_all_hosts_ms as u128) as usize
+    let total_ms = h.total_time_ms();
+    let card_val = match metric {
+        InsightsMetric::Time => total_ms,
+        InsightsMetric::Tasks => h.agent_runs as u64,
+    };
+    let share_pct = if total_all_val > 0 {
+        ((card_val as u128 * 100 + total_all_val as u128 / 2) / total_all_val as u128) as usize
     } else {
         0
     };
-    let lev = h.leverage();
-    let lev_color = match lev {
-        Some(v) if v >= 2.0 => SUCCESS,
-        Some(_) => TEXT,
-        None => MUTED,
+
+    let primary_val = match metric {
+        InsightsMetric::Time => format_duration_compact(total_ms),
+        InsightsMetric::Tasks => format!(
+            "{} {}",
+            h.agent_runs,
+            if h.agent_runs == 1 { "task" } else { "tasks" }
+        ),
     };
-    let (pass_txt, pass_color) = match h.pass_rate_pct() {
-        Some(pct) if pct >= 85 => (format!("{pct}% pass"), SUCCESS),
-        Some(pct) if pct < 60 => (format!("{pct}% pass"), ATTENTION),
-        Some(pct) => (format!("{pct}% pass"), TEXT),
-        None if h.active_runs > 0 => (format!("{} active", h.active_runs), ACCENT),
-        None => ("— pass".into(), MUTED),
+
+    let bar_el = match metric {
+        InsightsMetric::Time => render_two_color_bar(h.agent_ms, h.dwell_ms, max_card_val),
+        InsightsMetric::Tasks => render_single_bar(
+            h.agent_runs as u64,
+            max_card_val,
+            accent_color,
+            format!("{} tasks", h.agent_runs),
+        ),
     };
 
     let status_dot_color = if h.offline {
@@ -3080,8 +2206,12 @@ fn render_machine_card(
             .join(" · ")
     };
 
-    let spark_max = h.load_bars.iter().copied().max().unwrap_or(1).max(1);
-    let has_spark = h.load_bars.iter().any(|&v| v > 0);
+    let spark_data: &[u64] = match metric {
+        InsightsMetric::Time => &h.load_bars,
+        InsightsMetric::Tasks => &h.task_bars,
+    };
+    let spark_max = spark_data.iter().copied().max().unwrap_or(1).max(1);
+    let has_spark = spark_data.iter().any(|&v| v > 0);
 
     let mut meta_row = view()
         .flex_row()
@@ -3089,31 +2219,23 @@ fn render_machine_card(
         .items_center()
         .gap_2p5()
         .child(
-            text(format!("✓{} done", h.merged))
+            text(format!(
+                "{} {}",
+                h.agent_runs,
+                if h.agent_runs == 1 { "task" } else { "tasks" }
+            ))
+            .font_family(MONO_FONT)
+            .text_size(px(11.5))
+            .text_color(TEXT),
+        )
+        .child(
+            text(format!("{} merged", h.merged))
                 .font_family(MONO_FONT)
                 .text_size(px(11.5))
                 .text_color(if h.merged > 0 { SUCCESS } else { MUTED }),
         )
         .child(
-            text(format!("+{} in", h.created))
-                .font_family(MONO_FONT)
-                .text_size(px(11.5))
-                .text_color(MUTED),
-        )
-        .child(
             text(format!("{} WIP", h.wip))
-                .font_family(MONO_FONT)
-                .text_size(px(11.5))
-                .text_color(MUTED),
-        )
-        .child(
-            text(pass_txt)
-                .font_family(MONO_FONT)
-                .text_size(px(11.5))
-                .text_color(pass_color),
-        )
-        .child(
-            text(format!("{} runs", h.agent_runs))
                 .font_family(MONO_FONT)
                 .text_size(px(11.5))
                 .text_color(MUTED),
@@ -3127,10 +2249,26 @@ fn render_machine_card(
         );
     }
 
-    let mut card_body = view()
+    let mut bottom_row = view()
+        .w_full()
+        .pt_2()
+        .border_t_1()
+        .border_color(alpha_tint(BORDER, 0.45))
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_3();
+    if has_spark {
+        bottom_row = bottom_row.child(view().w(px(96.)).flex_shrink_0().child(
+            render_mini_sparkline(spark_data, spark_max, accent_color, 18.0),
+        ));
+    }
+    bottom_row = bottom_row.child(note(top_projects_str).flex_1().min_w(px(0.)).truncate());
+
+    let card_body = view()
         .w_full()
         .gap_2p5()
-        // Row 1: Identity + share %
+        // Row 1: Machine identity + share %
         .child(
             view()
                 .w_full()
@@ -3177,7 +2315,7 @@ fn render_machine_card(
                         }),
                 )
                 .child(
-                    text(if total_all_hosts_ms > 0 {
+                    text(if total_all_val > 0 {
                         format!("{share_pct}%")
                     } else {
                         "—".into()
@@ -3189,62 +2327,30 @@ fn render_machine_card(
                     .flex_shrink_0(),
                 ),
         )
-        // Row 2: Agent & Me time + Leverage
+        // Row 2: Total + Agent/Me two-color breakdown
         .child(
             view()
                 .w_full()
                 .flex_row()
+                .flex_wrap()
                 .items_baseline()
                 .justify_between()
                 .gap_2()
                 .child(
-                    view()
-                        .flex_row()
-                        .items_baseline()
-                        .gap_3()
-                        .child(
-                            text(format!("Agent {}", format_duration_compact(h.agent_ms)))
-                                .font_family(MONO_FONT)
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(TEXT),
-                        )
-                        .child(
-                            text(format!("Me {}", format_duration_compact(h.dwell_ms)))
-                                .font_family(MONO_FONT)
-                                .text_size(px(12.))
-                                .text_color(MUTED),
-                        ),
-                )
-                .child(
-                    text(format_leverage(lev))
+                    text(primary_val)
                         .font_family(MONO_FONT)
                         .text_size(px(15.))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(lev_color)
-                        .flex_shrink_0(),
-                ),
+                        .text_color(TEXT),
+                )
+                .child(time_breakdown_inline(h.agent_ms, h.dwell_ms)),
         )
-        // Row 3: Cards + Pass% + Runs + optional peak parallel
-        .child(meta_row);
-
-    // Row 4: Mini load sparkline + Top projects
-    let mut bottom_row = view()
-        .w_full()
-        .pt_1p5()
-        .border_t_1()
-        .border_color(alpha_tint(BORDER, 0.45))
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap_3();
-    if has_spark {
-        bottom_row = bottom_row.child(view().w(px(96.)).flex_shrink_0().child(
-            render_mini_sparkline(&h.load_bars, spark_max, accent_color, 18.0),
-        ));
-    }
-    bottom_row = bottom_row.child(note(top_projects_str).flex_1().min_w(px(0.)).truncate());
-    card_body = card_body.child(bottom_row);
+        // Row 3: Two-color total time bar (or Tasks bar)
+        .child(bar_el)
+        // Row 4: Plain stats
+        .child(meta_row)
+        // Row 5: Sparkline + Top projects
+        .child(bottom_row);
 
     press_target()
         .flex_1()
@@ -3278,10 +2384,67 @@ fn render_machine_card(
         .child(card_body)
 }
 
-fn render_machines(ui: Ui, dash: &Dashboard, narrow: bool) -> View {
+fn render_machines(ui: Ui, dash: &Dashboard, metric: InsightsMetric, narrow: bool) -> View {
     let active_host = ui.insights.scope_host.get();
-    let total_all_hosts_ms: u64 = dash.host_stats.iter().map(HostStat::total_time_ms).sum();
-    let online_count = dash.host_stats.iter().filter(|h| !h.offline).count();
+    let is_time = metric == InsightsMetric::Time;
+    let mut hosts = dash.host_stats.clone();
+    match metric {
+        InsightsMetric::Time => {
+            hosts.sort_by(|a, b| {
+                b.total_time_ms()
+                    .cmp(&a.total_time_ms())
+                    .then_with(|| b.agent_runs.cmp(&a.agent_runs))
+                    .then_with(|| (!a.is_local).cmp(&!b.is_local))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        }
+        InsightsMetric::Tasks => {
+            hosts.sort_by(|a, b| {
+                b.agent_runs
+                    .cmp(&a.agent_runs)
+                    .then_with(|| b.total_time_ms().cmp(&a.total_time_ms()))
+                    .then_with(|| (!a.is_local).cmp(&!b.is_local))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        }
+    }
+
+    let total_all_val: u64 = hosts
+        .iter()
+        .map(|h| {
+            if is_time {
+                h.total_time_ms()
+            } else {
+                h.agent_runs as u64
+            }
+        })
+        .sum();
+    let max_card_val: u64 = hosts
+        .iter()
+        .map(|h| {
+            if is_time {
+                h.total_time_ms()
+            } else {
+                h.agent_runs as u64
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    let online_count = hosts.iter().filter(|h| !h.offline).count();
+
+    let header_right = if total_all_val > 0 {
+        let lbl = if is_time {
+            format!("Total {}", format_duration_compact(total_all_val))
+        } else {
+            format!(
+                "{total_all_val} {}",
+                if total_all_val == 1 { "task" } else { "tasks" }
+            )
+        };
+        note(lbl).into_element()
+    } else {
+        view().into_element()
+    };
 
     let mut sec = section_wrap().child(
         view()
@@ -3296,444 +2459,339 @@ fn render_machines(ui: Ui, dash: &Dashboard, narrow: bool) -> View {
                     .gap_2()
                     .child(heading("Machines"))
                     .child(
-                        mono_val(
-                            format!("{online_count}/{} online", dash.host_stats.len()),
-                            11.5,
-                        )
-                        .text_color(MUTED),
+                        mono_val(format!("{online_count}/{} online", hosts.len()), 11.5)
+                            .text_color(MUTED),
                     ),
             )
-            .child(if total_all_hosts_ms > 0 {
-                note(format!(
-                    "Total {}",
-                    format_duration_compact(total_all_hosts_ms)
-                ))
-                .into_element()
-            } else {
-                view().into_element()
-            }),
+            .child(header_right),
     );
 
-    if dash.host_stats.len() >= 2 && total_all_hosts_ms > 0 {
-        let split: Vec<(String, u64, AdaptiveColor)> = dash
-            .host_stats
+    if hosts.len() >= 2 && total_all_val > 0 {
+        let split: Vec<(String, u64, AdaptiveColor)> = hosts
             .iter()
             .enumerate()
-            .filter(|(_, h)| h.total_time_ms() > 0)
-            .map(|(idx, h)| {
-                (
-                    h.name.clone(),
-                    h.total_time_ms(),
-                    host_color(idx, h.offline),
-                )
+            .filter_map(|(idx, h)| {
+                let v = if is_time {
+                    h.total_time_ms()
+                } else {
+                    h.agent_runs as u64
+                };
+                (v > 0).then(|| (h.name.clone(), v, host_color(idx, h.offline)))
             })
             .collect();
         if !split.is_empty() {
-            sec = sec.child(render_proportional_bar(&split));
+            sec = sec.child(render_proportional_bar(&split, is_time));
         }
     }
 
-    if narrow || dash.host_stats.len() == 1 {
-        let cards: Vec<AnyElement> = dash
-            .host_stats
-            .iter()
-            .enumerate()
-            .map(|(idx, h)| {
-                let is_sel = active_host == h.id;
-                render_machine_card(
-                    ui,
-                    h,
-                    total_all_hosts_ms,
-                    host_color(idx, h.offline),
-                    is_sel,
-                )
-                .into_element()
-            })
-            .collect();
-        sec = sec.child(view().w_full().gap_3().children(cards));
-    } else {
-        let mut grid_rows: Vec<AnyElement> = Vec::new();
-        let mut iter = dash.host_stats.iter().enumerate();
-        while let Some((idx_a, a)) = iter.next() {
-            let card_a = render_machine_card(
+    let cards: Vec<AnyElement> = hosts
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| {
+            let is_sel = active_host == h.id;
+            render_machine_card(
                 ui,
-                a,
-                total_all_hosts_ms,
-                host_color(idx_a, a.offline),
-                active_host == a.id,
-            );
-            let row_el = if let Some((idx_b, b)) = iter.next() {
-                let card_b = render_machine_card(
-                    ui,
-                    b,
-                    total_all_hosts_ms,
-                    host_color(idx_b, b.offline),
-                    active_host == b.id,
-                );
-                view()
-                    .w_full()
-                    .flex_row()
-                    .items_stretch()
-                    .gap_3()
-                    .child(card_a)
-                    .child(card_b)
-                    .into_element()
-            } else {
-                view()
-                    .w_full()
-                    .flex_row()
-                    .items_stretch()
-                    .gap_3()
-                    .child(card_a)
-                    .child(view().flex_1().min_w(px(280.)))
-                    .into_element()
-            };
-            grid_rows.push(row_el);
-        }
-        sec = sec.child(view().w_full().gap_3().children(grid_rows));
-    }
-
-    sec
+                h,
+                total_all_val,
+                max_card_val,
+                host_color(idx, h.offline),
+                metric,
+                is_sel,
+            )
+            .into_element()
+        })
+        .collect();
+    sec.child(render_two_col_grid(narrow, cards))
 }
 
-fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
-    let filter = ui.insights.drilldown.get();
-    if filter.is_empty() {
-        return view();
-    }
-    let ids = if filter == "created" {
-        &dash.created_ids
+struct AgentCardSpec {
+    title: String,
+    subtitle: String,
+    working_ms: u64,
+    tasks: usize,
+    cards: usize,
+    avg_task_ms: Option<u64>,
+    color: AdaptiveColor,
+}
+
+fn render_agent_card(
+    spec: &AgentCardSpec,
+    total_all_val: u64,
+    max_card_val: u64,
+    metric: InsightsMetric,
+) -> View {
+    let is_time = metric == InsightsMetric::Time;
+    let card_val = if is_time {
+        spec.working_ms
     } else {
-        &dash.merged_ids
+        spec.tasks as u64
     };
-    let label_kind = if filter == "merged" {
-        "resolved"
+    let share_pct = if total_all_val > 0 {
+        ((card_val as u128 * 100 + total_all_val as u128 / 2) / total_all_val as u128) as usize
     } else {
-        &filter
+        0
     };
-    let mut panel = view()
-        .w_full()
-        .p_3()
-        .gap_1p5()
-        .rounded(px(8.))
+    let time_txt = if spec.working_ms > 0 {
+        format_duration_compact(spec.working_ms)
+    } else {
+        "0m".into()
+    };
+    let tasks_txt = format!(
+        "{} {}",
+        spec.tasks,
+        if spec.tasks == 1 { "task" } else { "tasks" }
+    );
+    let avg_txt = spec
+        .avg_task_ms
+        .map(|ms| format!("avg {}/task", format_duration_compact(ms)))
+        .unwrap_or_else(|| "avg —".into());
+    let bar_tip = format!("{} · {time_txt} · {tasks_txt}", spec.title);
+
+    let (left_val, right_val) = if is_time {
+        (time_txt, tasks_txt)
+    } else {
+        (tasks_txt, time_txt)
+    };
+
+    view()
+        .flex_1()
+        .min_w(px(280.))
+        .p_4()
+        .rounded(px(10.))
         .bg(SURFACE)
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    label(format!("{} {} Cards", ids.len(), label_kind))
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
-                .child(compact_action("Close", Variant::Quiet, move |_| {
-                    intent(ui, "cards-close")
-                })),
-        );
-    for id in ids.iter().take(100) {
-        if let Some(card) = ui.index.with(|idx| idx.cards.get(id).cloned()) {
-            let proj_name = ui
-                .snapshot
-                .with(|s| s.project_display_name(&card.project_id));
-            let id = id.clone();
-            panel = panel.child(
-                press_target()
-                    .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(px(5.))
-                    .hover(|s| s.bg(CARD_HOVER))
-                    .on_press(move |_: &()| ui.open_card(id.clone()))
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                label(format!("#{} {}", card.number, card.title))
-                                    .text_size(px(12.5))
-                                    .truncate()
-                                    .flex_1()
-                                    .min_w(px(0.)),
-                            )
-                            .child(note(proj_name).flex_shrink_0()),
-                    ),
-            );
-        }
-    }
-    if ids.len() > 100 {
-        panel = panel.child(note("First 100 cards"));
-    }
-    panel
-}
-
-fn render_cards(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
-    let drill = ui.insights.drilldown.get();
-    let p = &dash.pipeline;
-
-    let mut stage_row = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_3()
-        .child(
-            view()
-                .flex_row()
-                .items_baseline()
-                .gap_1()
-                .child(note("Backlog"))
-                .child(mono_val(p.backlog.to_string(), 12.)),
-        )
-        .child(
-            view()
-                .flex_row()
-                .items_baseline()
-                .gap_1()
-                .child(note("Develop"))
-                .child(
-                    mono_val(p.develop.to_string(), 12.).text_color(if p.develop > 0 {
-                        ACCENT
-                    } else {
-                        TEXT
-                    }),
-                ),
-        )
-        .child(
-            view()
-                .flex_row()
-                .items_baseline()
-                .gap_1()
-                .child(note("Review"))
-                .child(mono_val(p.review.to_string(), 12.)),
-        );
-    if p.human_gated > 0 {
-        stage_row = stage_row.child(
-            view()
-                .flex_row()
-                .items_baseline()
-                .gap_1()
-                .child(note("Blocked"))
-                .child(mono_val(p.human_gated.to_string(), 12.).text_color(ATTENTION)),
-        );
-    }
-    if p.merging_now > 0 {
-        stage_row = stage_row.child(
-            view()
-                .flex_row()
-                .items_baseline()
-                .gap_1()
-                .child(note("Merging"))
-                .child(mono_val(p.merging_now.to_string(), 12.).text_color(SUCCESS)),
-        );
-    }
-
-    let mut delivery_row = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_3()
-        .child(note(format!("PR {}", dash.pr_merges)))
-        .child(note(format!("Local {}", dash.local_merges)))
-        .child(note(format!("Manual {}", dash.manual_resolutions)));
-    if let Some(zh) = dash.funnel.zero_human_pct() {
-        delivery_row = delivery_row.child(
-            text(format!("{zh}% zero-human"))
-                .font_family(MONO_FONT)
-                .text_size(px(11.5))
-                .text_color(if zh >= 70 { SUCCESS } else { MUTED }),
-        );
-    }
-
-    let mut sec = section_wrap()
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(heading("Cards"))
-                .child(
-                    row()
-                        .child(
-                            compact_action(
-                                format!("Resolved ({})", dash.merged_total),
-                                if drill == "merged" {
-                                    Variant::Secondary
-                                } else {
-                                    Variant::Quiet
-                                },
-                                move |_| intent(ui, "cards-merged"),
-                            )
-                            .accessibility_label("Resolved Cards"),
-                        )
-                        .child(
-                            compact_action(
-                                format!("Created ({})", dash.created_total),
-                                if drill == "created" {
-                                    Variant::Secondary
-                                } else {
-                                    Variant::Quiet
-                                },
-                                move |_| intent(ui, "cards-created"),
-                            )
-                            .accessibility_label("Created Cards"),
-                        ),
-                ),
-        )
+        .gap_2p5()
+        // Row 1: Agent identity + share %
         .child(
             view()
                 .w_full()
-                .pb_2p5()
-                .border_b_1()
-                .border_color(alpha_tint(BORDER, 0.45))
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(stage_row)
-                .child(delivery_row),
-        );
-
-    if !drill.is_empty() {
-        sec = sec.child(render_card_drilldown(ui, dash));
-    }
-
-    if dash.range == RangeWindow::Today {
-        sec = sec.child(render_timeline_1d(ui, dash, project_order));
-    } else {
-        sec = sec.child(render_daily_output(ui, dash));
-    }
-
-    sec
-}
-
-struct AgentRowSpec {
-    name: String,
-    runs: usize,
-    cards: usize,
-    working_ms: u64,
-    max_work_ms: u64,
-    pass_pct: Option<usize>,
-    active_runs: usize,
-    asks: usize,
-    avg_run_ms: Option<u64>,
-    tooltip: String,
-}
-
-fn render_agent_table_row(spec: AgentRowSpec) -> View {
-    let work_ratio = if spec.working_ms > 0 && spec.max_work_ms > 0 {
-        (spec.working_ms as f32 / spec.max_work_ms as f32).clamp(0.04, 1.0)
-    } else {
-        0.0
-    };
-    let (pass_txt, pass_color) = match spec.pass_pct {
-        Some(pct) if pct >= 85 => (format!("{pct}%"), SUCCESS),
-        Some(pct) if pct < 60 => (format!("{pct}%"), ATTENTION),
-        Some(pct) => (format!("{pct}%"), TEXT),
-        None if spec.active_runs > 0 => ("active".into(), ACCENT),
-        None => ("—".into(), MUTED),
-    };
-    let avg_str = spec
-        .avg_run_ms
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into());
-
-    view()
-        .w_full()
-        .py_1p5()
-        .px_2()
-        .border_b_1()
-        .border_color(alpha_tint(BORDER, 0.45))
-        .hover(|s| s.bg(CARD_HOVER))
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .tooltip(tooltip_box().child(note(spec.tooltip)))
-        .child(
-            label(spec.name)
-                .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .flex_1()
-                .min_w(px(120.))
-                .truncate(),
-        )
-        .child(
-            mono_val(spec.runs.to_string(), 12.)
-                .w(px(48.))
-                .flex_shrink_0(),
-        )
-        .child(
-            mono_val(spec.cards.to_string(), 12.)
-                .w(px(48.))
-                .flex_shrink_0(),
-        )
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(140.))
-                .flex_row()
-                .items_center()
-                .gap_2()
+                .gap_0p5()
                 .child(
                     view()
-                        .flex_1()
-                        .min_w(px(56.))
-                        .h(px(6.))
-                        .rounded(px(3.))
-                        .bg(INSET)
-                        .overflow_hidden()
+                        .w_full()
                         .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
                         .child(
                             view()
-                                .flex_grow(work_ratio)
-                                .basis(px(0.))
-                                .h_full()
-                                .rounded(px(3.))
-                                .bg(ACCENT),
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    view()
+                                        .w(px(8.))
+                                        .h(px(8.))
+                                        .rounded(px(4.))
+                                        .bg(spec.color)
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    label(spec.title.clone())
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(TEXT)
+                                        .truncate()
+                                        .min_w(px(0.)),
+                                ),
                         )
                         .child(
-                            view()
-                                .flex_grow((1.0 - work_ratio).max(0.0))
-                                .basis(px(0.))
-                                .h_full(),
+                            text(if total_all_val > 0 {
+                                format!("{share_pct}%")
+                            } else {
+                                "—".into()
+                            })
+                            .font_family(MONO_FONT)
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(MUTED)
+                            .flex_shrink_0(),
                         ),
                 )
                 .child(
-                    mono_val(format_duration_compact(spec.working_ms), 11.5)
-                        .w(px(54.))
-                        .flex_shrink_0(),
+                    view()
+                        .pl(px(16.))
+                        .child(note(spec.subtitle.clone()).truncate()),
                 ),
         )
+        // Row 2: Execution time + Task count
         .child(
-            text(pass_txt)
-                .font_family(MONO_FONT)
-                .text_size(px(12.))
-                .text_color(pass_color)
-                .w(px(54.))
-                .flex_shrink_0(),
+            view()
+                .w_full()
+                .flex_row()
+                .items_baseline()
+                .justify_between()
+                .gap_2()
+                .child(
+                    text(left_val)
+                        .font_family(MONO_FONT)
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(TEXT),
+                )
+                .child(
+                    text(right_val)
+                        .font_family(MONO_FONT)
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(MUTED),
+                ),
         )
+        // Row 3: Proportional bar
+        .child(render_single_bar(
+            card_val,
+            max_card_val,
+            spec.color,
+            bar_tip,
+        ))
+        // Row 4: Cards touched + avg duration
         .child(
-            mono_val(spec.asks.to_string(), 12.)
-                .w(px(44.))
-                .flex_shrink_0(),
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2p5()
+                .child(
+                    text(format!(
+                        "{} {}",
+                        spec.cards,
+                        if spec.cards == 1 { "card" } else { "cards" }
+                    ))
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.5))
+                    .text_color(MUTED),
+                )
+                .child(
+                    text(avg_txt)
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .text_color(MUTED),
+                ),
         )
-        .child(mono_val(avg_str, 11.5).w(px(68.)).flex_shrink_0())
 }
 
-fn render_agents(ui: Ui, dash: &Dashboard) -> View {
+fn render_agents(ui: Ui, dash: &Dashboard, metric: InsightsMetric, narrow: bool) -> View {
     let agent_group = ui.insights.agent_group.get();
-    let mut panel = section_wrap().child(
+    let is_time = metric == InsightsMetric::Time;
+
+    let mut specs: Vec<AgentCardSpec> = match agent_group {
+        AgentGroup::Profile => dash
+            .profile_stats
+            .iter()
+            .map(|p| {
+                let title = if p.profile_id == "manual" {
+                    "Manual".to_owned()
+                } else {
+                    format!("@{}", p.profile_id)
+                };
+                let avg_task_ms = p.avg_exec_ms.or_else(|| {
+                    (p.total_runs > 0 && p.working_ms > 0)
+                        .then(|| p.working_ms / p.total_runs as u64)
+                });
+                AgentCardSpec {
+                    title,
+                    subtitle: format!("{} · {}", p.provider, p.model),
+                    working_ms: p.working_ms,
+                    tasks: p.total_runs,
+                    cards: p.cards_touched,
+                    avg_task_ms,
+                    color: ACCENT.resolve(),
+                }
+            })
+            .collect(),
+        AgentGroup::Model => dash
+            .model_stats
+            .iter()
+            .map(|m| {
+                let providers = if m.providers.is_empty() {
+                    "—".into()
+                } else {
+                    m.providers.iter().cloned().collect::<Vec<_>>().join(", ")
+                };
+                let avg_task_ms = (m.total_runs > 0 && m.working_ms > 0)
+                    .then(|| m.working_ms / m.total_runs as u64);
+                AgentCardSpec {
+                    title: m.model.clone(),
+                    subtitle: format!(
+                        "{providers} · {} {}",
+                        m.profiles.len(),
+                        if m.profiles.len() == 1 {
+                            "profile"
+                        } else {
+                            "profiles"
+                        }
+                    ),
+                    working_ms: m.working_ms,
+                    tasks: m.total_runs,
+                    cards: m.cards_touched,
+                    avg_task_ms,
+                    color: ACCENT.resolve(),
+                }
+            })
+            .collect(),
+    };
+
+    match metric {
+        InsightsMetric::Time => {
+            specs.sort_by(|a, b| {
+                b.working_ms
+                    .cmp(&a.working_ms)
+                    .then_with(|| b.tasks.cmp(&a.tasks))
+                    .then_with(|| a.title.cmp(&b.title))
+            });
+        }
+        InsightsMetric::Tasks => {
+            specs.sort_by(|a, b| {
+                b.tasks
+                    .cmp(&a.tasks)
+                    .then_with(|| b.working_ms.cmp(&a.working_ms))
+                    .then_with(|| a.title.cmp(&b.title))
+            });
+        }
+    }
+    for (idx, s) in specs.iter_mut().enumerate() {
+        s.color = palette_color(idx);
+    }
+
+    let split: Vec<(String, u64, AdaptiveColor)> = specs
+        .iter()
+        .filter_map(|s| {
+            let v = if is_time {
+                s.working_ms
+            } else {
+                s.tasks as u64
+            };
+            (v > 0).then(|| (s.title.clone(), v, s.color))
+        })
+        .collect();
+    let total_all_val: u64 = split.iter().map(|(_, v, _)| *v).sum();
+    let max_card_val: u64 = specs
+        .iter()
+        .map(|s| {
+            if is_time {
+                s.working_ms
+            } else {
+                s.tasks as u64
+            }
+        })
+        .max()
+        .unwrap_or(0);
+
+    let mut sec = section_wrap().child(
         view()
             .flex_row()
             .flex_wrap()
             .items_center()
             .justify_between()
             .gap_2()
-            .child(heading("Agents"))
+            .child(
+                view()
+                    .flex_row()
+                    .items_baseline()
+                    .gap_2()
+                    .child(heading("Agents"))
+                    .child(mono_val(specs.len().to_string(), 11.5).text_color(MUTED)),
+            )
             .child(
                 row()
                     .child(choice(
@@ -3751,140 +2809,25 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
             ),
     );
 
-    let first_col = match agent_group {
-        AgentGroup::Profile => "Profile",
-        AgentGroup::Model => "Model",
-    };
-
-    let header_row = view()
-        .w_full()
-        .px_2()
-        .pb_1p5()
-        .border_b_1()
-        .border_color(BORDER)
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .child(note(first_col).flex_1().min_w(px(120.)))
-        .child(note("Runs").w(px(48.)).flex_shrink_0())
-        .child(note("Cards").w(px(48.)).flex_shrink_0())
-        .child(note("Working").flex_1().min_w(px(140.)))
-        .child(note("Pass").w(px(54.)).flex_shrink_0())
-        .child(note("Asks").w(px(44.)).flex_shrink_0())
-        .child(note("Avg/run").w(px(68.)).flex_shrink_0());
-
-    let mut table = view().w_full().child(header_row);
-
-    match agent_group {
-        AgentGroup::Profile => {
-            let max_work = dash
-                .profile_stats
-                .iter()
-                .map(|p| p.working_ms)
-                .max()
-                .unwrap_or(1)
-                .max(1);
-            for p in &dash.profile_stats {
-                table = table.child(render_profile_agent_row(p, max_work));
-            }
-            if dash.profile_stats.is_empty() {
-                table = table.child(view().py_2().px_2().child(note("No agent runs")));
-            }
-        }
-        AgentGroup::Model => {
-            let max_work = dash
-                .model_stats
-                .iter()
-                .map(|m| m.working_ms)
-                .max()
-                .unwrap_or(1)
-                .max(1);
-            for m in &dash.model_stats {
-                table = table.child(render_model_agent_row(m, max_work));
-            }
-            if dash.model_stats.is_empty() {
-                table = table.child(view().py_2().px_2().child(note("No agent runs")));
-            }
-        }
+    if !split.is_empty() {
+        sec = sec.child(render_proportional_bar(&split, is_time));
     }
 
-    panel = panel.child(table);
-    panel
-}
-
-fn render_profile_agent_row(p: &ProfileStat, max_work: u64) -> View {
-    let title = if p.profile_id == "manual" {
-        "Manual".to_owned()
+    if specs.is_empty() {
+        sec = sec.child(note("No agent tasks"));
     } else {
-        format!("@{}", p.profile_id)
-    };
-    let avg_run_ms = p.avg_exec_ms.or_else(|| {
-        (p.total_runs > 0 && p.working_ms > 0).then(|| p.working_ms / p.total_runs as u64)
-    });
-    let exec_str = avg_run_ms
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into());
-    let tooltip = format!(
-        "{title} ({} · {}) · {} completed · {} active · {} blocked · {} failed · {} Cards · avg {exec_str}",
-        p.provider,
-        p.model,
-        p.completed_runs,
-        p.active_runs,
-        p.blocked_runs,
-        p.failed_runs,
-        p.cards_touched
-    );
-    render_agent_table_row(AgentRowSpec {
-        name: title,
-        runs: p.total_runs,
-        cards: p.cards_touched,
-        working_ms: p.working_ms,
-        max_work_ms: max_work,
-        pass_pct: p.pass_rate_pct(),
-        active_runs: p.active_runs,
-        asks: p.human_asks,
-        avg_run_ms,
-        tooltip,
-    })
+        let cards: Vec<AnyElement> = specs
+            .iter()
+            .map(|s| render_agent_card(s, total_all_val, max_card_val, metric).into_element())
+            .collect();
+        sec = sec.child(render_two_col_grid(narrow, cards));
+    }
+    sec
 }
 
-fn render_model_agent_row(m: &ModelAgentStat, max_work: u64) -> View {
-    let providers = if m.providers.is_empty() {
-        "—".into()
-    } else {
-        m.providers.iter().cloned().collect::<Vec<_>>().join(", ")
-    };
-    let avg_run_ms =
-        (m.total_runs > 0 && m.working_ms > 0).then(|| m.working_ms / m.total_runs as u64);
-    let tooltip = format!(
-        "{} ({providers} · {} profiles) · {} completed · {} active · {} blocked · {} failed · {} Cards",
-        m.model,
-        m.profiles.len(),
-        m.completed_runs,
-        m.active_runs,
-        m.blocked_runs,
-        m.failed_runs,
-        m.cards_touched
-    );
-    render_agent_table_row(AgentRowSpec {
-        name: m.model.clone(),
-        runs: m.total_runs,
-        cards: m.cards_touched,
-        working_ms: m.working_ms,
-        max_work_ms: max_work,
-        pass_pct: m.pass_rate_pct(),
-        active_runs: m.active_runs,
-        asks: m.human_asks,
-        avg_run_ms,
-        tooltip,
-    })
-}
-
-fn render_footer(ui: Ui, dash: &Dashboard) -> View {
-    let intake = &dash.intake;
-    let excl = dash.exclude_initial_sync;
+fn render_unavailable_hosts(ui: Ui) -> Option<View> {
     let live_unavailable = ui.insights.unavailable_hosts.get();
-    let offline = ui.snapshot.with(|s| {
+    let offline = ui.snapshot.with_untracked(|s| {
         let mut entries: Vec<String> = Vec::new();
         let mut seen = BTreeSet::new();
         for (name, reason) in &live_unavailable {
@@ -3899,54 +2842,17 @@ fn render_footer(ui: Ui, dash: &Dashboard) -> View {
         }
         entries.join(", ")
     });
-
-    let toggle_box = nsh_base::checkbox()
-        .checked(move || ui.insights.exclude_initial_sync.get())
-        .on_change(move |_: &bool| intent(ui, "toggle-initial-sync"))
-        .cursor_pointer()
-        .px_1()
-        .py_0p5()
-        .rounded(px(4.))
-        .hover(|s| s.bg(INSET))
-        .focus(|s| s.border_1().border_color(ACCENT))
-        .accessibility_label("Exclude initial sync")
-        .child(mono_val(if excl { "☑" } else { "☐" }, 12.));
-
-    let row_view = view()
-        .w_full()
-        .pt_3()
-        .border_t_1()
-        .border_color(BORDER)
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(note(format!(
-            "Intake  Local {} · GitHub PR {} · Issue {}",
-            intake.local_manual, intake.github_pr, intake.github_issue
-        )))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(note(format!(
-                    "(Initial sync {} {}",
-                    intake.initial_sync,
-                    if excl { "excluded" } else { "included" }
-                )))
-                .child(toggle_box)
-                .child(note(")")),
-        );
-
     if offline.is_empty() {
-        row_view
+        None
     } else {
-        view()
-            .gap_1p5()
-            .child(row_view)
-            .child(note(format!("Unavailable hosts: {offline}")))
+        Some(
+            view()
+                .w_full()
+                .pt_3()
+                .border_t_1()
+                .border_color(BORDER)
+                .child(note(format!("Unavailable hosts: {offline}"))),
+        )
     }
 }
 
@@ -3960,69 +2866,7 @@ fn skeleton_bar(width_pct: f32, height: f32) -> View {
 }
 
 fn render_loading_skeleton(narrow: bool) -> View {
-    let kpi_col = || {
-        view()
-            .flex_1()
-            .min_w(px(160.))
-            .py_2()
-            .px_3()
-            .gap_1p5()
-            .child(skeleton_bar(0.48, 10.))
-            .child(skeleton_bar(0.56, 24.))
-            .child(skeleton_bar(0.74, 10.))
-    };
-    let v_sep = || {
-        view()
-            .w(px(1.))
-            .my_2()
-            .bg(BORDER)
-            .opacity(0.65)
-            .flex_shrink_0()
-    };
-
-    let kpi_strip = if narrow {
-        view()
-            .pb_3()
-            .gap_1()
-            .child(
-                view()
-                    .flex_row()
-                    .child(kpi_col())
-                    .child(v_sep())
-                    .child(kpi_col()),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .child(kpi_col())
-                    .child(v_sep())
-                    .child(kpi_col()),
-            )
-    } else {
-        view()
-            .pb_3()
-            .flex_row()
-            .child(kpi_col())
-            .child(v_sep())
-            .child(kpi_col())
-            .child(v_sep())
-            .child(kpi_col())
-            .child(v_sep())
-            .child(kpi_col())
-    };
-
-    let projects_skel = section_wrap()
-        .child(heading("Projects"))
-        .child(skeleton_bar(1.0, 8.))
-        .child(
-            view()
-                .gap_2p5()
-                .child(skeleton_bar(0.98, 22.))
-                .child(skeleton_bar(0.94, 22.))
-                .child(skeleton_bar(0.90, 22.)),
-        );
-
-    let machine_skel_card = || {
+    let skel_card = || {
         view()
             .flex_1()
             .min_w(px(280.))
@@ -4031,50 +2875,34 @@ fn render_loading_skeleton(narrow: bool) -> View {
             .bg(SURFACE)
             .gap_2p5()
             .child(skeleton_bar(0.45, 14.))
-            .child(skeleton_bar(0.70, 16.))
-            .child(skeleton_bar(0.85, 12.))
-            .child(skeleton_bar(0.60, 14.))
+            .child(skeleton_bar(0.75, 15.))
+            .child(skeleton_bar(1.0, 7.))
+            .child(skeleton_bar(0.65, 12.))
+            .into_element()
     };
-    let machines_skel = section_wrap().child(heading("Machines")).child(if narrow {
-        view()
-            .gap_3()
-            .child(machine_skel_card())
-            .child(machine_skel_card())
-    } else {
-        view()
-            .flex_row()
-            .gap_3()
-            .child(machine_skel_card())
-            .child(machine_skel_card())
-    });
 
-    let cards_skel = section_wrap()
-        .child(heading("Cards"))
-        .child(skeleton_bar(0.68, 14.))
-        .child(skeleton_bar(1.0, CHART_HEIGHT));
-
-    let agents_skel = section_wrap().child(heading("Agents")).child(
-        view()
-            .gap_2()
-            .child(skeleton_bar(0.98, 18.))
-            .child(skeleton_bar(0.92, 18.)),
-    );
+    let skel_section = |title: &'static str| {
+        section_wrap()
+            .child(heading(title))
+            .child(skeleton_bar(1.0, 8.))
+            .child(render_two_col_grid(narrow, vec![skel_card(), skel_card()]))
+    };
 
     view()
-        .gap_4()
+        .gap_5()
         .min_w(px(0.))
         .child(
             view()
-                .h(px(24.))
-                .items_end()
-                .justify_center()
-                .child(skeleton_bar(0.24, 12.)),
+                .w_full()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(skeleton_bar(0.48, 14.))
+                .child(skeleton_bar(0.12, 12.)),
         )
-        .child(kpi_strip)
-        .child(projects_skel)
-        .child(machines_skel)
-        .child(cards_skel)
-        .child(agents_skel)
+        .child(skel_section("Projects"))
+        .child(skel_section("Machines"))
+        .child(skel_section("Agents"))
 }
 
 fn merged_insights_profiles(ui: Ui) -> Vec<canban_types::Profile> {
@@ -4218,6 +3046,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .gap_4()
                             .child(dynamic(move || {
                                 let narrow = ui.narrow.get();
+                                let metric = ui.insights.metric.get();
                                 let Some(dash) = dashboard.get() else {
                                     return render_loading_skeleton(narrow).into_element();
                                 };
@@ -4227,24 +3056,26 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 let mut body = view()
                                     .gap_5()
                                     .min_w(px(0.))
-                                    .child(render_kpis(ui, &dash, narrow))
-                                    .child(render_projects(ui, &dash, &project_order, narrow));
+                                    .child(render_summary_bar(ui, &dash))
+                                    .child(render_projects(
+                                        ui,
+                                        &dash,
+                                        &project_order,
+                                        metric,
+                                        narrow,
+                                    ));
 
                                 if !dash.host_stats.is_empty() {
-                                    body = body.child(render_machines(ui, &dash, narrow));
+                                    body = body.child(render_machines(ui, &dash, metric, narrow));
                                 }
 
-                                body = body
-                                    .child(render_cards(ui, &dash, &project_order))
-                                    .child(render_agents(ui, &dash))
-                                    .child(render_footer(ui, &dash));
+                                body = body.child(render_agents(ui, &dash, metric, narrow));
 
-                                view()
-                                    .gap_3()
-                                    .min_w(px(0.))
-                                    .child(render_compare_subbar(ui, &dash))
-                                    .child(body)
-                                    .into_element()
+                                if let Some(unavail) = render_unavailable_hosts(ui) {
+                                    body = body.child(unavail);
+                                }
+
+                                body.into_element()
                             })),
                     ),
                 ),
