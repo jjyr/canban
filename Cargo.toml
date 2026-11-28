@@ -35,12 +35,12 @@ futures-util = "0.3"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 zstd = "0.13"
-nsh-core = { git = "https://github.com/longbridge/nsh", rev = "7620f0145d3a83b0283ca7c397460b87497e039d", features = ["svg"] }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "7620f0145d3a83b0283ca7c397460b87497e039d", default-features = false, features = ["editor", "highlight", "term"] }
-nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "7620f0145d3a83b0283ca7c397460b87497e039d", default-features = false }
-nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "7620f0145d3a83b0283ca7c397460b87497e039d", default-features = false, features = ["shader", "editor", "highlight", "term"] }
-nsh-platform-ios = { git = "https://github.com/longbridge/nsh", rev = "7620f0145d3a83b0283ca7c397460b87497e039d", default-features = false, features = ["editor", "highlight", "term", "svg"] }
-nsh-platform-android = { git = "https://github.com/longbridge/nsh", rev = "7620f0145d3a83b0283ca7c397460b87497e039d", default-features = false, features = ["editor", "highlight", "term", "svg"] }
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "ff30a1509149c3d31f11723c46ff68e931806dc3", features = ["svg"] }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "ff30a1509149c3d31f11723c46ff68e931806dc3", default-features = false, features = ["editor", "highlight", "term"] }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "ff30a1509149c3d31f11723c46ff68e931806dc3", default-features = false }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "ff30a1509149c3d31f11723c46ff68e931806dc3", default-features = false, features = ["shader", "editor", "highlight", "term"] }
+nsh-platform-ios = { git = "https://github.com/longbridge/nsh", rev = "ff30a1509149c3d31f11723c46ff68e931806dc3", default-features = false, features = ["editor", "highlight", "term", "svg"] }
+nsh-platform-android = { git = "https://github.com/longbridge/nsh", rev = "ff30a1509149c3d31f11723c46ff68e931806dc3", default-features = false, features = ["editor", "highlight", "term", "svg"] }
 canban-profiler = { path = "crates/profiler" }
 canban-exec = { path = "crates/exec" }
 canban-themes = { path = "crates/themes" }

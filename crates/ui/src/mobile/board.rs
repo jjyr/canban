@@ -1,12 +1,13 @@
 //! Mobile `Board` tab: pinned stage pills, horizontally swipeable stage pager (`Carousel`),
-//! mobile-native single-layer cards with long-press native context menu, and searchable Project picker.
+//! Linear-style hairline flat Card rows with long-press native context menu, Assignee-enabled
+//! Card creation sheet, and searchable Project picker.
 use super::{
     CardSegment, MobileSheet, MobileState,
     chrome::{
-        MOBILE_CAPTION, MOBILE_FOOTNOTE, MOBILE_RADIUS, disclosure_chevron, empty_state,
-        grouped_card, is_mobile_os, mobile_button, mobile_field, mobile_footnote,
-        mobile_inline_button, mobile_subhead, mobile_title, offline_sync_banner_inset,
-        section_header, tab_scroll_bottom_pad, trigger_haptic,
+        MOBILE_CAPTION, MOBILE_FOOTNOTE, disclosure_chevron, empty_state, hairline_list_inset,
+        is_mobile_os, mobile_button, mobile_field, mobile_footnote, mobile_inline_button,
+        mobile_subhead, mobile_title, offline_sync_banner_inset, section_header,
+        tab_scroll_bottom_pad, trigger_haptic,
     },
     mobile_hosts,
 };
@@ -43,7 +44,7 @@ fn build_board_header(ui: Ui) -> BoardHeaderModel {
         let Some(project) = proj else {
             return BoardHeaderModel {
                 project_id: String::new(),
-                project_name: "Select Project".into(),
+                project_name: "Board".into(),
                 host_id: String::new(),
                 stages: Vec::new(),
             };
@@ -118,28 +119,31 @@ fn mobile_card_row(
             top_chips.push(status(lbl, tone).into_element());
         }
     }
-    if let Some(badge) = running.first() {
+    if review_running {
+        top_chips.push(live_status("Reviewing", Tone::Info).into_element());
+    } else if review_draft.is_some() {
+        top_chips.push(status("Review ready", Tone::Info).into_element());
+    }
+
+    let actor_chip: Option<AnyElement> = if let Some(badge) = running.first() {
         let tone = if badge.herdr_status == canban_types::HerdrStatus::Blocked {
             Tone::Attention
         } else {
             Tone::Info
         };
-        top_chips.push(live_status(format!("@{}", badge.profile_id), tone).into_element());
+        Some(live_status(format!("@{}", badge.profile_id), tone).into_element())
     } else if let Some(badge) = ephemeral_agents.first() {
         let tone = if badge.herdr_status == canban_types::HerdrStatus::Blocked {
             Tone::Attention
         } else {
             Tone::Info
         };
-        top_chips.push(live_status(badge.provider_name.clone(), tone).into_element());
-    } else if let Some(aid) = card.assignee.as_deref() {
-        top_chips.push(status(format!("@{aid}"), Tone::Neutral).into_element());
-    }
-    if review_running {
-        top_chips.push(live_status("Reviewing", Tone::Info).into_element());
-    } else if review_draft.is_some() {
-        top_chips.push(status("Review ready", Tone::Info).into_element());
-    }
+        Some(live_status(badge.provider_name.clone(), tone).into_element())
+    } else {
+        card.assignee
+            .as_deref()
+            .map(|aid| status(format!("@{aid}"), Tone::Neutral).into_element())
+    };
 
     let top_row = view()
         .w_full()
@@ -165,10 +169,19 @@ fn mobile_card_row(
                 )
                 .children(top_chips),
         )
-        .child(disclosure_chevron());
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .flex_shrink_0()
+                .children(actor_chip)
+                .child(disclosure_chevron()),
+        );
 
-    let title_view =
-        mobile_title(card.title.clone()).text_color(if resolved { MUTED } else { TEXT });
+    let title_view = mobile_title(card.title.clone())
+        .text_color(if resolved { MUTED } else { TEXT })
+        .number_of_lines(2);
 
     let excerpt = card_excerpt(&card.body).to_owned();
     let github_meta = card.github_issue().map(|source| {
@@ -197,14 +210,12 @@ fn mobile_card_row(
 
     let mut card_surface = press_target()
         .w_full()
-        .p_4()
-        .gap_2()
-        .rounded(px(MOBILE_RADIUS))
-        .border_1()
-        .border_color(BORDER)
-        .bg(if resolved { INSET } else { SURFACE })
+        .px_4()
+        .py_3p5()
+        .gap_1p5()
+        .bg(BACKGROUND)
         .cursor_pointer()
-        .active(|s| s.opacity(0.75))
+        .active(|s| s.opacity(0.72))
         .child(top_row)
         .child(title_view)
         .children(github_meta)
@@ -215,7 +226,7 @@ fn mobile_card_row(
         });
 
     if resolved {
-        card_surface = card_surface.border_dashed().opacity(0.78);
+        card_surface = card_surface.opacity(0.68);
     }
 
     if has_footer {
@@ -231,12 +242,10 @@ fn mobile_card_row(
             let is_active = active_tags.iter().any(|t| t.eq_ignore_ascii_case(tag));
             meta_left = meta_left.child(
                 view()
-                    .h(px(24.))
-                    .px_2()
-                    .rounded(px(6.))
-                    .bg(if is_active { SELECTED } else { INSET })
-                    .border_1()
-                    .border_color(if is_active { ACCENT } else { BORDER })
+                    .h(px(22.))
+                    .px_1p5()
+                    .rounded(px(5.))
+                    .bg(if is_active { SELECTED } else { SURFACE })
                     .items_center()
                     .justify_center()
                     .child(
@@ -264,9 +273,9 @@ fn mobile_card_row(
                     .items_center()
                     .gap_1()
                     .min_w(px(0.))
-                    .child(icon_tinted(Icon::Branch, MUTED).w(px(13.)).h(px(13.)))
+                    .child(icon_tinted(Icon::Branch, MUTED).w(px(12.)).h(px(12.)))
                     .child(
-                        mobile_footnote(crate::components::git_workspace::compact(&br, 22))
+                        mobile_footnote(crate::components::git_workspace::compact(&br, 20))
                             .font_family(MONO_FONT)
                             .truncate(),
                     ),
@@ -281,8 +290,8 @@ fn mobile_card_row(
                     .gap_1()
                     .child(
                         icon_tinted(Icon::MessageSquare, MUTED)
-                            .w(px(13.))
-                            .h(px(13.)),
+                            .w(px(12.))
+                            .h(px(12.)),
                     )
                     .child(mobile_footnote(replies.to_string()).tabular_nums()),
             );
@@ -301,12 +310,10 @@ fn mobile_card_row(
             let term_cid = card.id.clone();
             footer = footer.child(
                 press_target()
-                    .h(px(28.))
-                    .px_2p5()
-                    .rounded(px(8.))
-                    .bg(INSET)
-                    .border_1()
-                    .border_color(BORDER)
+                    .h(px(26.))
+                    .px_2()
+                    .rounded(px(6.))
+                    .bg(SURFACE)
                     .flex_row()
                     .items_center()
                     .gap_1()
@@ -314,11 +321,11 @@ fn mobile_card_row(
                     .accessibility_label(Some(SharedString::from("Open card terminal")))
                     .child(
                         icon_tinted(Icon::Terminal, terminal_tint)
-                            .w(px(14.))
-                            .h(px(14.)),
+                            .w(px(13.))
+                            .h(px(13.)),
                     )
                     .child(
-                        text("Shell")
+                        text("Terminal")
                             .text_size(px(MOBILE_CAPTION))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(terminal_tint),
@@ -354,6 +361,7 @@ fn mobile_card_row(
 
     let mut menu_items = vec![
         MenuButtonItem::new("open", "Open Card").icon("doc.text"),
+        MenuButtonItem::new("edit", "Edit Card").icon("pencil"),
         MenuButtonItem::new("terminal", "Open Terminal").icon("terminal"),
         MenuButtonItem::new("diff", "View Diff").icon("arrow.left.arrow.right.square"),
     ];
@@ -394,6 +402,7 @@ fn mobile_card_row(
             }
             match raw {
                 "open" => state.push_card(cid_menu.clone(), CardSegment::Conversation),
+                "edit" => state.open_sheet(MobileSheet::EditCard(cid_menu.clone())),
                 "terminal" => state.push_card(cid_menu.clone(), CardSegment::Terminal),
                 "diff" => state.push_card(cid_menu.clone(), CardSegment::Diff),
                 "resolve" => {
@@ -490,19 +499,17 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                 scroll().horizontal().scrollbar(false).w_full().child(
                     view()
                         .px_4()
-                        .py_2p5()
+                        .py_2()
                         .flex_row()
                         .items_center()
-                        .gap_2()
+                        .gap_1p5()
                         .children(hm.stages.into_iter().map(|(id, name, count)| {
                             let selected = id == cur;
                             let next_id = id.clone();
                             press_target()
-                                .h(px(34.))
-                                .px_3p5()
+                                .h(px(32.))
+                                .px_3()
                                 .rounded_full()
-                                .border_1()
-                                .border_color(if selected { CLEAR } else { BORDER })
                                 .bg(if selected { ACCENT_FILL } else { SURFACE })
                                 .flex_row()
                                 .items_center()
@@ -511,7 +518,7 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                                 .active(|s| s.opacity(0.75))
                                 .child(
                                     text(name)
-                                        .text_size(px(14.))
+                                        .text_size(px(13.5))
                                         .font_weight(if selected {
                                             FontWeight::SEMIBOLD
                                         } else {
@@ -521,7 +528,7 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                                 )
                                 .child(
                                     text(count.to_string())
-                                        .text_size(px(13.))
+                                        .text_size(px(12.5))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(if selected { ON_ACCENT } else { MUTED })
                                         .opacity(if selected { 0.85 } else { 1.0 })
@@ -561,7 +568,7 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                         Icon::Board,
                         Tone::Neutral,
                         "No Project selected",
-                        "Pair a remote machine in Settings or switch projects from the top bar.",
+                        "",
                         Some(
                             mobile_button("Switch Project", Variant::Secondary, move |_| {
                                 state.open_sheet(MobileSheet::ProjectPicker);
@@ -573,65 +580,64 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
             }
 
             let stages_for_change = structure.stages.clone();
-            let slides = structure.stages.clone().into_iter().map(|(stage_id, stage_name)| {
-                let scroll_ref = element_ref();
-                let pid_create = structure.project_id.clone();
-                let sid_lookup = stage_id.clone();
-                let all_stages = structure.stages.clone();
-                let stage_list = pull_refresh_scroll(
-                    scroll().size_full().child(
-                        view()
-                            .w_full()
-                            .px_4()
-                            .pt_3()
-                            .pb(px(tab_scroll_bottom_pad()))
-                            .gap_3()
-                            .child(dynamic(move || {
-                                let models = stage_cards_map
-                                    .with(|m| m.get(&sid_lookup).cloned().unwrap_or_default());
-                                if models.is_empty() {
-                                    let pid_btn = pid_create.clone();
-                                    return empty_state(
-                                        Icon::Board,
-                                        Tone::Neutral,
-                                        format!("No Cards in {stage_name}"),
-                                        "Tap + above to create a Card, or swipe horizontally to view other stages.",
-                                        Some(
-                                            mobile_inline_button(
-                                                "+ New Card",
-                                                Variant::Secondary,
-                                                move |_| {
-                                                    state.open_sheet(MobileSheet::CreateCard(
-                                                        pid_btn.clone(),
-                                                    ));
-                                                },
-                                            )
-                                            .into_element(),
-                                        ),
-                                    )
-                                    .into_element();
-                                }
-                                view()
-                                    .w_full()
-                                    .gap_3()
-                                    .children(models.into_iter().map(|m| {
-                                        mobile_card_row(ui, state, m, all_stages.clone())
-                                    }))
-                                    .into_element()
-                            })),
-                    ),
-                    scroll_ref,
-                    move || ui.refreshing.get(),
-                    move || refresh(ui),
-                );
+            let slides = structure
+                .stages
+                .clone()
+                .into_iter()
+                .map(|(stage_id, stage_name)| {
+                    let scroll_ref = element_ref();
+                    let pid_create = structure.project_id.clone();
+                    let sid_lookup = stage_id.clone();
+                    let all_stages = structure.stages.clone();
+                    let stage_list = pull_refresh_scroll(
+                        scroll().size_full().child(
+                            view()
+                                .w_full()
+                                .pb(px(tab_scroll_bottom_pad()))
+                                .child(dynamic(move || {
+                                    let models = stage_cards_map
+                                        .with(|m| m.get(&sid_lookup).cloned().unwrap_or_default());
+                                    if models.is_empty() {
+                                        let pid_btn = pid_create.clone();
+                                        return empty_state(
+                                            Icon::Board,
+                                            Tone::Neutral,
+                                            format!("No Cards in {stage_name}"),
+                                            "",
+                                            Some(
+                                                mobile_inline_button(
+                                                    "New Card",
+                                                    Variant::Secondary,
+                                                    move |_| {
+                                                        state.open_sheet(MobileSheet::CreateCard(
+                                                            pid_btn.clone(),
+                                                        ));
+                                                    },
+                                                )
+                                                .into_element(),
+                                            ),
+                                        )
+                                        .into_element();
+                                    }
+                                    let rows: Vec<AnyElement> = models
+                                        .into_iter()
+                                        .map(|m| mobile_card_row(ui, state, m, all_stages.clone()))
+                                        .collect();
+                                    hairline_list_inset(rows, 16.0).into_element()
+                                })),
+                        ),
+                        scroll_ref,
+                        move || ui.refreshing.get(),
+                        move || refresh(ui),
+                    );
 
-                carousel_item()
-                    .accessibility_label(Some(SharedString::from(format!("{stage_id} stage"))))
-                    .w(move || px(pager_width.get()))
-                    .h_full()
-                    .flex_shrink_0()
-                    .child(stage_list)
-            });
+                    carousel_item()
+                        .accessibility_label(Some(SharedString::from(format!("{stage_id} stage"))))
+                        .w(move || px(pager_width.get()))
+                        .h_full()
+                        .flex_shrink_0()
+                        .child(stage_list)
+                });
 
             carousel()
                 .size_full()
@@ -679,7 +685,7 @@ pub(crate) fn move_card_sheet_body(
 
     dynamic(move || {
         let Some((card, stages)) = info.get() else {
-            return mobile_subhead("Card no longer available").into_element();
+            return mobile_subhead("Card unavailable").into_element();
         };
 
         let stage_rows: Vec<AnyElement> = stages
@@ -690,7 +696,7 @@ pub(crate) fn move_card_sheet_body(
                 let stage_id = stage.id.clone();
                 press_target()
                     .w_full()
-                    .min_h(px(52.))
+                    .min_h(px(50.))
                     .px_4()
                     .py_2p5()
                     .flex_row()
@@ -723,6 +729,7 @@ pub(crate) fn move_card_sheet_body(
             .collect();
 
         let term_cid = card.id.clone();
+        let edit_cid = card.id.clone();
         let resolved = card.resolved();
         let mut col = view()
             .w_full()
@@ -733,16 +740,22 @@ pub(crate) fn move_card_sheet_body(
                 view()
                     .w_full()
                     .child(section_header("MOVE TO STAGE", None))
-                    .child(grouped_card(stage_rows)),
+                    .child(hairline_list_inset(stage_rows, 16.0)),
             );
         }
         col.child(
             view()
                 .w_full()
                 .flex_row()
-                .gap_2p5()
+                .gap_2()
                 .child(
-                    mobile_inline_button("Open Terminal", Variant::Secondary, move |_| {
+                    mobile_inline_button("Edit", Variant::Secondary, move |_| {
+                        state.open_sheet(MobileSheet::EditCard(edit_cid.clone()));
+                    })
+                    .flex_1(),
+                )
+                .child(
+                    mobile_inline_button("Terminal", Variant::Secondary, move |_| {
                         state.close_sheet();
                         state.push_card(term_cid.clone(), CardSegment::Terminal);
                     })
@@ -784,11 +797,20 @@ pub(crate) fn create_card_sheet_body(
                 .unwrap_or_default()
         })
     });
+    let profiles: Vec<String> = untracked(|| {
+        ui.profiles
+            .get_untracked()
+            .into_iter()
+            .filter(|p| p.enabled)
+            .map(|p| p.id)
+            .collect()
+    });
     let initial_stage = stages
         .first()
         .map(|st| st.id.clone())
         .unwrap_or_else(|| "backlog".to_owned());
     let stage = signal(initial_stage);
+    let assignee = signal(Option::<String>::None);
     let busy = signal(false);
 
     view()
@@ -799,7 +821,7 @@ pub(crate) fn create_card_sheet_body(
                 .w_full()
                 .gap_1p5()
                 .child(section_header("TITLE", None))
-                .child(mobile_field(title, "What needs doing?")),
+                .child(mobile_field(title, "Card title")),
         )
         .child(
             view()
@@ -811,8 +833,8 @@ pub(crate) fn create_card_sheet_body(
                         .value(move || body.get())
                         .on_change(move |v: &str| body.set(v.to_owned()))
                         .multiline(true)
-                        .placeholder("Context, acceptance criteria, or links…")
-                        .min_h(px(110.))
+                        .placeholder("Details…")
+                        .min_h(px(104.))
                         .px_3p5()
                         .py_2p5()
                         .rounded(px(12.))
@@ -836,26 +858,17 @@ pub(crate) fn create_card_sheet_body(
                         .gap_2()
                         .children(stages.into_iter().map(move |st| {
                             let sid = st.id.clone();
-                            let sid_border = sid.clone();
                             let sid_bg = sid.clone();
-                            let sid_press = sid;
+                            let sid_fg = sid;
                             press_target()
-                                .h(px(38.))
+                                .h(px(36.))
                                 .px_3p5()
                                 .rounded_full()
-                                .border_1()
-                                .border_color(move || {
-                                    if stage.get() == sid_border {
-                                        ACCENT
-                                    } else {
-                                        BORDER
-                                    }
-                                })
                                 .bg(move || {
                                     if stage.get() == sid_bg {
                                         SELECTED
                                     } else {
-                                        INSET
+                                        SURFACE
                                     }
                                 })
                                 .items_center()
@@ -863,10 +876,87 @@ pub(crate) fn create_card_sheet_body(
                                 .active(|s| s.opacity(0.75))
                                 .child(
                                     text(st.name)
-                                        .text_size(px(14.5))
+                                        .text_size(px(14.))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(move || {
-                                            if stage.get() == sid_press {
+                                            if stage.get() == sid_fg { ACCENT } else { TEXT }
+                                        }),
+                                )
+                                .on_press(move |_: &()| {
+                                    trigger_haptic(Haptic::Selection);
+                                    stage.set(st.id.clone());
+                                })
+                        })),
+                )
+        }))
+        .children((!profiles.is_empty()).then(|| {
+            view()
+                .w_full()
+                .gap_1p5()
+                .child(section_header("ASSIGNEE", None))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            press_target()
+                                .h(px(36.))
+                                .px_3()
+                                .rounded_full()
+                                .bg(move || {
+                                    if assignee.with(Option::is_none) {
+                                        SELECTED
+                                    } else {
+                                        SURFACE
+                                    }
+                                })
+                                .items_center()
+                                .justify_center()
+                                .active(|s| s.opacity(0.75))
+                                .child(
+                                    text("Unassigned")
+                                        .text_size(px(14.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(move || {
+                                            if assignee.with(Option::is_none) {
+                                                ACCENT
+                                            } else {
+                                                MUTED
+                                            }
+                                        }),
+                                )
+                                .on_press(move |_: &()| {
+                                    trigger_haptic(Haptic::Selection);
+                                    assignee.set(None);
+                                }),
+                        )
+                        .children(profiles.into_iter().map(move |pid| {
+                            let pid_bg = pid.clone();
+                            let pid_fg = pid.clone();
+                            let pid_press = pid.clone();
+                            press_target()
+                                .h(px(36.))
+                                .px_3()
+                                .rounded_full()
+                                .bg(move || {
+                                    if assignee.with(|a| a.as_deref() == Some(pid_bg.as_str())) {
+                                        SELECTED
+                                    } else {
+                                        SURFACE
+                                    }
+                                })
+                                .items_center()
+                                .justify_center()
+                                .active(|s| s.opacity(0.75))
+                                .child(
+                                    text(format!("@{pid}"))
+                                        .text_size(px(14.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(move || {
+                                            if assignee
+                                                .with(|a| a.as_deref() == Some(pid_fg.as_str()))
+                                            {
                                                 ACCENT
                                             } else {
                                                 TEXT
@@ -875,7 +965,7 @@ pub(crate) fn create_card_sheet_body(
                                 )
                                 .on_press(move |_: &()| {
                                     trigger_haptic(Haptic::Selection);
-                                    stage.set(st.id.clone());
+                                    assignee.set(Some(pid_press.clone()));
                                 })
                         })),
                 )
@@ -897,6 +987,7 @@ pub(crate) fn create_card_sheet_body(
                     }
                     let b = body.get_untracked();
                     let st = stage.get_untracked();
+                    let asg = assignee.get_untracked();
                     if !crate::backend::is_connected() {
                         let new_id = format!("card-{}", canban_types::id());
                         let new_card: Card = serde_json::from_value(json!({
@@ -906,6 +997,7 @@ pub(crate) fn create_card_sheet_body(
                             "title": t,
                             "body": b,
                             "stage": st,
+                            "assignee": asg,
                             "revision": 1,
                             "created_at": canban_types::now(),
                         }))
@@ -918,21 +1010,20 @@ pub(crate) fn create_card_sheet_body(
                     busy.set(true);
                     let pid = project_id.clone();
                     let next_stage = st.clone();
-                    dispatch_complete(
-                        ui,
-                        "card.create",
-                        json!({"project_id": pid, "title": t, "body": b, "stage": st}),
-                        move |res| {
-                            busy.try_set(false);
-                            if let Ok(val) = res {
-                                state.board_stage.set(next_stage.clone());
-                                state.close_sheet();
-                                if let Some(cid) = val["id"].as_str() {
-                                    state.push_card(cid.to_owned(), CardSegment::Conversation);
-                                }
+                    let mut params = json!({"project_id": pid, "title": t, "body": b, "stage": st});
+                    if let Some(a) = asg {
+                        params["assignee"] = json!(a);
+                    }
+                    dispatch_complete(ui, "card.create", params, move |res| {
+                        busy.try_set(false);
+                        if let Ok(val) = res {
+                            state.board_stage.set(next_stage.clone());
+                            state.close_sheet();
+                            if let Some(cid) = val["id"].as_str() {
+                                state.push_card(cid.to_owned(), CardSegment::Conversation);
                             }
-                        },
-                    );
+                        }
+                    });
                 },
             )
             .disabled(move || busy.get() || title.get().trim().is_empty()),
@@ -992,28 +1083,16 @@ pub(crate) fn project_picker_sheet_body(ui: Ui, state: MobileState) -> impl Into
     view()
         .w_full()
         .gap_4()
-        .child(mobile_field(query, "Search projects or machines…"))
+        .child(mobile_field(query, "Search projects…"))
         .child(dynamic(move || {
             let (active_pid, total_projects, groups) = grouped.get();
             if total_projects == 0 {
-                return empty_state(
-                    Icon::Projects,
-                    Tone::Neutral,
-                    "No Projects yet",
-                    "Connect a machine or create a Project on desktop first.",
-                    None,
-                )
-                .into_element();
+                return empty_state(Icon::Projects, Tone::Neutral, "No Projects", "", None)
+                    .into_element();
             }
             if groups.is_empty() {
-                return empty_state(
-                    Icon::Search,
-                    Tone::Neutral,
-                    "No matching Projects",
-                    "Try a different project name, directory, or host.",
-                    None,
-                )
-                .into_element();
+                return empty_state(Icon::Search, Tone::Neutral, "No matches", "", None)
+                    .into_element();
             }
             let mut col = view().w_full().gap_5();
             for (host_opt, projects) in groups {
@@ -1032,7 +1111,7 @@ pub(crate) fn project_picker_sheet_body(ui: Ui, state: MobileState) -> impl Into
                         let pid = project.id.clone();
                         press_target()
                             .w_full()
-                            .min_h(px(58.))
+                            .min_h(px(56.))
                             .px_4()
                             .py_2p5()
                             .flex_row()
@@ -1048,7 +1127,7 @@ pub(crate) fn project_picker_sheet_body(ui: Ui, state: MobileState) -> impl Into
                                     .gap_0p5()
                                     .child(
                                         text(project.name)
-                                            .text_size(px(16.5))
+                                            .text_size(px(16.))
                                             .font_weight(if is_sel {
                                                 FontWeight::SEMIBOLD
                                             } else {
@@ -1082,7 +1161,12 @@ pub(crate) fn project_picker_sheet_body(ui: Ui, state: MobileState) -> impl Into
                     })
                     .collect();
 
-                col = col.child(view().w_full().child(header_el).child(grouped_card(rows)));
+                col = col.child(
+                    view()
+                        .w_full()
+                        .child(header_el)
+                        .child(hairline_list_inset(rows, 16.0)),
+                );
             }
             col.into_element()
         }))

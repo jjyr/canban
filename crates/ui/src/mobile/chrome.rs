@@ -1,14 +1,15 @@
-//! Platform-adaptive mobile chrome helpers, unified iOS + Android typography/spacing tokens,
-//! Inset Grouped surfaces, native `UITabBar` / `NavigationBar` / `PageSheet` / `Switch` / `AlertDialog`,
-//! and haptic helpers.
+//! Platform-adaptive mobile chrome helpers: Linear × Editorial hairline typography/spacing tokens,
+//! borderless `SURFACE` blocks, native-thread `swipe_row`, native `UITabBar` / `NavigationBar` /
+//! `PageSheet` / `Switch` / `AlertDialog`, Undo toast, and haptic helpers.
 use super::{MobileSheet, MobileState, mobile_hosts};
 use crate::presenter::Ui;
 use canban_types::HostSummary;
 use canban_ui_kit::{tokens::*, *};
 use nsh_base::{alert_dialog, dialog};
 use nsh_core::{
-    Haptic,
-    mobile::{SegmentedControlItem, TabBarItem, segmented_control, switch, tab_bar},
+    Haptic, HapticImpact, PanActivation, PanDirection,
+    element::{PanEvent, Spring},
+    mobile::{TabBarItem, tab_bar},
     prelude::*,
 };
 use std::rc::Rc;
@@ -25,7 +26,6 @@ pub(crate) const MOBILE_CAPTION: f32 = 12.0;
 pub(crate) const MOBILE_CODE: f32 = 12.5;
 
 pub(crate) const MOBILE_RADIUS: f32 = 14.0;
-pub(crate) const MOBILE_CARD_RADIUS: f32 = 16.0;
 pub(crate) const MOBILE_BTN_H: f32 = 48.0;
 pub(crate) const MOBILE_INLINE_BTN_H: f32 = 42.0;
 
@@ -118,32 +118,243 @@ pub(crate) fn section_header(title: impl Into<SharedString>, trailing: Option<An
         .children(trailing)
 }
 
-/// Inset Grouped container wrapping stacked rows with `16pt` inset hairline dividers.
-pub(crate) fn grouped_card(rows: Vec<AnyElement>) -> View {
-    grouped_card_with_inset(rows, 16.0)
+/// 1px hairline horizontal divider.
+pub(crate) fn hairline_divider() -> View {
+    view().w_full().h(px(1.)).bg(BORDER)
 }
 
-/// Inset Grouped container with custom leading divider inset (e.g. `60pt` after a `32pt` icon badge).
-pub(crate) fn grouped_card_with_inset(rows: Vec<AnyElement>, divider_inset: f32) -> View {
-    let mut card = view()
-        .w_full()
-        .rounded(px(MOBILE_RADIUS))
-        .border_1()
-        .border_color(BORDER)
-        .bg(SURFACE)
-        .overflow_hidden();
+/// 1px hairline horizontal divider with leading inset (e.g. aligning with row title text).
+pub(crate) fn hairline_divider_inset(inset: f32) -> View {
+    view().w_full().pl(px(inset)).child(hairline_divider())
+}
+
+/// Flat hairline-separated list directly on the canvas (no outer border or nested boxes).
+pub(crate) fn hairline_list(rows: Vec<AnyElement>) -> View {
+    hairline_list_inset(rows, 0.0)
+}
+
+/// Flat hairline-separated list directly on the canvas with custom leading divider inset.
+pub(crate) fn hairline_list_inset(rows: Vec<AnyElement>, divider_inset: f32) -> View {
+    let mut list = view().w_full();
     for (idx, row) in rows.into_iter().enumerate() {
         if idx > 0 {
-            card = card.child(
-                view()
-                    .w_full()
-                    .pl(px(divider_inset))
-                    .child(view().w_full().h(px(1.)).bg(BORDER)),
-            );
+            list = list.child(if divider_inset > 0.0 {
+                hairline_divider_inset(divider_inset)
+            } else {
+                hairline_divider()
+            });
         }
-        card = card.child(row);
+        list = list.child(row);
     }
-    card
+    list
+}
+
+/// Borderless `SURFACE` block for focused decision cards, active agent cards, or diff/code blocks.
+pub(crate) fn surface_block() -> View {
+    view()
+        .w_full()
+        .rounded(px(MOBILE_RADIUS))
+        .bg(SURFACE)
+        .overflow_hidden()
+}
+
+/// Legacy alias mapped to flat hairline list with `16pt` inset dividers (zero outer box border).
+pub(crate) fn grouped_card(rows: Vec<AnyElement>) -> View {
+    hairline_list_inset(rows, 16.0)
+}
+
+/// Native-thread horizontal swipeable row for Inbox triage (swipe left = Done, swipe right = Defer).
+/// Uses NSH's `PanActivation::horizontal` + `pan_values` + `bind_translate_x` so vertical scrolling
+/// stays completely uninterrupted and horizontal drags track at 60/120fps on the UI thread.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn swipe_row(
+    content: impl IntoElement,
+    left_label: &'static str,
+    left_icon: Icon,
+    left_tone: Tone,
+    on_swipe_right: Option<Rc<dyn Fn()>>,
+    right_label: &'static str,
+    right_icon: Icon,
+    right_tone: Tone,
+    on_swipe_left: Option<Rc<dyn Fn()>>,
+) -> View {
+    let has_right = on_swipe_right.is_some();
+    let has_left = on_swipe_left.is_some();
+    if !has_right && !has_left {
+        return view().w_full().child(content);
+    }
+
+    let tx = animated_value(0.0_f32);
+    let (left_bg, left_fg) = tone_colors(left_tone);
+    let (right_bg, right_fg) = tone_colors(right_tone);
+
+    let activation = match (has_right, has_left) {
+        (true, true) => PanActivation::horizontal(px(12.0), px(12.0)),
+        (true, false) => PanActivation::default()
+            .active_offset_x(px(12.0))
+            .fail_offset_y(px(12.0))
+            .direction(PanDirection::Right),
+        (false, true) => PanActivation::default()
+            .active_offset_x(px(12.0))
+            .fail_offset_y(px(12.0))
+            .direction(PanDirection::Left),
+        (false, false) => PanActivation::horizontal(px(12.0), px(12.0)),
+    };
+
+    let mut backdrop = view()
+        .absolute()
+        .inset_0()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .pointer_events(PointerEvents::None);
+
+    backdrop = backdrop.child(if has_right {
+        view()
+            .h_full()
+            .flex_1()
+            .px_4()
+            .bg(left_bg)
+            .flex_row()
+            .items_center()
+            .justify_start()
+            .gap_2()
+            .child(icon_tinted(left_icon, left_fg).w(px(16.)).h(px(16.)))
+            .child(
+                text(left_label)
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(left_fg),
+            )
+    } else {
+        view().h_full().flex_1().bg(BACKGROUND)
+    });
+
+    backdrop = backdrop.child(if has_left {
+        view()
+            .h_full()
+            .flex_1()
+            .px_4()
+            .bg(right_bg)
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap_2()
+            .child(
+                text(right_label)
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(right_fg),
+            )
+            .child(icon_tinted(right_icon, right_fg).w(px(16.)).h(px(16.)))
+    } else {
+        view().h_full().flex_1().bg(BACKGROUND)
+    });
+
+    let tx_end = tx;
+    let foreground = view()
+        .w_full()
+        .bg(BACKGROUND)
+        .pan_activation(activation)
+        .pan_values(Some(&tx), None)
+        .bind_translate_x(&tx)
+        .on_pan_end(move |e: &PanEvent| {
+            let dx = e.translation.x.0;
+            let vx = e.velocity_x;
+            if !e.cancelled {
+                if let Some(cb) = &on_swipe_left
+                    && (dx <= -72.0 || (dx <= -36.0 && vx <= -300.0))
+                {
+                    trigger_haptic(Haptic::Impact(HapticImpact::Light));
+                    cb();
+                } else if let Some(cb) = &on_swipe_right
+                    && (dx >= 72.0 || (dx >= 36.0 && vx >= 300.0))
+                {
+                    trigger_haptic(Haptic::Impact(HapticImpact::Light));
+                    cb();
+                }
+            }
+            let _ = tx_end.spring(0.0, Spring::default());
+        })
+        .child(content);
+
+    view()
+        .w_full()
+        .relative()
+        .overflow_hidden()
+        .bg(BACKGROUND)
+        .child(backdrop)
+        .child(foreground)
+}
+
+/// Floating bottom Undo toast bound to `ui.inbox.undo_banner` (auto-dismissed after 4s by `inbox::state`).
+pub(crate) fn undo_toast(ui: Ui) -> impl IntoElement {
+    when(
+        move || ui.inbox.undo_banner.with(Option::is_some),
+        move || {
+            let label_str = move || {
+                ui.inbox
+                    .undo_banner
+                    .with(|b| b.as_ref().map(|u| u.label.clone()).unwrap_or_default())
+            };
+            view()
+                .absolute()
+                .bottom(move || {
+                    px(if is_mobile_os() {
+                        safe_area().bottom.0 + 78.0
+                    } else {
+                        72.0
+                    })
+                })
+                .left(px(16.))
+                .right(px(16.))
+                .items_center()
+                .child(
+                    view()
+                        .w_full()
+                        .max_w(px(360.))
+                        .px_4()
+                        .py_2p5()
+                        .rounded(px(12.))
+                        .bg(SURFACE)
+                        .border_1()
+                        .border_color(BORDER)
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            text(label_str)
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(TEXT)
+                                .truncate()
+                                .flex_1()
+                                .min_w(px(0.)),
+                        )
+                        .child(
+                            press_target()
+                                .min_h(px(32.))
+                                .px_2p5()
+                                .rounded(px(8.))
+                                .bg(SELECTED)
+                                .items_center()
+                                .justify_center()
+                                .active(|s| s.opacity(0.7))
+                                .child(
+                                    text("Undo")
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(ACCENT),
+                                )
+                                .on_press(move |_: &()| {
+                                    trigger_haptic(Haptic::Selection);
+                                    crate::inbox::state::undo_last(ui);
+                                }),
+                        ),
+                )
+        },
+    )
 }
 
 /// `32×32` rounded tinted icon medallion matching iOS Settings / Material 3 leading icons.
@@ -270,37 +481,39 @@ pub(crate) fn empty_state(
     cta: Option<AnyElement>,
 ) -> View {
     let (bg, fg) = tone_colors(tone);
+    let sub: SharedString = subtitle.into();
+    let has_sub = !sub.trim().is_empty();
     view()
         .w_full()
-        .py(px(56.))
+        .py(px(48.))
         .px_6()
         .items_center()
         .gap_3()
         .child(
             view()
-                .w(px(56.))
-                .h(px(56.))
-                .rounded(px(16.))
+                .w(px(48.))
+                .h(px(48.))
+                .rounded(px(14.))
                 .bg(bg)
                 .items_center()
                 .justify_center()
-                .child(icon_tinted(ic, fg).w(px(26.)).h(px(26.))),
+                .child(icon_tinted(ic, fg).w(px(22.)).h(px(22.))),
         )
         .child(
             text(title.into())
-                .text_size(px(MOBILE_HEADLINE))
+                .text_size(px(MOBILE_TITLE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(TEXT)
                 .text_center(),
         )
-        .child(
-            view().w_full().max_w(px(300.)).items_center().child(
-                mobile_subhead(subtitle.into())
-                    .line_height(px(21.))
-                    .text_center(),
-            ),
-        )
-        .children(cta.map(|btn| view().pt_1().w_full().max_w(px(260.)).child(btn)))
+        .children(has_sub.then(move || {
+            view()
+                .w_full()
+                .max_w(px(300.))
+                .items_center()
+                .child(mobile_subhead(sub).line_height(px(20.)).text_center())
+        }))
+        .children(cta.map(|btn| view().pt_1().w_full().max_w(px(240.)).child(btn)))
 }
 
 /// Native confirmation dialog (`UIAlertController` on iOS, Material `AlertDialog` on Android,
@@ -430,19 +643,13 @@ fn offline_sync_banner_inner(
             _ => Tone::Info,
         };
         let (bg, fg) = tone_colors(tone);
-        let border_col = match tone {
-            Tone::Attention => ATTENTION,
-            _ => ACCENT,
-        };
         let open_sync = m.open_sync;
         let host_id = m.host_id;
         let card = view()
             .w_full()
-            .rounded(px(MOBILE_RADIUS))
+            .rounded(px(10.))
             .px_3p5()
             .py_2p5()
-            .border_1()
-            .border_color(border_col)
             .bg(bg)
             .flex_row()
             .items_center()
@@ -459,12 +666,10 @@ fn offline_sync_banner_inner(
             )
             .child(
                 press_target()
-                    .h(px(34.))
-                    .px_3()
-                    .rounded(px(9.))
+                    .h(px(30.))
+                    .px_2p5()
+                    .rounded(px(8.))
                     .bg(SURFACE)
-                    .border_1()
-                    .border_color(BORDER)
                     .items_center()
                     .justify_center()
                     .active(|s| s.opacity(0.75))
@@ -472,7 +677,7 @@ fn offline_sync_banner_inner(
                         text(m.cta)
                             .text_size(px(13.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(TEXT),
+                            .text_color(fg),
                     )
                     .on_press(move |_: &()| {
                         trigger_haptic(Haptic::Selection);
@@ -516,12 +721,12 @@ pub(crate) fn mobile_tab_bar(
         let items = move || {
             let count = inbox_badge();
             let badge_val = (count > 0).then(|| count.to_string());
-            let mut needs = TabBarItem::new("Needs you").icon(inbox_icon);
+            let mut inbox_item = TabBarItem::new("Inbox").icon(inbox_icon);
             if let Some(b) = badge_val {
-                needs = needs.badge(b);
+                inbox_item = inbox_item.badge(b);
             }
             vec![
-                needs,
+                inbox_item,
                 TabBarItem::new("Board").icon(board_icon),
                 TabBarItem::new("Terminals").icon(term_icon),
                 TabBarItem::new("Settings").icon(settings_icon),
@@ -551,7 +756,7 @@ pub(crate) fn mobile_tab_bar(
         move || !hidden(),
         move || {
             let tabs = [
-                (super::MobileTab::NeedsYou, "Needs you", Icon::Overview),
+                (super::MobileTab::Inbox, "Inbox", Icon::Inbox),
                 (super::MobileTab::Board, "Board", Icon::Board),
                 (super::MobileTab::Terminals, "Terminals", Icon::Terminal),
                 (super::MobileTab::Settings, "Settings", Icon::Settings),
@@ -570,7 +775,7 @@ pub(crate) fn mobile_tab_bar(
                     let value = on_select.clone();
                     move |(t, title, ic)| {
                         let on_sel = value.clone();
-                        let is_badge_tab = t == super::MobileTab::NeedsYou;
+                        let is_badge_tab = t == super::MobileTab::Inbox;
                         press_target()
                             .flex_1()
                             .h_full()
@@ -627,36 +832,18 @@ pub(crate) fn mobile_tab_bar(
     ))
 }
 
-/// Platform-adaptive segmented control (`UISegmentedControl` on iOS, tactile pill bar elsewhere).
+/// Tactile segmented control shared across iOS, Android, and Gallery.
 pub(crate) fn mobile_segmented_control(
     titles: &'static [&'static str],
     selected_index: impl Fn() -> usize + Copy + 'static,
     on_select: impl Fn(usize) + Copy + 'static,
 ) -> View {
-    if is_ios() {
-        let items: Vec<SegmentedControlItem> = titles
-            .iter()
-            .map(|t| SegmentedControlItem::new(*t))
-            .collect();
-        return view().w_full().child(
-            segmented_control()
-                .items(items)
-                .selected_index(move || selected_index() as u32)
-                .on_change(move |idx: &u32| {
-                    trigger_haptic(Haptic::Selection);
-                    on_select(*idx as usize);
-                }),
-        );
-    }
-
     view()
         .w_full()
-        .h(px(40.))
+        .h(px(38.))
         .p_1()
-        .rounded(px(11.))
+        .rounded(px(10.))
         .bg(INSET)
-        .border_1()
-        .border_color(BORDER)
         .flex_row()
         .items_center()
         .gap_1()
@@ -695,25 +882,20 @@ pub(crate) fn mobile_segmented_control(
         }))
 }
 
-/// Platform-adaptive native switch (`UISwitch` on iOS, Material 3 Switch on Android, `toggle` in Gallery).
+/// Platform-consistent switch control with haptic feedback on mobile targets.
 pub(crate) fn mobile_switch(
     checked: impl Fn() -> bool + Copy + 'static,
     a11y_label: &'static str,
     on_change: impl Fn(bool) + Clone + 'static,
 ) -> View {
-    if is_mobile_os() {
-        return view().child(
-            switch()
-                .checked(checked)
-                .accessibility_label(Some(SharedString::from(a11y_label)))
-                .on_change(move |next: &bool| {
-                    trigger_haptic(Haptic::Selection);
-                    on_change(*next);
-                }),
-        );
-    }
-
-    view().child(toggle("", checked, on_change))
+    let cb = on_change;
+    view().child(
+        toggle("", checked, move |next| {
+            trigger_haptic(Haptic::Selection);
+            cb(next);
+        })
+        .accessibility_label(Some(SharedString::from(a11y_label))),
+    )
 }
 
 /// Native mobile `PageSheet` (`UISheetPresentationController` on iOS, ModalBottomSheet on Android)

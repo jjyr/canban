@@ -99,7 +99,7 @@ impl MarkdownInput {
                 "mod+enter",
                 KeyOptions {
                     when: nsh_core::keymap::When::Always,
-                    over_focused: true,
+                    over_focused: nsh_core::keymap::OverFocused::Always,
                     ..Default::default()
                 },
                 move |_| {
@@ -550,7 +550,10 @@ mod tests {
             matches!(
                 item,
                 MountItem::Keymap(keymap)
-                    if keymap.bindings().iter().any(|b| b.over_focused && b.keystroke == expected)
+                    if keymap.bindings().iter().any(|b| {
+                        b.over_focused == nsh_core::keymap::OverFocused::Always
+                            && b.keystroke == expected
+                    })
             )
         });
         assert!(has_over_focused_submit);

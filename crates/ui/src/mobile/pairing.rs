@@ -601,39 +601,30 @@ pub(crate) fn onboarding_screen(ui: Ui, state: MobileState) -> impl IntoElement 
                     .pt_2()
                     .child(
                         view()
-                            .w(px(64.))
-                            .h(px(64.))
-                            .rounded(px(18.))
+                            .w(px(56.))
+                            .h(px(56.))
+                            .rounded(px(16.))
                             .bg(SELECTED)
-                            .border_1()
-                            .border_color(ACCENT)
                             .items_center()
                             .justify_center()
-                            .child(icon_tinted(Icon::Board, ACCENT).w(px(30.)).h(px(30.))),
+                            .child(icon_tinted(Icon::Board, ACCENT).w(px(28.)).h(px(28.))),
                     )
                     .child(
-                        text("Connect to Canban")
+                        text("Canban")
                             .text_size(px(MOBILE_HERO_TITLE))
                             .font_weight(FontWeight::BOLD)
                             .letter_spacing(px(-0.4))
                             .text_color(TEXT)
                             .text_center(),
                     )
-                    .child(
-                        view().w_full().max_w(px(320.)).items_center().child(
-                            mobile_subhead(
-                                "Enter a Tailscale address (host.ts.net or 100.x.y.z), scan a QR code in desktop Settings -> Remote Access, or paste a pairing link.",
-                            )
-                            .line_height(px(21.))
-                            .text_center(),
-                        ),
-                    ),
+                    .child(mobile_subhead("Tailscale address or pairing link").text_center()),
             )
             .child(pairing_panel(ui, state))
             .children(
-                state.pairing_error.with_untracked(|_| false).then(|| {
-                    view().rounded(px(MOBILE_RADIUS))
-                }),
+                state
+                    .pairing_error
+                    .with_untracked(|_| false)
+                    .then(|| view().rounded(px(MOBILE_RADIUS))),
             ),
     )
 }
@@ -815,18 +806,13 @@ pub(crate) fn discover_hosts_sheet_body(ui: Ui, state: MobileState) -> impl Into
         if discovering && hosts.is_empty() {
             return col
                 .child(
-                    view()
-                        .w_full()
+                    super::chrome::surface_block()
                         .p_4()
-                        .rounded(px(MOBILE_RADIUS))
-                        .border_1()
-                        .border_color(BORDER)
-                        .bg(SURFACE)
                         .flex_row()
                         .items_center()
                         .gap_3()
                         .child(loading_spinner(16., ACCENT))
-                        .child(mobile_subhead("Checking online Tailnet machines…")),
+                        .child(mobile_subhead("Scanning Tailnet…")),
                 )
                 .into_element();
         }
@@ -840,8 +826,8 @@ pub(crate) fn discover_hosts_sheet_body(ui: Ui, state: MobileState) -> impl Into
                 .child(empty_state(
                     Icon::Server,
                     Tone::Neutral,
-                    "No new Canban hosts found",
-                    "Online machines running Canban on the same Tailscale account will appear here.",
+                    "No new hosts found",
+                    "",
                     Some(rescan_cta),
                 ))
                 .into_element();
@@ -913,9 +899,7 @@ pub(crate) fn discover_hosts_sheet_body(ui: Ui, state: MobileState) -> impl Into
                                             .gap_1p5()
                                             .child(mobile_title(host.name).truncate())
                                             .child(
-                                                icon_tinted(sec_ic, sec_col)
-                                                    .w(px(13.))
-                                                    .h(px(13.)),
+                                                icon_tinted(sec_ic, sec_col).w(px(13.)).h(px(13.)),
                                             )
                                             .children(
                                                 host.linked_on_host
@@ -936,24 +920,24 @@ pub(crate) fn discover_hosts_sheet_body(ui: Ui, state: MobileState) -> impl Into
             })
             .collect();
 
-        col = col
-            .child(
-                view()
-                    .w_full()
-                    .child(section_header("AVAILABLE ON TAILNET", None))
-                    .child(grouped_card(rows))
-                    .child(view().px_2().pt_2().child(mobile_footnote(
-                        "Connects directly from this device over Tailscale using your personal account.",
-                    ))),
-            );
+        col = col.child(
+            view()
+                .w_full()
+                .child(section_header("AVAILABLE ON TAILNET", None))
+                .child(grouped_card(rows)),
+        );
 
         if joinable.len() > 1 {
             let join_count = joinable.len();
             let all = joinable;
             col = col.child(
-                mobile_button(format!("Join All ({join_count})"), Variant::Primary, move |_| {
-                    join_discovered_hosts(ui, state, all.clone());
-                })
+                mobile_button(
+                    format!("Join All ({join_count})"),
+                    Variant::Primary,
+                    move |_| {
+                        join_discovered_hosts(ui, state, all.clone());
+                    },
+                )
                 .disabled(move || any_joining || discovering),
             );
         }

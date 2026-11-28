@@ -1,5 +1,5 @@
-//! Mobile UI (`Needs you`, `Board`, `Terminals`, `Settings`, QR/URI pairing, pushed `Card`,
-//! `Terminal`, & `HostDetail` routes) shared across iOS, Android, and Desktop Gallery phone scenes.
+//! Mobile UI (`Inbox`, `Board`, `Terminals`, `Settings`, QR/URI pairing, pushed `Card`,
+//! `GitHubItem`, `Terminal`, & `HostDetail` routes) shared across iOS, Android, and Desktop Gallery phone scenes.
 pub mod board;
 pub mod card;
 pub mod chrome;
@@ -10,6 +10,7 @@ pub mod settings;
 pub mod terminals;
 
 use crate::presenter::Ui;
+use canban_notifications::GitHubStackItem;
 use canban_types::{DiscoveredCanbanHost, HostSummary, HostTransport};
 use canban_ui_kit::{tokens::*, *};
 use nsh_base::{MenuButtonItem, menu_button, nav_page, nav_stack};
@@ -25,7 +26,7 @@ use std::{collections::BTreeSet, rc::Rc};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MobileTab {
     #[default]
-    NeedsYou,
+    Inbox,
     Board,
     Terminals,
     Settings,
@@ -34,7 +35,7 @@ pub enum MobileTab {
 impl MobileTab {
     pub fn index(self) -> u32 {
         match self {
-            Self::NeedsYou => 0,
+            Self::Inbox => 0,
             Self::Board => 1,
             Self::Terminals => 2,
             Self::Settings => 3,
@@ -43,7 +44,7 @@ impl MobileTab {
 
     pub fn from_index(index: u32) -> Option<Self> {
         match index {
-            0 => Some(Self::NeedsYou),
+            0 => Some(Self::Inbox),
             1 => Some(Self::Board),
             2 => Some(Self::Terminals),
             3 => Some(Self::Settings),
@@ -90,6 +91,9 @@ pub enum MobileRoute {
     Terminal {
         terminal_id: String,
     },
+    GitHubItem {
+        item: Box<GitHubStackItem>,
+    },
     HostDetail {
         host_id: String,
     },
@@ -100,6 +104,7 @@ impl MobileRoute {
         match self {
             Self::Card { card_id, .. } => format!("card:{card_id}"),
             Self::Terminal { terminal_id } => format!("term:{terminal_id}"),
+            Self::GitHubItem { item } => format!("gh:{}", item.key),
             Self::HostDetail { host_id } => format!("host:{host_id}"),
         }
     }
@@ -111,17 +116,27 @@ pub enum MobileSheet {
     Pairing(Option<String>),
     DiscoverHosts,
     CreateCard(String),
+    EditCard(String),
     MoveCard(String),
     CreateTerminal,
     SyncConflicts,
     Diagnostics(String),
     ProjectPicker,
     Rework(String),
+    DeferInbox {
+        items: Vec<(String, Option<u64>)>,
+        subject: String,
+    },
+    ThemePicker,
+    CutoffPicker,
 }
 
 impl MobileSheet {
     fn is_medium_default(&self) -> bool {
-        matches!(self, Self::ProjectPicker | Self::MoveCard(_))
+        matches!(
+            self,
+            Self::ProjectPicker | Self::MoveCard(_) | Self::DeferInbox { .. } | Self::CutoffPicker
+        )
     }
 }
 
@@ -153,7 +168,7 @@ impl Default for MobileState {
 impl MobileState {
     pub fn new() -> Self {
         Self {
-            tab: signal(MobileTab::NeedsYou),
+            tab: signal(MobileTab::Inbox),
             stack: signal(Vec::new()),
             sheet: signal(None),
             board_stage: signal(String::new()),
@@ -206,6 +221,17 @@ impl MobileState {
         });
     }
 
+    pub fn push_github_item(self, item: GitHubStackItem) {
+        batch(move || {
+            self.terminal_fullscreen.set(false);
+            self.stack.update(|routes| {
+                routes.push(MobileRoute::GitHubItem {
+                    item: Box::new(item),
+                });
+            });
+        });
+    }
+
     pub fn push_host_detail(self, host_id: String) {
         batch(move || {
             self.terminal_fullscreen.set(false);
@@ -231,6 +257,13 @@ impl MobileState {
             self.pairing_uri_input.set(uri.clone());
         }
         self.sheet.set(Some(sheet));
+    }
+
+    pub fn open_defer(self, items: Vec<(String, Option<u64>)>, subject: String) {
+        if items.is_empty() {
+            return;
+        }
+        self.open_sheet(MobileSheet::DeferInbox { items, subject });
     }
 
     pub fn open_pairing(self, prefill_uri: Option<String>) {
@@ -292,6 +325,10 @@ type NavHostGroup = (String, String, Vec<NavProjectEntry>);
 #[derive(Clone, PartialEq)]
 struct RootNavModel {
     tab: MobileTab,
+    inbox_drawer: String,
+    deferred_count: usize,
+    done_count: usize,
+    remaining_triage_count: usize,
     active_project_id: String,
     active_project_name: String,
     unread_count: usize,
@@ -305,6 +342,14 @@ fn build_root_nav_model(ui: Ui, state: MobileState) -> RootNavModel {
     let unread_count: usize = ui
         .reminder_counts
         .with(|counts| counts.values().map(|c| c.unread).sum());
+    let inbox_drawer = ui.inbox.drawer.get();
+    let (deferred_count, done_count, remaining_triage_count) = ui.daily_inbox.with(|i| {
+        (
+            i.deferred_items.len(),
+            i.done_today_items.len(),
+            i.remaining_triage_keys().len(),
+        )
+    });
 
     ui.snapshot.with(|s| {
         let active_proj = s
@@ -351,6 +396,10 @@ fn build_root_nav_model(ui: Ui, state: MobileState) -> RootNavModel {
 
         RootNavModel {
             tab,
+            inbox_drawer,
+            deferred_count,
+            done_count,
+            remaining_triage_count,
             active_project_id,
             active_project_name,
             unread_count,
@@ -367,9 +416,17 @@ fn switch_project(ui: Ui, state: MobileState, pid: String) {
     });
 }
 
+fn inbox_title_for_drawer(drawer: &str) -> String {
+    match drawer {
+        "deferred" => "Deferred".to_owned(),
+        "done" => "Done".to_owned(),
+        _ => "Inbox".to_owned(),
+    }
+}
+
 fn root_title(m: &RootNavModel) -> String {
     match m.tab {
-        MobileTab::NeedsYou => "Needs you".to_owned(),
+        MobileTab::Inbox => inbox_title_for_drawer(&m.inbox_drawer),
         MobileTab::Board => m.active_project_name.clone(),
         MobileTab::Terminals => "Terminals".to_owned(),
         MobileTab::Settings => "Settings".to_owned(),
@@ -378,11 +435,21 @@ fn root_title(m: &RootNavModel) -> String {
 
 fn root_back_title(tab: MobileTab) -> &'static str {
     match tab {
-        MobileTab::NeedsYou => "Inbox",
+        MobileTab::Inbox => "Inbox",
         MobileTab::Board => "Board",
         MobileTab::Terminals => "Terminals",
         MobileTab::Settings => "Settings",
     }
+}
+
+fn defer_remaining_mobile(ui: Ui, state: MobileState) {
+    let items = ui.daily_inbox.with_untracked(|i| i.remaining_triage_keys());
+    if items.is_empty() {
+        ui.notify("All caught up");
+        return;
+    }
+    let count = items.len();
+    state.open_defer(items, format!("{count} remaining items"));
 }
 
 fn render_sheet_modal(ui: Ui, state: MobileState, active: MobileSheet) -> AnyElement {
@@ -400,6 +467,10 @@ fn render_sheet_modal(ui: Ui, state: MobileState, active: MobileSheet) -> AnyEle
         MobileSheet::CreateCard(pid) => (
             "New Card".into(),
             board::create_card_sheet_body(ui, state, pid).into_element(),
+        ),
+        MobileSheet::EditCard(cid) => (
+            "Edit Card".into(),
+            card::edit_card_sheet_body(ui, state, cid).into_element(),
         ),
         MobileSheet::MoveCard(cid) => (
             "Card Actions".into(),
@@ -424,6 +495,18 @@ fn render_sheet_modal(ui: Ui, state: MobileState, active: MobileSheet) -> AnyEle
         MobileSheet::Rework(cid) => (
             "Return for Rework".into(),
             card::rework_sheet_body(ui, state, cid).into_element(),
+        ),
+        MobileSheet::DeferInbox { items, subject } => (
+            "Defer".into(),
+            inbox::defer_sheet_body(ui, state, items, subject).into_element(),
+        ),
+        MobileSheet::ThemePicker => (
+            "Theme".into(),
+            settings::theme_picker_sheet_body(ui, state).into_element(),
+        ),
+        MobileSheet::CutoffPicker => (
+            "Daily Cutoff".into(),
+            settings::cutoff_picker_sheet_body(ui, state).into_element(),
         ),
     };
     chrome::mobile_sheet(title, medium_default, close_cb, body).into_element()
@@ -453,16 +536,47 @@ fn android_root_actions(
     dynamic(move || -> AnyElement {
         let m = nav_model.get();
         match m.tab {
-            MobileTab::NeedsYou => {
-                if m.unread_count == 0 {
-                    return view().into_element();
+            MobileTab::Inbox => {
+                let mut items = vec![
+                    MenuButtonItem::new("drawer:today", "Today").checked(m.inbox_drawer == "today"),
+                    MenuButtonItem::new(
+                        "drawer:deferred",
+                        format!("Deferred ({})", m.deferred_count),
+                    )
+                    .checked(m.inbox_drawer == "deferred"),
+                    MenuButtonItem::new("drawer:done", format!("Done ({})", m.done_count))
+                        .checked(m.inbox_drawer == "done"),
+                ];
+                if m.unread_count > 0 {
+                    items.push(MenuButtonItem::new("mark-read", "Mark all read"));
                 }
-                header_btn(
-                    Icon::Check,
-                    "Mark all read",
-                    Rc::new(move || crate::overview::mark_all_read(ui, None)),
-                )
-                .into_element()
+                if m.remaining_triage_count > 0 {
+                    items.push(MenuButtonItem::new("defer-rest", "Defer remaining…"));
+                }
+                menu_button()
+                    .title("Inbox View")
+                    .accessibility_label(Some(SharedString::from("Inbox options")))
+                    .items(items)
+                    .on_select(move |id: &SharedString| {
+                        chrome::trigger_haptic(Haptic::Selection);
+                        match id.as_ref() {
+                            "drawer:today" => ui.inbox.drawer.set("today".into()),
+                            "drawer:deferred" => ui.inbox.drawer.set("deferred".into()),
+                            "drawer:done" => ui.inbox.drawer.set("done".into()),
+                            "mark-read" => crate::overview::mark_all_read(ui, None),
+                            "defer-rest" => defer_remaining_mobile(ui, state),
+                            _ => {}
+                        }
+                    })
+                    .child(
+                        view()
+                            .w(px(44.))
+                            .h(px(44.))
+                            .items_center()
+                            .justify_center()
+                            .child(icon_tinted(Icon::More, ACCENT).w(px(21.)).h(px(21.))),
+                    )
+                    .into_element()
             }
             MobileTab::Board => {
                 let mut items: Vec<MenuButtonItem> = m
@@ -550,34 +664,50 @@ fn gallery_root_header(
     dynamic(move || {
         let m = nav_model.get();
         let right: AnyElement = match m.tab {
-            MobileTab::NeedsYou if m.unread_count > 0 => press_target()
-                .min_h(px(36.))
-                .px_2p5()
-                .rounded(px(9.))
-                .items_center()
-                .justify_center()
-                .active(|s| s.opacity(0.65))
-                .child(
-                    text("Mark all read")
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(ACCENT),
-                )
-                .on_press(move |_: &()| crate::overview::mark_all_read(ui, None))
-                .into_element(),
+            MobileTab::Inbox => {
+                let next_drawer = match m.inbox_drawer.as_str() {
+                    "today" => "deferred",
+                    "deferred" => "done",
+                    _ => "today",
+                };
+                let pill_label = match m.inbox_drawer.as_str() {
+                    "today" if m.deferred_count > 0 => format!("Deferred ({})", m.deferred_count),
+                    "today" => "Done".to_owned(),
+                    "deferred" => "Done".to_owned(),
+                    _ => "Today".to_owned(),
+                };
+                press_target()
+                    .min_h(px(34.))
+                    .px_2p5()
+                    .rounded(px(8.))
+                    .bg(INSET)
+                    .items_center()
+                    .justify_center()
+                    .active(|s| s.opacity(0.65))
+                    .child(
+                        text(pill_label)
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(ACCENT),
+                    )
+                    .on_press(move |_: &()| {
+                        ui.inbox.drawer.set(next_drawer.into());
+                    })
+                    .into_element()
+            }
             MobileTab::Board => {
                 let pid = m.active_project_id.clone();
                 let has_proj = !pid.is_empty();
                 press_target()
-                    .w(px(36.))
-                    .h(px(36.))
+                    .w(px(34.))
+                    .h(px(34.))
                     .rounded_full()
                     .bg(ACCENT_FILL)
                     .items_center()
                     .justify_center()
                     .disabled(move || !has_proj)
                     .disabled_style(|s| s.opacity(0.4))
-                    .child(icon_tinted(Icon::Plus, ON_ACCENT).w(px(18.)).h(px(18.)))
+                    .child(icon_tinted(Icon::Plus, ON_ACCENT).w(px(17.)).h(px(17.)))
                     .on_press(move |_: &()| {
                         if has_proj {
                             state.open_sheet(MobileSheet::CreateCard(pid.clone()));
@@ -586,49 +716,46 @@ fn gallery_root_header(
                     .into_element()
             }
             MobileTab::Terminals => press_target()
-                .w(px(36.))
-                .h(px(36.))
+                .w(px(34.))
+                .h(px(34.))
                 .rounded_full()
                 .bg(ACCENT_FILL)
                 .items_center()
                 .justify_center()
-                .child(icon_tinted(Icon::Plus, ON_ACCENT).w(px(18.)).h(px(18.)))
+                .child(icon_tinted(Icon::Plus, ON_ACCENT).w(px(17.)).h(px(17.)))
                 .on_press(move |_: &()| state.open_sheet(MobileSheet::CreateTerminal))
                 .into_element(),
             MobileTab::Settings => press_target()
-                .min_h(px(36.))
+                .min_h(px(34.))
                 .px_3()
-                .rounded(px(10.))
+                .rounded(px(9.))
                 .bg(ACCENT_FILL)
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(icon_tinted(Icon::Plus, ON_ACCENT).w(px(15.)).h(px(15.)))
+                .child(icon_tinted(Icon::Plus, ON_ACCENT).w(px(14.)).h(px(14.)))
                 .child(
                     text("Pair")
-                        .text_size(px(14.))
+                        .text_size(px(13.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(ON_ACCENT),
                 )
                 .on_press(move |_: &()| state.open_pairing(None))
                 .into_element(),
-            _ => view().into_element(),
         };
 
         let left: AnyElement = if m.tab == MobileTab::Board {
             press_target()
-                .h(px(38.))
-                .px_3()
-                .rounded(px(10.))
+                .h(px(36.))
+                .px_2p5()
+                .rounded(px(8.))
                 .bg(INSET)
-                .border_1()
-                .border_color(BORDER)
                 .flex_row()
                 .items_center()
                 .gap_1p5()
                 .child(
                     text(m.active_project_name.clone())
-                        .text_size(px(16.))
+                        .text_size(px(15.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(TEXT)
                         .truncate(),
@@ -638,7 +765,7 @@ fn gallery_root_header(
                 .into_element()
         } else {
             text(root_title(&m))
-                .text_size(px(22.))
+                .text_size(px(21.))
                 .font_weight(FontWeight::BOLD)
                 .letter_spacing(px(-0.3))
                 .text_color(TEXT)
@@ -647,11 +774,11 @@ fn gallery_root_header(
 
         view()
             .w_full()
-            .h(px(54.))
+            .h(px(52.))
             .px_4()
             .border_b_1()
             .border_color(BORDER)
-            .bg(SURFACE)
+            .bg(BACKGROUND)
             .flex_row()
             .items_center()
             .justify_between()
@@ -669,6 +796,9 @@ fn render_pushed_route(ui: Ui, state: MobileState, route: MobileRoute) -> AnyEle
         MobileRoute::Terminal { terminal_id } => {
             terminals::pushed_page(ui, state, terminal_id).into_element()
         }
+        MobileRoute::GitHubItem { item } => {
+            inbox::github_item_page(ui, state, *item).into_element()
+        }
         MobileRoute::HostDetail { host_id } => {
             settings::host_detail_page(ui, state, host_id).into_element()
         }
@@ -682,19 +812,59 @@ fn ios_tab_right_items(
     tab: MobileTab,
 ) -> Vec<HeaderItem> {
     match tab {
-        MobileTab::NeedsYou => {
-            let unread = root_nav_model.get().unread_count;
-            if unread == 0 {
-                return Vec::new();
+        MobileTab::Inbox => {
+            let m = root_nav_model.get();
+            let mut menu_items = vec![
+                MenuItem::new("Today")
+                    .symbol("tray")
+                    .checked(m.inbox_drawer == "today")
+                    .on_select(move || {
+                        chrome::trigger_haptic(Haptic::Selection);
+                        ui.inbox.drawer.set("today".into());
+                    }),
+                MenuItem::new(format!("Deferred ({})", m.deferred_count))
+                    .symbol("clock")
+                    .checked(m.inbox_drawer == "deferred")
+                    .on_select(move || {
+                        chrome::trigger_haptic(Haptic::Selection);
+                        ui.inbox.drawer.set("deferred".into());
+                    }),
+                MenuItem::new(format!("Done ({})", m.done_count))
+                    .symbol("checkmark.circle")
+                    .checked(m.inbox_drawer == "done")
+                    .on_select(move || {
+                        chrome::trigger_haptic(Haptic::Selection);
+                        ui.inbox.drawer.set("done".into());
+                    }),
+            ];
+            if m.unread_count > 0 || m.remaining_triage_count > 0 {
+                menu_items.push(MenuItem::separator());
+            }
+            if m.unread_count > 0 {
+                menu_items.push(
+                    MenuItem::new("Mark all read")
+                        .symbol("checkmark.circle")
+                        .on_select(move || {
+                            chrome::trigger_haptic(Haptic::Selection);
+                            crate::overview::mark_all_read(ui, None);
+                        }),
+                );
+            }
+            if m.remaining_triage_count > 0 {
+                menu_items.push(
+                    MenuItem::new("Defer remaining…")
+                        .symbol("clock.arrow.circlepath")
+                        .on_select(move || {
+                            chrome::trigger_haptic(Haptic::Selection);
+                            defer_remaining_mobile(ui, state);
+                        }),
+                );
             }
             vec![
-                HeaderItem::symbol("checkmark.circle")
-                    .key("inbox-mark-read")
-                    .label("Mark all read")
-                    .on_press(move || {
-                        chrome::trigger_haptic(Haptic::Selection);
-                        crate::overview::mark_all_read(ui, None);
-                    }),
+                HeaderItem::symbol("line.3.horizontal.decrease.circle")
+                    .key("inbox-menu")
+                    .label("Inbox View")
+                    .menu(menu_items),
             ]
         }
         MobileTab::Board => {
@@ -770,7 +940,7 @@ fn ios_tab_right_items(
 
 fn tab_root_content(ui: Ui, state: MobileState, tab: MobileTab) -> AnyElement {
     match tab {
-        MobileTab::NeedsYou => inbox::screen(ui, state).into_element(),
+        MobileTab::Inbox => inbox::screen(ui, state).into_element(),
         MobileTab::Board => board::screen(ui, state).into_element(),
         MobileTab::Terminals => terminals::screen(ui, state).into_element(),
         MobileTab::Settings => settings::screen(ui, state).into_element(),
@@ -784,13 +954,12 @@ fn ios_retained_tab_stack(
     tab: MobileTab,
 ) -> View {
     let key = match tab {
-        MobileTab::NeedsYou => "tab-needs-you",
+        MobileTab::Inbox => "tab-inbox",
         MobileTab::Board => "tab-board",
         MobileTab::Terminals => "tab-terminals",
         MobileTab::Settings => "tab-settings",
     };
 
-    // Keep one retained `NavStack` per iOS tab so each tab preserves its scroll position and header chrome.
     let large_title = tab != MobileTab::Board;
     let root_page = nav_page()
         .key(key)
@@ -800,7 +969,7 @@ fn ios_retained_tab_stack(
         .header_title_align(HeaderTitleAlign::Center)
         .header_style_with(|s| s.text_color(TEXT).tint_color(ACCENT))
         .title(move || match tab {
-            MobileTab::NeedsYou => "Needs you".to_owned(),
+            MobileTab::Inbox => inbox_title_for_drawer(&root_nav_model.get().inbox_drawer),
             MobileTab::Board => root_nav_model.get().active_project_name,
             MobileTab::Terminals => "Terminals".to_owned(),
             MobileTab::Settings => "Settings".to_owned(),
@@ -860,7 +1029,7 @@ pub fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                 ui,
                 state,
                 root_nav_model,
-                MobileTab::NeedsYou,
+                MobileTab::Inbox,
             ))
             .child(ios_retained_tab_stack(
                 ui,
@@ -954,6 +1123,7 @@ pub fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                 view().hidden().into_element()
             }
         }))
+        .child(chrome::undo_toast(ui))
         .child(when(
             move || !ui.operation_error.with(String::is_empty),
             move || {
@@ -971,10 +1141,8 @@ pub fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                     .child(
                         view()
                             .w_full()
-                            .rounded(px(chrome::MOBILE_RADIUS))
+                            .rounded(px(12.))
                             .p_3()
-                            .border_1()
-                            .border_color(DANGER)
                             .bg(DANGER_SURFACE)
                             .flex_row()
                             .items_center()
@@ -1033,7 +1201,7 @@ pub fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
             },
         ))
         .child(when(
-            move || !ui.toast.with(String::is_empty),
+            move || !ui.toast.with(String::is_empty) && ui.inbox.undo_banner.with(Option::is_none),
             move || {
                 view()
                     .absolute()
@@ -1073,13 +1241,24 @@ fn has_configured_host(ui: Ui) -> bool {
     }) || ui.hosts.with_untracked(|h| !h.is_empty())
 }
 
-/// Standalone mobile application root component hosted on `nsh-platform-ios` (and mobile targets).
+/// Standalone mobile application root component hosted on `nsh-platform-ios` and `nsh-platform-android`.
 #[component]
 pub fn CanbanMobile() -> impl IntoElement {
     canban_ui_kit::tokens::install_theme();
     let ui = Ui::new();
     let state = MobileState::new();
     crate::links::install(ui);
+
+    // Mirror active mobile Inbox tab into shared Inbox state so GitHub notifications & PR details hydrate.
+    effect(move || {
+        ui.inbox
+            .mobile_active
+            .set(state.tab.get() == MobileTab::Inbox);
+    });
+
+    crate::utilities::init(ui);
+    crate::github::init(ui);
+    crate::inbox::init(ui);
 
     // Seed project selection once snapshots arrive.
     effect(move || {

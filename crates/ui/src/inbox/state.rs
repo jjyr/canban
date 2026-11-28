@@ -90,6 +90,9 @@ pub struct State {
     pub undo_banner: Signal<Option<UndoBatch>>,
     pub undo_epoch: Signal<u64>,
     pub gh_epoch: Signal<u64>,
+    /// Set to `true` by the mobile shell while the `Inbox` tab is active so shared
+    /// GitHub notification hydration and PR detail prefetching work without `ui.page`.
+    pub mobile_active: Signal<bool>,
 }
 
 impl Default for State {
@@ -119,6 +122,7 @@ impl State {
             undo_banner: signal(None),
             undo_epoch: signal(0),
             gh_epoch: signal(0),
+            mobile_active: signal(false),
         }
     }
 }
@@ -143,10 +147,10 @@ pub fn format_cutoff(minutes: u16) -> String {
 
 pub fn init(ui: Ui) {
     // Hydrate GitHub notifications on startup/connect AND whenever the user visits Inbox or gh state changes,
-    // so the left-rail Inbox badge accurately reflects unread GitHub mentions/reviews immediately.
+    // so the Inbox badge accurately reflects unread GitHub mentions/reviews immediately.
     effect(move || {
         let _ = ui.inbox.gh_epoch.get();
-        let on_inbox = ui.page.get() == "inbox";
+        let on_inbox = ui.page.get() == "inbox" || ui.inbox.mobile_active.get();
         let gh_connected = ui
             .github
             .gh_status
@@ -164,7 +168,8 @@ pub fn init(ui: Ui) {
     // Prefetch structured PR/Issue metadata (avatar, CI, comment count, labels) for visible
     // Daily Briefing GitHub items (bounded, cached by AppServer).
     effect(move || {
-        if ui.page.get() != "inbox" || !crate::backend::is_connected() {
+        let on_inbox = ui.page.get() == "inbox" || ui.inbox.mobile_active.get();
+        if !on_inbox || !crate::backend::is_connected() {
             return;
         }
         let inbox = ui.daily_inbox.get();
@@ -760,6 +765,42 @@ pub fn dismiss_items(ui: Ui, items: Vec<(String, Option<u64>)>, label: String) {
     triage_items(ui, patches, Some(label));
 }
 
+pub const CUTOFF_OPTIONS: &[(u16, &str)] = &[
+    (0, "00:00 · Calendar day"),
+    (4 * 60, "04:00 · Late night"),
+    (6 * 60, "06:00 · Early morning"),
+    (9 * 60, "09:00 · Workday start"),
+    (10 * 60, "10:00 · Late morning"),
+];
+
+pub fn apply_defer(
+    ui: Ui,
+    items: Vec<(String, Option<u64>)>,
+    until_ms: u64,
+    subject: &str,
+    preset_label: &str,
+) {
+    if items.is_empty() {
+        return;
+    }
+    let patches: Vec<Value> = items
+        .iter()
+        .map(|(id, wm)| {
+            json!({
+                "id": id,
+                "state": "deferred",
+                "defer_until": until_ms,
+                "watermark": wm,
+            })
+        })
+        .collect();
+    triage_items(
+        ui,
+        patches,
+        Some(format!("Deferred \"{subject}\" → {preset_label}")),
+    );
+}
+
 pub fn open_defer_menu(ui: Ui, items: Vec<(String, Option<u64>)>, subject: String) {
     if items.is_empty() {
         return;
@@ -777,22 +818,7 @@ pub fn open_defer_menu(ui: Ui, items: Vec<(String, Option<u64>)>, subject: Strin
                     let label_text = preset.label.clone();
                     let until = preset.until_ms;
                     MenuItem::new(preset.label).on_select(move || {
-                        let patches: Vec<Value> = items
-                            .iter()
-                            .map(|(id, wm)| {
-                                json!({
-                                    "id": id,
-                                    "state": "deferred",
-                                    "defer_until": until,
-                                    "watermark": wm,
-                                })
-                            })
-                            .collect();
-                        triage_items(
-                            ui,
-                            patches,
-                            Some(format!("Deferred \"{subject}\" → {label_text}")),
-                        );
+                        apply_defer(ui, items.clone(), until, &subject, &label_text);
                     })
                 })
                 .collect(),
@@ -814,17 +840,10 @@ pub fn defer_remaining_all(ui: Ui) {
 
 pub fn open_cutoff_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
-    let options: &[(u16, &str)] = &[
-        (0, "00:00 · Calendar day (default)"),
-        (4 * 60, "04:00 · Late-night cutoff"),
-        (6 * 60, "06:00 · Early morning cutoff"),
-        (9 * 60, "09:00 · Workday start"),
-        (10 * 60, "10:00 · Late morning cutoff"),
-    ];
     let current = cutoff_minutes_from_utility(&ui.utility.get_untracked());
     ui.spawn(async move {
         popup_menu(
-            options
+            CUTOFF_OPTIONS
                 .iter()
                 .map(|&(mins, label_text)| {
                     let prefix = if mins == current { "✓ " } else { "   " };

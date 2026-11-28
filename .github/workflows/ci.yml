@@ -48,6 +48,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run lint
         run: mise run lint
+      - name: Check pure-remote mobile UI compilation
+        if: ${{ !cancelled() }}
+        run: mise exec -- cargo check -p canban-ui --no-default-features --locked
       - name: Run unit tests
         if: ${{ !cancelled() }}
         run: mise run test

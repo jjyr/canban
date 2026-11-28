@@ -10,14 +10,16 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 
 pub const SCENES: &[(&str, &str)] = &[
-    ("mobile-needs-you", "Mobile · Needs you"),
+    ("mobile-inbox", "Mobile · Inbox"),
+    ("mobile-github-pr", "Mobile · GitHub PR"),
     ("mobile-board", "Mobile · Board"),
     ("mobile-card-conversation", "Mobile · Card"),
     ("mobile-terminal", "Mobile · Terminal"),
-    ("mobile-terminals-tab", "Mobile · Terminals tab"),
+    ("mobile-terminals-tab", "Mobile · Terminals"),
     ("mobile-diff", "Mobile · Diff"),
+    ("mobile-settings", "Mobile · Settings"),
     ("mobile-pairing", "Mobile · Pairing"),
-    ("mobile-sync-conflicts", "Mobile · Sync conflicts"),
+    ("mobile-sync-conflicts", "Mobile · Sync"),
     ("mobile-offline-states", "Mobile · Offline"),
 ];
 
@@ -27,15 +29,45 @@ pub fn apply_scene(ui: Ui, state: MobileState, name: &str) {
     state.stack.set(Vec::new());
     state.board_stage.set(String::new());
     state.terminal_fullscreen.set(false);
+    ui.inbox.drawer.set("today".into());
+    ui.inbox.focus_filter.set(String::new());
+    ui.inbox.undo_banner.set(None);
     ui.sync_preview.set(Vec::new());
 
     match name {
-        "mobile-needs-you" => {
+        "mobile-inbox" => {
             let (_, hosts) = fixtures::multi_host_workspace(false);
             ui.hosts.set(hosts);
-            ui.snapshot.set(fixtures::overview());
-            ui.select_project("gallery-project".into());
-            state.tab.set(MobileTab::NeedsYou);
+            fixtures::daily_inbox(ui, false);
+            state.tab.set(MobileTab::Inbox);
+        }
+        "mobile-github-pr" => {
+            let (_, hosts) = fixtures::multi_host_workspace(false);
+            ui.hosts.set(hosts);
+            fixtures::daily_inbox(ui, false);
+            state.tab.set(MobileTab::Inbox);
+            let gh_item = ui.daily_inbox.with_untracked(|inbox| {
+                inbox
+                    .needs_you
+                    .iter()
+                    .find_map(|n| match &n.kind {
+                        canban_notifications::NeedsYouKind::GitHub { item, .. } => {
+                            Some((**item).clone())
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        inbox
+                            .github_stacks
+                            .iter()
+                            .flat_map(|s| s.items.iter())
+                            .next()
+                            .cloned()
+                    })
+            });
+            if let Some(item) = gh_item {
+                state.push_github_item(item);
+            }
         }
         "mobile-board" => {
             let (snap, hosts) = fixtures::multi_host_workspace(false);
@@ -82,6 +114,12 @@ pub fn apply_scene(ui: Ui, state: MobileState, name: &str) {
             ui.select_project("gallery-project".into());
             state.tab.set(MobileTab::Board);
             state.push_card("card-1".into(), CardSegment::Diff);
+        }
+        "mobile-settings" => {
+            let (snap, hosts) = fixtures::multi_host_workspace(false);
+            ui.hosts.set(hosts);
+            ui.snapshot.set(snap);
+            state.tab.set(MobileTab::Settings);
         }
         "mobile-pairing" => {
             ui.hosts.set(Vec::new());

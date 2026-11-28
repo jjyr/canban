@@ -21,7 +21,7 @@ use nsh_core::prelude::*;
 use serde_json::json;
 use state::*;
 
-fn engine_icon(engine: Option<&str>) -> Icon {
+pub(crate) fn engine_icon(engine: Option<&str>) -> Icon {
     match engine
         .map(|e| e.strip_prefix("herdr:").unwrap_or(e))
         .unwrap_or("")
@@ -76,7 +76,7 @@ fn format_today_date_long() -> String {
     chrono::Local::now().format("%A, %B %-d").to_string()
 }
 
-fn format_duration_short(since_ms: u64, now_ms: u64) -> String {
+pub(crate) fn format_duration_short(since_ms: u64, now_ms: u64) -> String {
     if since_ms == 0 || now_ms <= since_ms {
         return String::new();
     }
@@ -92,7 +92,7 @@ fn format_duration_short(since_ms: u64, now_ms: u64) -> String {
     }
 }
 
-fn format_age_compact(ts_ms: u64, now_ms: u64) -> String {
+pub(crate) fn format_age_compact(ts_ms: u64, now_ms: u64) -> String {
     if ts_ms == 0 {
         return String::new();
     }
@@ -109,7 +109,7 @@ fn format_age_compact(ts_ms: u64, now_ms: u64) -> String {
 }
 
 /// Borderless circular GitHub avatar with 2-letter initials fallback.
-fn github_avatar(login: &str, avatar_url: Option<&str>, size: f32) -> View {
+pub(crate) fn github_avatar(login: &str, avatar_url: Option<&str>, size: f32) -> View {
     let short = login
         .chars()
         .filter(|c| c.is_alphanumeric())
@@ -148,7 +148,12 @@ fn github_avatar(login: &str, avatar_url: Option<&str>, size: f32) -> View {
 }
 
 /// Colored semantic PR/Issue state mark (`Open` green, `Merged` purple, `Draft` muted, `Closed` danger).
-fn gh_state_mark(kind: &str, pr_state: Option<&str>, merged: bool, draft: bool) -> AnyElement {
+pub(crate) fn gh_state_mark(
+    kind: &str,
+    pr_state: Option<&str>,
+    merged: bool,
+    draft: bool,
+) -> AnyElement {
     if kind == "pr" {
         if merged || pr_state.is_some_and(|s| s.eq_ignore_ascii_case("merged")) {
             return icon_tinted(Icon::GitMerge, HIGHLIGHT)
@@ -190,7 +195,7 @@ fn gh_state_mark(kind: &str, pr_state: Option<&str>, merged: bool, draft: bool) 
 }
 
 /// Compact inline CI indicator (`✓ 12/12`, `✗ 2/12`, `● 3/12`).
-fn ci_indicator(
+pub(crate) fn ci_indicator(
     state: Option<&str>,
     passed: u32,
     total: u32,
@@ -267,7 +272,7 @@ fn ci_indicator(
 }
 
 /// Compact comment icon + count indicator (`💬 4`).
-fn comments_indicator(count: u32) -> View {
+pub(crate) fn comments_indicator(count: u32) -> View {
     view()
         .flex_row()
         .items_center()
@@ -580,20 +585,20 @@ fn render_environment_pulse(ui: Ui) -> View {
     col
 }
 
-struct ReadyMergeSummary {
-    needs_you_items: Vec<NeedsYouItem>,
-    open_cards: Vec<InboxCardWork>,
-    gh_items: Vec<GitHubStackItem>,
-    refs: Vec<String>,
+pub(crate) struct ReadyMergeSummary {
+    pub needs_you_items: Vec<NeedsYouItem>,
+    pub open_cards: Vec<InboxCardWork>,
+    pub gh_items: Vec<GitHubStackItem>,
+    pub refs: Vec<String>,
 }
 
 impl ReadyMergeSummary {
-    fn total(&self) -> usize {
+    pub fn total(&self) -> usize {
         self.needs_you_items.len() + self.open_cards.len() + self.gh_items.len()
     }
 }
 
-fn toggle_focus_filter(ui: Ui, key: &'static str) {
+pub(crate) fn toggle_focus_filter(ui: Ui, key: &'static str) {
     ui.inbox.focus_filter.update(|cur| {
         if cur == key {
             cur.clear();
@@ -603,7 +608,7 @@ fn toggle_focus_filter(ui: Ui, key: &'static str) {
     });
 }
 
-fn collect_ready_to_merge(
+pub(crate) fn collect_ready_to_merge(
     inbox: &DailyInbox,
     gh_details: &std::collections::BTreeMap<String, GitHubItemDetail>,
 ) -> ReadyMergeSummary {

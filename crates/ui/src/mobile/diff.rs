@@ -3,8 +3,7 @@
 use super::{
     MobileSheet, MobileState,
     chrome::{
-        MOBILE_CODE, MOBILE_RADIUS, is_mobile_os, mobile_button, mobile_footnote, mobile_subhead,
-        trigger_haptic,
+        MOBILE_CODE, is_mobile_os, mobile_button, mobile_footnote, mobile_subhead, trigger_haptic,
     },
 };
 use crate::{
@@ -236,251 +235,245 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
             scroll()
                 .flex_1()
                 .min_h(px(0.))
-                .child(view().w_full().p_4().gap_3().pb(px(32.)).child(dynamic(move || {
-                    let m = model.get();
-                    if m.empty_workspace {
-                        return super::chrome::empty_state(
-                            Icon::Compare,
-                            Tone::Neutral,
-                            "No workspace changes",
-                            "This Card does not have an active worktree, branch, or PR attached yet.",
-                            None,
-                        )
-                        .into_element();
-                    }
-                    if m.offline && m.files.is_empty() {
-                        return notice(
-                            "Diff unavailable while host is offline. Reconnect or pull cached snapshots online.",
-                            Tone::Attention,
-                        )
-                        .into_element();
-                    }
-                    if m.loading && m.files.is_empty() {
-                        return loading_panel("Loading Card diff…", "Comparing branches")
-                            .into_element();
-                    }
-                    if !m.error.is_empty() && m.files.is_empty() {
-                        return notice(m.error, Tone::Danger).into_element();
-                    }
-                    if m.files.is_empty() {
-                        return super::chrome::empty_state(
-                            Icon::Check,
-                            Tone::Success,
-                            "Working tree clean",
-                            "No diff against target branch.",
-                            None,
-                        )
-                        .into_element();
-                    }
+                .child(
+                    view()
+                        .w_full()
+                        .p_4()
+                        .gap_3()
+                        .pb(px(32.))
+                        .child(dynamic(move || {
+                            let m = model.get();
+                            if m.empty_workspace {
+                                return super::chrome::empty_state(
+                                    Icon::Compare,
+                                    Tone::Neutral,
+                                    "No workspace changes",
+                                    "",
+                                    None,
+                                )
+                                .into_element();
+                            }
+                            if m.offline && m.files.is_empty() {
+                                return notice("Diff unavailable while offline", Tone::Attention)
+                                    .into_element();
+                            }
+                            if m.loading && m.files.is_empty() {
+                                return loading_panel("Loading diff…", "").into_element();
+                            }
+                            if !m.error.is_empty() && m.files.is_empty() {
+                                return notice(m.error, Tone::Danger).into_element();
+                            }
+                            if m.files.is_empty() {
+                                return super::chrome::empty_state(
+                                    Icon::Check,
+                                    Tone::Success,
+                                    "Working tree clean",
+                                    "",
+                                    None,
+                                )
+                                .into_element();
+                            }
 
-                    let chosen = selected_file.get();
-                    let active_file = m
-                        .files
-                        .iter()
-                        .find(|f| f.filename == chosen)
-                        .or_else(|| m.files.first())
-                        .cloned();
-                    let wrap = wrap_lines.get();
+                            let chosen = selected_file.get();
+                            let active_file = m
+                                .files
+                                .iter()
+                                .find(|f| f.filename == chosen)
+                                .or_else(|| m.files.first())
+                                .cloned();
+                            let wrap = wrap_lines.get();
 
-                    let wrap_btn = press_target()
-                        .h(px(32.))
-                        .px_3()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(if wrap { ACCENT } else { BORDER })
-                        .bg(if wrap { SELECTED } else { SURFACE })
-                        .items_center()
-                        .justify_center()
-                        .active(|s| s.opacity(0.7))
-                        .child(
-                            text(if wrap { "Wrap: On" } else { "Wrap: Off" })
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(if wrap { ACCENT } else { TEXT }),
-                        )
-                        .on_press(move |_: &()| {
-                            trigger_haptic(Haptic::Selection);
-                            wrap_lines.update(|w| *w = !*w);
-                        });
+                            let wrap_btn = press_target()
+                                .h(px(30.))
+                                .px_2p5()
+                                .rounded_full()
+                                .bg(if wrap { SELECTED } else { SURFACE })
+                                .items_center()
+                                .justify_center()
+                                .active(|s| s.opacity(0.7))
+                                .child(
+                                    text(if wrap { "Wrap: On" } else { "Wrap: Off" })
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(if wrap { ACCENT } else { MUTED }),
+                                )
+                                .on_press(move |_: &()| {
+                                    trigger_haptic(Haptic::Selection);
+                                    wrap_lines.update(|w| *w = !*w);
+                                });
 
-                    let mut out = view().w_full().gap_3().child(
-                        view()
-                            .w_full()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2p5()
-                                    .child(
-                                        text(format!(
-                                            "{} file{}",
-                                            m.files.len(),
-                                            if m.files.len() == 1 { "" } else { "s" }
-                                        ))
-                                        .text_size(px(15.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(TEXT)
-                                        .tabular_nums(),
-                                    )
-                                    .child(
-                                        text(format!("+{}", m.total_add))
-                                            .text_size(px(14.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(SUCCESS)
-                                            .tabular_nums(),
-                                    )
-                                    .child(
-                                        text(format!("−{}", m.total_del))
-                                            .text_size(px(14.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(DANGER)
-                                            .tabular_nums(),
-                                    )
-                                    .children(m.truncated.then(|| mobile_footnote("Partial"))),
-                            )
-                            .child(wrap_btn),
-                    );
-
-                    out = out.child(
-                        scroll().horizontal().scrollbar(false).w_full().child(
-                            view().flex_row().items_center().gap_2().children(m.files.iter().map(
-                                |f| {
-                                    let fname = f.filename.clone();
-                                    let fname_press = fname.clone();
-                                    let short =
-                                        fname.rsplit('/').next().unwrap_or(&fname).to_owned();
-                                    let is_sel = active_file
-                                        .as_ref()
-                                        .is_some_and(|a| a.filename == fname);
-                                    press_target()
-                                        .h(px(36.))
-                                        .px_3()
-                                        .rounded(px(10.))
-                                        .border_1()
-                                        .border_color(if is_sel { CLEAR } else { BORDER })
-                                        .bg(if is_sel { ACCENT_FILL } else { SURFACE })
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .cursor_pointer()
-                                        .active(|s| s.opacity(0.75))
-                                        .child(
-                                            text(short)
-                                                .text_size(px(13.5))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(if is_sel { ON_ACCENT } else { TEXT }),
-                                        )
-                                        .child(
-                                            text(format!("+{} −{}", f.additions, f.deletions))
-                                                .text_size(px(12.))
-                                                .text_color(if is_sel { ON_ACCENT } else { MUTED })
-                                                .opacity(if is_sel { 0.85 } else { 1.0 })
-                                                .tabular_nums(),
-                                        )
-                                        .on_press(move |_: &()| {
-                                            trigger_haptic(Haptic::Selection);
-                                            selected_file.set(fname_press.clone());
-                                        })
-                                },
-                            )),
-                        ),
-                    );
-
-                    if let Some(file) = active_file {
-                        let hunks = parse_unified_hunks(&file.patch);
-                        let mut diff_card = view()
-                            .w_full()
-                            .rounded(px(MOBILE_RADIUS))
-                            .border_1()
-                            .border_color(BORDER)
-                            .bg(SURFACE)
-                            .overflow_hidden()
-                            .child(
+                            let mut out = view().w_full().gap_3().child(
                                 view()
                                     .w_full()
-                                    .px_3p5()
-                                    .py_2p5()
-                                    .border_b_1()
-                                    .border_color(BORDER)
-                                    .bg(INSET)
                                     .flex_row()
                                     .items_center()
                                     .justify_between()
                                     .gap_2()
                                     .child(
                                         view()
-                                            .flex_1()
-                                            .min_w(px(0.))
                                             .flex_row()
                                             .items_center()
-                                            .gap_1()
+                                            .gap_2p5()
                                             .child(
-                                                text(file.filename.clone())
-                                                    .font_family(MONO_FONT)
-                                                    .text_size(px(12.5))
-                                                    .text_color(TEXT)
-                                                    .truncate()
-                                                    .select_text()
-                                                    .min_w(px(0.))
-                                                    .flex_shrink(1.),
+                                                text(format!(
+                                                    "{} file{}",
+                                                    m.files.len(),
+                                                    if m.files.len() == 1 { "" } else { "s" }
+                                                ))
+                                                .text_size(px(15.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(TEXT)
+                                                .tabular_nums(),
                                             )
-                                            .children((!file.filename.is_empty()).then(|| {
-                                                let copy_path = file.filename.clone();
-                                                copy_icon_button(
-                                                    format!("Copy file path {}", file.filename),
-                                                    "Copy file path",
-                                                    28.,
-                                                    14.,
-                                                    CARD_HOVER,
-                                                    Placement::Bottom,
-                                                    move || copy_text(ui, copy_path.clone()),
-                                                )
-                                            })),
+                                            .child(
+                                                text(format!("+{}", m.total_add))
+                                                    .text_size(px(14.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(SUCCESS)
+                                                    .tabular_nums(),
+                                            )
+                                            .child(
+                                                text(format!("−{}", m.total_del))
+                                                    .text_size(px(14.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(DANGER)
+                                                    .tabular_nums(),
+                                            )
+                                            .children(
+                                                m.truncated.then(|| mobile_footnote("Partial")),
+                                            ),
                                     )
-                                    .child(badge(file.status)),
+                                    .child(wrap_btn),
                             );
-                        if hunks.is_empty() {
-                            diff_card = diff_card.child(
-                                view().p_4().child(mobile_subhead(
-                                    "Binary or summary-only diff (no patch lines).",
-                                )),
-                            );
-                        } else {
-                            let mut hunks_col = view().w_full();
-                            for hunk in hunks {
-                                hunks_col = hunks_col.child(
+
+                            out = out.child(scroll().horizontal().scrollbar(false).w_full().child(
+                                view().flex_row().items_center().gap_2().children(
+                                    m.files.iter().map(|f| {
+                                        let fname = f.filename.clone();
+                                        let fname_press = fname.clone();
+                                        let short =
+                                            fname.rsplit('/').next().unwrap_or(&fname).to_owned();
+                                        let is_sel = active_file
+                                            .as_ref()
+                                            .is_some_and(|a| a.filename == fname);
+                                        press_target()
+                                            .h(px(34.))
+                                            .px_3()
+                                            .rounded(px(9.))
+                                            .bg(if is_sel { ACCENT_FILL } else { SURFACE })
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .cursor_pointer()
+                                            .active(|s| s.opacity(0.75))
+                                            .child(
+                                                text(short)
+                                                    .text_size(px(13.5))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(if is_sel {
+                                                        ON_ACCENT
+                                                    } else {
+                                                        TEXT
+                                                    }),
+                                            )
+                                            .child(
+                                                text(format!("+{} −{}", f.additions, f.deletions))
+                                                    .text_size(px(12.))
+                                                    .text_color(if is_sel {
+                                                        ON_ACCENT
+                                                    } else {
+                                                        MUTED
+                                                    })
+                                                    .opacity(if is_sel { 0.85 } else { 1.0 })
+                                                    .tabular_nums(),
+                                            )
+                                            .on_press(move |_: &()| {
+                                                trigger_haptic(Haptic::Selection);
+                                                selected_file.set(fname_press.clone());
+                                            })
+                                    }),
+                                ),
+                            ));
+
+                            if let Some(file) = active_file {
+                                let hunks = parse_unified_hunks(&file.patch);
+                                let mut diff_card = super::chrome::surface_block().child(
                                     view()
                                         .w_full()
-                                        .px_2p5()
-                                        .py_1p5()
-                                        .bg(SELECTED)
+                                        .px_3p5()
+                                        .py_2p5()
+                                        .border_b_1()
+                                        .border_color(BORDER)
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
                                         .child(
-                                            text(hunk.header)
-                                                .text_size(px(11.5))
-                                                .font_family(MONO_FONT)
-                                                .text_color(ACCENT),
-                                        ),
+                                            view()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    text(file.filename.clone())
+                                                        .font_family(MONO_FONT)
+                                                        .text_size(px(12.5))
+                                                        .text_color(TEXT)
+                                                        .truncate()
+                                                        .select_text()
+                                                        .min_w(px(0.))
+                                                        .flex_shrink(1.),
+                                                )
+                                                .children((!file.filename.is_empty()).then(|| {
+                                                    let copy_path = file.filename.clone();
+                                                    copy_icon_button(
+                                                        format!("Copy file path {}", file.filename),
+                                                        "Copy file path",
+                                                        28.,
+                                                        14.,
+                                                        CARD_HOVER,
+                                                        Placement::Bottom,
+                                                        move || copy_text(ui, copy_path.clone()),
+                                                    )
+                                                })),
+                                        )
+                                        .child(badge(file.status)),
                                 );
-                                for line in hunk.lines {
-                                    hunks_col = hunks_col.child(render_diff_line(line, wrap));
+                                if hunks.is_empty() {
+                                    diff_card =
+                                        diff_card.child(view().p_4().child(mobile_subhead(
+                                            "Binary or summary-only diff (no patch lines).",
+                                        )));
+                                } else {
+                                    let mut hunks_col = view().w_full();
+                                    for hunk in hunks {
+                                        hunks_col = hunks_col.child(
+                                            view().w_full().px_2p5().py_1p5().bg(SELECTED).child(
+                                                text(hunk.header)
+                                                    .text_size(px(11.5))
+                                                    .font_family(MONO_FONT)
+                                                    .text_color(ACCENT),
+                                            ),
+                                        );
+                                        for line in hunk.lines {
+                                            hunks_col =
+                                                hunks_col.child(render_diff_line(line, wrap));
+                                        }
+                                    }
+                                    if wrap {
+                                        diff_card = diff_card.child(hunks_col);
+                                    } else {
+                                        diff_card = diff_card
+                                            .child(scroll().horizontal().w_full().child(hunks_col));
+                                    }
                                 }
+                                out = out.child(diff_card);
                             }
-                            if wrap {
-                                diff_card = diff_card.child(hunks_col);
-                            } else {
-                                diff_card = diff_card
-                                    .child(scroll().horizontal().w_full().child(hunks_col));
-                            }
-                        }
-                        out = out.child(diff_card);
-                    }
 
-                    out.into_element()
-                }))),
+                            out.into_element()
+                        })),
+                ),
         )
         .child(dynamic(move || {
             let m = model.get();
