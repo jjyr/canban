@@ -1222,7 +1222,7 @@ impl AppServer {
                     continue;
                 }
             };
-            let core_id = self.verified_core_id().ok();
+            let core_id = self.fresh_core_id().ok();
             let mut labels = BTreeMap::from([
                 ("canban.project".into(), run.project_id.clone()),
                 ("canban.script_run".into(), run.id.clone()),
@@ -1243,6 +1243,14 @@ impl AppServer {
                 Some(self.resolve_launch_terminal_size(None)),
             ) {
                 Ok(launched) => {
+                    let core_id = core_id
+                        .map(|cid| self.resolve_launched_core_id(cid, &launched))
+                        .or_else(|| {
+                            launched["core_id"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                        });
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
                     let commit_res: Result<bool> = (|| {
                         self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;

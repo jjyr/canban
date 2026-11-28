@@ -1189,8 +1189,72 @@ impl InvariantOracle {
         if !self.shadow_ui_writes.is_empty() || self.shadow_ui_receipt_count > 0 {
             self.check_ui_committed_writes(world, true)?;
         }
+        Self::check_no_zombie_replaced_schedules(world)?;
         Self::check_sqlite_integrity(world)?;
         Self::check_post_bounce_recovery_all(world)?;
+        Ok(())
+    }
+
+    /// Ensures no cardless `ScheduledRun` remains zombied in `running`/`working`/`blocked`
+    /// after its Herdr terminal was marked `connection == "replaced"` (Core identity changed),
+    /// and that no replaced cardless scheduled terminal stays open in `state != "finished"`.
+    fn check_no_zombie_replaced_schedules(world: &SimWorld) -> Result<()> {
+        for (host_name, handle) in &world.servers {
+            let Some(server) = handle.server() else {
+                continue;
+            };
+            let snap = server.snapshot()?;
+            for r in snap.scheduled_runs.iter().filter(|r| !r.creates_card) {
+                let Some(tid) = r.terminal_id.as_deref() else {
+                    ensure!(
+                        r.state != "blocked",
+                        "[{host_name}] ZOMBIE SCHEDULED RUN: cardless run {} remained blocked without a terminal",
+                        r.id
+                    );
+                    continue;
+                };
+                let rt_opt = snap
+                    .terminals
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .and_then(|t| t.runtime.as_ref());
+                let Some(rt) = rt_opt else {
+                    ensure!(
+                        !matches!(r.state.as_str(), "running" | "working" | "blocked"),
+                        "[{host_name}] ZOMBIE SCHEDULED RUN: cardless run {} remained {:?} after terminal {} disappeared",
+                        r.id,
+                        r.state,
+                        tid
+                    );
+                    continue;
+                };
+                if rt.connection == "replaced" {
+                    ensure!(
+                        !matches!(r.state.as_str(), "running" | "working" | "blocked"),
+                        "[{host_name}] ZOMBIE SCHEDULED RUN: cardless run {} remained in state {:?} after terminal {} entered connection=\"replaced\"",
+                        r.id,
+                        r.state,
+                        tid
+                    );
+                    ensure!(
+                        rt.state == "finished",
+                        "[{host_name}] ZOMBIE SCHEDULED TERMINAL: terminal {} for replaced scheduled run {} remained in runtime.state={:?}",
+                        tid,
+                        r.id,
+                        rt.state
+                    );
+                }
+                if r.state == "blocked" {
+                    ensure!(
+                        rt.state != "finished",
+                        "[{host_name}] ZOMBIE BLOCKED SCHEDULED RUN: cardless run {} remained blocked after terminal {} finished",
+                        r.id,
+                        tid
+                    );
+                }
+            }
+        }
+        world.hit("oracle.no_zombie_replaced_schedules_checked");
         Ok(())
     }
 

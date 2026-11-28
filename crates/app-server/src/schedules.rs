@@ -689,7 +689,7 @@ impl AppServer {
         for run in snapshot
             .scheduled_runs
             .iter()
-            .filter(|r| r.creates_card && r.active())
+            .filter(|r| r.creates_card && (r.active() || r.state == "blocked"))
         {
             let wf = run
                 .workflow_run_id
@@ -700,18 +700,48 @@ impl AppServer {
                 .as_deref()
                 .and_then(|id| snapshot.cards.iter().find(|c| c.id == id));
             let (next_state, next_step, next_terminal, next_err, done) = match wf {
+                _ if card.is_some_and(|c| !c.active()) => (
+                    "cancelled".to_owned(),
+                    run.current_step.clone(),
+                    run.terminal_id.clone(),
+                    None,
+                    true,
+                ),
+                _ if card.is_some_and(|c| c.resolved()) => (
+                    "completed".to_owned(),
+                    run.current_step.clone(),
+                    run.terminal_id.clone(),
+                    None,
+                    true,
+                ),
                 Some(w) if w.active() => {
-                    let st = if w.state == "blocked" || card.is_some_and(|c| c.human_gate.is_some())
+                    let core_replaced = w
+                        .terminal_id
+                        .as_deref()
+                        .and_then(|tid| snapshot.terminals.iter().find(|t| t.id == tid))
+                        .and_then(|t| t.agent.as_ref())
+                        .is_some_and(|a| !a.finished() && a.connection_state == "replaced");
+                    let st = if w.state == "blocked"
+                        || core_replaced
+                        || card.is_some_and(|c| c.human_gate.is_some())
                     {
                         "blocked"
                     } else {
                         "running"
                     };
+                    let err = if core_replaced {
+                        Some(
+                            "Original Herdr core identity changed; retry or close the Agent terminal"
+                                .to_owned(),
+                        )
+                    } else {
+                        w.error.clone()
+                    };
                     (
                         st.to_owned(),
                         w.step.clone(),
                         w.terminal_id.clone(),
-                        w.error.clone(),
+                        err,
                         false,
                     )
                 }
@@ -733,6 +763,7 @@ impl AppServer {
             if run.state != next_state
                 || run.current_step != next_step
                 || run.terminal_id != next_terminal
+                || run.error != next_err
                 || (done && run.completed_at.is_none())
             {
                 updates.push((
@@ -755,7 +786,7 @@ impl AppServer {
                         if tid.is_some() {
                             cur.terminal_id = tid;
                         }
-                        if err.is_some() {
+                        if err.is_some() || cur.state == "running" {
                             cur.error = err;
                         }
                         if done && cur.completed_at.is_none() {
@@ -887,24 +918,95 @@ impl AppServer {
         let client = self.herdr_client();
         for run in snapshot.scheduled_runs.iter().filter(|r| !r.creates_card) {
             let Some(tid) = run.terminal_id.as_deref() else {
+                if run.state == "blocked" {
+                    self.store.lock().unwrap().write(|db| {
+                        let mut cur: ScheduledRun = db.get(&run.id)?;
+                        if cur.state == "blocked" {
+                            cur.state = "failed".into();
+                            cur.error =
+                                Some("Scheduled Agent terminal is no longer available".into());
+                            cur.completed_at = Some(now_ms);
+                            if let Some(step) = cur.steps.iter_mut().rev().find(|s| {
+                                s.kind == "agent"
+                                    && matches!(s.state.as_str(), "running" | "blocked")
+                            }) {
+                                step.state = "failed".into();
+                            }
+                            db.save(&cur)?;
+                        }
+                        Ok(())
+                    })?;
+                    self.emit("schedules", None);
+                }
                 continue;
             };
             let Some(entry) = snapshot.terminals.iter().find(|t| t.id == tid) else {
+                if matches!(run.state.as_str(), "running" | "working" | "blocked") {
+                    self.store.lock().unwrap().write(|db| {
+                        let mut cur: ScheduledRun = db.get(&run.id)?;
+                        if matches!(cur.state.as_str(), "running" | "working" | "blocked") {
+                            cur.state = "failed".into();
+                            cur.error =
+                                Some("Scheduled Agent terminal is no longer available".into());
+                            cur.completed_at = Some(now_ms);
+                            if let Some(step) = cur.steps.iter_mut().rev().find(|s| {
+                                s.kind == "agent"
+                                    && matches!(s.state.as_str(), "running" | "blocked")
+                            }) {
+                                step.state = "failed".into();
+                            }
+                            db.save(&cur)?;
+                        }
+                        Ok(())
+                    })?;
+                    self.emit("schedules", None);
+                }
                 continue;
             };
             let Some(rt) = entry.runtime.as_ref() else {
+                if matches!(run.state.as_str(), "running" | "working" | "blocked") {
+                    self.store.lock().unwrap().write(|db| {
+                        let mut cur: ScheduledRun = db.get(&run.id)?;
+                        if matches!(cur.state.as_str(), "running" | "working" | "blocked") {
+                            cur.state = "failed".into();
+                            cur.error = Some(
+                                "Scheduled Agent terminal runtime is no longer available".into(),
+                            );
+                            cur.completed_at = Some(now_ms);
+                            if let Some(step) = cur.steps.iter_mut().rev().find(|s| {
+                                s.kind == "agent"
+                                    && matches!(s.state.as_str(), "running" | "blocked")
+                            }) {
+                                step.state = "failed".into();
+                            }
+                            db.save(&cur)?;
+                        }
+                        Ok(())
+                    })?;
+                    self.emit("schedules", None);
+                }
                 continue;
             };
 
-            if rt.state == "finished" {
+            if rt.state == "finished" || rt.connection == "replaced" {
+                let replaced = rt.connection == "replaced";
                 if matches!(run.state.as_str(), "running" | "working" | "blocked") {
-                    let out_path = self.capture_scheduled_output(&run.id, entry).ok().flatten();
+                    let out_path = if replaced {
+                        None
+                    } else {
+                        self.capture_scheduled_output(&run.id, entry).ok().flatten()
+                    };
+                    let replaced_err = rt.error.clone().unwrap_or_else(|| {
+                        "Original Core identity changed; scheduled run interrupted".into()
+                    });
                     self.store.lock().unwrap().write(|db| {
                         let mut cur: ScheduledRun = db.get(&run.id)?;
                         if matches!(cur.state.as_str(), "running" | "working" | "blocked") {
                             let was_blocked = cur.state == "blocked";
                             cur.state = "failed".into();
-                            cur.error = Some(if was_blocked {
+                            cur.error = Some(if replaced {
+                                replaced_err.clone()
+                            } else if was_blocked {
                                 "Scheduled Agent terminal exited while waiting for decision".into()
                             } else {
                                 "Scheduled Agent exited without reporting an outcome".into()
@@ -924,6 +1026,9 @@ impl AppServer {
                         Ok(())
                     })?;
                     self.emit("schedules", None);
+                }
+                if replaced && rt.state != "finished" {
+                    self.mark_scheduled_terminal_finished(tid);
                 }
                 continue;
             }
@@ -1721,7 +1826,7 @@ impl AppServer {
             );
         }
 
-        let core_id = self.verified_core_id()?;
+        let core_id = self.fresh_core_id()?;
         let mut labels = BTreeMap::from([
             ("canban.schedule_run".into(), run.id.clone()),
             ("canban.terminal".into(), run.id.clone()),
@@ -1744,6 +1849,7 @@ impl AppServer {
                 size: None,
             })?
             .receipt;
+        let core_id = self.resolve_launched_core_id(core_id, &receipt);
         let terminal_address = strp(&receipt, "address")?.to_owned();
         {
             let mut inv = self.inventory.lock().unwrap();

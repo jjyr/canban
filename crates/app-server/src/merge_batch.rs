@@ -1093,7 +1093,7 @@ impl AppServer {
         };
         let client = self.herdr_client();
         // Leave the batch queued if Herdr Core is not reachable yet (e.g. startup or non-runtime tests).
-        let Ok(core) = self.verified_core_id() else {
+        let Ok(core) = self.fresh_core_id() else {
             return Ok(());
         };
         let profile =
@@ -1199,8 +1199,10 @@ impl AppServer {
         });
         match launch_res.map(|o| o.receipt) {
             Ok(receipt) => {
+                let core = self.resolve_launched_core_id(core, &receipt);
                 let address = strp(&receipt, "address")?.to_owned();
                 let started_ms = self.now_ms();
+                runtime.core_id = Some(core.clone());
                 runtime.terminal = Some(address.clone());
                 runtime.state = "running".into();
                 runtime.connection = "connected".into();

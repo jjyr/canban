@@ -2619,14 +2619,24 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     && herdr.subscriber_count() > 0
                                 {
                                     let prev_core = herdr.core_id();
+                                    let new_core = format!("chaos-core-{host}-{seed}-{tag}");
                                     crate::trace::record_fault_armed("herdr.restart_core");
-                                    herdr.restart_core(format!("chaos-core-{host}-{seed}-{tag}"));
-                                    let evicted = herdr.core_id() != prev_core
-                                        && herdr.subscriber_count() == 0;
-                                    world.advance(Duration::from_millis(250))?;
-                                    if evicted {
-                                        crate::trace::record_fault_fired("herdr.restart_core");
-                                        world.hit("chaos.herdr_restart_core");
+                                    if tag % 3 == 0 {
+                                        herdr.restart_core_silent(&new_core);
+                                        world.advance(Duration::from_millis(250))?;
+                                        if herdr.core_id() != prev_core {
+                                            crate::trace::record_fault_fired("herdr.restart_core");
+                                            world.hit("chaos.herdr_restart_core");
+                                        }
+                                    } else {
+                                        herdr.restart_core(&new_core);
+                                        let evicted = herdr.core_id() != prev_core
+                                            && herdr.subscriber_count() == 0;
+                                        world.advance(Duration::from_millis(250))?;
+                                        if evicted {
+                                            crate::trace::record_fault_fired("herdr.restart_core");
+                                            world.hit("chaos.herdr_restart_core");
+                                        }
                                     }
                                 }
                             }
@@ -3544,7 +3554,19 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     let mut active_scheds: Vec<_> = snap
                                         .scheduled_runs
                                         .iter()
-                                        .filter(|r| !r.creates_card && r.active())
+                                        .filter(|r| {
+                                            !r.creates_card
+                                                && r.active()
+                                                && r.terminal_id.as_deref().is_none_or(|tid| {
+                                                    snap.terminals
+                                                        .iter()
+                                                        .find(|t| t.id == tid)
+                                                        .and_then(|t| t.runtime.as_ref())
+                                                        .is_none_or(|rt| {
+                                                            rt.connection != "replaced"
+                                                        })
+                                                })
+                                        })
                                         .collect();
                                     active_scheds.sort_by_key(|r| (r.scheduled_at, r.number));
                                     if let Some(sr) = active_scheds.first() {
@@ -4657,19 +4679,22 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                     let snap =
                                         world.server(&wf_host).and_then(|s| s.snapshot().ok());
                                     if let Some(snap) = snap {
-                                        if let Some(failed) = snap.terminals.iter().find(|t| {
+                                        if let Some(retryable) = snap.terminals.iter().find(|t| {
                                             t.agent.as_ref().is_some_and(|a| {
-                                                a.state == "failed"
-                                                    && a.observed.as_ref().is_some_and(|v| {
-                                                        matches!(
-                                                            v["state"].as_str(),
-                                                            Some("finished" | "missing")
-                                                        )
-                                                    })
+                                                a.connection_state == "replaced"
+                                                    || (a.state == "failed"
+                                                        && a.observed.as_ref().is_some_and(|v| {
+                                                            matches!(
+                                                                v["state"].as_str(),
+                                                                Some("finished" | "missing")
+                                                            )
+                                                        }))
                                             })
                                         }) {
-                                            let q_tid =
-                                                canban_types::qualify_host_id(&wf_host, &failed.id);
+                                            let q_tid = canban_types::qualify_host_id(
+                                                &wf_host,
+                                                &retryable.id,
+                                            );
                                             let _ = check_expected_chaos_err(
                                                 "execution.retry",
                                                 world.client_call(

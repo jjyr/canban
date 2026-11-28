@@ -614,18 +614,21 @@ impl AppServer {
                     } else if run.step_is_deliver() {
                         engine::requeue_delivery_at(db, &mut card, &mut run, now_ms)?;
                     } else {
+                        let core_replaced = prev.connection_state == "replaced";
                         ensure!(
-                            prev.terminal.is_none()
+                            core_replaced
+                                || prev.terminal.is_none()
                                 || prev.observed.as_ref().is_some_and(|v| {
                                     matches!(v["state"].as_str(), Some("finished" | "missing"))
                                 }),
                             "Answer the live Agent first, or end it before retrying"
                         );
                         ensure!(
-                            matches!(
-                                prev.state.as_str(),
-                                "blocked" | "failed" | "needs_report" | "missing"
-                            ),
+                            core_replaced
+                                || matches!(
+                                    prev.state.as_str(),
+                                    "blocked" | "failed" | "needs_report" | "missing"
+                                ),
                             "Inspect the uncertain execution before retrying"
                         );
                         crate::sessions::retry_agent(db, &card, &mut prev_entry, now_ms)?;
@@ -673,12 +676,16 @@ impl AppServer {
                             prev.state != "unknown",
                             "Inspect uncertain launch before retrying"
                         );
-                        if matches!(
-                            prev.state.as_str(),
-                            "blocked" | "failed" | "needs_report" | "missing"
-                        ) {
+                        let core_replaced = prev.connection_state == "replaced";
+                        if core_replaced
+                            || matches!(
+                                prev.state.as_str(),
+                                "blocked" | "failed" | "needs_report" | "missing"
+                            )
+                        {
                             ensure!(
-                                prev.terminal.is_none()
+                                core_replaced
+                                    || prev.terminal.is_none()
                                     || prev
                                         .observed
                                         .as_ref()

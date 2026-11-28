@@ -2559,7 +2559,7 @@ fn render_schedules_report(
                 }
                 other => (MUTED, other.to_owned(), Tone::Neutral, false),
             };
-            let is_failed = run.state == "failed";
+            let is_failed = matches!(run.state.as_str(), "failed" | "unknown");
             let outcome_text = if let Some(err) = &run.error {
                 err.clone()
             } else if let Some(sum) = &run.summary {

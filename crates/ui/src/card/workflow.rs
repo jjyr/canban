@@ -120,7 +120,7 @@ struct WorkflowPanelModel {
     has_any_active_run: bool,
     idle_deliver_workflow: Option<(String, String)>,
     had_previous_run: bool,
-    att_profiles: std::collections::BTreeMap<String, (String, Option<u64>, bool)>,
+    att_profiles: std::collections::BTreeMap<String, (String, Option<u64>, bool, Option<String>)>,
     queue_info: Option<MergeQueueInfo>,
     active_batch: Option<(canban_types::MergeBatch, usize, usize)>,
 }
@@ -140,7 +140,10 @@ pub fn render(ui: Ui) -> impl IntoElement {
             queue_info,
             active_batch,
         ) = ui.snapshot.with(|s| {
-            let att_profiles: std::collections::BTreeMap<String, (String, Option<u64>, bool)> = s
+            let att_profiles: std::collections::BTreeMap<
+                String,
+                (String, Option<u64>, bool, Option<String>),
+            > = s
                 .terminals
                 .iter()
                 .filter_map(|t| {
@@ -149,16 +152,28 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         return None;
                     }
                     let started_at = crate::components::activity::agent_started_at(s, t);
-                    let stopped = a.terminal.is_none()
+                    let core_replaced = a.connection_state == "replaced";
+                    let stopped = core_replaced
+                        || a.terminal.is_none()
                         || a.observed.as_ref().is_some_and(|v| {
                             matches!(v["state"].as_str(), Some("finished" | "missing"))
                         });
                     let retryable = stopped
-                        && matches!(
-                            a.state.as_str(),
-                            "failed" | "blocked" | "needs_report" | "missing" | "unknown"
-                        );
-                    Some((t.id.clone(), (a.profile.id.clone(), started_at, retryable)))
+                        && (core_replaced
+                            || matches!(
+                                a.state.as_str(),
+                                "failed" | "blocked" | "needs_report" | "missing" | "unknown"
+                            ));
+                    let err = a.error.clone().or_else(|| {
+                        core_replaced.then(|| {
+                            "Original Herdr core identity changed; retry to start on current Core"
+                                .into()
+                        })
+                    });
+                    Some((
+                        t.id.clone(),
+                        (a.profile.id.clone(), started_at, retryable, err),
+                    ))
                 })
                 .collect();
             let card_runs: Vec<_> = s
@@ -406,9 +421,13 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         .terminal_id
                         .as_ref()
                         .and_then(|tid| att_profiles.get(tid));
-                    let active_profile = active_agent_meta.map(|(p, _, _)| p.as_str());
-                    let active_agent_started_at = active_agent_meta.and_then(|(_, ts, _)| *ts);
-                    let active_agent_retryable = active_agent_meta.is_some_and(|(_, _, r)| *r);
+                    let active_profile = active_agent_meta.map(|(p, _, _, _)| p.as_str());
+                    let active_agent_started_at = active_agent_meta.and_then(|(_, ts, _, _)| *ts);
+                    let active_agent_retryable = active_agent_meta.is_some_and(|(_, _, r, _)| *r);
+                    let active_agent_error = active_agent_meta.and_then(|(_, _, _, e)| e.clone());
+                    let agent_retryable = !is_deliver_step
+                        && active_agent_retryable
+                        && matches!(run.state.as_str(), "waiting_agent" | "running" | "blocked");
                     let deliver_retryable = is_deliver_step
                         && (matches!(run.state.as_str(), "failed" | "blocked")
                             || (run.state == "waiting_agent"
@@ -465,6 +484,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 run.state.as_str(),
                                 "waiting_approval" | "stale" | "blocked"
                             ) || deliver_retryable
+                                || agent_retryable
                             {
                                 Tone::Attention
                             } else {
@@ -483,6 +503,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 "waiting_agent" | "running" | "waiting_script"
                             )
                             && !deliver_retryable
+                            && !agent_retryable
                             && let Some(elapsed_base) = crate::components::activity::workflow_step_elapsed(
                                 &run,
                                 step_id,
@@ -671,6 +692,24 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 )
                                 .disabled(pending_action),
                             );
+                        } else if agent_retryable
+                            && let Some(tid) = run.terminal_id.clone()
+                        {
+                            actions = actions.child(
+                                compact_action_with_icon(
+                                    Icon::Refresh,
+                                    "Retry",
+                                    Variant::Primary,
+                                    move |_| {
+                                        dispatch(
+                                            ui,
+                                            "execution.retry",
+                                            json!({"terminal_id": tid}),
+                                        );
+                                    },
+                                )
+                                .disabled(pending_action),
+                            );
                         }
                         if let Some((ref batch, _, _)) = active_batch
                             && matches!(batch.state.as_str(), "queued" | "running")
@@ -774,6 +813,8 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         "waiting_agent" | "running" => {
                             if deliver_retryable {
                                 "Auto-merge stopped".to_owned()
+                            } else if agent_retryable {
+                                "Agent interrupted".to_owned()
                             } else if run.inputs["conflict_attempts"].as_u64().unwrap_or(0) > 0 {
                                 if let Some(prof) = active_profile {
                                     format!("Resolving merge conflict (@{prof})…")
@@ -805,7 +846,8 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     let active_step_start = (matches!(
                         run.state.as_str(),
                         "waiting_agent" | "running" | "waiting_script"
-                    ) && !deliver_retryable)
+                    ) && !deliver_retryable
+                        && !agent_retryable)
                     .then(|| {
                         let now_ms = ui.runtime_clock.get_untracked();
                         if let Some(step_id) = &run.step
@@ -909,10 +951,12 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     } else if (matches!(
                         run.state.as_str(),
                         "waiting_approval" | "stale" | "failed" | "blocked"
-                    ) || deliver_retryable)
+                    ) || deliver_retryable
+                        || agent_retryable)
                         && let Some(reason) = card_reason
                             .clone()
                             .or_else(|| run.error.clone().filter(|r| !r.trim().is_empty()))
+                            .or_else(|| active_agent_error.clone().filter(|r| !r.trim().is_empty()))
                     {
                         let notice_tone = if run.state == "failed" {
                             Tone::Danger

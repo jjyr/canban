@@ -1469,7 +1469,7 @@ impl AppServer {
         let client = self.herdr_client();
         let runtime = item.runtime.as_mut().unwrap();
         let result = (|| -> Result<()> {
-            let core = self.verified_core_id()?;
+            let core = self.fresh_core_id()?;
             runtime.core_id = Some(core.clone());
             let mut argv = canban_profiles::command(
                 &profile,
@@ -1521,6 +1521,8 @@ impl AppServer {
                     size: None,
                 })?
                 .receipt;
+            let core = self.resolve_launched_core_id(core, &receipt);
+            runtime.core_id = Some(core.clone());
             let address = strp(&receipt, "address")?.to_owned();
             runtime.terminal = Some(address.clone());
             {

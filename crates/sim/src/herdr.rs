@@ -209,6 +209,25 @@ impl SimHerdr {
         self.restart_core(new_core_id);
     }
 
+    /// Simulates a silent Herdr Core replacement where `core_id` changes and old PTYs
+    /// vanish, while existing event subscribers remain open without an immediate EOF
+    /// (reproducing the real-world window before the 45s heartbeat timeout detects a
+    /// stale subscription).
+    pub fn restart_core_silent(&self, new_core_id: impl Into<String>) {
+        crate::trace::record_coverage_hit("herdr.restart_core_silent");
+        let mut st = self.state.lock().unwrap();
+        st.core_id = new_core_id.into();
+        st.seq = 1;
+        st.terminals.clear();
+        st.buffers.clear();
+        st.activities.clear();
+        st.hang_exit_terminals.clear();
+        st.hang_kill_terminals.clear();
+        st.hang_interrupt_terminals.clear();
+        st.reorder_buffer.clear();
+        st.reorder_remaining = 0;
+    }
+
     /// Inserts or updates a simulated terminal and broadcasts a `created` event.
     pub fn upsert_terminal(
         &self,

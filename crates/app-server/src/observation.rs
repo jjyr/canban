@@ -302,6 +302,53 @@ impl AppServer {
             .context("Core identity unavailable")?
             .to_owned())
     }
+    /// Queries the live Herdr Core ID directly via `Client::status()`, bypassing the
+    /// subscription cache. Use before spawning a new PTY so a silent Core replacement
+    /// within the 45s heartbeat window can never stamp an obsolete `core_id` onto a
+    /// freshly launched terminal.
+    pub(super) fn fresh_core_id(&self) -> Result<String> {
+        let status = self.herdr_client().status()?;
+        let core = status["core"]["id"]
+            .as_str()
+            .context("Core identity unavailable")?
+            .to_owned();
+        self.invalidate_inventory_if_core_changed(&core);
+        Ok(core)
+    }
+    /// Reconciles the launch receipt's authoritative `core_id` (when supplied by Herdr)
+    /// against the pre-launch `fallback` Core ID and triggers an immediate observer
+    /// reconnect if the cached inventory still references an obsolete Core.
+    pub(super) fn resolve_launched_core_id(&self, fallback: String, receipt: &Value) -> String {
+        let actual = receipt["core_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or(fallback);
+        self.invalidate_inventory_if_core_changed(&actual);
+        actual
+    }
+    fn invalidate_inventory_if_core_changed(&self, actual_core: &str) {
+        if !self.observer_running.load(Ordering::SeqCst) || actual_core.is_empty() {
+            return;
+        }
+        let changed = {
+            let mut inv = self.inventory.lock().unwrap();
+            if !inv.core.is_empty() && inv.core != actual_core {
+                let ts = self.now_ms();
+                inv.close_all_working(ts);
+                inv.core = actual_core.to_owned();
+                inv.records.clear();
+                inv.error = Some("Herdr Core identity changed; reconnecting event stream".into());
+                inv.generation += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.wake_herdr();
+        }
+    }
     pub(super) fn start_observer(self: &Arc<Self>) {
         self.observer_running.store(true, Ordering::SeqCst);
         let weak = Arc::downgrade(self);
@@ -505,6 +552,7 @@ async fn observer_loop(
                     delay = 1;
                     drop(server);
 
+                    let stream_core = subscription.core.clone();
                     let rx = subscription.receiver;
                     loop {
                         let Some(server) = weak.upgrade() else {
@@ -512,6 +560,11 @@ async fn observer_loop(
                         };
                         if server.stopped() {
                             return;
+                        }
+                        if server.inventory.lock().unwrap().core != stream_core {
+                            break Err(anyhow::anyhow!(
+                                "Herdr Core identity changed; reconnecting"
+                            ));
                         }
                         let mut stream_err: Option<anyhow::Error> = None;
                         loop {
@@ -562,6 +615,7 @@ async fn observer_loop(
                         tokio::select! {
                             biased;
                             _ = stop_rx.changed() => return,
+                            _ = notify.notified() => {}
                             _ = msg_notify.notified() => {}
                             _ = tokio::time::sleep(Duration::from_millis(remaining.min(5_000))) => {}
                         }
@@ -615,11 +669,17 @@ async fn observer_loop(
 
                     let stream_weak = weak.clone();
                     let stream_key = config_key.clone();
+                    let stream_core = subscription.core.clone();
                     match tokio::task::spawn_blocking(move || -> Option<Result<()>> {
                         loop {
                             let server = stream_weak.upgrade()?;
                             if server.stopped() {
                                 return None;
+                            }
+                            if server.inventory.lock().unwrap().core != stream_core {
+                                return Some(Err(anyhow::anyhow!(
+                                    "Herdr Core identity changed; reconnecting"
+                                )));
                             }
                             let config = server.config();
                             if serde_json::to_vec(&json!([

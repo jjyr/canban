@@ -211,33 +211,54 @@ impl AppServer {
             }
             if let Some(run) = &mut item.agent {
                 if !run.finished() && run.terminal.is_some() {
-                    let core = run
-                        .core_id
-                        .clone()
-                        .context("Original Core binding unavailable")?;
-                    let terminal = run
-                        .terminal
-                        .clone()
-                        .context("Terminal is still starting; wait before closing")?;
-                    target = Some((core, terminal));
                     let now_ms = self.now_ms();
-                    run.close_state = "closing".into();
-                    run.close_requested_at = Some(now_ms);
                     let card_id = run.card_id.clone();
                     let run_num = run.number;
-                    db.save(&item)?;
-                    let card: Card = db.get(&card_id)?;
-                    log(
-                        db,
-                        &card,
-                        "execution.close_requested",
-                        "user",
-                        "Terminal closed by user",
-                        Some(item.id.clone()),
-                        json!({"run_number":run_num}),
-                        now_ms,
-                    )?;
-                    closing_agent = true;
+                    if run.connection_state == "replaced" {
+                        // Original Core was replaced; detach locally without ever sending
+                        // `terminal.kill` to the new Core.
+                        run.state = "cancelled".into();
+                        run.close_state = "closed".into();
+                        run.close_requested_at = Some(now_ms);
+                        db.save(&item)?;
+                        if let Ok(card) = db.get::<Card>(&card_id) {
+                            log(
+                                db,
+                                &card,
+                                "execution.close_requested",
+                                "user",
+                                "Detached terminal from replaced Herdr Core",
+                                Some(item.id.clone()),
+                                json!({"run_number":run_num,"core_replaced":true}),
+                                now_ms,
+                            )?;
+                        }
+                    } else {
+                        let core = run
+                            .core_id
+                            .clone()
+                            .context("Original Core binding unavailable")?;
+                        let terminal = run
+                            .terminal
+                            .clone()
+                            .context("Terminal is still starting; wait before closing")?;
+                        target = Some((core, terminal));
+                        run.close_state = "closing".into();
+                        run.close_requested_at = Some(now_ms);
+                        db.save(&item)?;
+                        let card: Card = db.get(&card_id)?;
+                        log(
+                            db,
+                            &card,
+                            "execution.close_requested",
+                            "user",
+                            "Terminal closed by user",
+                            Some(item.id.clone()),
+                            json!({"run_number":run_num}),
+                            now_ms,
+                        )?;
+                        closing_agent = true;
+                    }
                 } else if !run.finished() {
                     ensure!(
                         run.state != "starting",
@@ -275,7 +296,16 @@ impl AppServer {
             } else if let Some(runtime) = &mut item.runtime
                 && runtime.state != "finished"
             {
-                if let Some(terminal) = runtime.terminal.clone() {
+                if runtime.connection == "replaced" {
+                    // Original Core was replaced; detach locally without ever sending
+                    // `terminal.kill` to the new Core.
+                    runtime.state = "finished".into();
+                    runtime.agent_status = None;
+                    runtime.agent_turn = None;
+                    runtime.observed_agent = None;
+                    runtime.waiting = None;
+                    runtime.command = None;
+                } else if let Some(terminal) = runtime.terminal.clone() {
                     let core = runtime
                         .core_id
                         .clone()
@@ -314,6 +344,7 @@ impl AppServer {
                     saved,
                 );
             }
+            self.wake_runtime();
             return Ok(saved);
         };
         let client = self.herdr_client();
@@ -1100,7 +1131,8 @@ impl AppServer {
         let runtime = item.runtime.as_mut().unwrap();
         let client = self.herdr_client();
         let result = (|| -> Result<()> {
-            runtime.core_id = Some(self.verified_core_id()?);
+            let core_id = self.fresh_core_id()?;
+            runtime.core_id = Some(core_id.clone());
             let is_setup = p["setup_argv"].is_array();
             let mut env = std::collections::BTreeMap::new();
             let mut labels =
@@ -1239,6 +1271,8 @@ impl AppServer {
                 })?
                 .receipt
             };
+            let core_id = self.resolve_launched_core_id(core_id, &receipt);
+            runtime.core_id = Some(core_id);
             let address = receipt["address"]
                 .as_str()
                 .context("Terminal launch receipt has no address")?

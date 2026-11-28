@@ -866,6 +866,7 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "oracle.ui_overview_checked",
     "oracle.ui_quick_merge_checked",
     "oracle.column_ranks_ordered_checked",
+    "oracle.no_zombie_replaced_schedules_checked",
     "client_pages.ui_presenter_pagination_checked",
     "client_pages.ui_event_batch_checked",
     // Phase 2A: core RPC, schedule, workflow & configuration session migrations
@@ -874,6 +875,7 @@ const FULL_SUITE_REQUIRED_COVERAGE: &[&str] = &[
     "bundle.project_crud_and_onboarding",
     "schedules_budget.crud_and_artifact_read",
     "schedules_budget.backlog_and_workflow_edges",
+    "schedules_budget.core_restart_recovery_and_reschedule",
     "sessions.configuration_sessions",
     // Phase 2B: GitHub browse/CI/intake & insights/overview/activity migrations
     "github.browse_and_references",
@@ -946,6 +948,7 @@ const CHAOS_RANDOM_REQUIRED_COVERAGE: &[&str] = &[
     "oracle.ui_overview_checked",
     "oracle.ui_quick_merge_checked",
     "oracle.column_ranks_ordered_checked",
+    "oracle.no_zombie_replaced_schedules_checked",
     "transport.local_framed_rpc",
     "world.quiesce_natural",
     "chaos.profile.desktop",
@@ -2266,8 +2269,8 @@ mod tests {
         let unique: BTreeSet<&str> = all.iter().copied().collect();
         assert_eq!(
             all.len(),
-            126,
-            "full suite coverage gate must require 126 properties"
+            128,
+            "full suite coverage gate must require 128 properties"
         );
         assert_eq!(
             unique.len(),
@@ -2315,8 +2318,8 @@ mod tests {
         let chaos_unique: BTreeSet<&str> = chaos_all.iter().copied().collect();
         assert_eq!(
             chaos_all.len(),
-            41,
-            "chaos random coverage gate must require 41 properties"
+            42,
+            "chaos random coverage gate must require 42 properties"
         );
         assert_eq!(
             chaos_unique.len(),
@@ -2332,8 +2335,8 @@ mod tests {
         let chaos_24_unique: BTreeSet<&str> = chaos_24_all.iter().copied().collect();
         assert_eq!(
             chaos_24_all.len(),
-            47,
-            "chaos 24-seed coverage gate must require 47 properties"
+            48,
+            "chaos 24-seed coverage gate must require 48 properties"
         );
         assert_eq!(
             chaos_24_unique.len(),

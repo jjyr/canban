@@ -1915,7 +1915,7 @@ impl AppServer {
             db.save(&current)
         })?;
         let client = self.herdr_client();
-        let core_id = self.verified_core_id()?;
+        let core_id = self.fresh_core_id()?;
         let labels = std::collections::BTreeMap::from([
             ("canban.project".into(), att.project_id.clone()),
             ("canban.card".into(), card.number.to_string()),
@@ -1968,6 +1968,7 @@ impl AppServer {
         )?;
         let delivery_error = (|| -> Result<Option<String>> {
             self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
+            let core_id = self.resolve_launched_core_id(core_id, &terminal);
             let terminal_address = strp(&terminal, "address")?.to_owned();
             run.core_id = Some(core_id.clone());
             run.terminal = Some(terminal_address.clone());
@@ -2499,7 +2500,7 @@ impl AppServer {
                 config.terminal_env_mode.is_inherit(),
                 source_trust,
             );
-            let core_id = self.verified_core_id().ok();
+            let core_id = self.fresh_core_id().ok();
             let labels = std::collections::BTreeMap::from([
                 ("canban.project".into(), run.project_id.clone()),
                 ("canban.workflow_run".into(), run.id.clone()),
@@ -2516,6 +2517,14 @@ impl AppServer {
                 Some(self.resolve_launch_terminal_size(None)),
             ) {
                 Ok(launched) => {
+                    let core_id = core_id
+                        .map(|cid| self.resolve_launched_core_id(cid, &launched))
+                        .or_else(|| {
+                            launched["core_id"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                        });
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
                     let commit_res: Result<bool> = (|| {
                         self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;

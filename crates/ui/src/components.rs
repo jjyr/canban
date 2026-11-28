@@ -45,7 +45,8 @@ pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
                 deliver_run.is_some_and(|r| r.state == "waiting_delivery"),
             )
         });
-    let can_retry = current.as_ref().is_none_or(crate::terminals::model::closed)
+    let core_replaced = run.connection_state == "replaced";
+    let can_retry = (core_replaced || current.as_ref().is_none_or(crate::terminals::model::closed))
         && card_active
         && !already_queued_for_merge;
     if let Some(row) = current {
@@ -95,10 +96,11 @@ pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
         panel = panel.child(label(error).text_color(DANGER));
     }
     if can_retry
-        && matches!(
-            run.state.as_str(),
-            "failed" | "blocked" | "needs_report" | "missing"
-        )
+        && (core_replaced
+            || matches!(
+                run.state.as_str(),
+                "failed" | "blocked" | "needs_report" | "missing" | "unknown"
+            ))
     {
         let retry_id = id.clone();
         panel = panel.child(

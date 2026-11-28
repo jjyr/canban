@@ -900,7 +900,7 @@ pub fn build_daily_inbox(
             .completed_at
             .unwrap_or(run.scheduled_at)
             .max(run.scheduled_at);
-        if matches!(run.state.as_str(), "failed" | "blocked")
+        if matches!(run.state.as_str(), "failed" | "blocked" | "unknown")
             && !passed_schedules.contains(&(run.project_id.as_str(), run.schedule_id.as_str()))
         {
             match classify_triage(&triage_map, &sched_key, now_ms, day_start_ms, Some(ts)) {

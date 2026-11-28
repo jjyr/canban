@@ -225,7 +225,7 @@ impl AppServer {
             };
             let result = (|| -> Result<()> {
                 let client = self.herdr_client();
-                let core = self.verified_core_id()?;
+                let core = self.fresh_core_id()?;
                 let prompt = if fresh {
                     session.prompt.clone()
                 } else {
@@ -302,6 +302,7 @@ impl AppServer {
                         size: None,
                     })?
                     .receipt;
+                let core = self.resolve_launched_core_id(core, &receipt);
                 let address = strp(&receipt, "address")?.to_owned();
                 let runtime = terminal.runtime.as_mut().unwrap();
                 runtime.core_id = Some(core.clone());

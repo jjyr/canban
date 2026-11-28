@@ -2365,6 +2365,399 @@ workspace:
             json!({ "run_id": dc2_restarted_id }),
         );
         finish_all_remote_ptys(world)?;
+
+        // 7. Herdr Core identity replacement & reschedule recovery:
+        //    (a) Silent Core swap within the 45s observer heartbeat window must NEVER stamp
+        //        the obsolete cached `core_id` onto a freshly launched scheduled run;
+        //    (b) Mid-flight `restart_core` during a running cardless schedule must transition
+        //        it cleanly to `failed`, mark its dead terminal finished without killing on
+        //        the new Core, release its `max_agents` slot, unblock `overlap: skip`, and
+        //        allow immediate manual reschedule;
+        //    (c) Mid-flight `restart_core` during a Card-creating scheduled run must mark the
+        //        Card Agent `replaced` and ScheduledRun `blocked`, support direct
+        //        `execution.retry` on the new Core, AND support clean local `terminal.close`
+        //        on both replaced Card Agents and replaced standalone terminals with zero
+        //        `terminal.kill` sent to the new Core.
+        let raw_pid = canban_types::unqualified_entity_id(&pid).to_owned();
+        let _ = world.server_call(
+            "remote-a",
+            "scheduler.configure",
+            json!({ "max_agents": 1 }),
+        )?;
+        let recovery_sched_res = world.server_call(
+            "remote-a",
+            "schedule.create",
+            json!({
+                "project_id": raw_pid,
+                "name": "Core Recovery Watch",
+                "cron": "* * * * *",
+                "overlap": "skip",
+                "enabled": false,
+                "mode": "agent",
+                "profile_id": "developer",
+                "instruction": "Verify core recovery",
+                "request_key": format!("sb-core-rec-create-{seed}"),
+            }),
+        )?;
+        let rec_sched_id = recovery_sched_res["schedule"]["id"]
+            .as_str()
+            .context("recovery schedule missing id")?
+            .to_owned();
+
+        // 7a. Silent Core swap (old subscriber stays open, < 45s heartbeat window).
+        let silent_core = format!("sim-core-silent-{seed}");
+        herdr.restart_core_silent(&silent_core);
+        let silent_run = world.server_call(
+            "remote-a",
+            "schedule.trigger",
+            json!({ "schedule_id": rec_sched_id }),
+        )?;
+        let silent_run_id = silent_run["id"]
+            .as_str()
+            .context("silent trigger missing run id")?
+            .to_owned();
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == silent_run_id
+                    && t.runtime.as_ref().is_some_and(|rt| {
+                        rt.core_id.as_deref() == Some(silent_core.as_str())
+                            && rt.terminal.is_some()
+                            && rt.connection == "connected"
+                            && rt.state == "running"
+                    })
+            }))
+        })?;
+        // Advance 2s to ensure observer reconnected to `silent_core` and never falsely
+        // downgraded the newly launched run to `replaced`.
+        world.advance(Duration::from_secs(2))?;
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            let sr = snap
+                .scheduled_runs
+                .iter()
+                .find(|r| r.id == silent_run_id)
+                .context("silent scheduled run missing")?;
+            let rt = snap
+                .terminals
+                .iter()
+                .find(|t| t.id == silent_run_id)
+                .and_then(|t| t.runtime.as_ref())
+                .context("silent scheduled terminal missing")?;
+            ensure!(
+                matches!(sr.state.as_str(), "running" | "working")
+                    && rt.connection == "connected"
+                    && rt.core_id.as_deref() == Some(silent_core.as_str()),
+                "Silent Core swap stamped stale core_id or falsely flagged replaced: run={sr:?} rt={rt:?}"
+            );
+        }
+
+        // 7b. Transition `silent_run_id` into `blocked` (simulating a "Run #N · Waiting"
+        //     state), then trigger mid-flight `restart_core`! Verify it does NOT remain
+        //     stuck in `blocked` ("Run #N · Waiting" / attention badge `1`), transitions
+        //     cleanly to `failed`, finishes its dead terminal without killing on the new
+        //     Core, releases its slot, and allows immediate manual reschedule!
+        let silent_addr = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .terminals
+            .into_iter()
+            .find(|t| t.id == silent_run_id)
+            .and_then(|t| t.runtime)
+            .and_then(|rt| rt.terminal)
+            .context("silent scheduled run missing herdr address")?;
+        herdr.set_status(&silent_addr, "blocked", Some(1));
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .scheduled_runs
+                .iter()
+                .any(|r| r.id == silent_run_id && r.state == "blocked"))
+        })?;
+        let kills_before_restart = herdr.killed_terminals().len();
+        let replaced_core = format!("sim-core-replaced-{seed}");
+        herdr.restart_core(&replaced_core);
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            let run_failed = snap.scheduled_runs.iter().any(|r| {
+                r.id == silent_run_id
+                    && r.state == "failed"
+                    && r.completed_at.is_some()
+                    && r.error
+                        .as_deref()
+                        .is_some_and(|e| e.contains("Core identity changed"))
+            });
+            let no_blocked = !snap
+                .scheduled_runs
+                .iter()
+                .any(|r| r.schedule_id == rec_sched_id && r.state == "blocked");
+            let term_finished = snap.terminals.iter().any(|t| {
+                t.id == silent_run_id
+                    && t.runtime
+                        .as_ref()
+                        .is_some_and(|rt| rt.state == "finished" && rt.connection == "replaced")
+            });
+            let slot_freed = canban_scheduler::active_count_at(&snap, w.now_ms()) == 0;
+            Ok(run_failed && no_blocked && term_finished && slot_freed)
+        })?;
+        ensure!(
+            herdr.killed_terminals().len() == kills_before_restart,
+            "Reconciling replaced scheduled run must NEVER send terminal.kill to the new Core"
+        );
+        {
+            let snap = world.server("remote-a").unwrap().snapshot()?;
+            ensure!(
+                !canban_scheduler::timers::schedule_has_active_run(&snap, &rec_sched_id),
+                "Replaced cardless scheduled run must not keep blocking overlap: skip"
+            );
+        }
+        // Immediate manual reschedule (`schedule.trigger`) succeeds cleanly on `replaced_core`!
+        let retried_sched = world.server_call(
+            "remote-a",
+            "schedule.trigger",
+            json!({ "schedule_id": rec_sched_id }),
+        )?;
+        let retried_sched_id = retried_sched["id"]
+            .as_str()
+            .context("retried schedule trigger missing id")?
+            .to_owned();
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap.terminals.iter().any(|t| {
+                t.id == retried_sched_id
+                    && t.runtime.as_ref().is_some_and(|rt| {
+                        rt.core_id.as_deref() == Some(replaced_core.as_str())
+                            && rt.terminal.is_some()
+                            && rt.connection == "connected"
+                    })
+            }))
+        })?;
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "schedule_run_id": retried_sched_id,
+                "state": "completed",
+                "message": "rescheduled run succeeded on new core",
+                "request_key": format!("sb-core-rec-done-{seed}"),
+            }),
+        )?;
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            Ok(snap
+                .scheduled_runs
+                .iter()
+                .any(|r| r.id == retried_sched_id && r.state == "completed")
+                && canban_scheduler::active_count_at(&snap, w.now_ms()) == 0)
+        })?;
+
+        // 7c. Card-creating scheduled run + standalone terminal hit `restart_core` ->
+        //     direct `execution.retry` AND local `terminal.close` both work cleanly without
+        //     sending `terminal.kill` to the new Core!
+        let _ = world.server_call(
+            "remote-a",
+            "scheduler.configure",
+            json!({ "max_agents": 4 }),
+        )?;
+        let card_sched_res = world.server_call(
+            "remote-a",
+            "schedule.create",
+            json!({
+                "project_id": raw_pid,
+                "name": "Core Recovery Card",
+                "cron": "0 9 * * *",
+                "overlap": "skip",
+                "enabled": false,
+                "mode": "card",
+                "card_column": "develop",
+                "card_title": "Core Recovery Card #{{run_number}}",
+                "profile_id": "developer",
+                "instruction": "Verify card recovery after core restart",
+                "request_key": format!("sb-core-card-create-{seed}"),
+            }),
+        )?;
+        let card_sched_id = card_sched_res["schedule"]["id"]
+            .as_str()
+            .context("card recovery schedule missing id")?
+            .to_owned();
+        let card_run_1 = world.server_call(
+            "remote-a",
+            "schedule.trigger",
+            json!({ "schedule_id": card_sched_id }),
+        )?;
+        let card_run_1_id = card_run_1["id"].as_str().unwrap().to_owned();
+        let card_1_id = card_run_1["card_id"].as_str().unwrap().to_owned();
+        let card_run_2 = world.server_call(
+            "remote-a",
+            "schedule.trigger",
+            json!({ "schedule_id": card_sched_id }),
+        )?;
+        let card_2_id = card_run_2["card_id"].as_str().unwrap().to_owned();
+        let manual_term = world.server_call(
+            "remote-a",
+            "terminal.create",
+            json!({ "project_id": raw_pid }),
+        )?;
+        let manual_tid = manual_term["id"].as_str().unwrap().to_owned();
+
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            let c1_live = snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == card_1_id
+                        && a.terminal.is_some()
+                        && a.connection_state == "connected"
+                })
+            });
+            let c2_live = snap.terminals.iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == card_2_id
+                        && a.terminal.is_some()
+                        && a.connection_state == "connected"
+                })
+            });
+            Ok(c1_live && c2_live)
+        })?;
+        let c1_tid = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .terminals
+            .into_iter()
+            .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card_1_id))
+            .unwrap()
+            .id;
+        let c2_tid = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .terminals
+            .into_iter()
+            .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card_2_id))
+            .unwrap()
+            .id;
+
+        let final_core = format!("sim-core-final-{seed}");
+        herdr.restart_core(&final_core);
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            let c1_rep = snap.terminals.iter().any(|t| {
+                t.id == c1_tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.connection_state == "replaced")
+            });
+            let c2_rep = snap.terminals.iter().any(|t| {
+                t.id == c2_tid
+                    && t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.connection_state == "replaced")
+            });
+            let man_rep = snap.terminals.iter().any(|t| {
+                t.id == manual_tid
+                    && t.runtime
+                        .as_ref()
+                        .is_some_and(|rt| rt.connection == "replaced")
+            });
+            let sr_blocked = snap
+                .scheduled_runs
+                .iter()
+                .any(|r| r.id == card_run_1_id && r.state == "blocked");
+            Ok(c1_rep && c2_rep && man_rep && sr_blocked)
+        })?;
+        let kills_before_recovery = herdr.killed_terminals().len();
+
+        // Direct `execution.retry` on replaced Card Agent 1 (no prior close required)!
+        let _ = world.server_call(
+            "remote-a",
+            "execution.retry",
+            json!({
+                "terminal_id": c1_tid,
+                "request_key": format!("sb-core-c1-retry-{seed}"),
+            }),
+        )?;
+        // Clean local `terminal.close` on replaced Card Agent 2 and replaced manual terminal!
+        let close_c2 = world.server_call(
+            "remote-a",
+            "terminal.close",
+            json!({
+                "terminal_id": c2_tid,
+                "request_key": format!("sb-core-c2-close-{seed}"),
+            }),
+        )?;
+        ensure!(
+            close_c2["state"] == "closed",
+            "terminal.close on replaced Card Agent must detach cleanly: {close_c2}"
+        );
+        let close_man = world.server_call(
+            "remote-a",
+            "terminal.close",
+            json!({
+                "terminal_id": manual_tid,
+                "request_key": format!("sb-core-man-close-{seed}"),
+            }),
+        )?;
+        ensure!(
+            close_man["state"] == "closed",
+            "terminal.close on replaced standalone terminal must detach cleanly: {close_man}"
+        );
+        ensure!(
+            herdr.killed_terminals().len() == kills_before_recovery,
+            "Retrying or closing replaced terminals must NEVER send terminal.kill to the new Core"
+        );
+
+        // Card 1's retried Agent launches on `final_core` and reconciles ScheduledRun back to running!
+        world.wait_until(10_000, |w| {
+            let snap = w.server("remote-a").unwrap().snapshot()?;
+            let c1_new = snap.terminals.iter().any(|t| {
+                t.id == c1_tid
+                    && t.agent.as_ref().is_some_and(|a| {
+                        a.core_id.as_deref() == Some(final_core.as_str())
+                            && a.connection_state == "connected"
+                            && a.terminal.is_some()
+                    })
+            });
+            let sr_running = snap
+                .scheduled_runs
+                .iter()
+                .any(|r| r.id == card_run_1_id && r.state == "running");
+            Ok(c1_new && sr_running)
+        })?;
+        // Complete Card 1's retried execution and stop Card 2's workflow cleanly.
+        let _ = world.server_call(
+            "remote-a",
+            "execution.report",
+            json!({
+                "terminal_id": c1_tid,
+                "state": "completed",
+                "message": "card 1 recovered after core restart",
+                "request_key": format!("sb-core-c1-done-{seed}"),
+            }),
+        )?;
+        if let Some(c2_wf) = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .workflow_runs
+            .into_iter()
+            .find(|r| r.card_id.as_deref() == Some(card_2_id.as_str()) && r.active())
+        {
+            let _ = world.server_call("remote-a", "workflow.stop", json!({ "run_id": c2_wf.id }));
+        }
+        let _ = world.server_call(
+            "remote-a",
+            "schedule.delete",
+            json!({ "schedule_id": rec_sched_id }),
+        );
+        let _ = world.server_call(
+            "remote-a",
+            "schedule.delete",
+            json!({ "schedule_id": card_sched_id }),
+        );
+        finish_all_remote_ptys(world)?;
+        world.hit("schedules_budget.core_restart_recovery_and_reschedule");
+
         ensure!(
             exec.blocked_commands().is_empty(),
             "schedules_and_budget blocked OS commands: {:?}",

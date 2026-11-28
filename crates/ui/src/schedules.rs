@@ -125,7 +125,7 @@ impl ScheduleItem {
             || self
                 .latest_run
                 .as_ref()
-                .is_some_and(|r| matches!(r.state.as_str(), "blocked" | "failed"))
+                .is_some_and(|r| matches!(r.state.as_str(), "blocked" | "failed" | "unknown"))
     }
 
     pub fn timezone_label(&self) -> String {
@@ -321,6 +321,34 @@ fn project_stages(ui: Ui, project_id: &str) -> Vec<(String, String)> {
     })
 }
 
+fn is_live_blocked_run(s: &Snapshot, r: &ScheduledRun) -> bool {
+    if r.state != "blocked" {
+        return false;
+    }
+    if r.creates_card {
+        let card_active = r.card_id.as_deref().is_some_and(|cid| {
+            s.cards
+                .iter()
+                .find(|c| c.id == cid)
+                .is_some_and(|c| c.active() && !c.resolved())
+        });
+        let wf_active = r
+            .workflow_run_id
+            .as_deref()
+            .is_none_or(|wid| s.workflow_runs.iter().any(|w| w.id == wid && w.active()));
+        return card_active && wf_active;
+    }
+    let Some(tid) = r.terminal_id.as_deref() else {
+        return false;
+    };
+    s.terminals.iter().any(|t| {
+        t.id == tid
+            && t.runtime
+                .as_ref()
+                .is_some_and(|rt| rt.state != "finished" && rt.connection != "replaced")
+    })
+}
+
 fn collect_scope_items(
     s: &Snapshot,
     drafts: &BTreeMap<String, crate::workflows::Draft>,
@@ -447,7 +475,7 @@ fn collect_scope_items(
                         || (r.project_id == scope_id
                             && r.filename == *filename
                             && r.rule_id == *rule_id))
-                    && r.state == "blocked"
+                    && is_live_blocked_run(s, r)
             });
 
             items.push(ScheduleItem {
@@ -510,7 +538,7 @@ fn collect_scope_items(
             } else {
                 r.host_id.as_str()
             };
-            rh == host_id && r.schedule_id == st.id && r.state == "blocked"
+            rh == host_id && r.schedule_id == st.id && is_live_blocked_run(s, r)
         });
         items.push(ScheduleItem {
             key: schedule_key_for_host(scope_id, host_id, &st.filename, &st.rule_id),
@@ -1927,13 +1955,15 @@ fn master_list(ui: Ui, items: Memo<Vec<ScheduleItem>>) -> impl IntoElement {
                     let blocked = item_sig.with(|i| i.active_blocked);
                     let latest_failed = item_sig
                         .with(|i| i.latest_run.as_ref().is_some_and(|r| r.state == "failed"));
+                    let latest_unknown = item_sig
+                        .with(|i| i.latest_run.as_ref().is_some_and(|r| r.state == "unknown"));
                     let active_run = ui.snapshot.with(|snap| {
                         let s_id = item_sig.with(|i| i.schedule_id.clone());
                         snap.scheduled_runs
                             .iter()
                             .any(|r| r.schedule_id == s_id && r.active())
                     });
-                    if blocked {
+                    if blocked || latest_unknown {
                         ATTENTION
                     } else if active_run {
                         ACCENT
@@ -2090,7 +2120,8 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
     let blocked_run = ui.snapshot.with(|s| {
         s.scheduled_runs
             .iter()
-            .find(|r| r.schedule_id == schedule_id && r.state == "blocked")
+            .filter(|r| r.schedule_id == schedule_id && is_live_blocked_run(s, r))
+            .max_by_key(|r| (r.scheduled_at, r.number))
             .cloned()
     });
 
@@ -2153,10 +2184,79 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
                     ))
                     .child(if let Some(br) = blocked_run {
                         let msg = br
-                            .summary
+                            .error
                             .clone()
+                            .or_else(|| br.summary.clone())
                             .unwrap_or_else(|| "Waiting for input".into());
-                        let tid = br.terminal_id.unwrap_or_else(|| br.id.clone());
+                        let mut banner_actions =
+                            view().flex_row().flex_wrap().items_center().gap_1p5();
+                        if br.creates_card {
+                            let agent_retry_tid = br.terminal_id.as_deref().and_then(|tid| {
+                                ui.snapshot.with_untracked(|s| {
+                                    s.terminals.iter().find(|t| t.id == tid).and_then(|t| {
+                                        let a = t.agent.as_ref()?;
+                                        (a.connection_state == "replaced"
+                                            || matches!(
+                                                a.state.as_str(),
+                                                "failed" | "blocked" | "needs_report" | "missing"
+                                            ))
+                                        .then(|| tid.to_owned())
+                                    })
+                                })
+                            });
+                            if let Some(tid) = agent_retry_tid {
+                                banner_actions = banner_actions.child(compact_action_with_icon(
+                                    Icon::Refresh,
+                                    "Retry",
+                                    Variant::Primary,
+                                    move |_| {
+                                        dispatch(
+                                            ui,
+                                            "execution.retry",
+                                            json!({ "terminal_id": tid }),
+                                        );
+                                    },
+                                ));
+                            }
+                            if let Some(cid) = br.card_id.clone() {
+                                banner_actions = banner_actions.child(compact_action(
+                                    br.card_number
+                                        .map(|n| format!("Card #{n} →"))
+                                        .unwrap_or_else(|| "Open Card →".into()),
+                                    Variant::Secondary,
+                                    move |_| ui.open_card(cid.clone()),
+                                ));
+                            }
+                            if let Some(wf_id) = br.workflow_run_id.clone() {
+                                banner_actions = banner_actions.child(compact_action(
+                                    "Cancel",
+                                    Variant::Quiet,
+                                    move |_| {
+                                        dispatch(ui, "workflow.stop", json!({ "run_id": wf_id }));
+                                    },
+                                ));
+                            }
+                        } else {
+                            let tid = br.terminal_id.unwrap_or_else(|| br.id.clone());
+                            let tid_cancel = tid.clone();
+                            banner_actions = banner_actions
+                                .child(compact_action("Cancel", Variant::Secondary, move |_| {
+                                    dispatch(
+                                        ui,
+                                        "terminal.close",
+                                        json!({
+                                            "terminal_id": tid_cancel,
+                                            "request_key": canban_types::id(),
+                                        }),
+                                    );
+                                }))
+                                .child(action_with_icon(
+                                    Icon::Terminal,
+                                    "Open Terminal →",
+                                    Variant::Primary,
+                                    move |_| ui.open_terminal(tid.clone()),
+                                ));
+                        }
                         view()
                             .flex_row()
                             .items_stretch()
@@ -2187,12 +2287,7 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
                                             )
                                             .child(muted(msg)),
                                     )
-                                    .child(action_with_icon(
-                                        Icon::Terminal,
-                                        "Open Terminal →",
-                                        Variant::Primary,
-                                        move |_| ui.open_terminal(tid.clone()),
-                                    )),
+                                    .child(banner_actions),
                             )
                             .into_element()
                     } else {
@@ -3104,6 +3199,10 @@ fn history_panel_section(
     runs: Memo<Vec<ScheduledRun>>,
 ) -> impl IntoElement {
     let tz_raw = item.rule.timezone.clone();
+    let item_for_rows = item.clone();
+    let host_offline = ui.snapshot.with(|s| s.is_host_offline(&item.host_id));
+    let dirty = item.dirty;
+    let published = item.published;
     view()
         .gap_2()
         .child(
@@ -3121,6 +3220,7 @@ fn history_panel_section(
             move || !runs.with(Vec::is_empty),
             move || {
                 let tz_for_each = tz_raw.clone();
+                let item_for_each = item_for_rows.clone();
                 view().border_t_1().border_color(BORDER).child(each(
                     move || runs.get(),
                     |r| format!("{}:{}:{}", r.id, r.state, r.updated_at),
@@ -3131,11 +3231,24 @@ fn history_panel_section(
                         let tone = run_tone(&run.state);
                         let lbl = run_label(&run.state);
                         let live = run.active();
-                        let summary_line = run
-                            .summary
-                            .clone()
-                            .or_else(|| run.error.clone())
-                            .unwrap_or_default();
+                        let summary_line = if matches!(
+                            run.state.as_str(),
+                            "failed" | "blocked" | "unknown" | "cancelled"
+                        ) {
+                            run.error
+                                .clone()
+                                .or_else(|| run.summary.clone())
+                                .unwrap_or_default()
+                        } else {
+                            run.summary
+                                .clone()
+                                .or_else(|| run.error.clone())
+                                .unwrap_or_default()
+                        };
+                        let show_retry = matches!(
+                            run.state.as_str(),
+                            "failed" | "unknown" | "cancelled" | "skipped"
+                        );
                         let card_link = run.card_id.clone().zip(run.card_number);
                         let live_tid = run.terminal_id.clone().and_then(|tid| {
                             ui.snapshot.with_untracked(|s| {
@@ -3153,6 +3266,7 @@ fn history_panel_section(
                         let has_log = run.output_path.is_some();
                         let run_for_report = run.clone();
                         let run_for_log = run.clone();
+                        let item_for_retry = item_for_each.clone();
 
                         view()
                             .py_2p5()
@@ -3213,6 +3327,25 @@ fn history_panel_section(
                                             .flex_wrap()
                                             .items_center()
                                             .gap_1()
+                                            .child(if show_retry {
+                                                compact_action_with_icon(
+                                                    Icon::Refresh,
+                                                    "Retry",
+                                                    Variant::Secondary,
+                                                    move |_| {
+                                                        trigger_schedule(ui, &item_for_retry);
+                                                    },
+                                                )
+                                                .disabled(move || {
+                                                    host_offline
+                                                        || ui.is_method_pending("schedule.trigger")
+                                                        || dirty
+                                                        || !published
+                                                })
+                                                .into_element()
+                                            } else {
+                                                view().into_element()
+                                            })
                                             .child(if let Some((cid, cnum)) = card_link {
                                                 compact_action(
                                                     format!("Card #{cnum} →"),

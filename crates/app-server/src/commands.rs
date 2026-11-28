@@ -1915,18 +1915,22 @@ impl AppServer {
                     "Retry requires an explicit user decision"
                 );
                 ensure!(c.archived_at.is_none(), "Restore the Card before retrying");
+                let core_replaced = prev.connection_state == "replaced";
                 ensure!(
-                    !matches!(
-                        prev.state.as_str(),
-                        "queued" | "starting" | "running" | "working"
-                    ) && !(prev.state == "completed"
-                        && deliver_run
-                            .as_ref()
-                            .is_none_or(|r| r.state != "blocked")),
+                    (core_replaced
+                        || !matches!(
+                            prev.state.as_str(),
+                            "queued" | "starting" | "running" | "working"
+                        ))
+                        && !(prev.state == "completed"
+                            && deliver_run
+                                .as_ref()
+                                .is_none_or(|r| r.state != "blocked")),
                     "Execution is not retryable"
                 );
                 ensure!(
-                    prev.terminal.is_none()
+                    core_replaced
+                        || prev.terminal.is_none()
                         || prev.observed.as_ref().is_some_and(|v| {
                             matches!(v["state"].as_str(), Some("finished" | "missing"))
                         }),
