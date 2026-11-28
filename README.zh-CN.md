@@ -3,6 +3,11 @@
 </h1>
 
 <p align="center">
+  <strong>用看板理清任务，用原生 Agent CLI 完成开发。</strong><br/>
+  基于原生 <strong>Rust + <code>libghostty</code></strong> 构建的轻量级应用（零 Electron、不做聊天框套壳），让 <strong>Claude Code、Codex、Cursor CLI、Antigravity（<code>agy</code>）</strong> 等真实终端 CLI 与每日简报收件箱（Daily Briefing Inbox）、本地看板、持久化 PTY 及单卡 Git Worktree 审查自然协同。
+</p>
+
+<p align="center">
   <a href="https://github.com/jjyr/canban/releases"><img src="https://img.shields.io/github/v/release/jjyr/canban?label=release" alt="最新版本" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/jjyr/canban" alt="Apache-2.0 协议" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Android-blue" alt="支持 macOS、Linux 与 Android" />
@@ -10,19 +15,12 @@
 </p>
 
 <p align="center">
+  <a href="#安装"><strong>快速安装</strong></a> · <a href="https://canban.dev/zh/"><strong>canban.dev</strong></a> · <a href="https://canban.dev/zh/docs/"><strong>文档</strong></a>
+  <br/>
   <sub><a href="README.md">English</a> · <strong>简体中文</strong></sub>
 </p>
 
-<p align="center">
-  <strong>用看板理清任务，用原生 Agent CLI 完成开发。</strong><br/>
-  基于原生 <strong>Rust + <code>libghostty</code></strong> 构建的轻量级应用（零 Electron、不做聊天框套壳），让 <strong>Claude Code、Codex、Cursor CLI、Antigravity（<code>agy</code>）</strong> 等真实终端 CLI 与每日简报收件箱（Daily Briefing Inbox）、本地看板、持久化 PTY 及单卡 Git Worktree 审查自然协同。
-</p>
-
-<h3 align="center"><a href="#安装"><ins>快速安装</ins></a> · <a href="https://canban.dev/zh/"><ins>canban.dev</ins></a> · <a href="https://canban.dev/zh/docs/"><ins>文档</ins></a></h3>
-
-<p align="center">
-  <img src="docs/assets/canban-hero.gif" alt="Canban 看板、展开卡片与实时原生 Agent CLI 终端演示" width="960" />
-</p>
+---
 
 ## 为什么选择 Canban？
 
@@ -33,88 +31,49 @@
 
 ## 核心功能
 
-<table>
-<tr>
-<td width="50%" valign="middle">
-
 ### 每日简报收件箱（Daily Briefing Inbox）
 
 跨所有项目、Worktree、GitHub PR、定时运行与远程主机的每日统一入口。通过顶部可点击决策过滤条（`Waiting On You`、`Ready to Merge`、`Agents`、`Shipped Today`）快速聚焦，支持行内直接回复等待中的 Agent 或 PR、应用内展开阅读 PR Markdown 与 CI 检查状态，一键直达对应卡片与实时终端，并自动将低优先级订阅动态降噪折叠。
 
-</td>
-<td width="50%">
-  <img src="docs/assets/notification-center.jpg" alt="Canban 每日简报收件箱：集中处理等待中的 Agent、可合并 PR 与实时会话" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/daily-briefing.webp" alt="Canban 每日简报收件箱：集中处理等待中的 Agent、本地与远程主机活跃会话以及 GitHub PR" width="100%" />
+</p>
 
 ### 看板与卡片上下文
 
-围绕任意本地目录或 Git 仓库构建简洁的 `Backlog → Develop → Review` 看板。将 Markdown 任务说明、截图、`#Card` 与 GitHub Issue/PR 关联以及 `@Agent` 讨论集中在一处，紧邻右侧实时终端。
+围绕本地及远程主机上的任意目录或 Git 仓库构建简洁的 `Backlog → Develop → Review` 看板。将 Markdown 任务说明、截图、`#Card` 与 GitHub Issue/PR 关联以及 `@Agent` 讨论集中在一处。
 
-</td>
-<td width="50%">
-  <img src="website/screenshots/board-terminal.png" alt="Canban 看板与卡片规格和右侧实时原生 Agent CLI 终端" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/board.webp" alt="Canban 看板界面：跨本地与远程项目管理 Backlog、Develop 与 Review 列任务卡片" width="100%" />
+</p>
 
 ### 原生 Agent CLI 与持久化终端
 
-拒绝聊天框套壳。在基于 Rust、NSH 与 `libghostty-vt` 构建的持久化防中断 PTY 中，直接运行 Claude Code、Codex、Antigravity（`agy`）、Cursor CLI、Pi 或自定义 CLI，完整保留原生 TUI、权限交互、MCP、Skills 与会话恢复能力。
+拒绝聊天框套壳。在基于 Rust、NSH 与 `libghostty-vt` 构建的持久化防中断 PTY 中，跨本机与远程主机直接运行 Claude Code、Codex、Antigravity（`agy`）、Cursor CLI、Pi 或自定义 CLI，完整保留原生 TUI、权限交互、MCP、Skills 与会话恢复能力。[文档 →](https://canban.dev/zh/docs/agents/)
 
-[文档 →](https://canban.dev/zh/docs/agents/)
-
-</td>
-<td width="50%">
-  <img src="docs/assets/terminals-cli.jpg" alt="Canban 终端工作区与原生 Agent CLI" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/terminals.webp" alt="Canban 终端工作区：跨本地 macOS 与远程 Linux 主机运行原生 Agent CLI" width="100%" />
+</p>
 
 ### 独立 Worktree 与行内 Diff 审查
 
-无需切出应用去开外部编辑器，直接查看提交历史与单卡片隔离 Worktree 的代码改动。支持在变更代码行上直接添加行内评审意见，并一键发送给 `@Agent` 继续修改。
+无需切出应用去开外部编辑器，直接查看提交历史与单卡片隔离 Worktree 的代码改动。支持在变更代码行上直接添加行内评审意见，并一键发送给 `@Agent` 继续修改。[文档 →](https://canban.dev/zh/docs/)
 
-[文档 →](https://canban.dev/zh/docs/)
+<p align="center">
+  <img src="docs/assets/git-review.webp" alt="Canban 内置 Git 工作台：展示提交历史、变更文件列表与行内 Diff 审查" width="100%" />
+</p>
 
-</td>
-<td width="50%">
-  <img src="website/screenshots/review-diff.png" alt="Canban 内置 Git 工作台与行内 Diff 审查" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+### 定时运行与可编程工作流
 
-### 定时运行与可编程工作流（按需启用）
+按 Cron 计划定期执行 Agent 任务，并在收件箱中直接查看运行结果或一键重试失败任务。通过可视化编排或源码模式编写类似 GitHub Actions 的本地 YAML 工作流，串联 Shell 脚本、`agent` + prompt 步骤与串行合并队列。[文档 →](https://canban.dev/zh/docs/workflows/)
 
-按 Cron 计划定期执行 Agent 任务，并在收件箱中直接查看运行结果或一键重试失败任务。需要进一步自动化时，可按需启用类似 GitHub Actions 的本地 YAML 工作流，串联 Shell 脚本、`agent` + prompt 步骤与串行合并队列。
-
-[文档 →](https://canban.dev/zh/docs/workflows/)
-
-</td>
-<td width="50%">
-  <img src="website/screenshots/workflow-studio.png" alt="Canban 定时运行与可编程工作流流水线" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/workflows.webp" alt="Canban 工作流可视化编排界面：展示 Backlog、Develop、Review 阶段与串行合并队列" width="100%" />
+</p>
 
 ### 多机器协同（全程 E2E 直连）
 
-把高负载编译和 Agent 任务交给远程 Linux 主机。通过桌面端或移动端直接连接无头 `canband` 主机，全程强制端到端加密、无任何中转服务器——可选配合 **Tailscale** 或 **SSH** 使用——像操作本地项目一样丝滑管理远程看板、收件箱分流、工作流与 120Hz 实时终端。
-
-[文档 →](https://canban.dev/zh/docs/remote-hosts/)
-
-</td>
-<td width="50%">
-  <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts 弹窗：展示本地 macOS Socket 与 Tailscale TCP 远程 Linux 主机" width="100%" />
-</td>
-</tr>
-</table>
+把高负载编译和 Agent 任务交给远程 Linux 主机。通过桌面端或移动端直接连接无头 `canband` 主机，全程强制端到端加密、无任何中转服务器——可选配合 **Tailscale** 或 **SSH** 使用——像操作本地项目一样丝滑管理远程看板、收件箱分流、工作流与 120Hz 实时终端。[文档 →](https://canban.dev/zh/docs/remote-hosts/)
 
 ## 隐私与安全
 

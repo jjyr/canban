@@ -3,6 +3,11 @@
 </h1>
 
 <p align="center">
+  <strong>Organize with Kanban. Work with native agent CLIs.</strong><br/>
+  A lightweight, native <strong>Rust + <code>libghostty</code></strong> app for <strong>Claude Code, Codex, Cursor CLI, Antigravity (<code>agy</code>), and more</strong> — zero Electron, zero chat wrapper, with a noise-filtered Daily Briefing Inbox, restart-safe PTYs, and per-card Git worktree review.
+</p>
+
+<p align="center">
   <a href="https://github.com/jjyr/canban/releases"><img src="https://img.shields.io/github/v/release/jjyr/canban?label=release" alt="Latest release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/jjyr/canban" alt="Apache-2.0 License" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Android-blue" alt="macOS, Linux, and Android" />
@@ -10,19 +15,12 @@
 </p>
 
 <p align="center">
+  <a href="#installation"><strong>Quick Install</strong></a> · <a href="https://canban.dev"><strong>canban.dev</strong></a> · <a href="https://canban.dev/docs/"><strong>Docs</strong></a>
+  <br/>
   <sub><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></sub>
 </p>
 
-<p align="center">
-  <strong>Organize with Kanban. Work with native agent CLIs.</strong><br/>
-  A lightweight, native <strong>Rust + <code>libghostty</code></strong> app for <strong>Claude Code, Codex, Cursor CLI, Antigravity (<code>agy</code>), and more</strong> — zero Electron, zero chat wrapper, with a noise-filtered Daily Briefing Inbox, restart-safe PTYs, and per-card Git worktree review.
-</p>
-
-<h3 align="center"><a href="#installation"><ins>Quick Install</ins></a> · <a href="https://canban.dev"><ins>canban.dev</ins></a> · <a href="https://canban.dev/docs/"><ins>Docs</ins></a></h3>
-
-<p align="center">
-  <img src="docs/assets/canban-hero.gif" alt="Canban Kanban board with an expanded card and live native Agent CLI terminal" width="960" />
-</p>
+---
 
 ## Why Canban?
 
@@ -33,88 +31,49 @@
 
 ## Features
 
-<table>
-<tr>
-<td width="50%" valign="middle">
-
 ### Daily Briefing Inbox
 
 Start every session from one calm, noise-filtered briefing across all projects, worktrees, GitHub PRs, scheduled runs, and remote hosts. Triage with clickable decision filters (`Waiting On You`, `Ready to Merge`, `Agents`, `Shipped Today`), reply to blocked agents or PRs inline, read PR descriptions and CI checks without leaving the app, and jump straight into any Card or live terminal.
 
-</td>
-<td width="50%">
-  <img src="docs/assets/notification-center.jpg" alt="Canban Daily Briefing Inbox triaging waiting agents, ready-to-merge PRs, and live sessions" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/daily-briefing.webp" alt="Canban Daily Briefing Inbox triaging waiting agents, active sessions across local and remote hosts, and GitHub PRs" width="100%" />
+</p>
 
 ### Kanban Board &amp; Card Context
 
-Organize work around any local directory or Git repo with a fast `Backlog → Develop → Review` board. Keep Markdown specs, screenshots, `#Card` and GitHub Issue/PR links, and `@Agent` discussions right beside a live terminal.
+Organize work around any local directory or Git repo across local and remote hosts with a fast `Backlog → Develop → Review` board. Keep Markdown specs, screenshots, `#Card` and GitHub Issue/PR links, and `@Agent` discussions together in one place.
 
-</td>
-<td width="50%">
-  <img src="website/screenshots/board-terminal.png" alt="Canban Kanban board and card specification beside a live native Agent CLI terminal" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/board.webp" alt="Canban Kanban board organizing Backlog, Develop, and Review columns across local and remote projects" width="100%" />
+</p>
 
 ### Native Agent CLIs &amp; Persistent Terminals
 
-No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt` — preserving native TUIs, interactive permissions, MCPs, skills, and session resume.
+No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt` across local and remote machines — preserving native TUIs, interactive permissions, MCPs, skills, and session resume. [Docs →](https://canban.dev/docs/agents/)
 
-[Docs →](https://canban.dev/docs/agents/)
-
-</td>
-<td width="50%">
-  <img src="docs/assets/terminals-cli.jpg" alt="Canban Terminals workspace running native Agent CLIs" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/terminals.webp" alt="Canban Terminals workspace running native Agent CLIs across local macOS and remote Linux hosts" width="100%" />
+</p>
 
 ### Per-Card Worktrees &amp; Inline Diff Review
 
-Inspect commits and isolated per-card worktree diffs without switching to an external editor. Leave inline review comments directly on changed lines and send focused revision requests straight back to `@Agent`.
+Inspect commits and isolated per-card worktree diffs without switching to an external editor. Leave inline review comments directly on changed lines and send focused revision requests straight back to `@Agent`. [Docs →](https://canban.dev/docs/)
 
-[Docs →](https://canban.dev/docs/)
+<p align="center">
+  <img src="docs/assets/git-review.webp" alt="Canban built-in Git workbench showing commit history, changed files, and inline diff review" width="100%" />
+</p>
 
-</td>
-<td width="50%">
-  <img src="website/screenshots/review-diff.png" alt="Canban built-in Git workbench and inline diff review" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+### Scheduled Runs &amp; Workflows
 
-### Scheduled Runs &amp; Workflows (Optional)
+Run recurring agent tasks on a cron schedule and inspect results or retry failures straight from your Inbox. Build GitHub Actions-like local YAML workflows visually or in source mode — combining shell scripts, `agent` + prompt steps, and a serialized merge queue. [Docs →](https://canban.dev/docs/workflows/)
 
-Run recurring agent tasks on a cron schedule and inspect results or retry failures straight from your Inbox. When you're ready for deeper automation, opt in to GitHub Actions-like local YAML workflows combining shell scripts, `agent` + prompt steps, and a serialized merge queue.
-
-[Docs →](https://canban.dev/docs/workflows/)
-
-</td>
-<td width="50%">
-  <img src="website/screenshots/workflow-studio.png" alt="Canban Scheduled Runs and Programmable Workflows pipeline" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
+<p align="center">
+  <img src="docs/assets/workflows.webp" alt="Canban Workflows Visual Studio showing Backlog, Develop, and Review automation stages and merge queue" width="100%" />
+</p>
 
 ### Multi-Machine &amp; Mobile (Direct E2E)
 
-Offload heavy builds and agent runs to remote Linux boxes. Connect your lightweight desktop or mobile app directly to headless `canband` hosts with mandatory end-to-end encryption and zero relay servers — optionally paired with **Tailscale** or **SSH** — to control remote boards, Inbox triage, workflows, and live 120Hz terminals seamlessly.
-
-[Docs →](https://canban.dev/docs/remote-hosts/)
-
-</td>
-<td width="50%">
-  <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts popover showing local macOS socket and remote Linux host over Tailscale TCP" width="100%" />
-</td>
-</tr>
-</table>
+Offload heavy builds and agent runs to remote Linux boxes. Connect your lightweight desktop or mobile app directly to headless `canband` hosts with mandatory end-to-end encryption and zero relay servers — optionally paired with **Tailscale** or **SSH** — to control remote boards, Inbox triage, workflows, and live 120Hz terminals seamlessly. [Docs →](https://canban.dev/docs/remote-hosts/)
 
 ## Privacy &amp; Security
 
