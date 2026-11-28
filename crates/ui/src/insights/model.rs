@@ -657,6 +657,20 @@ impl ActivityMetric {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChartPoint {
+    pub label: String,
+    pub agent_ms: u64,
+    pub dwell_ms: u64,
+    pub tasks: u64,
+}
+
+impl ChartPoint {
+    pub fn total_ms(&self) -> u64 {
+        self.agent_ms.saturating_add(self.dwell_ms)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostStat {
     pub id: String,
     pub name: String,
@@ -676,6 +690,7 @@ pub struct HostStat {
     pub top_projects: Vec<(String, u64)>,
     pub load_bars: Vec<u64>,
     pub task_bars: Vec<u64>,
+    pub chart_points: Vec<ChartPoint>,
 }
 
 impl HostStat {
@@ -719,6 +734,7 @@ pub struct ProjectStat {
     pub recent_merges: Vec<usize>,
     pub load_bars: Vec<u64>,
     pub task_bars: Vec<u64>,
+    pub chart_points: Vec<ChartPoint>,
 }
 
 impl ProjectStat {
@@ -771,6 +787,48 @@ fn downsample_bars(raw: &[u64], max_bars: usize) -> Vec<u64> {
         out[slot] = out[slot].saturating_add(val);
     }
     out
+}
+
+fn build_chart_points(
+    start: NaiveDate,
+    range_days: i64,
+    time_by_day: Option<&BTreeMap<NaiveDate, (u64, u64)>>,
+    tasks_by_day: Option<&BTreeMap<NaiveDate, u64>>,
+    max_slots: usize,
+) -> Vec<ChartPoint> {
+    let n = range_days.max(1) as usize;
+    let slots = n.min(max_slots.max(1));
+    let mut first_day: Vec<Option<NaiveDate>> = vec![None; slots];
+    let mut last_day: Vec<Option<NaiveDate>> = vec![None; slots];
+    let mut pts = vec![ChartPoint::default(); slots];
+
+    for i in 0..n {
+        let d = start + Duration::days(i as i64);
+        let slot = (i * slots) / n;
+        if first_day[slot].is_none() {
+            first_day[slot] = Some(d);
+        }
+        last_day[slot] = Some(d);
+        if let Some((agent_ms, dwell_ms)) = time_by_day.and_then(|m| m.get(&d).copied()) {
+            pts[slot].agent_ms = pts[slot].agent_ms.saturating_add(agent_ms);
+            pts[slot].dwell_ms = pts[slot].dwell_ms.saturating_add(dwell_ms);
+        }
+        if let Some(tasks) = tasks_by_day.and_then(|m| m.get(&d).copied()) {
+            pts[slot].tasks = pts[slot].tasks.saturating_add(tasks);
+        }
+    }
+
+    for slot in 0..slots {
+        pts[slot].label = match (first_day[slot], last_day[slot]) {
+            (Some(a), Some(b)) if a == b => a.format("%b %-d").to_string(),
+            (Some(a), Some(b)) if a.month() == b.month() => {
+                format!("{}–{}", a.format("%b %-d"), b.day())
+            }
+            (Some(a), Some(b)) => format!("{}–{}", a.format("%b %-d"), b.format("%b %-d")),
+            _ => String::new(),
+        };
+    }
+    pts
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3231,6 +3289,8 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
         .collect();
 
     let mut project_load_raw: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut project_daily_time: BTreeMap<String, BTreeMap<NaiveDate, (u64, u64)>> = BTreeMap::new();
+    let mut host_daily_time: BTreeMap<String, BTreeMap<NaiveDate, (u64, u64)>> = BTreeMap::new();
     let mut other_dwell_ms = 0u64;
     let mut other_agent_ms = 0u64;
     if range == RangeWindow::Today {
@@ -3244,6 +3304,7 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
                 continue;
             }
             let pid = seg.project_id.as_deref().filter(|s| !s.is_empty());
+            let seg_date = local_date(seg.start_ms, tz);
             if let Some(id) = pid
                 && let Some(bars) = project_load_raw.get_mut(id)
             {
@@ -3251,8 +3312,26 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
                     .min(7) as usize;
                 bars[slot] = bars[slot].saturating_add(dur);
             }
+            let hkey = pid
+                .map(|id| snapshot.project_host(id))
+                .filter(|h| !h.is_empty())
+                .unwrap_or("local");
             match seg.kind {
                 ActivityKind::Dwell => {
+                    let he = host_daily_time
+                        .entry(hkey.to_owned())
+                        .or_default()
+                        .entry(seg_date)
+                        .or_default();
+                    he.1 = he.1.saturating_add(dur);
+                    if let Some(id) = pid {
+                        let pe = project_daily_time
+                            .entry(id.to_owned())
+                            .or_default()
+                            .entry(seg_date)
+                            .or_default();
+                        pe.1 = pe.1.saturating_add(dur);
+                    }
                     if let Some(p) = pid.and_then(|id| projects.get_mut(id)) {
                         p.dwell_ms = p.dwell_ms.saturating_add(dur);
                     } else if scope.is_none() {
@@ -3260,6 +3339,20 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
                     }
                 }
                 ActivityKind::Agent => {
+                    let he = host_daily_time
+                        .entry(hkey.to_owned())
+                        .or_default()
+                        .entry(seg_date)
+                        .or_default();
+                    he.0 = he.0.saturating_add(dur);
+                    if let Some(id) = pid {
+                        let pe = project_daily_time
+                            .entry(id.to_owned())
+                            .or_default()
+                            .entry(seg_date)
+                            .or_default();
+                        pe.0 = pe.0.saturating_add(dur);
+                    }
                     if let Some(p) = pid.and_then(|id| projects.get_mut(id)) {
                         p.agent_ms = p.agent_ms.saturating_add(dur);
                     } else if scope.is_none() {
@@ -3276,6 +3369,10 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             }
         }
         for (idx, b) in cur_buckets.iter().enumerate() {
+            let mid = b
+                .start_ms
+                .saturating_add(b.end_ms.saturating_sub(b.start_ms) / 2);
+            let b_date = local_date(mid, tz);
             let mut matched_dwell = 0u64;
             let mut matched_agent = 0u64;
             for (pid, pt) in &b.by_project {
@@ -3288,6 +3385,23 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
                 if let Some(bars) = project_load_raw.get_mut(pid) {
                     bars[idx] = bars[idx].saturating_add(pt.dwell_ms.saturating_add(pt.agent_ms));
                 }
+                let pe = project_daily_time
+                    .entry(pid.clone())
+                    .or_default()
+                    .entry(b_date)
+                    .or_default();
+                pe.0 = pe.0.saturating_add(pt.agent_ms);
+                pe.1 = pe.1.saturating_add(pt.dwell_ms);
+
+                let hkey = snapshot.project_host(pid);
+                let hkey = if hkey.is_empty() { "local" } else { hkey };
+                let he = host_daily_time
+                    .entry(hkey.to_owned())
+                    .or_default()
+                    .entry(b_date)
+                    .or_default();
+                he.0 = he.0.saturating_add(pt.agent_ms);
+                he.1 = he.1.saturating_add(pt.dwell_ms);
             }
             if scope.is_none() {
                 other_dwell_ms =
@@ -3322,6 +3436,13 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             })
             .collect();
         p.task_bars = downsample_bars(&raw_tasks, 14);
+        p.chart_points = build_chart_points(
+            start,
+            range_len_days,
+            project_daily_time.get(&p.id),
+            project_daily_tasks.get(&p.id),
+            14,
+        );
     }
     let mut project_stats: Vec<_> = projects
         .into_values()
@@ -3484,6 +3605,13 @@ pub fn compute_dashboard_scoped<Tz: TimeZone>(
             })
             .collect();
         hs.task_bars = downsample_bars(&raw_host_tasks, 14);
+        hs.chart_points = build_chart_points(
+            start,
+            range_len_days,
+            host_daily_time.get(hid),
+            host_daily_tasks.get(hid),
+            14,
+        );
     }
 
     let mut host_stats: Vec<HostStat> = host_map.into_values().collect();

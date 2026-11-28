@@ -1768,7 +1768,7 @@ pub fn Gallery() -> impl IntoElement {
             "insights-weekly" => {
                 ui.insights
                     .range
-                    .set(canban_ui::insights::model::RangeWindow::Days7);
+                    .set(canban_ui::insights::model::RangeWindow::Days14);
             }
             "insights-agents-model" => {
                 ui.insights
