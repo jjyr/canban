@@ -1672,7 +1672,7 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                     let drawer = ui.inbox.drawer.get();
                     let focus = ui.inbox.focus_filter.get();
                     let gh_details = ui.inbox.github_item_details.get();
-                    let now_ms = ui.runtime_clock.get().max(canban_types::now());
+                    let now_ms = ui.runtime_clock.get_untracked().max(canban_types::now());
 
                     if drawer == "deferred" {
                         return render_deferred_drawer(ui, inbox.deferred_items.clone());
