@@ -639,4 +639,99 @@ class Releases(unittest.TestCase):
             sw,sh=struct.unpack('>II',data[16:24])
             self.assertGreaterEqual(min(sw,sh),320,shot.name)
             self.assertLessEqual(max(sw,sh)/min(sw,sh),2.0,shot.name)
+    def test_custom_release_notes_dispatch_notes_context_and_draft_preservation(self):
+        root=pathlib.Path(__file__).resolve().parents[1]
+        workflow=(root/'.github/workflows/release.yml').read_text()
+        self.assertIn('CANBAN_RELEASE_NOTES: ${{ inputs.notes }}',workflow)
+        self.assertIn('notes:',workflow)
+
+        # 1. Custom notes via CANBAN_RELEASE_NOTES append Full Changelog and respect limit.
+        def notes_api(method,path,body=None,**kwargs):
+            if '/releases?' in path:
+                return [{'tag_name':'20261127-1','draft':False}]
+            raise AssertionError((method,path))
+        curated="Faster remote terminals and cleaner Insights.\n\n### Highlights\n- 1-RTT remote attach with zstd streaming.\n"
+        with patch.object(release,'api',notes_api):
+            rendered=release.build_release_notes('fixture/app','20261128-1','a'*40,custom_notes=curated)
+        self.assertTrue(rendered.startswith('Faster remote terminals and cleaner Insights.'))
+        self.assertIn('### Highlights\n- 1-RTT remote attach with zstd streaming.',rendered)
+        self.assertTrue(rendered.endswith('**Full Changelog**: https://github.com/fixture/app/compare/20261127-1...20261128-1'))
+
+        # Truncation keeps Full Changelog footer intact.
+        huge='Summary\n\n### Highlights\n' + ('- item detail\n'*40)
+        with patch.object(release,'api',notes_api):
+            trimmed=release.build_release_notes('fixture/app','20261128-1','a'*40,limit=180,custom_notes=huge)
+        self.assertLessEqual(len(trimmed),180)
+        self.assertTrue(trimmed.endswith('**Full Changelog**: https://github.com/fixture/app/compare/20261127-1...20261128-1'))
+
+        # 2. publish preserves manually edited draft body when CANBAN_RELEASE_NOTES is empty.
+        draft_calls=[]
+        draft={'id':99,'tag_name':'20261128-2','draft':True,'assets':[],'body':'Hand-edited draft notes.'}
+        def draft_api(method,path,body=None,**kwargs):
+            draft_calls.append((method,path,body))
+            if method=='GET' and '/releases?' in path:
+                return [draft,{'id':10,'tag_name':'20261127-1','draft':False}]
+            if method=='PATCH':
+                return {**draft,**body}
+            raise AssertionError((method,path,body))
+        with tempfile.TemporaryDirectory(prefix='cb-release-draft-keep-') as directory:
+            with patch.object(release,'api',draft_api),patch.object(sys,'argv',['release.py','publish','--directory',directory]),patch.dict(os.environ,{'GITHUB_REPOSITORY':'fixture/app','CANBAN_RELEASE_COMMIT':'b'*40,'CANBAN_RELEASE_VERSION':'20261128-2'},clear=False):
+                os.environ.pop('CANBAN_RELEASE_NOTES',None)
+                release.main()
+        patched=next(b for m,_,b in draft_calls if m=='PATCH')
+        self.assertEqual(patched['body'],'Hand-edited draft notes.\n\n**Full Changelog**: https://github.com/fixture/app/compare/20261127-1...20261128-2')
+
+        # 3. dispatch --notes-file passes inputs.notes to workflow_dispatch.
+        dispatch_payloads=[]
+        def dispatch_api(method,path,body=None,**kwargs):
+            if method=='GET' and path=='/repos/fixture/app/commits/main':
+                return {'sha':'d'*40}
+            if method=='GET' and '/workflows/ci.yml/runs' in path:
+                return {'workflow_runs':[{'id':1,'status':'completed','conclusion':'success','created_at':'2026-11-28T00:00:00Z'}]}
+            if method=='POST' and path.endswith('/dispatches'):
+                dispatch_payloads.append(body)
+                return None
+            if method=='GET' and '/workflows/release.yml/runs' in path:
+                return {'workflow_runs':[{'id':77,'run_number':12,'head_sha':'d'*40,'created_at':'2099-01-01T00:00:00Z','html_url':'https://github.com/fixture/app/actions/runs/77'}]}
+            raise AssertionError((method,path,body))
+        with tempfile.TemporaryDirectory(prefix='cb-release-dispatch-notes-') as tmp:
+            notes_file=pathlib.Path(tmp)/'notes.md'
+            notes_file.write_text(curated,encoding='utf-8')
+            with patch.object(release,'resolve_gh_token',return_value='tok'),patch.object(release,'api',dispatch_api),patch.object(sys,'argv',['release.py','dispatch','--repo','fixture/app','--notes-file',str(notes_file)]):
+                release.main()
+        self.assertEqual(len(dispatch_payloads),1)
+        self.assertEqual(dispatch_payloads[0],{'ref':'main','inputs':{'notes':curated.strip()}})
+
+        # 4. notes-context collects commits/files and writes $CANBAN_OUTPUT metadata.
+        def ctx_api(method,path,body=None,**kwargs):
+            if path=='/repos/fixture/app/commits/main':
+                return {'sha':'e'*40}
+            if '/workflows/ci.yml/runs' in path:
+                return {'workflow_runs':[{'id':5,'status':'completed','conclusion':'success','created_at':'2026-11-28T00:00:00Z','html_url':'https://github.com/fixture/app/actions/runs/5'}]}
+            if '/releases?' in path:
+                return [{'tag_name':'20261127-1','draft':False}]
+            if '/compare/20261127-1...' in path:
+                return {
+                    'total_commits':2,
+                    'commits':[
+                        {'sha':'1111111aaaa','parents':[{'sha':'0'}],'commit':{'message':'feat(inbox): add KPIs'}},
+                        {'sha':'2222222bbbb','parents':[{'sha':'1'}],'commit':{'message':'perf(terminal): add zstd-s2c'}},
+                    ],
+                    'files':[{'filename':'crates/terminal/src/remote.rs','status':'modified','additions':120,'deletions':10}],
+                }
+            raise AssertionError((method,path))
+        with tempfile.TemporaryDirectory(prefix='cb-release-ctx-') as tmp:
+            out_md=pathlib.Path(tmp)/'context.md'
+            canban_out=pathlib.Path(tmp)/'canban-output.txt'
+            with patch.object(release,'resolve_gh_token',return_value='tok'),patch.object(release,'api',ctx_api),patch.dict(os.environ,{'CANBAN_OUTPUT':str(canban_out)}),patch.object(sys,'argv',['release.py','notes-context','--repo','fixture/app','--out',str(out_md),'--canban-output']):
+                release.main()
+            md=out_md.read_text(encoding='utf-8')
+            self.assertIn('Previous published release: `20261127-1`',md)
+            self.assertIn('perf(terminal): add zstd-s2c',md)
+            self.assertIn('crates/terminal/src/remote.rs',md)
+            kv=dict(line.split('=',1) for line in canban_out.read_text(encoding='utf-8').splitlines() if '=' in line)
+            self.assertEqual(kv['has_changes'],'true')
+            self.assertEqual(kv['previous_tag'],'20261127-1')
+            self.assertEqual(kv['ci_state'],'success')
+            self.assertEqual(kv['commit_count'],'2')
 if __name__=='__main__':unittest.main()

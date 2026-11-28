@@ -166,8 +166,43 @@ def format_commit_bullet(entry):
     if summary and sha:return f'- {summary} ({sha})'
     return f'- {summary or sha}'
 
-def build_release_notes(repo,version,commit,limit=16000):
+def find_latest_published_release_tag(repo,token=None):
+    releases=api('GET',f'/repos/{repo}/releases?per_page=30&page=1',token=token) or []
+    best=None
+    for release in releases:
+        if release.get('draft'):continue
+        tag=release.get('tag_name','')
+        parsed=parse_version(tag)
+        if parsed is not None and (best is None or parsed>best[0]):
+            best=(parsed,tag)
+    return best[1] if best is not None else None
+
+def normalize_custom_notes(raw):
+    if raw is None:return None
+    text=str(raw).replace('\r\n','\n').replace('\r','\n').strip()
+    return text or None
+
+def format_custom_release_notes(custom_notes,footer,limit=16000):
+    body=normalize_custom_notes(custom_notes)
+    if not body:return None
+    if '**Full Changelog**:' in body:
+        return body if len(body)<=limit else body[:limit].rstrip()
+    combined=f'{body}\n\n{footer}'
+    if len(combined)<=limit:return combined
+    budget=limit-len(footer)-len('\n\n…\n\n')
+    if budget<=0:return footer[:limit]
+    trimmed=body[:budget].rstrip()
+    return f'{trimmed}\n\n…\n\n{footer}'
+
+def build_release_notes(repo,version,commit,limit=16000,custom_notes=None):
     prev_tag=find_previous_release_tag(repo,version)
+    footer=(
+        f'**Full Changelog**: https://github.com/{repo}/compare/{prev_tag}...{version}'
+        if prev_tag is not None
+        else f'**Full Changelog**: https://github.com/{repo}/commits/{version}'
+    )
+    formatted_custom=format_custom_release_notes(custom_notes,footer,limit=limit)
+    if formatted_custom is not None:return formatted_custom
     commits=[];extra=0
     if prev_tag is not None:
         comparison=get_optional(f'/repos/{repo}/compare/{urllib.parse.quote(prev_tag,safe="")}...{commit}')
@@ -177,12 +212,10 @@ def build_release_notes(repo,version,commit,limit=16000):
             extra=max(0,total-len(raw_commits))
             non_merge=[c for c in raw_commits if len(c.get('parents') or [])<=1]
             commits=list(reversed(non_merge if non_merge else raw_commits))
-        footer=f'**Full Changelog**: https://github.com/{repo}/compare/{prev_tag}...{version}'
     else:
         raw_commits=get_optional(f'/repos/{repo}/commits?sha={commit}&per_page=100') or []
         non_merge=[c for c in raw_commits if len(c.get('parents') or [])<=1]
         commits=non_merge if non_merge else list(raw_commits)
-        footer=f'**Full Changelog**: https://github.com/{repo}/commits/{version}'
     if not commits and extra==0:return footer
     header="## What's Changed\n"
     bullets=[format_commit_bullet(c) for c in commits]
@@ -203,6 +236,86 @@ def build_release_notes(repo,version,commit,limit=16000):
         body=header+more+f'\n\n{footer}'
         return body if len(body)<=limit else footer[:limit]
     return header+'\n'.join(kept)+f'\n\n{footer}'
+
+def collect_notes_context(repo,ref='main',token=None):
+    token=token if token is not None else resolve_gh_token()
+    ref_param=urllib.parse.quote(ref,safe='')
+    head_sha=api('GET',f'/repos/{repo}/commits/{ref_param}',token=token)['sha']
+    ci_state,ci_run=classify_ci_runs(ci_runs(repo,head_sha,token=token))
+    prev_tag=find_latest_published_release_tag(repo,token=token)
+    commits=[];files=[];total_commits=0
+    if prev_tag is not None:
+        comparison=api('GET',f'/repos/{repo}/compare/{urllib.parse.quote(prev_tag,safe="")}...{head_sha}',token=token) or {}
+        raw_commits=comparison.get('commits') or []
+        total_commits=comparison.get('total_commits',len(raw_commits))
+        non_merge=[c for c in raw_commits if len(c.get('parents') or [])<=1]
+        ordered=list(reversed(non_merge if non_merge else raw_commits))
+        for entry in ordered:
+            msg=((entry.get('commit') or {}).get('message') or '').strip()
+            lines=msg.splitlines()
+            commits.append({
+                'sha':(entry.get('sha') or '')[:7],
+                'subject':lines[0].strip() if lines else '',
+                'body':'\n'.join(lines[1:]).strip() if len(lines)>1 else '',
+            })
+        for f in (comparison.get('files') or [])[:80]:
+            files.append({
+                'filename':f.get('filename',''),
+                'status':f.get('status',''),
+                'additions':f.get('additions',0),
+                'deletions':f.get('deletions',0),
+            })
+    else:
+        raw_commits=api('GET',f'/repos/{repo}/commits?sha={head_sha}&per_page=50',token=token) or []
+        non_merge=[c for c in raw_commits if len(c.get('parents') or [])<=1]
+        ordered=non_merge if non_merge else list(raw_commits)
+        total_commits=len(ordered)
+        for entry in ordered:
+            msg=((entry.get('commit') or {}).get('message') or '').strip()
+            lines=msg.splitlines()
+            commits.append({
+                'sha':(entry.get('sha') or '')[:7],
+                'subject':lines[0].strip() if lines else '',
+                'body':'\n'.join(lines[1:]).strip() if len(lines)>1 else '',
+            })
+    return {
+        'repo':repo,
+        'ref':ref,
+        'head_sha':head_sha,
+        'previous_tag':prev_tag,
+        'ci_state':ci_state,
+        'ci_url':(ci_run or {}).get('html_url') or '',
+        'total_commits':total_commits,
+        'has_changes':bool(commits or total_commits>0),
+        'commits':commits,
+        'files':files,
+    }
+
+def render_notes_context_markdown(ctx):
+    lines=[
+        f'# Release Context ({ctx["repo"]}@{ctx["ref"]})',
+        '',
+        f'- Head commit: `{ctx["head_sha"][:7]}` (`{ctx["head_sha"]}`)',
+        f'- Previous published release: `{ctx["previous_tag"] or "none"}`',
+        f'- CI status on head: `{ctx["ci_state"]}`' + (f' ({ctx["ci_url"]})' if ctx.get('ci_url') else ''),
+        f'- Unreleased commits: `{ctx["total_commits"]}`',
+        '',
+        '## Commits',
+    ]
+    if not ctx['commits']:
+        lines.append('- No unreleased commits.')
+    else:
+        for c in ctx['commits']:
+            lines.append(f'- `{c["sha"]}` {c["subject"]}')
+            if c.get('body'):
+                for b in c['body'].splitlines()[:8]:
+                    if b.strip():
+                        lines.append(f'  {b.strip()}')
+    if ctx['files']:
+        lines.extend(['', '## Changed Files (up to 80)'])
+        for f in ctx['files']:
+            lines.append(f'- `{f["filename"]}` ({f["status"]}, +{f["additions"]}/-{f["deletions"]})')
+    return '\n'.join(lines)+'\n'
 
 def find_release(repo,version):
     # GitHub's release-by-tag endpoint only resolves published releases.
@@ -282,7 +395,7 @@ def wait_for_ci(repo,sha,token=None,timeout=5400,missing_grace=600,poll=30,sleep
             print(f'Waiting for CI run to appear for {sha7}...',flush=True)
         sleep(poll)
 
-def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.0,discover_timeout=30.0):
+def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.0,discover_timeout=30.0,notes=None):
     token=resolve_gh_token()
     ref_param=urllib.parse.quote(ref,safe='')
     sha=api('GET',f'/repos/{repo}/commits/{ref_param}',token=token)['sha']
@@ -301,8 +414,14 @@ def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.
         print(f'No CI run found yet for {sha7}; release ci-gate will wait up to 10 min for {CI_WORKFLOW} to appear')
     else:
         print(f'CI green for {sha7}')
+    clean_notes=normalize_custom_notes(notes)
+    if clean_notes is not None and len(clean_notes)>16000:
+        raise RuntimeError(f'Release notes exceed 16000 characters ({len(clean_notes)})')
+    payload={'ref':ref}
+    if clean_notes is not None:
+        payload['inputs']={'notes':clean_notes}
     dispatched_at=datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(seconds=2)
-    api('POST',f'/repos/{repo}/actions/workflows/{workflow}/dispatches',{'ref':ref},token=token)
+    api('POST',f'/repos/{repo}/actions/workflows/{workflow}/dispatches',payload,token=token)
     deadline=time.monotonic()+discover_timeout
     run=None
     while time.monotonic()<deadline:
@@ -328,21 +447,46 @@ def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['dispatch','ci-gate','reserve','package','package-cli','package-android','verify-dist','publish'])
+    parser.add_argument('command',choices=['dispatch','notes-context','ci-gate','reserve','package','package-cli','package-android','verify-dist','publish'])
     parser.add_argument('--directory',type=pathlib.Path,default=pathlib.Path('dist'))
     parser.add_argument('--apk',type=pathlib.Path,default=pathlib.Path('.local/android/Canban-android-arm64-v8a.apk'),help='Signed release APK path (package-android only)')
     parser.add_argument('--signing-sha256',default=None,help='Verified Signer #1 SHA-256 certificate hex digest (package-android only)')
     parser.add_argument('--version-code',type=int,default=None,help='Android versionCode override (package-android only)')
-    parser.add_argument('--ref',default='main',help='Branch or tag ref to release (dispatch only, default: main)')
+    parser.add_argument('--ref',default='main',help='Branch or tag ref to release (dispatch / notes-context, default: main)')
     parser.add_argument('--repo',default=None,help='GitHub owner/repo override (default: GITHUB_REPOSITORY or jjyr/canban)')
     parser.add_argument('--watch',action='store_true',help='Watch the dispatched workflow run until completion (dispatch only)')
+    parser.add_argument('--notes',default=None,help='Optional curated release notes Markdown string (dispatch only)')
+    parser.add_argument('--notes-file',type=pathlib.Path,default=None,help='Optional path to curated release notes Markdown file (dispatch only)')
+    parser.add_argument('--out',type=pathlib.Path,default=None,help='Write notes-context output to a file (notes-context only)')
+    parser.add_argument('--format',choices=['markdown','json'],default='markdown',help='Output format (notes-context only)')
+    parser.add_argument('--canban-output',action='store_true',help='Append key=value metadata to $CANBAN_OUTPUT when set (notes-context only)')
     parser.add_argument('--require-all-platforms',action='store_true',help='Verify macOS + Linux (x86_64 & aarch64) desktop/CLI and Android APK manifests/artifacts before publishing')
     args=parser.parse_args()
     repo=args.repo or os.environ.get('GITHUB_REPOSITORY','jjyr/canban')
+    if args.command=='notes-context':
+        ctx=collect_notes_context(repo,ref=args.ref)
+        rendered=json.dumps(ctx,indent=2)+'\n' if args.format=='json' else render_notes_context_markdown(ctx)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True,exist_ok=True)
+            args.out.write_text(rendered,encoding='utf-8')
+        else:
+            sys.stdout.write(rendered)
+        if args.canban_output and os.environ.get('CANBAN_OUTPUT'):
+            with open(os.environ['CANBAN_OUTPUT'],'a',encoding='utf-8') as out:
+                out.write(f'has_changes={"true" if ctx["has_changes"] else "false"}\n')
+                out.write(f'head_sha={ctx["head_sha"]}\n')
+                out.write(f'previous_tag={ctx["previous_tag"] or ""}\n')
+                out.write(f'ci_state={ctx["ci_state"]}\n')
+                out.write(f'commit_count={ctx["total_commits"]}\n')
+        return
     if args.command=='dispatch':
-        dispatch(repo,ref=args.ref,watch=args.watch)
+        if args.notes is not None and args.notes_file is not None:
+            raise RuntimeError('Specify either --notes or --notes-file, not both')
+        notes=args.notes_file.read_text(encoding='utf-8') if args.notes_file is not None else args.notes
+        dispatch(repo,ref=args.ref,watch=args.watch,notes=notes)
         return
     commit=os.environ['CANBAN_RELEASE_COMMIT'];version=os.environ.get('CANBAN_RELEASE_VERSION','')
+    custom_notes=normalize_custom_notes(os.environ.get('CANBAN_RELEASE_NOTES'))
     if args.command=='ci-gate':
         run=wait_for_ci(repo,commit)
         print('CI green: '+(run.get('html_url') or commit[:7]))
@@ -353,7 +497,7 @@ def main():
             with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('version='+version+'\n')
         release=find_release(repo,version)
         if release is None:
-            notes=build_release_notes(repo,version,commit)
+            notes=build_release_notes(repo,version,commit,custom_notes=custom_notes)
             api('POST',f'/repos/{repo}/releases',{'tag_name':version,'target_commitish':commit,'name':version,'body':notes,'draft':True,'prerelease':False,'generate_release_notes':False})
         print(version);return
     if args.command=='verify-dist':
@@ -411,7 +555,11 @@ def main():
     for name,path in sorted(dist_files.items()):
         ctype='application/vnd.android.package-archive' if name.endswith('.apk') else 'application/octet-stream'
         api('POST',f'/upload/repos/{repo}/releases/{release["id"]}/assets?name={name}',raw=path.read_bytes(),content_type=ctype)
-    notes=build_release_notes(repo,version,commit)
+    if custom_notes is None:
+        existing_body=normalize_custom_notes(release.get('body'))
+        if existing_body is not None and not existing_body.startswith("## What's Changed\n") and not existing_body.startswith('**Full Changelog**:'):
+            custom_notes=existing_body
+    notes=build_release_notes(repo,version,commit,custom_notes=custom_notes)
     api('PATCH',f'/repos/{repo}/releases/{release["id"]}',{'draft':False,'prerelease':False,'body':notes})
     print('Published '+version)
 if __name__=='__main__':main()

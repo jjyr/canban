@@ -1,6 +1,12 @@
 name: Release
 on:
   workflow_dispatch:
+    inputs:
+      notes:
+        description: 'Optional curated release notes Markdown (blank uses commit list)'
+        required: false
+        type: string
+        default: ''
 permissions:
   contents: write
   actions: read
@@ -27,6 +33,7 @@ jobs:
         id: identity
         env:
           GH_TOKEN: ${{ github.token }}
+          CANBAN_RELEASE_NOTES: ${{ inputs.notes }}
         run: python3 scripts/release.py reserve
 
   macos:
@@ -234,6 +241,7 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          CANBAN_RELEASE_NOTES: ${{ inputs.notes }}
         run: python3 scripts/release.py publish --require-all-platforms
 
   cache-prune:

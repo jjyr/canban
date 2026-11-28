@@ -1,0 +1,110 @@
+schema: 13
+id: release
+name: Release
+scope: project
+enabled: true
+on:
+  schedule:
+    event: schedule
+    cron: "0 17 * * 5"
+    timezone: Asia/Shanghai
+    overlap: skip
+    card:
+      column: review
+      title: "Release {{date}}"
+      body: "Collecting unreleased commits on `main`…"
+    start_at: collect
+  manual:
+    event: manual
+    start_at: collect
+steps:
+  - id: collect
+    name: Collect unreleased commits
+    uses: script
+    run: |
+      python3 scripts/release.py notes-context \
+        --ref main \
+        --out "$CANBAN_RUN_DIR/release-context.md" \
+        --canban-output
+      echo "RELEASE_CONTEXT_FILE=$CANBAN_RUN_DIR/release-context.md" >> "$CANBAN_ENV"
+    next: check_changes
+
+  - id: check_changes
+    name: Check for unreleased commits
+    uses: condition
+    with:
+      pointer: /outputs/collect/has_changes
+      equals: "true"
+      then: draft_notes
+      otherwise: done
+
+  - id: draft_notes
+    name: Draft release notes
+    uses: agent
+    with:
+      default_agent: developer
+      instruction: |
+        Read the release context at `$RELEASE_CONTEXT_FILE` (and inspect relevant repository commits/diffs if any commit subject is ambiguous).
+
+        Write clean, user-facing English release notes for this Canban release in pure Markdown:
+        - Start with a concise 1-2 sentence overview paragraph summarizing the release.
+        - Group user-visible changes under Markdown headings such as `### Highlights`, `### Improvements`, `### Performance`, and `### Bug Fixes` (omit any empty section).
+        - Use flat `- ` bullets with clear, concrete descriptions. Combine closely related commits into one bullet instead of listing raw commit subjects verbatim.
+        - Keep Markdown strictly compatible with GitHub Releases and `canban.dev` (`###` headings, paragraphs, `- ` bullets, inline `` `code` `` and `**bold**` only; no raw HTML, `<details>`, or tables).
+        - Do NOT include a `**Full Changelog**` footer — `scripts/release.py` appends it automatically during publication.
+        - Keep total length under 12,000 characters.
+
+        Save the draft to `$CANBAN_RUN_DIR/release-notes.md`, update this Card's Markdown body so the user can review or edit it directly before approving:
+        `"$CANBAN_CLI" card update --card "$CANBAN_CARD" --file "$CANBAN_RUN_DIR/release-notes.md"`
+        Then finish with:
+        `"$CANBAN_CLI" report --state completed --message "Drafted release notes for main" --file "$CANBAN_RUN_DIR/release-notes.md"`
+    next: approve_release
+
+  - id: approve_release
+    name: Approve release notes & dispatch
+    uses: approval
+    with:
+      title: "Approve release notes & dispatch GitHub Release"
+    on_changes_requested: draft_notes
+    next: dispatch_release
+
+  - id: dispatch_release
+    name: Dispatch GitHub Release
+    uses: script
+    run: |
+      python3 - <<'PY'
+      import json, os, pathlib, subprocess
+
+      cli = os.environ["CANBAN_CLI"]
+      card = os.environ["CANBAN_CARD"]
+      run_dir = pathlib.Path(os.environ["CANBAN_RUN_DIR"])
+
+      raw = subprocess.check_output(
+          [cli, "card", "show", "--card", card, "--fields", "body"],
+          text=True,
+      )
+      body = (json.loads(raw).get("body") or "").strip()
+      if not body:
+          raise SystemExit("Card body is empty; add release notes before approving")
+
+      notes_path = run_dir / "approved-notes.md"
+      notes_path.write_text(body + "\n", encoding="utf-8")
+
+      subprocess.run(
+          [
+              "python3",
+              "scripts/release.py",
+              "dispatch",
+              "--ref",
+              "main",
+              "--notes-file",
+              str(notes_path),
+          ],
+          check=True,
+      )
+      PY
+    next: done
+
+  - id: done
+    name: Complete
+    uses: complete
