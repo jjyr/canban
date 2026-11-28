@@ -1518,22 +1518,63 @@ fn render_expanded_github_detail(ui: Ui, item: &GitHubStackItem) -> AnyElement {
     .into_element()
 }
 
-/// Tier 1: Single-layer `SURFACE` row with 3px left semantic bar (no outer box border, no bare `Close`).
+/// Tier 1: Flat editorial hairline row directly on canvas (no outer card box, no 3px accent stripe).
 fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
     let key_defer = item.key.clone();
     let key_dismiss = item.key.clone();
     let wm = item.watermark;
     let age = format_age_compact(item.timestamp_ms, now_ms);
 
-    let row_base = |accent: ThemeColor| {
+    let row_base = || {
         view()
             .flex_row()
             .items_stretch()
             .min_w(px(0.))
-            .rounded(px(9.))
-            .overflow_hidden()
-            .bg(SURFACE)
-            .child(view().w(px(3.)).flex_shrink_0().bg(accent))
+            .border_b_1()
+            .border_color(BORDER)
+            .hover(|s| s.bg(CARD_HOVER))
+    };
+
+    let bare_icon = |kind: Icon, fg: ThemeColor| {
+        view()
+            .w(px(20.))
+            .pt(px(2.))
+            .items_center()
+            .flex_shrink_0()
+            .child(icon_tinted(kind, fg).w(px(15.)).h(px(15.)))
+    };
+
+    let bare_agent_icon = |engine: Option<&str>, fallback: ThemeColor| {
+        let ic = engine_icon(engine);
+        view()
+            .w(px(20.))
+            .pt(px(2.))
+            .items_center()
+            .flex_shrink_0()
+            .child(if engine.is_some() {
+                icon_colored(ic, 16.).into_element()
+            } else {
+                icon_tinted(ic, fallback)
+                    .w(px(15.))
+                    .h(px(15.))
+                    .into_element()
+            })
+    };
+
+    let semantic_intent = |text_str: String, color: ThemeColor| {
+        view()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .child(
+                view()
+                    .w(px(6.))
+                    .h(px(6.))
+                    .rounded_full()
+                    .bg(color)
+                    .flex_shrink_0(),
+            )
+            .child(label(text_str).text_size(px(12.)).text_color(color))
     };
 
     match item.kind {
@@ -1584,15 +1625,22 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             };
 
             let left_tile = if is_blocked {
-                agent_glyph_28(agent_engine.as_deref(), Some(ATTENTION))
+                bare_agent_icon(agent_engine.as_deref(), ATTENTION)
             } else if can_quick_merge {
-                glyph_28(Icon::GitMerge, SELECTED, ACCENT)
+                bare_icon(Icon::GitMerge, SUCCESS)
             } else if is_review {
-                glyph_28(Icon::Eye, HIGHLIGHT_SURFACE, HIGHLIGHT)
+                bare_icon(Icon::Eye, HIGHLIGHT)
             } else if agent_engine.is_some() {
-                agent_glyph_28(agent_engine.as_deref(), None)
+                bare_agent_icon(agent_engine.as_deref(), ACCENT)
             } else {
-                glyph_28(Icon::MessageSquare, SELECTED, ACCENT)
+                bare_icon(Icon::MessageSquare, ACCENT)
+            };
+            let status_color = if is_blocked {
+                ATTENTION
+            } else if can_quick_merge {
+                SUCCESS
+            } else {
+                accent
             };
 
             let intent_line = if is_blocked {
@@ -1656,9 +1704,9 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                     .on_press(move |_: &()| ui.open_card(cid_open.clone()))
                     .child(
                         view()
-                            .gap_0p5()
+                            .gap_1()
                             .child(title_line)
-                            .child(label(intent_line).text_size(px(12.)).text_color(accent)),
+                            .child(semantic_intent(intent_line, status_color)),
                     ),
             );
 
@@ -1790,15 +1838,15 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                     );
                 }));
 
-            row_base(accent).child(
+            row_base().child(
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_4()
+                    .px_1()
                     .py_3()
                     .flex_row()
                     .items_start()
-                    .gap_3()
+                    .gap_2p5()
                     .child(left_tile)
                     .child(
                         body_col
@@ -1808,7 +1856,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                                     .items_center()
                                     .justify_between()
                                     .gap_2()
-                                    .pt_0p5()
+                                    .pt_1()
                                     .child(left_actions)
                                     .child(right_triage),
                             )
@@ -1834,7 +1882,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             };
             let reply_target_btn = reply_target.clone();
 
-            let left_tile = agent_glyph_28(term.agent_engine.as_deref(), Some(accent));
+            let left_tile = bare_agent_icon(term.agent_engine.as_deref(), accent);
 
             let intent_line = if is_err {
                 "Error".to_owned()
@@ -1885,7 +1933,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                                                 .flex_shrink_0(),
                                         ),
                                 )
-                                .child(label(intent_line).text_size(px(12.)).text_color(accent)),
+                                .child(semantic_intent(intent_line, accent)),
                         ),
                 )
                 .child(
@@ -1955,15 +2003,15 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                     open_terminal_menu(ui, term_for_menu.clone())
                 }));
 
-            row_base(accent).child(
+            row_base().child(
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_4()
+                    .px_1()
                     .py_3()
                     .flex_row()
                     .items_start()
-                    .gap_3()
+                    .gap_2p5()
                     .child(left_tile)
                     .child(
                         body_col
@@ -1973,7 +2021,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                                     .items_center()
                                     .justify_between()
                                     .gap_2()
-                                    .pt_0p5()
+                                    .pt_1()
                                     .child(left_actions)
                                     .child(right_triage),
                             )
@@ -2012,20 +2060,13 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             } else {
                 ATTENTION
             };
-            let left_tile = glyph_28(
+            let left_tile = bare_icon(
                 if is_ci {
                     Icon::TriangleAlert
                 } else if is_rev {
                     Icon::Eye
                 } else {
                     Icon::GitHub
-                },
-                if is_ci {
-                    DANGER_SURFACE
-                } else if is_rev {
-                    HIGHLIGHT_SURFACE
-                } else {
-                    ATTENTION_SURFACE
                 },
                 accent,
             );
@@ -2260,15 +2301,15 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                 col = col.child(inline_reply_box(ui, rt));
             }
 
-            row_base(accent).child(
+            row_base().child(
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_4()
+                    .px_1()
                     .py_3()
                     .flex_row()
                     .items_start()
-                    .gap_3()
+                    .gap_2p5()
                     .child(left_tile)
                     .child(col),
             )
@@ -2294,15 +2335,7 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
             let is_failed = state == "failed";
             let accent = if is_failed { DANGER } else { ATTENTION };
 
-            let left_tile = glyph_28(
-                Icon::TriangleAlert,
-                if is_failed {
-                    DANGER_SURFACE
-                } else {
-                    ATTENTION_SURFACE
-                },
-                accent,
-            );
+            let left_tile = bare_icon(Icon::TriangleAlert, accent);
             let ctx_text = match host_label {
                 Some(h) => format!("{project_name} · {h}"),
                 None => project_name,
@@ -2384,11 +2417,14 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                                             .flex_shrink_0(),
                                     ),
                             )
-                            .child(
-                                label(if is_failed { "Failed" } else { "Waiting" })
-                                    .text_size(px(12.))
-                                    .text_color(accent),
-                            ),
+                            .child(semantic_intent(
+                                if is_failed {
+                                    "Failed".into()
+                                } else {
+                                    "Waiting".into()
+                                },
+                                accent,
+                            )),
                     ),
             );
             if let Some(err) = detail_text {
@@ -2419,15 +2455,15 @@ fn render_needs_you_row(ui: Ui, item: NeedsYouItem, now_ms: u64) -> View {
                     .child(right_triage),
             );
 
-            row_base(accent).child(
+            row_base().child(
                 view()
                     .flex_1()
                     .min_w(px(0.))
-                    .px_4()
+                    .px_1()
                     .py_3()
                     .flex_row()
                     .items_start()
-                    .gap_3()
+                    .gap_2p5()
                     .child(left_tile)
                     .child(col),
             )
@@ -4932,17 +4968,17 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             if all_active_empty {
                                 col = col.child(render_inbox_zero(ui, &inbox));
                             } else {
-                                // 3. Needs Action (single-layer `SURFACE` rows with 3px semantic left bar)
+                                // 3. Needs Action (flat editorial hairline rows directly on canvas)
                                 if !inbox.needs_you.is_empty() {
                                     let count = inbox.needs_you.len();
-                                    let mut sec = view().gap_2p5().child(chapter_header(
+                                    let mut sec = view().gap_2().child(chapter_header(
                                         Icon::ShieldAlert,
                                         ATTENTION,
                                         "Needs Action",
                                         format!("{count}"),
                                         None,
                                     ));
-                                    let mut list = view().gap_2();
+                                    let mut list = view().border_t_1().border_color(BORDER);
                                     for item in inbox.needs_you.iter().cloned() {
                                         list = list.child(render_needs_you_row(ui, item, now_ms));
                                     }

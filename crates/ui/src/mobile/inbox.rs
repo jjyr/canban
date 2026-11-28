@@ -9,7 +9,7 @@ use super::{
         MOBILE_BODY, disclosure_chevron, empty_state, hairline_divider, hairline_list,
         hairline_list_inset, is_android, is_ios, is_mobile_os, mobile_body, mobile_footnote,
         mobile_inline_button, mobile_subhead, mobile_title, offline_sync_banner, section_header,
-        surface_block, swipe_row, tab_scroll_bottom_pad, trigger_haptic,
+        swipe_row, tab_scroll_bottom_pad, trigger_haptic,
     },
 };
 use crate::{
@@ -307,6 +307,21 @@ fn render_needs_you_item(
             let key_defer = key.clone();
             let title_defer = card_title.clone();
 
+            let status_word = if is_blocked {
+                "Waiting"
+            } else if can_quick_merge {
+                "Ready to merge"
+            } else if is_review {
+                "Review"
+            } else {
+                "Needs action"
+            };
+            let ctx_right = if age.is_empty() {
+                project_name.clone()
+            } else {
+                format!("{project_name} · {age}")
+            };
+
             let mut meta_row = view()
                 .w_full()
                 .flex_row()
@@ -321,9 +336,19 @@ fn render_needs_you_item(
                         .items_center()
                         .gap_1p5()
                         .child(
-                            mobile_footnote(format!("{project_name} · #{card_number}"))
-                                .tabular_nums()
-                                .truncate(),
+                            view()
+                                .w(px(6.))
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(accent_col)
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            text(status_word)
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(accent_col)
+                                .flex_shrink_0(),
                         )
                         .children(pr_number.map(|n| {
                             let tone = match pr_ci_state.as_deref() {
@@ -338,11 +363,14 @@ fn render_needs_you_item(
                             status(lbl, tone)
                         })),
                 );
-            if !age.is_empty() {
-                meta_row = meta_row.child(mobile_footnote(age).tabular_nums().flex_shrink_0());
-            }
+            meta_row = meta_row.child(mobile_footnote(ctx_right).tabular_nums().flex_shrink_0());
 
-            let subtitle = detail.filter(|d| !d.trim().is_empty()).unwrap_or(headline);
+            let subtitle = detail
+                .filter(|d| !d.trim().is_empty() && d != status_word)
+                .or_else(|| {
+                    (!headline.trim().is_empty() && headline != status_word).then_some(headline)
+                })
+                .unwrap_or_default();
 
             let tap_body = press_target()
                 .w_full()
@@ -350,7 +378,7 @@ fn render_needs_you_item(
                 .gap_1()
                 .active(|s| s.opacity(0.72))
                 .child(meta_row)
-                .child(mobile_title(card_title.clone()).number_of_lines(2))
+                .child(mobile_title(format!("#{card_number} {card_title}")).number_of_lines(2))
                 .children(
                     (!subtitle.trim().is_empty())
                         .then(|| mobile_subhead(subtitle).number_of_lines(2)),
@@ -409,21 +437,15 @@ fn render_needs_you_item(
                 );
             }
 
-            let card_body = view().w_full().px_4().py_3().child(
-                surface_block()
-                    .flex_row()
-                    .items_stretch()
-                    .child(view().w(px(3.)).bg(accent_col).flex_shrink_0())
-                    .child(
-                        view()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .p_3p5()
-                            .gap_2()
-                            .child(tap_body)
-                            .child(actions),
-                    ),
-            );
+            let card_body = view()
+                .w_full()
+                .px_4()
+                .py_3p5()
+                .gap_2p5()
+                .border_b_1()
+                .border_color(BORDER)
+                .child(tap_body)
+                .child(actions);
 
             let do_done: Rc<dyn Fn()> = Rc::new(move || {
                 if unread_seq > 0 {
@@ -523,52 +545,55 @@ fn render_needs_you_item(
                 );
             }
 
-            let card_body = view().w_full().px_4().py_3().child(
-                surface_block()
-                    .flex_row()
-                    .items_stretch()
-                    .child(view().w(px(3.)).bg(DANGER).flex_shrink_0())
-                    .child(
-                        view()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .p_3p5()
-                            .gap_2()
-                            .child(
-                                view()
-                                    .w_full()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        view()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .flex_1()
-                                            .min_w(px(0.))
-                                            .child(
-                                                icon_tinted(Icon::Clock, DANGER)
-                                                    .w(px(13.))
-                                                    .h(px(13.)),
-                                            )
-                                            .child(
-                                                mobile_footnote(format!(
-                                                    "Schedule · {project_name}"
-                                                ))
-                                                .truncate(),
-                                            ),
-                                    )
-                                    .children((!age.is_empty()).then(|| {
-                                        mobile_footnote(age).tabular_nums().flex_shrink_0()
-                                    })),
-                            )
-                            .child(mobile_title(schedule_name.clone()).number_of_lines(2))
-                            .child(mobile_subhead(err_msg).number_of_lines(2))
-                            .child(actions),
-                    ),
-            );
+            let card_body = view()
+                .w_full()
+                .px_4()
+                .py_3p5()
+                .gap_2p5()
+                .border_b_1()
+                .border_color(BORDER)
+                .child(
+                    view()
+                        .w_full()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(
+                                    view()
+                                        .w(px(6.))
+                                        .h(px(6.))
+                                        .rounded_full()
+                                        .bg(DANGER)
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    text("Failed")
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(DANGER)
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    mobile_footnote(format!("Schedule · {project_name}"))
+                                        .truncate(),
+                                ),
+                        )
+                        .children(
+                            (!age.is_empty())
+                                .then(|| mobile_footnote(age).tabular_nums().flex_shrink_0()),
+                        ),
+                )
+                .child(mobile_title(schedule_name.clone()).number_of_lines(2))
+                .child(mobile_subhead(err_msg).number_of_lines(2))
+                .child(actions);
 
             let key_done = key.clone();
             let name_done = schedule_name.clone();
@@ -624,65 +649,93 @@ fn render_needs_you_item(
                 (None, None) => terminal.host_label.clone(),
             };
 
-            let card_body = view().w_full().px_4().py_3().child(
-                surface_block()
-                    .flex_row()
-                    .items_stretch()
-                    .child(view().w(px(3.)).bg(accent_col).flex_shrink_0())
-                    .child(
-                        view()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .p_3p5()
-                            .gap_2()
-                            .child(
-                                press_target()
-                                    .w_full()
-                                    .gap_1()
-                                    .active(|s| s.opacity(0.72))
-                                    .child(
-                                        view()
-                                            .w_full()
-                                            .flex_row()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .child(
-                                                view()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .flex_1()
-                                                    .min_w(px(0.))
-                                                    .child(
-                                                        icon_tinted(ic, accent_col)
-                                                            .w(px(14.))
-                                                            .h(px(14.)),
-                                                    )
-                                                    .child(mobile_footnote(ctx).truncate()),
-                                            )
-                                            .children((!age.is_empty()).then(|| {
-                                                mobile_footnote(age).tabular_nums().flex_shrink_0()
-                                            })),
-                                    )
-                                    .child(mobile_title(terminal.title.clone()).number_of_lines(2))
-                                    .child(mobile_subhead(detail).number_of_lines(2))
-                                    .on_press(move |_: &()| {
-                                        trigger_haptic(Haptic::Selection);
-                                        if let Some(cid) = &cid_opt {
-                                            state.push_card(cid.clone(), CardSegment::Terminal);
-                                        } else {
-                                            state.push_terminal(tid_open.clone());
-                                        }
+            let term_status_word = if matches!(
+                terminal.status,
+                HerdrStatus::Error | HerdrStatus::Disconnected
+            ) {
+                "Error"
+            } else {
+                "Waiting"
+            };
+            let card_body = view()
+                .w_full()
+                .px_4()
+                .py_3p5()
+                .gap_2p5()
+                .border_b_1()
+                .border_color(BORDER)
+                .child(
+                    press_target()
+                        .w_full()
+                        .gap_1()
+                        .active(|s| s.opacity(0.72))
+                        .child(
+                            view()
+                                .w_full()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .child(
+                                            view()
+                                                .w(px(6.))
+                                                .h(px(6.))
+                                                .rounded_full()
+                                                .bg(accent_col)
+                                                .flex_shrink_0(),
+                                        )
+                                        .child(
+                                            text(term_status_word)
+                                                .text_size(px(12.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(accent_col)
+                                                .flex_shrink_0(),
+                                        )
+                                        .child(mobile_footnote(ctx).truncate()),
+                                )
+                                .children(
+                                    (!age.is_empty()).then(|| {
+                                        mobile_footnote(age).tabular_nums().flex_shrink_0()
                                     }),
-                            )
-                            .child(mobile_inline_button(
-                                "Open Terminal",
-                                Variant::Secondary,
-                                move |_| state.push_terminal(tid_btn.clone()),
-                            )),
-                    ),
-            );
+                                ),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(if terminal.is_agent && terminal.agent_engine.is_some() {
+                                    icon_colored(ic, 16.).into_element()
+                                } else {
+                                    icon_tinted(ic, accent_col)
+                                        .w(px(15.))
+                                        .h(px(15.))
+                                        .into_element()
+                                })
+                                .child(mobile_title(terminal.title.clone()).number_of_lines(2)),
+                        )
+                        .child(mobile_subhead(detail).number_of_lines(2))
+                        .on_press(move |_: &()| {
+                            trigger_haptic(Haptic::Selection);
+                            if let Some(cid) = &cid_opt {
+                                state.push_card(cid.clone(), CardSegment::Terminal);
+                            } else {
+                                state.push_terminal(tid_open.clone());
+                            }
+                        }),
+                )
+                .child(mobile_inline_button(
+                    "Open Terminal",
+                    Variant::Secondary,
+                    move |_| state.push_terminal(tid_btn.clone()),
+                ));
 
             let key_done = key.clone();
             let title_done = terminal.title.clone();
@@ -842,18 +895,11 @@ fn render_github_row_item(
         });
 
     let wrapped: AnyElement = if prominent {
-        let accent_col = if gh.is_ci_failure { DANGER } else { ATTENTION };
         view()
             .w_full()
-            .px_4()
-            .py_2()
-            .child(
-                surface_block()
-                    .flex_row()
-                    .items_stretch()
-                    .child(view().w(px(3.)).bg(accent_col).flex_shrink_0())
-                    .child(view().flex_1().min_w(px(0.)).child(inner)),
-            )
+            .border_b_1()
+            .border_color(BORDER)
+            .child(inner)
             .into_element()
     } else {
         inner.into_element()
@@ -1752,15 +1798,17 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                             .into_element();
                     }
 
-                    // 1. Needs Action
+                    // 1. Needs Action (flat editorial hairline rows directly on canvas)
                     if !inbox.needs_you.is_empty() {
-                        let mut sec = view()
+                        let mut list = view().w_full().border_t_1().border_color(BORDER);
+                        for item in inbox.needs_you.clone() {
+                            list = list.child(render_needs_you_item(ui, state, item, now_ms));
+                        }
+                        let sec = view()
                             .w_full()
                             .pt_3()
-                            .child(view().px_4().child(section_header("NEEDS ACTION", None)));
-                        for item in inbox.needs_you.clone() {
-                            sec = sec.child(render_needs_you_item(ui, state, item, now_ms));
-                        }
+                            .child(view().px_4().child(section_header("NEEDS ACTION", None)))
+                            .child(list);
                         col = col.child(sec);
                     }
 
