@@ -213,19 +213,66 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
             })
         };
         let terminal_el = if !crate::backend::is_connected() {
-            canban_terminal::TerminalView::preview(
+            let is_showcase =
+                std::env::var("CANBAN_GALLERY_TERMINAL_PREVIEW").as_deref() == Ok("showcase");
+            let preview_content = if is_showcase {
+                concat!(
+                    "\x1b[38;2;226;154;59m╭────────────────────────────────────────────────────────────────────╮\x1b[0m\r\n",
+                    "\x1b[38;2;226;154;59m│\x1b[0m \x1b[1;38;2;242;240;233mClaude Code\x1b[0m \x1b[38;2;140;138;130mv2.1.42 · opus-4-6\x1b[0m   \x1b[38;2;152;195;121m●\x1b[0m \x1b[38;2;166;164;155mbranch: feat/search-context\x1b[0m   \x1b[38;2;226;154;59m│\x1b[0m\r\n",
+                    "\x1b[38;2;226;154;59m╰────────────────────────────────────────────────────────────────────╯\x1b[0m\r\n",
+                    "\r\n",
+                    "\x1b[38;2;166;164;155m> Card #1: Improve search and preserve the user's context when jumping across\x1b[0m\r\n",
+                    "\x1b[38;2;166;164;155m  projects and live terminals via Quick Open (⌘O).\x1b[0m\r\n",
+                    "\r\n",
+                    "\x1b[38;2;152;195;121m●\x1b[0m \x1b[1;38;2;242;240;233mRead\x1b[0m(\x1b[38;2;166;164;155mcrates/ui/src/quick_open/model.rs\x1b[0m)\r\n",
+                    "  \x1b[38;2;116;114;107m⎿  Read 184 lines · ranked() + recent_destinations scoring\x1b[0m\r\n",
+                    "\r\n",
+                    "\x1b[38;2;152;195;121m●\x1b[0m \x1b[1;38;2;242;240;233mEdit\x1b[0m(\x1b[38;2;166;164;155mcrates/ui/src/quick_open/model.rs\x1b[0m)\r\n",
+                    "  \x1b[38;2;116;114;107m⎿  Updated rank_candidate() to boost current project & preserve scroll anchor\x1b[0m\r\n",
+                    "     \x1b[38;2;224;108;117m- let score = fuzzy_score(&candidate.fields, query)?;\x1b[0m\r\n",
+                    "     \x1b[38;2;152;195;121m+ let base = fuzzy_score(&candidate.fields, query)?;\x1b[0m\r\n",
+                    "     \x1b[38;2;152;195;121m+ let boost = context_boost(&candidate, active_project, recent);\x1b[0m\r\n",
+                    "     \x1b[38;2;152;195;121m+ let score = base.saturating_sub(boost);\x1b[0m\r\n",
+                    "\r\n",
+                    "\x1b[38;2;152;195;121m●\x1b[0m \x1b[1;38;2;242;240;233mEdit\x1b[0m(\x1b[38;2;166;164;155mcrates/ui/src/presenter.rs\x1b[0m)\r\n",
+                    "  \x1b[38;2;116;114;107m⎿  Push previous destination into navigation stack before Quick Open jump\x1b[0m\r\n",
+                    "\r\n",
+                    "\x1b[38;2;152;195;121m●\x1b[0m \x1b[1;38;2;242;240;233mBash\x1b[0m(\x1b[38;2;166;164;155mcargo run -p canban-sim -- corpus && mise run check\x1b[0m)\r\n",
+                    "  \x1b[38;2;152;195;121m✓\x1b[0m \x1b[38;2;242;240;233mDST corpus:\x1b[0m \x1b[38;2;152;195;121m14/14 scenarios passed\x1b[0m \x1b[38;2;116;114;107m(0 invariant violations, 412ms)\x1b[0m\r\n",
+                    "  \x1b[38;2;152;195;121m✓\x1b[0m \x1b[38;2;242;240;233mWorkspace check:\x1b[0m \x1b[38;2;152;195;121mfmt + compile clean\x1b[0m\r\n",
+                    "\r\n",
+                    "\x1b[38;2;226;154;59m●\x1b[0m \x1b[1;38;2;242;240;233mBash\x1b[0m(\x1b[38;2;166;164;155mgit diff --stat && canban report --state completed --card #1\x1b[0m)\r\n",
+                    "  \x1b[38;2;166;164;155mcrates/ui/src/quick_open/model.rs | 94 +++++++++++++++++++++++---\x1b[0m\r\n",
+                    "  \x1b[38;2;166;164;155mcrates/ui/src/presenter.rs        | 42 +++++++++++-\x1b[0m\r\n",
+                    "  \x1b[38;2;166;164;155mcrates/ui/src/quick_open.rs       | 39 ++++++++--\x1b[0m\r\n",
+                    "  \x1b[38;2;116;114;107m3 files changed, \x1b[38;2;152;195;121m148 insertions(+)\x1b[38;2;116;114;107m, \x1b[38;2;224;108;117m27 deletions(-)\x1b[0m\r\n",
+                    "\r\n",
+                    "\x1b[38;2;226;154;59m❯\x1b[0m \x1b[38;2;166;164;155mRunning final check before posting PR #148 summary…\x1b[0m\r\n",
+                )
+                .to_owned()
+            } else {
                 concat!(
                     "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
                     "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
                     "Links : https://canban.dev · \x1b]8;;https://ghostty.org\x07libghostty-vt\x1b]8;;\x07\r\n",
-                ),
+                )
+                .to_owned()
+            };
+            canban_terminal::TerminalView::preview(
+                preview_content,
                 crate::utilities::terminal_theme,
                 move || crate::utilities::terminal_font(ui),
                 focus_req,
             )
             .ui_command_keys(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"])
             .read_only(|| true)
-            .input_status(status_fn)
+            .input_status(move || {
+                if is_showcase {
+                    String::new()
+                } else {
+                    status_fn()
+                }
+            })
             .notice_status(notice_fn)
             .hidden(move || !has_live_target.get())
         } else {

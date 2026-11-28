@@ -2702,6 +2702,19 @@ pub fn Gallery() -> impl IntoElement {
 
     if matches!(
         scene_env.as_str(),
+        "website-inbox"
+            | "website-board"
+            | "website-terminals"
+            | "website-review"
+            | "website-workflows"
+            | "website-quick-open"
+    ) {
+        canban_ui::frame::configure_window_chrome();
+        fixtures::website_showcase(ui, &scene_env);
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if matches!(
+        scene_env.as_str(),
         "daily-inbox" | "daily-inbox-expanded" | "daily-inbox-active-work"
     ) {
         fixtures::daily_inbox(ui, scene_env == "daily-inbox-expanded");

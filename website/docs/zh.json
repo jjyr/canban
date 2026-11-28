@@ -7,7 +7,12 @@
     "intro": "Canban（canban.dev）坚持本地优先、零资料收集、无中转服务器。它将用于维护 Human Context 的 Kanban 卡片、支持无卡 GitHub 事件与加密密钥库的声明式 schema 13 Workflow 引擎、时间线优先的 Insights 仪表盘、Agent 优先的 `canban` CLI，以及基于 Herdr 的持久 PTY 原生 Agent CLI 终端整合在同一个本机与全程端到端加密远程跨主机工作台中。",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["文档", "docs"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ]
+    ],
     "cards": [
       {
         "title": "指南：多 Agent 并行实战",
@@ -71,7 +76,7 @@
         "heading": "为什么是 Canban = Kanban + Workflow + Herdr",
         "markdown": "1. **Kanban 维护 Human Context**：需求说明、粘贴的截图、`#Card` 与 GitHub Issue/PR 引用、`@Agent` 讨论、结构化报告和代码 Diff 都保存在同一张卡片上。\n2. **Workflow 自动调度 Worktree 与交付**：将卡片拖入 `Develop` 自动创建独立 Git Worktree（`<dir>-<proj4>/<card-number>`）并推进工作流图；进入 `Review` 后通过串行 FIFO Queue Merge 完成变基合并。\n3. **Herdr 无干扰运行原生 Agent CLI**：完整保留原生 CLI 的 TUI 交互、MCP Server、Skills、权限确认与精确会话恢复能力。",
         "screenshot": {
-          "src": "/screenshots/review-diff.png",
+          "src": "/screenshots/git-review.webp",
           "alt": "Canban Card #1 工作树 Git Diff 审查视图，展示提交列表、变更 Rust 文件、行内 Diff、Copy Markdown 以及 Review & Send to @Agent 按钮。",
           "caption": "Canban 内置 Worktree Diff 审查：查看提交与行内代码变更、添加行级批注，并通过 Review & Send to @Agent 直接交给 Agent 处理。",
           "width": 2880,
@@ -99,14 +104,23 @@
     "intro": "Canban 工作流是以 SQLite 为唯一数据源（`workflow_sources` 与不可变 `workflow_revisions`）的声明式 YAML 1.2 执行图（当前 `CURRENT = 13`）。Visual Studio 图形编辑、YAML Source 手写与 Edit with agent 全部经由同一套 Rust 校验与编译引擎发布。",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["文档", "docs"], ["工作流", "docs/workflows"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ],
+      [
+        "工作流",
+        "docs/workflows"
+      ]
+    ],
     "sections": [
       {
         "id": "visual-studio",
         "heading": "Visual Studio、SQLite 单一数据源与 Stage 投影",
         "markdown": "在任意项目顶栏打开 **Workflows**，即可在 **Visual Studio**、**YAML Source**、**History** 与 **Edit with agent** 之间切换：\n\n- **SQLite 单一数据源**：所有工作流源码与不可变修订版本保存在 `canban.sqlite`（`workflow_sources` 与 `workflow_revisions`）中，不会在 `~/.canban` 生成隐藏 YAML 镜像。每个 `WorkflowRun` 在创建时冻结当前 `definition` 与 `definition_revision`，发布新 YAML 不会篡改正在运行的任务。\n- **线性 Schema 迁移（`1..=13`）**：`crates/workflow-engine/src/migrations.rs` 定义 `BASELINE = 1` 与 `CURRENT = 13`，解析旧版 YAML 时按顺序自动迁移升级（schema 11 新增 `cardless` 事件规则与 `exclude_self`，schema 12 新增密钥与变量表达式支持，schema 13 将 `uses: agent` 的 `with.profile` 升级为互斥的 `default_agent` / `override` 以配合卡片级 `assignee`）。\n- **Visual Studio 如何映射到 Stage（`stages.rs`）**：YAML 顶层并没有 `stages:` 键；`canban_workflow_engine::stages` 会根据 `columns`、`on` 入列规则和 `steps` 中的 `card.move`（`column: $next`、`next: $entry`）实时投影出每个看板列的 `StageView` 泳道（包含 `column`、`name`、`steps`、`entry_rule` 与 `exit`）。Step 上可选写 `stage: <column_id>` 显式归属泳道，或写 `enabled: false` 在编译期跳过节点而不破坏前后连线。",
         "screenshot": {
-          "src": "/screenshots/workflow-studio.png",
+          "src": "/screenshots/workflows.webp",
           "alt": "Canban Workflows Visual Studio 界面，展示 development.yaml 中的 Backlog、Develop（@developer Implement）与 Review（External PR check 条件分支、Human approval 与 Queue merge）泳道。",
           "caption": "development.yaml 的 Visual Studio 视图：清晰展示 Backlog、Develop 与 Review 泳道，包含 external_pr 条件分支、人工审批门禁与 Rebase · Sync 队列合入。",
           "width": 2880,
@@ -181,7 +195,16 @@
     "intro": "`canban` 命令行工具（`crates/cli/src/main.rs`）与原生桌面端调用同一套 `AppServer` JSON-RPC 接口。它默认面向 Agent 进行 Token 与一致性优化，同时通过全局 `--human` 参数为人类提供清晰易读的输出。",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["文档", "docs"], ["CLI", "docs/cli"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ],
+      [
+        "CLI",
+        "docs/cli"
+      ]
+    ],
     "sections": [
       {
         "id": "core-commands",
@@ -213,14 +236,23 @@
     "intro": "Canban 通过 `herdr-core` 持久 PTY 与 `libghostty-vt` 直接运行原生编程 Agent CLI，完整保留各工具原有的交互式 TUI、MCP、Skills、权限提示与会话恢复能力。",
     "date_published": "2026-11-19",
     "updated": "2026-11-24",
-    "breadcrumbs": [["文档", "docs"], ["原生 Agent 与 PTY", "docs/agents"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ],
+      [
+        "原生 Agent 与 PTY",
+        "docs/agents"
+      ]
+    ],
     "sections": [
       {
         "id": "herdr-preservation",
         "heading": "无干扰保留原生 TUI、MCP 与 Skills",
         "markdown": "Canban 不会用简陋聊天框替换你的编程工具，也不依赖脆弱的 `Stop` Hook，而是通过 `herdr-core`（`hc`）托管真实 PTY：\n\n- **原生 TUI 与终端渲染**：由 `libghostty-vt` 负责 VT 解析与增量状态同步，macOS 通过 AppKit/CoreText 原生绘制，Linux 通过 GTK4 绘制，支持 SGR/像素鼠标上报、OSC 8 超链接与 Monokai 等 17 套深色配色。\n- **完整保留 MCP、Skills 与权限控制**：CLI 进程直接在卡片对应 Worktree 中以你的本机环境启动，既有的 MCP Server、自定义 Skill、沙箱规则与登录态无需重新配置。\n- **重启不丢会话与精确恢复**：关闭 Canban 窗口、重启 `canband` 或应用在线升级时，`herdr-core` 中的 Agent 进程依然保持运行；已结束的会话也支持按精确会话 ID（`--resume` / `--session` / `--conversation`）恢复上下文。\n- **全局并发预算**：自动工作流步骤共享全局并发上限（`scheduler.max_agents`，默认 `8`），手动 Shell 与 `script` 步骤不占用 Agent 槽位。",
         "screenshot": {
-          "src": "/screenshots/board-terminal.png",
+          "src": "/screenshots/terminals.webp",
           "alt": "Canban Card #2 在持久 Herdr PTY 终端中运行原生 @developer CLI 会话，并与卡片讨论、Hold auto-merge 和工作流进度条并排显示。",
           "caption": "@developer 在 Card #2 的独立 Worktree（acme-api-f4c9/2）中通过 Herdr PTY 运行 cargo test，并等待显式调用 canban report 推进流程。",
           "width": 2880,
@@ -276,7 +308,16 @@
     "intro": "单个 Canban 桌面端或移动端客户端可以同时直连本机（`This Mac`）和一台或多台远程 Linux / macOS `canband` 主机，**全程强制 `Noise_XX` 端到端加密、无任何中转服务器**——支持局域网 / 私有网络直连，并可选配合 **Tailscale**（免扫码 WhoIs 自动认证）或托管 **SSH** 隧道使用。",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["文档", "docs"], ["远程主机", "docs/remote-hosts"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ],
+      [
+        "远程主机",
+        "docs/remote-hosts"
+      ]
+    ],
     "sections": [
       {
         "id": "multi-host-model",
@@ -326,14 +367,23 @@
     "intro": "**核心结论**：靠几十个原始终端标签页同时跑 5–10 个编程 Agent，很快会毁于上下文丢失、Git 工作区踩踏和漏看 `[Y/n]` 确认。Canban 将看板卡片（`Human Context`）、单卡隔离 Git Worktree（`<dir>-<proj4>/<card-number>`）、全局注意力收件箱（`⌘I`）、串行 FIFO 合并队列与时间线优先的 Insights 合为一体，让多个原生 Agent CLI 并行推进而不打架。",
     "date_published": "2026-11-23",
     "updated": "2026-11-24",
-    "breadcrumbs": [["文档", "docs"], ["多 Agent 并行指南", "guides/parallel-coding-agents"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ],
+      [
+        "多 Agent 并行指南",
+        "guides/parallel-coding-agents"
+      ]
+    ],
     "sections": [
       {
         "id": "why-tabs-break",
         "heading": "为什么并行超过 5 个 Agent 时纯终端标签页会失控",
         "markdown": "用普通终端多开 `claude`、`codex`、`agy`、`pi` 或 `cursor-agent` 在 1–2 个任务时尚可应付，一旦扩大并发立刻暴露四个痛点：\n\n- **Human Context 散落各处**：需求文档、截图和审查意见淹没在滚动终端日志里，无法随任务沉淀。\n- **工作树互相踩踏**：多个 Agent 共用同一个仓库目录会改乱彼此文件、污染 `git status`。\n- **审批阻塞无感知**：某个终端弹出工具授权或追问卡住二十分钟，人却盯着另一个标签页毫无察觉。\n- **收尾合入冲突**：即便手动建了几个 `git worktree`，把 5 个并行分支逐个变基、测试并合入 `main` 依然十分耗时。",
         "screenshot": {
-          "src": "/screenshots/board-terminal.png",
+          "src": "/screenshots/board.webp",
           "alt": "Canban 桌面看板中 Card #2 运行在独立 Git Worktree，左侧展示任务描述、活动记录和工作流进度，右侧并排运行 @developer Herdr PTY 终端。",
           "caption": "每张卡片将 Markdown 规格、独立 Git Worktree、工作流阶段与真实原生 Agent CLI 终端锁定在同一视图中。",
           "width": 2880,
@@ -351,7 +401,7 @@
         "heading": "用全局注意力收件箱（⌘I）与内置行级 Diff 审查闭环",
         "markdown": "不再逐个标签页巡检，按 **`⌘I`** 即可呼出跨项目、跨主机的全局**注意力收件箱**：\n\n- **一眼定位阻塞项**：集中列出等待授权、人工回复或人工审批的条目（`待你处理`），以及阶段完成动态和运行中会话。\n- **一键直达现场**：点击任意通知，直接跳到对应卡片时间线或该 Agent 的实时 Herdr PTY 终端。\n- **内置行级 Diff 审查与 PR 追踪**：不用切换外部编辑器，直接在 Canban 的 Git 工作台查看工作树提交与代码变更（支持自动发现外部手动创建的 git worktree、分支关联 PR 与 fast-fail CI 状态追踪、GitHub 直达链接，以及取消 800 行截断的渐进式 Diff 展开），在具体代码行留批注，并点击 `Review & Send to @Agent` 交给 Agent 返修。",
         "screenshot": {
-          "src": "/screenshots/review-diff.png",
+          "src": "/screenshots/git-review.webp",
           "alt": "Canban 内置 Git Diff 审查面板，显示工作树提交历史、修改的 Rust 文件、行内批注及 Review & Send to @Agent 按钮。",
           "caption": "在应用内直接审查独立 Worktree 提交并将行内批注一键退回给 @Agent 修改。",
           "width": 2880,
@@ -402,14 +452,23 @@
     "intro": "**核心结论**：纯 `tmux` 保住了原生 CLI 能力但缺少任务上下文、工作流编排与跨主机通知路由；聊天封装型 IDE 虽然界面整齐，却往往阉割原生 TUI、MCP 与精确会话恢复。Canban 用原生 Rust + `libghostty-vt` 与 `herdr-core`（`hc`）兼顾两者，并以无中转强制 `Noise_XX` 全程 E2EE `yamux/1` TCP（可选配合 Tailscale 或 SSH）打通本地 Mac 与多台远程 Linux `canband` 服务器——断网时依然支持离线编辑与重连自动同步。",
     "date_published": "2026-11-23",
     "updated": "2026-11-27",
-    "breadcrumbs": [["文档", "docs"], ["原生终端与多机协同", "guides/native-terminal-and-multi-machine"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ],
+      [
+        "原生终端与多机协同",
+        "guides/native-terminal-and-multi-machine"
+      ]
+    ],
     "sections": [
       {
         "id": "architecture-comparison",
         "heading": "架构对比：Canban vs. tmux/终端标签页 vs. 聊天封装 IDE",
         "markdown": "| 维度 | Canban (`Rust + libghostty-vt + Herdr`) | 纯 `tmux` / 终端标签页 | 聊天封装 IDE / Web UI |\n| --- | --- | --- | --- |\n| **原生 CLI TUI、MCP 与 Skills** | **100% 原汁原味** — 直接运行真实 `claude`、`codex`、`agy`、`pi`、`cursor-agent`、`gemini`、`opencode` | **100% 原汁原味** | 常被截断、转译或重写功能 |\n| **应用重启/升级不断线** | **支持** — `herdr-core` (`hc`) 托管 PTY 独立存活 | **支持**（依赖本机 `tmux` 服务端） | 关窗或重载进程常中断任务 |\n| **任务卡片、Worktree 与合并队列** | **开箱即用** — 看板卡片、`<dir>-<proj4>/<card>`、YAML 工作流、FIFO Queue Merge | 需手动建分支与脚本拼接 | 能力零散或绑定单机单仓 |\n| **跨项目全局注意力收件箱（`⌘I`）** | **开箱即用** — 本地 + 远程主机统一捕获 `[Y/n]` 与阶段更新 | 需逐个窗口人工切换查看 | 仅限单窗口红点提示 |\n| **多机远程 Linux 托管** | **开箱即用** — 无中转 `Noise_XX` E2EE `yamux/1` TCP（X25519 公钥认证）+ 可选 Tailscale WhoIs / SSH + 离线编辑与三方同步 | 手动 SSH 分别维护多个 `tmux` | 依赖远程 IDE 插件或云端绑定 |\n| **客户端技术栈** | 原生 AppKit/Metal（macOS）与 GTK4（Linux） | 终端仿真器 | Electron / 浏览器 DOM |",
         "screenshot": {
-          "src": "/screenshots/workflow-studio.png",
+          "src": "/screenshots/workflows.webp",
           "alt": "Canban Visual Workflow Studio 视图，展示 Backlog、Develop 与 Review 阶段以及条件分支和队列合并流水线。",
           "caption": "声明式工作流（schema: 13）可在本地 Mac 或远程 Headless Linux canband 主机上驱动原生 Agent CLI PTY。",
           "width": 2880,
@@ -460,7 +519,16 @@
     "intro": "**核心思路**：配置阶段**让 Agent 帮你写好、校验并跑通一次 Dry-Run**；但生成的定时工作流本身**只用纯 `run:` 脚本执行**（运行期零 `uses: agent`、零 PTY、零 Token 消耗）。每天按「**已合并 且 工作区干净 且 7 天未活跃**」安全清理，并在有清理或失败时自动建卡汇报各仓库释放的 GB 空间。",
     "date_published": "2026-11-24",
     "updated": "2026-11-27",
-    "breadcrumbs": [["文档", "docs"], ["定时回收 Worktree", "guides/scheduled-worktree-cleanup"]],
+    "breadcrumbs": [
+      [
+        "文档",
+        "docs"
+      ],
+      [
+        "定时回收 Worktree",
+        "guides/scheduled-worktree-cleanup"
+      ]
+    ],
     "sections": [
       {
         "id": "why-pure-script-schedule",

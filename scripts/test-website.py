@@ -30,10 +30,8 @@ class Page(HTMLParser):
         self.scripts = []
         self.in_script = False
         self._code_depth = 0
-        self.ch1_links = []
-        self._in_ch0 = False
-        self._ch0_depth = 0
-        self._in_ch1_nav = False
+        self.header_nav_links = []
+        self._in_site_nav = False
         self.feed(text)
 
     def handle_starttag(self, tag, attrs):
@@ -41,15 +39,10 @@ class Page(HTMLParser):
         self.elements.append((tag, attr_map))
         if tag in ("code", "pre"):
             self._code_depth += 1
-        if tag == "section" and attr_map.get("id") == "ch-0":
-            self._in_ch0 = True
-            self._ch0_depth = 1
-        elif self._in_ch0:
-            self._ch0_depth += 1
-        if self._in_ch0 and tag == "nav" and "ch1-links" in attr_map.get("class", "").split():
-            self._in_ch1_nav = True
-        if self._in_ch1_nav and tag == "a" and attr_map.get("href"):
-            self.ch1_links.append(attr_map["href"])
+        if tag == "nav" and "site-nav" in attr_map.get("class", "").split():
+            self._in_site_nav = True
+        if self._in_site_nav and tag == "a" and attr_map.get("href"):
+            self.header_nav_links.append(attr_map["href"])
         if tag == "script":
             self.in_script = True
             self.scripts.append((attr_map, ""))
@@ -59,12 +52,8 @@ class Page(HTMLParser):
             self._code_depth -= 1
         if tag == "script":
             self.in_script = False
-        if self._in_ch1_nav and tag == "nav":
-            self._in_ch1_nav = False
-        if self._in_ch0:
-            self._ch0_depth -= 1
-            if self._ch0_depth <= 0:
-                self._in_ch0 = False
+        if self._in_site_nav and tag == "nav":
+            self._in_site_nav = False
 
     def handle_data(self, data):
         if self.in_script:
@@ -177,7 +166,7 @@ class WebsiteTest(unittest.TestCase):
                             self.assertEqual(software["releaseNotes"], website.ORIGIN + website.route(lang, "changelog"))
                             screenshots = software["screenshot"]
                             self.assertIsInstance(screenshots, list)
-                            self.assertEqual(len(screenshots), 3)
+                            self.assertEqual(len(screenshots), 5)
                             for shot_url in screenshots:
                                 self.assertTrue(shot_url.startswith(website.ORIGIN + "/screenshots/"), shot_url)
                                 shot_path = self.output / urlsplit(shot_url).path.lstrip("/")
@@ -247,11 +236,11 @@ class WebsiteTest(unittest.TestCase):
                         self.assertIn(locales_json[lang]["hero_title"], visible)
                         self.assertEqual(len(page.attrs("title")), 1)
                         self.assertIn("Kanban + Workflow + Herdr", text)
-                        expected_ch1 = {
+                        expected_nav = {
                             website.route(lang, hub)
                             for hub in ("install", "docs", "docs/workflows", "docs/cli", "changelog")
                         }
-                        self.assertEqual(set(page.ch1_links), expected_ch1)
+                        self.assertEqual(set(page.header_nav_links), expected_nav)
                         hrefs = {attrs.get("href") for tag, attrs in page.elements if tag == "a"}
                         self.assertIn(f"{website.route(lang, 'install')}#mobile", hrefs, lang)
                         self.assertIn(website.ANDROID_APK_URL, hrefs, lang)
@@ -266,14 +255,45 @@ class WebsiteTest(unittest.TestCase):
                         android_panel = page.attrs("div", id="closing-install-android")
                         self.assertEqual(len(android_panel), 1, lang)
                         self.assertIn("hidden", android_panel[0], lang)
-                        self.assertFalse([img for img in page.attrs("img") if img.get("src", "").startswith("/screenshots/")])
+                        home_shots = [img.get("src") for img in page.attrs("img") if img.get("src", "").startswith("/screenshots/")]
+                        self.assertEqual(
+                            home_shots,
+                            [
+                                "/screenshots/daily-briefing.webp",
+                                "/screenshots/board.webp",
+                                "/screenshots/terminals.webp",
+                                "/screenshots/git-review.webp",
+                                "/screenshots/workflows.webp",
+                            ],
+                            lang,
+                        )
+                        showcase_tabs = [
+                            attrs.get("data-showcase-tab")
+                            for tag, attrs in page.elements
+                            if tag == "button" and attrs.get("data-showcase-tab")
+                        ]
+                        self.assertEqual(
+                            showcase_tabs,
+                            ["daily-briefing", "board", "terminals", "git-review", "workflows"],
+                            lang,
+                        )
+                        provider_icons = {
+                            img.get("src")
+                            for img in page.attrs("img")
+                            if img.get("src", "").startswith("/providers/")
+                        }
+                        self.assertEqual(
+                            provider_icons,
+                            {f"/providers/{cli_id}.svg" for cli_id in BUILTIN_24_CLI_IDS},
+                            lang,
+                        )
 
                     expected_screenshots = {
-                        "install": ("/screenshots/board-terminal.png", False),
-                        "docs": ("/screenshots/review-diff.png", True),
-                        "docs/workflows": ("/screenshots/workflow-studio.png", True),
-                        "docs/agents": ("/screenshots/board-terminal.png", True),
-                        "guides/native-terminal-and-multi-machine": ("/screenshots/workflow-studio.png", True),
+                        "install": ("/screenshots/daily-briefing.webp", False),
+                        "docs": ("/screenshots/git-review.webp", True),
+                        "docs/workflows": ("/screenshots/workflows.webp", True),
+                        "docs/agents": ("/screenshots/terminals.webp", True),
+                        "guides/native-terminal-and-multi-machine": ("/screenshots/workflows.webp", True),
                     }
                     if section in expected_screenshots:
                         expected_src, expect_lazy = expected_screenshots[section]
@@ -441,11 +461,17 @@ class WebsiteTest(unittest.TestCase):
 
     def test_links_assets_and_fragments_resolve(self):
         expected_screenshots = {
-            "board-terminal.png",
-            "workflow-studio.png",
-            "review-diff.png",
+            "daily-briefing.webp",
+            "board.webp",
+            "terminals.webp",
+            "git-review.webp",
+            "workflows.webp",
         }
-        source_shots = {path.name for path in (website.SOURCE / "screenshots").glob("*.png")}
+        source_shots = {
+            path.name
+            for path in (website.SOURCE / "screenshots").iterdir()
+            if path.is_file() and path.suffix in (".webp", ".png")
+        }
         self.assertEqual(source_shots, expected_screenshots)
         for name in expected_screenshots:
             built_shot = self.output / "screenshots" / name

@@ -5447,6 +5447,728 @@ pub fn env_meta_map() -> std::collections::BTreeMap<String, canban_types::EnvEnt
         ),
     ])
 }
+
+/// Unified 6-view showcase fixture shared across website & README screenshots.
+/// Keeps the same two projects (`Canban workspace` and `herdr`), same cards,
+/// same active agents, and zero personal paths or emails across all views.
+pub fn website_showcase(ui: canban_ui::presenter::Ui, scene: &str) {
+    use canban_types::*;
+    let now_ms = now();
+    let mut s = workspace();
+
+    // Clean English project metadata with neutral paths.
+    s.projects[0].name = "Canban workspace".into();
+    s.projects[0].directory = "/Users/alex/Workspace/canban".into();
+    s.projects[0].github = Some(GitHubSource {
+        repository: "jjyr/canban".into(),
+        repository_id: 1,
+        generation: "showcase".into(),
+        intake: GitHubIntake::All,
+        pr_intake: GitHubPrIntake::All,
+        authors: vec![],
+        labels: vec![],
+        include_drafts: false,
+        paused: false,
+        synced_at: Some(now_ms.saturating_sub(120_000)),
+        error: None,
+    });
+    s.github = GitHubAccount {
+        state: "connected".into(),
+        login: Some("alex".into()),
+        ..Default::default()
+    };
+
+    // Second project `herdr` with custom stages (`Triage`, `Spec`, `QA`).
+    let mut herdr = s.projects[0].clone();
+    herdr.id = "gallery-custom-project".into();
+    herdr.name = "herdr".into();
+    herdr.directory = "/Users/alex/Workspace/herdr".into();
+    herdr.github = None;
+    herdr.workflow.stages = vec![
+        Stage {
+            id: "triage".into(),
+            name: "Triage".into(),
+            execute: false,
+            profile: None,
+            instruction: String::new(),
+            on_completed: None,
+            require_human_review: false,
+        },
+        Stage {
+            id: "spec".into(),
+            name: "Spec".into(),
+            execute: true,
+            profile: Some("developer".into()),
+            instruction: String::new(),
+            on_completed: Some("qa".into()),
+            require_human_review: false,
+        },
+        Stage {
+            id: "qa".into(),
+            name: "QA".into(),
+            execute: false,
+            profile: None,
+            instruction: String::new(),
+            on_completed: None,
+            require_human_review: true,
+        },
+    ];
+    s.projects.push(herdr);
+
+    // Unified Cards across Backlog, Develop, and Review for `Canban workspace`.
+    let make_card = |id: &str,
+                     project_id: &str,
+                     number: u64,
+                     title: &str,
+                     stage: &str,
+                     branch: Option<&str>,
+                     tags: &[&str],
+                     created_ago_ms: u64|
+     -> Card {
+        let mut c: Card = serde_json::from_value(json!({
+            "id": id,
+            "project_id": project_id,
+            "number": number,
+            "title": title,
+            "body": "",
+            "stage": stage,
+            "revision": 2,
+            "created_at": now_ms.saturating_sub(created_ago_ms),
+            "tags": tags,
+        }))
+        .expect("showcase card");
+        c.branch = branch.map(str::to_owned);
+        if let Some(br) = branch {
+            c.worktree = Some(format!("/Users/alex/Workspace/canban/.worktrees/{br}"));
+        }
+        c
+    };
+
+    let mut c1 = make_card(
+        "card-1",
+        "gallery-project",
+        1,
+        "Improve search and preserve the user's context",
+        "review",
+        Some("feat/search-context"),
+        &["search", "ui"],
+        3_600_000,
+    );
+    c1.assignee = Some("developer".into());
+
+    let mut c2 = make_card(
+        "card-2",
+        "gallery-project",
+        2,
+        "Stream PTY resize acknowledgements cleanly",
+        "develop",
+        Some("feat/pty-resize"),
+        &["terminal", "herdr"],
+        5_400_000,
+    );
+    c2.assignee = Some("developer".into());
+
+    let c3 = make_card(
+        "card-3",
+        "gallery-project",
+        3,
+        "Explore a smaller navigation layout",
+        "backlog",
+        Some("feat/nav-layout"),
+        &["ui", "layout"],
+        7_200_000,
+    );
+
+    let mut c4 = make_card(
+        "card-4",
+        "gallery-project",
+        4,
+        "Serialize FIFO merge queue rebases",
+        "review",
+        Some("feat/queue-merge"),
+        &["workflow"],
+        10_800_000,
+    );
+    c4.human_gate = Some(HumanGate {
+        reason: "Ready to merge".into(),
+        terminal_id: None,
+        next_stage: None,
+    });
+
+    let c5 = make_card(
+        "card-5",
+        "gallery-project",
+        5,
+        "Add Tailscale WhoIs host discovery",
+        "backlog",
+        None,
+        &["remote", "tailscale"],
+        14_400_000,
+    );
+
+    let c6 = make_card(
+        "card-6",
+        "gallery-project",
+        6,
+        "Persist worktree cleanup schedule audit",
+        "develop",
+        Some("feat/worktree-gc"),
+        &["schedule"],
+        18_000_000,
+    );
+
+    let h18 = make_card(
+        "herdr-card-spec",
+        "gallery-custom-project",
+        18,
+        "Spec streaming PTY resize ack",
+        "spec",
+        Some("feat/pty-resize-ack"),
+        &["protocol"],
+        1_200_000,
+    );
+    let h19 = make_card(
+        "herdr-card-qa",
+        "gallery-custom-project",
+        19,
+        "Verify reconnect backoff jitter",
+        "qa",
+        Some("fix/reconnect-jitter"),
+        &["dst"],
+        1_200_000,
+    );
+
+    s.cards = vec![c1, c2, c3, c4, c5, c6, h18, h19];
+    s.terminals.clear();
+    s.terminal_contexts.clear();
+    s.workflow_runs.clear();
+    s.github_issues.clear();
+
+    // Linked PR badges for #1 and #3 + shipped PR #145 today.
+    s.github_issues.push(GitHubIssueSnapshot {
+        assignees: vec!["alex".into()],
+        id: "gh-pr-148".into(),
+        project_id: "gallery-project".into(),
+        source: GitHubIssueRef {
+            repository: "jjyr/canban".into(),
+            repository_id: 1,
+            issue_id: 148,
+            number: 148,
+            url: "https://github.com/jjyr/canban/pull/148".into(),
+        },
+        title: "Improve search and preserve the user's context".into(),
+        body:
+            "Boosts active project matches and preserves scroll position across Quick Open jumps."
+                .into(),
+        state: "open".into(),
+        author_id: 1,
+        author_login: "alex".into(),
+        labels: vec!["ui".into()],
+        updated_at: canban_notifications::format_rfc3339_utc_ms(now_ms.saturating_sub(600_000)),
+        synced_at: now_ms,
+        pr_head_sha: Some("c207c08".into()),
+        pr_checks: None,
+    });
+    s.github_issues.push(GitHubIssueSnapshot {
+        assignees: vec!["alex".into()],
+        id: "gh-pr-145".into(),
+        project_id: "gallery-project".into(),
+        source: GitHubIssueRef {
+            repository: "jjyr/canban".into(),
+            repository_id: 1,
+            issue_id: 145,
+            number: 145,
+            url: "https://github.com/jjyr/canban/pull/145".into(),
+        },
+        title: "Direct zstd streaming compression for remote PTY".into(),
+        body: "Compresses remote PTY frames with zstd-s2c on 1-RTT fast-attach.".into(),
+        state: "merged".into(),
+        author_id: 1,
+        author_login: "alex".into(),
+        labels: vec!["performance".into()],
+        updated_at: canban_notifications::format_rfc3339_utc_ms(now_ms.saturating_sub(3_600_000)),
+        synced_at: now_ms,
+        pr_head_sha: None,
+        pr_checks: None,
+    });
+
+    // Live Agent Terminals matching Daily Briefing, Board, Terminals, and Quick Open.
+    s.terminals.push(TerminalEntry {
+        id: "showcase-claude-1".into(),
+        conversation_id: None,
+        number: 1,
+        name: Some("Claude Code".into()),
+        origin_card_id: Some("card-1".into()),
+        agent_engine: Some("claude".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-claude-1".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(3),
+            observed_agent: Some("claude".into()),
+            waiting: None,
+            command: Some(ShellCommand {
+                label: "cargo".into(),
+                exit_code: None,
+            }),
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(600_000),
+    });
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "showcase-claude-1".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-claude-1".into(),
+        cwd: Some("/Users/alex/Workspace/canban/.worktrees/feat/search-context".into()),
+        directory_root: Some("/Users/alex/Workspace/canban".into()),
+        project_id: Some("gallery-project".into()),
+        card_id: Some("card-1".into()),
+        branch: Some("feat/search-context".into()),
+        dirty: true,
+        additions: 148,
+        deletions: 27,
+        ahead: 2,
+        ..Default::default()
+    });
+
+    s.terminals.push(TerminalEntry {
+        id: "showcase-codex-2".into(),
+        conversation_id: None,
+        number: 2,
+        name: Some("Codex 2".into()),
+        origin_card_id: Some("card-2".into()),
+        agent_engine: Some("codex".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-codex-2".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("done".into()),
+            agent_turn: Some(4),
+            observed_agent: Some("codex".into()),
+            waiting: None,
+            command: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(2_400_000),
+    });
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "showcase-codex-2".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-codex-2".into(),
+        cwd: Some("/Users/alex/Workspace/canban/.worktrees/feat/pty-resize".into()),
+        directory_root: Some("/Users/alex/Workspace/canban".into()),
+        project_id: Some("gallery-project".into()),
+        card_id: Some("card-2".into()),
+        branch: Some("feat/pty-resize".into()),
+        dirty: true,
+        additions: 64,
+        deletions: 12,
+        ahead: 1,
+        ..Default::default()
+    });
+
+    s.terminals.push(TerminalEntry {
+        id: "showcase-gemini-4".into(),
+        conversation_id: None,
+        number: 4,
+        name: Some("Gemini 4".into()),
+        origin_card_id: Some("herdr-card-qa".into()),
+        agent_engine: Some("gemini".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-gemini-4".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(1),
+            observed_agent: Some("gemini".into()),
+            waiting: None,
+            command: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(300_000),
+    });
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "showcase-gemini-4".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-gemini-4".into(),
+        cwd: Some("/Users/alex/Workspace/herdr".into()),
+        directory_root: Some("/Users/alex/Workspace/herdr".into()),
+        project_id: Some("gallery-custom-project".into()),
+        card_id: Some("herdr-card-qa".into()),
+        branch: Some("fix/reconnect-jitter".into()),
+        dirty: false,
+        additions: 0,
+        deletions: 0,
+        ahead: 0,
+        ..Default::default()
+    });
+
+    s.terminals.push(TerminalEntry {
+        id: "showcase-shell-zsh".into(),
+        conversation_id: None,
+        number: 5,
+        name: Some("zsh".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery-core".into()),
+            terminal: Some("pty-shell-5".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+            command: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(900_000),
+    });
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "showcase-shell-zsh".into(),
+        core_id: "gallery-core".into(),
+        terminal: "pty-shell-5".into(),
+        cwd: Some("/Users/alex/Workspace/canban".into()),
+        directory_root: Some("/Users/alex/Workspace/canban".into()),
+        project_id: Some("gallery-project".into()),
+        branch: Some("main".into()),
+        ..Default::default()
+    });
+
+    // Scheduled run completed today for Daily Briefing summary richness.
+    s.scheduled_runs.push(ScheduledRun {
+        host_id: "local".into(),
+        id: "showcase-sched-ok".into(),
+        project_id: "gallery-project".into(),
+        schedule_id: "worktree-gc".into(),
+        workflow_id: "worktree-gc".into(),
+        workflow_name: "Worktree Cleanup".into(),
+        filename: "worktree-gc.yaml".into(),
+        rule_id: "daily".into(),
+        number: 14,
+        trigger_kind: "cron".into(),
+        state: "completed".into(),
+        cron: "0 9 * * *".into(),
+        scheduled_at: now_ms.saturating_sub(7_200_000),
+        started_at: Some(now_ms.saturating_sub(7_190_000)),
+        completed_at: Some(now_ms.saturating_sub(7_140_000)),
+        close_requested_at: None,
+        updated_at: now_ms.saturating_sub(7_140_000),
+        creates_card: false,
+        card_id: None,
+        card_number: None,
+        workflow_run_id: None,
+        start_step: None,
+        current_step: None,
+        profile_id: None,
+        provider_session_id: None,
+        terminal_id: None,
+        cwd: String::new(),
+        report_path: None,
+        output_path: None,
+        summary: Some("Reclaimed 3 merged worktrees".into()),
+        error: None,
+        steps: Vec::new(),
+    });
+
+    // Card #2 active workflow run so Board shows live agent + workflow progress.
+    let dev_profile = Config::default()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    let mut card2_attempt = canban_scheduler::agent_run(
+        "gallery-project",
+        "card-2",
+        1,
+        "develop",
+        "stage_entry",
+        dev_profile,
+        "Implement PTY resize acknowledgements".into(),
+        None,
+    );
+    card2_attempt.state = "running".into();
+    card2_attempt.started_at = Some(now_ms.saturating_sub(12 * 60 * 1000));
+    card2_attempt.updated_at = now_ms.saturating_sub(30_000);
+    card2_attempt.core_id = Some("gallery-core".into());
+    card2_attempt.terminal = Some("pty-codex-2".into());
+    card2_attempt.cwd = "/Users/alex/Workspace/canban/.worktrees/feat/pty-resize".into();
+    card2_attempt.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+    card2_attempt.connection_state = "connected".into();
+    card2_attempt.lifecycle.observed_at = Some(u64::MAX);
+    card2_attempt.workflow_run_id = Some("showcase-card-2-run".into());
+    card2_attempt.workflow_step = Some("agent:develop".into());
+    if scene == "website-board" || scene == "website-quick-open" {
+        push_agent_terminal(&mut s, card2_attempt);
+    }
+
+    ui.snapshot.set(s);
+    canban_ui::utilities::configure(ui, "monokai".into());
+    ui.select_project("gallery-project".into());
+    ui.card.set(String::new());
+    ui.github
+        .gh_status
+        .set(json!({"state":"connected","login":"alex","account_matches":true}));
+    ui.inbox.drawer.set("today".into());
+    ui.inbox.github_notifications.set(Vec::new());
+    ui.inbox.github_error.set(String::new());
+
+    match scene {
+        "website-inbox" => {
+            ui.page.set("inbox".into());
+        }
+        "website-board" => {
+            ui.page.set("board".into());
+        }
+        "website-terminals" => {
+            ui.page.set("terminals".into());
+            ui.terminal_sidebar.set(true);
+            ui.open_terminal("showcase-claude-1".into());
+        }
+        "website-review" => {
+            ui.review.set(None);
+            let refs = json!({
+                "cwd": "/Users/alex/Workspace/canban",
+                "current_branch": "feat/search-context",
+                "default_branch": "main",
+                "head_sha": "c207c08a91fe001234567890abcdef0123456789",
+                "upstream": "origin/feat/search-context",
+                "ahead": 2,
+                "behind": 0,
+                "has_remote": true,
+                "remote_name": "origin",
+                "sync_remote": "origin",
+                "has_sync_remote": true,
+                "dirty": true,
+                "dirty_count": 3,
+                "staged_count": 1,
+                "unstaged_count": 2,
+                "related_card_id": "card-1",
+                "last_commit_subject": "feat(search): boost active project & preserve navigation context",
+                "last_commit_body": "Keeps recent destination anchor intact when jumping across projects via Quick Open.",
+                "checkouts": [
+                    {
+                        "kind": "card",
+                        "card_id": "card-1",
+                        "card_number": 1,
+                        "label": "#1 Improve search and preserve the user's context",
+                        "path": "/Users/alex/Workspace/canban/.worktrees/feat/search-context",
+                        "branch": "feat/search-context"
+                    },
+                    {
+                        "kind": "project",
+                        "label": "Canban workspace (main)",
+                        "path": "/Users/alex/Workspace/canban",
+                        "branch": "main"
+                    },
+                    {
+                        "kind": "card",
+                        "card_id": "card-2",
+                        "card_number": 2,
+                        "label": "#2 Stream PTY resize acknowledgements cleanly",
+                        "path": "/Users/alex/Workspace/canban/.worktrees/feat/pty-resize",
+                        "branch": "feat/pty-resize"
+                    }
+                ],
+                "status_files": [
+                    {
+                        "path": "crates/ui/src/quick_open/model.rs",
+                        "orig_path": null,
+                        "index_code": "M",
+                        "worktree_code": " ",
+                        "staged": true,
+                        "unstaged": false,
+                        "untracked": false,
+                        "conflicted": false
+                    },
+                    {
+                        "path": "crates/ui/src/presenter.rs",
+                        "orig_path": null,
+                        "index_code": " ",
+                        "worktree_code": "M",
+                        "staged": false,
+                        "unstaged": true,
+                        "untracked": false,
+                        "conflicted": false
+                    },
+                    {
+                        "path": "crates/ui/src/quick_open.rs",
+                        "orig_path": null,
+                        "index_code": " ",
+                        "worktree_code": "M",
+                        "staged": false,
+                        "unstaged": true,
+                        "untracked": false,
+                        "conflicted": false
+                    }
+                ],
+                "branches": [
+                    {
+                        "name": "feat/search-context",
+                        "kind": "local",
+                        "sha": "c207c08a91fe001234567890abcdef0123456789",
+                        "short_sha": "c207c08",
+                        "relative_time": "4 minutes ago",
+                        "subject": "feat(search): boost active project & preserve navigation context",
+                        "is_current": true,
+                        "is_default": false,
+                        "ahead": 2,
+                        "behind": 0,
+                        "gone": false
+                    },
+                    {
+                        "name": "main",
+                        "kind": "local",
+                        "sha": "1cfcce8111222333444555666777888999000aaa",
+                        "short_sha": "1cfcce8",
+                        "relative_time": "2 hours ago",
+                        "subject": "perf(terminal): 1-RTT fast-attach with zstd streaming",
+                        "is_current": false,
+                        "is_default": true,
+                        "ahead": 0,
+                        "behind": 0,
+                        "gone": false
+                    }
+                ],
+                "tags": [
+                    {
+                        "name": "v2026.11",
+                        "short_sha": "d93a6a2",
+                        "relative_time": "2 days ago",
+                        "subject": "Canban release"
+                    }
+                ],
+                "commits": [
+                    {
+                        "sha": "c207c08a91fe001234567890abcdef0123456789",
+                        "short_sha": "c207c08",
+                        "relative_time": "4m ago",
+                        "author": "Alex",
+                        "subject": "feat(search): boost active project & preserve navigation context"
+                    },
+                    {
+                        "sha": "9e4a21f0112233445566778899aabbccddeeff00",
+                        "short_sha": "9e4a21f",
+                        "relative_time": "28m ago",
+                        "author": "Alex",
+                        "subject": "test(sim): verify Quick Open focus restoration across projects"
+                    },
+                    {
+                        "sha": "1cfcce8111222333444555666777888999000aaa",
+                        "short_sha": "1cfcce8",
+                        "relative_time": "2h ago",
+                        "author": "Alex",
+                        "subject": "perf(terminal): 1-RTT fast-attach with zstd streaming"
+                    },
+                    {
+                        "sha": "7b2d190444555666777888999000aaabbbcccddd",
+                        "short_sha": "7b2d190",
+                        "relative_time": "5h ago",
+                        "author": "Alex",
+                        "subject": "feat(inbox): group Active Work sessions by project"
+                    }
+                ]
+            });
+            let compare = json!({
+                "base_ref": "HEAD",
+                "compare_ref": "UNCOMMITTED",
+                "base_sha": "c207c08a91fe001234567890abcdef0123456789",
+                "compare_sha": "c207c08a91fe001234567890abcdef0123456789",
+                "three_dot": false,
+                "total_additions": 148,
+                "total_deletions": 27,
+                "truncated": false,
+                "cwd": "/Users/alex/Workspace/canban/.worktrees/feat/search-context",
+                "commits": [],
+                "status_files": refs["status_files"].clone(),
+                "files": [
+                    {
+                        "filename": "crates/ui/src/quick_open/model.rs",
+                        "section": "staged",
+                        "status": "modified",
+                        "additions": 94,
+                        "deletions": 14,
+                        "patch": "@@ -112,11 +112,21 @@ pub fn rank_candidate(\n     candidate: &Candidate,\n     query: &str,\n+    active_project: Option<&str>,\n+    recent: &[String],\n ) -> Option<usize> {\n-    let score = fuzzy_score(&candidate.fields, query)?;\n-    Some(score)\n+    let base = fuzzy_score(&candidate.fields, query)?;\n+    let mut boost = 0_usize;\n+    if active_project == Some(candidate.project_id.as_str()) {\n+        boost += 18;\n+    }\n+    if let Some(pos) = recent.iter().position(|id| id == &candidate.key) {\n+        boost += 24_usize.saturating_sub(pos * 4);\n+    }\n+    Some(base.saturating_sub(boost))\n }"
+                    },
+                    {
+                        "filename": "crates/ui/src/presenter.rs",
+                        "section": "unstaged",
+                        "status": "modified",
+                        "additions": 32,
+                        "deletions": 8,
+                        "patch": "@@ -920,8 +920,14 @@ impl Ui {\n     pub fn jump_to_candidate(self, target: Target) {\n+        self.push_history_anchor();\n         match target {\n-            Target::Card(id) => self.open_card(id),\n+            Target::Card(id) => {\n+                self.preserve_board_scroll();\n+                self.open_card(id);\n+            }\n             Target::Terminal(id) => self.open_terminal(id),\n         }\n     }\n }"
+                    },
+                    {
+                        "filename": "crates/ui/src/quick_open.rs",
+                        "section": "unstaged",
+                        "status": "modified",
+                        "additions": 22,
+                        "deletions": 5,
+                        "patch": "@@ -414,6 +414,10 @@ pub fn overlay(ui: Ui) -> impl IntoElement {\n     let active_project = ui.project.get();\n+    let recent = ui.recent_destinations.get();\n     let ranked = model::ranked(&candidates, &query, Some(&active_project), &recent);"
+                    }
+                ]
+            });
+            ui.review_state.mode.set("git".into());
+            ui.review_state
+                .checkout_cwd
+                .set("/Users/alex/Workspace/canban".into());
+            ui.review_state.refs_data.set(refs.clone());
+            ui.review_state.log_branch.set("feat/search-context".into());
+            ui.review_state
+                .log_commits
+                .set(refs["commits"].as_array().cloned().unwrap_or_default());
+            ui.review_state.log_has_more.set(false);
+            ui.review_state.base_ref.set("HEAD".into());
+            ui.review_state.compare_ref.set("UNCOMMITTED".into());
+            ui.review_state
+                .commit_summary
+                .set("feat(search): preserve navigation context across Quick Open jumps".into());
+            let prepared = canban_ui::review::cache::ReadValue::new(compare);
+            canban_ui::review::apply_compare(ui, &prepared);
+            ui.page.set("review".into());
+        }
+        "website-workflows" => {
+            let default_raw = canban_workflow_engine::source::encode(
+                &canban_workflow_engine::source::default_document(
+                    "delivery:gallery-project",
+                    canban_types::WorkspaceSettings::default(),
+                ),
+            )
+            .unwrap();
+            let plan_raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
+            let mut draft = canban_ui::workflows::Draft {
+                base: json!({"revision":"showcase","sources":[
+                    {"filename":"development.yaml","source":default_raw,"active":{"revision":1,"workflow_id":"delivery:gallery-project"}},
+                    {"filename":"issue-planning.yaml","source":plan_raw,"active":{"revision":1,"workflow_id":"gallery-workflow"}}
+                ]}),
+                ..Default::default()
+            };
+            draft.sources.insert("development.yaml".into(), default_raw);
+            draft.sources.insert("issue-planning.yaml".into(), plan_raw);
+            draft.selected = "development.yaml".into();
+            ui.workflows.drafts.update(|d| {
+                d.insert("gallery-project".into(), draft);
+            });
+            ui.workflows.section.set("workflows".into());
+            ui.page.set("workflows".into());
+        }
+        "website-quick-open" => {
+            ui.page.set("board".into());
+            ui.show_search(false);
+        }
+        _ => {
+            ui.page.set("inbox".into());
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

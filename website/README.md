@@ -1,10 +1,10 @@
 # Canban Website (`canban.dev`)
 
-Static product site for [https://canban.dev/](https://canban.dev/), deployed via GitHub Pages (`.github/workflows/pages.yml`). The Python standard-library generator builds 55 complete HTML pages (11 routes across 5 languages: English `/`, Simplified Chinese `/zh/`, Traditional Chinese `/zh-tw/`, Japanese `/ja/`, and Korean `/ko/`) plus 55 Markdown mirrors: JavaScript enhances the CRT product demo, dropdown closing, and copy buttons, but is not required to read localized content, switch languages via `<details class="lang-menu">`, browse installation instructions, FAQs, guides, or release history.
+Static product site for [https://canban.dev/](https://canban.dev/), deployed via GitHub Pages (`.github/workflows/pages.yml`). The Python standard-library generator builds 55 complete HTML pages (11 routes across 5 languages: English `/`, Simplified Chinese `/zh/`, Traditional Chinese `/zh-tw/`, Japanese `/ja/`, and Korean `/ko/`) plus 55 Markdown mirrors: JavaScript enhances the 5-tab real-screenshot showcase, synced install tabs, dropdown closing, and copy buttons, but is not required to read localized content, view all screenshots, switch languages via `<details class="lang-menu">`, browse installation instructions, FAQs, guides, or release history.
 
 ## Pages and content
 
-- `/` (and `/zh/`, `/zh-tw/`, `/ja/`, `/ko/`) retain the four-channel CRT product deck and expose visible navigation links in `CH.01` (`Install`, `Docs`, `Workflows`, `CLI`, `Changelog`) plus guide links in `CH.04` without requiring channel switching. On phones (720px and below), the channels form one vertically scrolling page. Desktop channel navigation and the three-scene product demo remain available.
+- `/` (and `/zh/`, `/zh-tw/`, `/ja/`, `/ko/`) follow a dark-only Warm Obsidian editorial layout aligned with the native Canban desktop app: sticky header navigation (`Install`, `Docs`, `Workflows`, `CLI`, `Changelog`), Hero with inline platform-switchable copyable install command (`Desktop` / `Headless` / `Android`), a 5-tab unified real-screenshot showcase (`Daily Briefing`, `Board`, `Terminals`, `Git Review`, `Workflows`), flat hairline capabilities, all 24 built-in native CLI icons, architecture & privacy highlights, and closing install + guides links.
 - `/install/` (and localized equivalents) contain desktop/headless installation, prerequisites, Linux runtime dependencies, updates, source installation links, and six visible FAQs. Agent support follows Herdr support.
 - `/docs/` (plus `/docs/workflows/`, `/docs/cli/`, `/docs/agents/`, `/docs/remote-hosts/`) and the three scenario guides (`/guides/parallel-coding-agents/`, `/guides/native-terminal-and-multi-machine/`, and `/guides/scheduled-worktree-cleanup/`) provide architecture and Privacy & Security (`#privacy-security`) guides, Timeline-first Insights, verified `schema: 13` Workflow YAML syntax (including `default_agent`/`override`, cardless GitHub events, and `XChaCha20-Poly1305` encrypted secrets), the Agent-first `canban` CLI and `--human` guide, built-in CLI agent catalog with managed terminal presence leases & `agy` Orchestrator config, remote Linux `canband` (direct `Noise_XX` E2EE `yamux/1` TCP with X25519 public-key auth & host key pinning, optional Tailscale WhoIs & SSH, and offline editing with 3-way sync) guides, and visible FAQs with `TechArticle`, `BreadcrumbList`, and `FAQPage` JSON-LD.
 - `/changelog/` shows published GitHub Releases in descending version order (`YYYYMMDD-N`, comparing the daily sequence numerically), preserving the original release-note language. Non-English `/changelog/` routes remain accessible for in-site navigation, carry `<meta name="robots" content="noindex, follow">`, omit cross-language `hreflang` tags, and are excluded from `sitemap.xml` so duplicate English release notes do not compete with `/changelog/`. Historical prereleases are labeled; drafts and records without a publication date are excluded.
@@ -19,12 +19,35 @@ Static product site for [https://canban.dev/](https://canban.dev/), deployed via
 - `pages.json` — 5-language installation, FAQ, navigation, and release-page translations.
 - `docs/<lang>.json` (`en.json`, `zh.json`, `zh-tw.json`, `ja.json`, `ko.json`) — per-language content, FAQs, and publication/update dates for `/docs/*` and `/guides/*`.
 - `schema.json` — shared site/software graph plus per-language `localized` properties.
-- `styles.css` — original Monokai CRT design and `<details class="lang-menu">` dropdown styling; `pages.css` — document layout, tables, copyable code blocks, and responsive corrections.
-- `app.js` — 5-language demo scenes, desktop channel navigation, installation-mode selection, language-menu close behavior, and copy helpers. Copy labels are embedded in each generated page; content language is never rewritten at runtime.
+- `styles.css` — Warm Obsidian Native Craft design system, sticky header, 5-tab screenshot stage, hairline grids, 24-CLI icon strip, and `<details class="lang-menu">` styling; `pages.css` — unified document layout, tables, copyable code blocks, and responsive rules.
+- `app.js` — 5-tab showcase switching with keyboard arrow support, synced installation-mode tabs, language-menu close behavior, GitHub star count fetch, and copy helpers. Copy labels are embedded in each generated page; content language is never rewritten at runtime.
 - `releases.json` — checked-in published-release snapshot for deterministic offline builds. Refresh it intentionally when updating the snapshot; deployments fetch current releases independently.
-- `../scripts/website.py` — generator, release fetching/filtering, conservative escaped Markdown rendering (including tables and copyable code blocks for trusted docs), `.md` mirror emitter, and `llms-full.txt` bundler.
+- `../scripts/website.py` — generator, release fetching/filtering, provider SVG icon exporter (from `crates/ui-kit/assets/providers/`), conservative escaped Markdown rendering (including tables and copyable code blocks for trusted docs), `.md` mirror emitter, and `llms-full.txt` bundler.
 - `install.sh` — source compatibility symlink. The generator copies the canonical `../scripts/install.sh` into the output.
 - `CNAME`, icons, `og-image.png`, `screenshots/`, `site.webmanifest`, `robots.txt`, `llms.txt` — public assets. Templates and content JSON are not deployed.
+
+## Capturing and compressing screenshots
+
+All 5 product screenshots (`daily-briefing.webp`, `board.webp`, `terminals.webp`, `git-review.webp`, `workflows.webp`) are captured uniformly from the standalone Canban Gallery (`examples/gallery`) using the shared `website_showcase` mock fixture (`Canban workspace` + `herdr`, `monokai` warm dark theme, dark native macOS chrome, zero personal paths or emails) and shared verbatim between `website/screenshots/` and `docs/assets/` (for `README.md` / `README.zh-CN.md`).
+
+1. Build the Gallery binary (`cargo build --example gallery`) and launch each scene at `1440×900` logical points (`2880×1800` at 2x Retina) with `HC_*` stripped:
+   - `CANBAN_GALLERY_SCENE`: `website-inbox`, `website-board`, `website-terminals`, `website-review`, `website-workflows`
+   - `CANBAN_GALLERY_WIDTH=1440`, `CANBAN_GALLERY_HEIGHT=900`, `CANBAN_GALLERY_TERMINAL_PREVIEW=showcase`
+2. Capture each window cleanly without macOS drop shadows at native 2x Retina resolution:
+
+```sh
+screencapture -l <window_id> -o -x raw.png
+```
+
+3. **Do NOT resample or downscale the PNG before compressing** (avoid `sips --resampleWidth` or any fractional resize). Fractional downscaling blurs CoreText text and 1px UI dividers, and introduces anti-aliased intermediate pixels that nearly double lossless WebP size.
+4. Compress the unscaled native `2880×1800` PNG directly with lossless WebP at maximum effort:
+
+```sh
+cwebp -lossless -z 9 raw.png -o website/screenshots/<name>.webp
+cp website/screenshots/<name>.webp docs/assets/<name>.webp
+```
+
+5. Keep `width: 2880` and `height: 1800` in sync across `templates/home.html`, `pages.json`, `docs/*.json`, and `scripts/test-website.py`.
 
 ## Build and preview
 
@@ -48,7 +71,7 @@ This paginates the repository's GitHub Releases API, filters unpublished records
 
 The Pages workflow validates the generator, refreshes release history, and uploads only `.local/website`. It runs on relevant `main` pushes, manual dispatch, published-release changes, and successful completion of the `Release` workflow. The completion trigger also covers releases created using `GITHUB_TOKEN`, whose release event does not start another workflow. Release-triggered builds use the default branch's website source.
 
-`mise run test-website` checks complete localized HTML and metadata across all 55 pages (5 languages × 11 routes), visible `CH.01` navigation links, absence of removed `/workflows/` and `/compare/` routes across all language prefixes, visible FAQ content and `FAQPage` JSON-LD on install/docs/guides, localized `SoftwareApplication` Schema, enriched `TechArticle` and `BreadcrumbList` JSON-LD, non-English `/changelog/` `noindex` and `sitemap.xml` exclusion, page-scoped `lastmod`, `.md` mirrors, `llms.txt` / `llms-full.txt`, 24-CLI catalog parity with `crates/profiles/src/catalog.rs`, local links/assets/fragments, all sitemap language pairs, canonical installer equality, release coverage, draft exclusion, and escaping of untrusted release notes and doc Markdown. Browser acceptance must additionally cover multiple languages and viewports (`320`, `390`, `720`, `768`, `1280px`), `<details class="lang-menu">` language switching, desktop channel navigation, mobile scrolling, installation tabs, actual clipboard copying, legacy query redirects, and JavaScript-disabled rendering. Rust/native app tests do not exercise this standalone website.
+`mise run test-website` checks complete localized HTML and metadata across all 55 pages (5 languages × 11 routes), visible header navigation links, 5-tab showcase & 24 provider SVG icons, absence of removed `/workflows/` and `/compare/` routes across all language prefixes, visible FAQ content and `FAQPage` JSON-LD on install/docs/guides, localized `SoftwareApplication` Schema, enriched `TechArticle` and `BreadcrumbList` JSON-LD, non-English `/changelog/` `noindex` and `sitemap.xml` exclusion, page-scoped `lastmod`, `.md` mirrors, `llms.txt` / `llms-full.txt`, 24-CLI catalog parity with `crates/profiles/src/catalog.rs`, local links/assets/fragments, all sitemap language pairs, canonical installer equality, release coverage, draft exclusion, and escaping of untrusted release notes and doc Markdown. Browser acceptance must additionally cover multiple languages and viewports (`320`, `390`, `720`, `768`, `1280px`), `<details class="lang-menu">` language switching, 5-tab showcase switching, synced installation tabs, actual clipboard copying, legacy query redirects, and JavaScript-disabled rendering. Rust/native app tests do not exercise this standalone website.
 
 ## License
 

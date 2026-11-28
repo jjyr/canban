@@ -7,7 +7,12 @@
     "intro": "Canban(canban.dev)은 로컬 우선·데이터 수집 제로·릴레이 서버 없음을 원칙으로 합니다. Human Context를 담는 칸반 카드, 선언적 schema 13 워크플로우 엔진(암호화 Vault·카드 없는 GitHub 트리거·다계층 환경 변수), Timeline-first **Insights**, 에이전트 우선 `canban` CLI, 그리고 Herdr 영구 PTY 터미널을 로컬 및 직접 E2EE 원격 호스트 전반에서 하나로 통합합니다.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["문서", "docs"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ]
+    ],
     "cards": [
       {
         "title": "가이드: 병렬 코딩 에이전트",
@@ -71,7 +76,7 @@
         "heading": "왜 Canban = Kanban + Workflow + Herdr 인가",
         "markdown": "1. **Kanban이 Human Context를 유지**: 기능 명세, 붙여넣은 스크린샷, 제목·본문 모두에서 작동하는 `@Agent` / `#Card` 자동완성, GitHub Issue/PR 추적, `Resolved` 완료 상태, 코드 Diff를 각 카드에 함께 보관합니다.\n2. **Workflow가 Worktree·환경 변수·배포를 자동화**: 카드를 `Develop`으로 옮기면 독립된 Git Worktree(`<dir>-<proj4>/<card-number>`)가 할당되고, 9계층 환경 변수와 Vault 시크릿(`external_pr`은 최소 환경으로 격리)을 안전하게 전달한 뒤 `Review`에서 직렬 FIFO Queue Merge로 통합합니다.\n3. **Herdr가 네이티브 Agent CLI를 무간섭 실행**: 각 CLI 고유의 TUI, MCP 서버, 스킬, 권한 프롬프트, 정확한 세션 ID 재개(`agy` Planner/Worker 듀얼 역할 포함)를 그대로 유지합니다.",
         "screenshot": {
-          "src": "/screenshots/review-diff.png",
+          "src": "/screenshots/git-review.webp",
           "alt": "Canban Card #1 워크트리 Git Diff 검사기 화면: 커밋 히스토리, 변경된 Rust 파일, 인라인 Diff, Copy Markdown 및 Review & Send to @Agent 버튼 표시.",
           "caption": "내장 Worktree Diff 리뷰: 커밋과 인라인 변경 사항을 검사하고 줄 단위 코멘트를 달아 Review & Send to @Agent로 바로 전달하세요.",
           "width": 2880,
@@ -99,14 +104,23 @@
     "intro": "Canban 워크플로우는 SQLite(`workflow_sources`와 불변 `workflow_revisions`)를 단일 진실 공급원으로 삼는 선언적 YAML 1.2 실행 그래프(현재 `CURRENT = 13`)입니다. Visual Studio, YAML 직접 편집, Edit with agent 모두 동일한 Rust 엔진으로 검증 및 컴파일됩니다.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["문서", "docs"], ["워크플로우", "docs/workflows"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ],
+      [
+        "워크플로우",
+        "docs/workflows"
+      ]
+    ],
     "sections": [
       {
         "id": "visual-studio",
         "heading": "Visual Studio, SQLite 단일 소스 & Stage 투영",
         "markdown": "프로젝트 상단 바에서 **Workflows**를 열면 **Visual Studio**, **YAML Source**, **History**, **Edit with agent**를 전환할 수 있습니다.\n\n- **SQLite 단일 소스**: 워크플로우 소스와 불변 리비전은 `~/.canban`의 숨겨진 YAML이 아니라 `canban.sqlite`(`workflow_sources`, `workflow_revisions`)에 저장됩니다. 각 `WorkflowRun`은 생성 시점의 `definition`과 `definition_revision`을 고정하므로 실행 중인 작업이 중간에 변형되지 않습니다.\n- **선형 Schema 마이그레이션(`1..=13`)**: `crates/workflow-engine/src/migrations.rs`가 `BASELINE = 1`과 `CURRENT = 13`을 정의해(v11: GitHub 이벤트·`cardless: true`·`exclude_self`, v12: `${{ secrets.KEY }}` / `${{ vars.KEY }}`, v13: `uses: agent`의 `with.profile`을 카드 `assignee` 연동을 위한 상호 배타적 `default_agent` / `override`로 대체) 구버전 YAML을 파싱 시 순차 업그레이드합니다.\n- **Visual Studio의 Stage 투영(`stages.rs`)**: YAML 최상위에는 `stages:` 블록이 없으며, `canban_workflow_engine::stages`가 `columns`, `on` 진입 규칙, `card.move`(`column: $next` / `next: $entry`)를 바탕으로 각 보드 열의 `StageView` 레인을 파생합니다. 각 `Step`에 `stage: <column_id>`나 `enabled: false`를 지정할 수도 있습니다.",
         "screenshot": {
-          "src": "/screenshots/workflow-studio.png",
+          "src": "/screenshots/workflows.webp",
           "alt": "Canban Workflows Visual Studio 화면: development.yaml의 Backlog, Develop(@developer Implement), Review(External PR check 분기, Human approval, Queue merge) 레인을 표시.",
           "caption": "development.yaml의 Visual Studio 뷰: Backlog, Develop, Review 레인과 /card/source_trust == external_pr 분기, 승인 게이트, Rebase·Sync Queue merge를 시각화합니다.",
           "width": 2880,
@@ -181,7 +195,16 @@
     "intro": "`canban` 바이너리(`crates/cli/src/main.rs`)는 네이티브 데스크톱 UI와 동일한 `AppServer` JSON-RPC 권한과 통신합니다. 기본적으로 에이전트의 컨텍스트 토큰을 아끼는 컴팩트 계약으로 동작하며, `--human`을 붙이면 사람이 읽기 편한 출력으로 바뀝니다.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["문서", "docs"], ["CLI", "docs/cli"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ],
+      [
+        "CLI",
+        "docs/cli"
+      ]
+    ],
     "sections": [
       {
         "id": "core-commands",
@@ -213,14 +236,23 @@
     "intro": "Canban은 `libghostty-vt`로 렌더링되는 `herdr-core` 영구 PTY 터미널 안에서 네이티브 코딩 에이전트 CLI를 직접 실행하여 모든 도구의 원래 TUI, MCP 서버, 스킬, 권한 설정, 세션 재개를 그대로 보존합니다.",
     "date_published": "2026-11-19",
     "updated": "2026-11-24",
-    "breadcrumbs": [["문서", "docs"], ["네이티브 에이전트 & PTY", "docs/agents"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ],
+      [
+        "네이티브 에이전트 & PTY",
+        "docs/agents"
+      ]
+    ],
     "sections": [
       {
         "id": "herdr-preservation",
         "heading": "간섭 없는 네이티브 TUI, MCP & 스킬 보존",
         "markdown": "채팅 래퍼를 덧씌우거나 불안정한 `Stop` 훅에 의존하는 대신, Canban은 `herdr-core`(`hc`)가 감독하는 실제 PTY 안에서 CLI를 실행합니다:\n\n- **네이티브 TUI 및 제어**: `libghostty-vt` 기반(macOS는 AppKit/CoreText, Linux는 GTK4)으로 SGR/픽셀 마우스 리포팅, OSC 8 하이퍼링크, Monokai 포함 17개 다크 테마를 지원합니다.\n- **MCP, 스킬 & 권한 그대로 유지**: 실제 CLI 바이너리가 카드의 Worktree에서 로컬 환경 그대로 실행되므로 기존 MCP 서버, 커스텀 스킬, 샌드박스, 로그인 세션이 변함없이 동작합니다.\n- **재시작 후에도 살아남는 PTY & 정확한 재개**: Canban 창을 닫거나 `canband`를 재시작/업그레이드해도 `herdr-core` 세션은 유지되며, 종료된 세션도 정확한 공급자 ID(`--resume`, `--session`, `--conversation`)로 이어서 실행할 수 있습니다.\n- **전역 스케줄러 예산**: 자동 워크플로우 단계는 `scheduler.max_agents`(기본 `8`) 동시성 제한을 공유하고, 수동 셸과 `script` 단계는 해당 예산을 소모하지 않습니다.",
         "screenshot": {
-          "src": "/screenshots/board-terminal.png",
+          "src": "/screenshots/terminals.webp",
           "alt": "Canban Card #2의 격리된 Git Worktree 안에서 cargo test를 실행 중인 실시간 Herdr @developer 터미널과 카드 활동·워크플로우 진행률 표시.",
           "caption": "Card #2의 독립 Git Worktree(acme-api-f4c9/2)에서 cargo test를 실행 중인 @developer 실시간 Herdr PTY. 명시적 canban report 후 다음 단계로 진행합니다.",
           "width": 2880,
@@ -276,7 +308,16 @@
     "intro": "하나의 Canban 데스크톱 또는 모바일 클라이언트에서 로컬 Mac(`This Mac`)과 하나 이상의 원격 Linux / macOS `canband` 호스트에 **릴레이 서버 없는 필수 `Noise_XX` 종단간 암호화(E2EE)**로 직접 연결합니다 — LAN / 사설 VPN 직결은 물론 선택적으로 **Tailscale**(QR 없는 WhoIs 자동 인증)이나 관리형 **SSH** 터널과 함께 사용할 수 있습니다.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["문서", "docs"], ["원격 호스트", "docs/remote-hosts"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ],
+      [
+        "원격 호스트",
+        "docs/remote-hosts"
+      ]
+    ],
     "sections": [
       {
         "id": "multi-host-model",
@@ -326,14 +367,23 @@
     "intro": "**핵심 요약**: 일반 터미널 탭에서 5~10개 코딩 에이전트를 동시에 돌리면 컨텍스트 유실, Git 작업 트리 충돌, `[Y/n]` 승인 누락 때문에 금방 무너집니다. Canban은 칸반 카드(`Human Context`), 카드별 Git Worktree(`<dir>-<proj4>/<card-number>`), 전역 주의 인박스(`⌘I`), 직렬 FIFO 병합 큐, Timeline-first **Insights**를 하나로 묶어 여러 네이티브 Agent CLI가 충돌 없이 병렬로 작업하게 합니다.",
     "date_published": "2026-11-23",
     "updated": "2026-11-24",
-    "breadcrumbs": [["문서", "docs"], ["병렬 에이전트 가이드", "guides/parallel-coding-agents"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ],
+      [
+        "병렬 에이전트 가이드",
+        "guides/parallel-coding-agents"
+      ]
+    ],
     "sections": [
       {
         "id": "why-tabs-break",
         "heading": "에이전트 5개 이상을 병렬로 돌릴 때 터미널 탭이 무너지는 이유",
         "markdown": "`claude`, `codex`, `agy`, `pi`, `cursor-agent`를 각각 별도 탭에 띄우는 방식은 작업이 1~2개일 땐 괜찮지만 동시 실행이 늘어나면 금세 한계에 부딪힙니다:\n\n- **흩어지는 Human Context**: 기능 명세, 스크린샷, 리뷰 피드백이 스크롤백 버퍼 속에 묻혀 추적할 수 없게 됩니다.\n- **작업 디렉토리 충돌**: 같은 체크아웃에서 두 에이전트가 파일을 수정하면 서로의 변경 사항을 덮어쓰고 `git status`가 뒤엉킵니다.\n- **조용한 `[Y/n]` 정체**: 한 에이전트가 도구 권한 승인을 기다리며 20분째 멈춰 있어도 다른 탭을 보는 동안 알아채지 못합니다.\n- **수동 병합 병목**: 직접 `git worktree`를 여러 개 만들어도 완료된 브랜치 5개를 차례로 리베이스·테스트해 `main`에 합치는 일이 고된 수작업이 됩니다.",
         "screenshot": {
-          "src": "/screenshots/board-terminal.png",
+          "src": "/screenshots/board.webp",
           "alt": "Canban 데스크톱 보드에서 Card #2가 격리된 Git Worktree, 타임라인, 워크플로우 상태 및 실시간 @developer Herdr 터미널과 함께 실행 중인 모습.",
           "caption": "모든 카드가 Markdown 명세, 격리된 Git Worktree, 워크플로우 단계, 실제 네이티브 Agent CLI 터미널을 한곳에 묶습니다.",
           "width": 2880,
@@ -351,7 +401,7 @@
         "heading": "전역 주의 인박스(⌘I), Git PR/CI 추적 & 무제한 Diff 리뷰",
         "markdown": "10개 탭을 일일이 눌러 확인하는 대신 **`⌘I`** 를 누르면 프로젝트와 원격 호스트를 아우르는 **Attention Inbox**가 열립니다:\n\n- **막힌 작업 즉시 확인**: 도구 승인 대기, 추가 질문, 사람 검토 대기(`Needs you`)와 완료·실행 중 세션을 한눈에 파악합니다.\n- **Git PR & Fast-Fail CI 추적**: Git 워크벤치가 현재 브랜치에 연결된 Pull Request 상태, 리뷰, 빠른 실패(`github.pr.ci_failed`)를 포함한 CI 상태와 GitHub 바로가기 링크를 함께 추적합니다.\n- **무제한·점진적 인라인 Diff 리뷰**: 기존 800줄 표시 제한을 없애 대형 변경도 점진적으로 전체를 펼쳐 볼 수 있으며, 줄 단위 코멘트를 달아 `Review & Send to @Agent`로 넘기거나 `canban review draft` / `publish`와 연동할 수 있습니다.",
         "screenshot": {
-          "src": "/screenshots/review-diff.png",
+          "src": "/screenshots/git-review.webp",
           "alt": "Canban 내장 Git Diff 리뷰 화면: 커밋 목록, 변경 파일, 줄 단위 코멘트, Review & Send to @Agent 버튼 표시.",
           "caption": "격리된 Worktree 커밋을 앱 안에서 바로 검토하고 줄 단위 피드백을 @Agent에게 직접 전달하세요.",
           "width": 2880,
@@ -402,14 +452,23 @@
     "intro": "**핵심 요약**: 순수 `tmux`는 CLI 기능을 그대로 살리지만 작업 컨텍스트·병합 워크플로우·호스트 통합 알림이 없고, 채팅 래퍼 IDE는 깔끔한 UI 대신 네이티브 TUI·MCP·정확한 세션 재개 기능을 잃기 쉽습니다. Canban은 Rust + `libghostty-vt` + `herdr-core`(`hc`)로 네이티브 터미널을 무손실 유지하면서 릴레이 없는 필수 `Noise_XX` E2EE(선택적 Tailscale / SSH 연동)로 로컬 Mac과 여러 원격 Linux `canband` 서버를 하나로 통합합니다.",
     "date_published": "2026-11-23",
     "updated": "2026-11-27",
-    "breadcrumbs": [["문서", "docs"], ["네이티브 터미널 & 멀티 머신", "guides/native-terminal-and-multi-machine"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ],
+      [
+        "네이티브 터미널 & 멀티 머신",
+        "guides/native-terminal-and-multi-machine"
+      ]
+    ],
     "sections": [
       {
         "id": "architecture-comparison",
         "heading": "아키텍처 비교: Canban vs. tmux/터미널 탭 vs. 채팅 래퍼 IDE",
         "markdown": "| 비교 항목 | Canban (`Rust + libghostty-vt + Herdr`) | 순수 `tmux` / 터미널 탭 | 채팅 래퍼 IDE / Web UI |\n| --- | --- | --- | --- |\n| **네이티브 CLI TUI, MCP & 스킬** | **100% 무손실** — 실제 `claude`, `codex`, `agy`, `pi`, `cursor-agent`, `gemini`, `opencode` 직접 실행 | **100% 무손실** | 기능 축소·프록시·재구현되는 경우 다수 |\n| **앱 재시작/업그레이드/회수 시 세션 유지** | **지원** — `herdr-core`(`hc`) + `viewer.presence`로 유지되며 회수 후에도 세션 ID로 재개 | **지원** (머신별 `tmux` 서버 의존) | 창 닫기/새로고침 시 중단되기 쉬움 |\n| **작업 카드, Worktree & 병합 큐** | **기본 내장** — 칸반 카드, `<dir>-<proj4>/<card>`, YAML 워크플로우, FIFO Queue Merge | 수동 브랜치·셸 스크립트 필요 | 일부 지원 또는 단일 저장소 한정 |\n| **프로젝트/호스트 통합 주의 인박스(`⌘I`)** | **기본 내장** — 로컬·원격 호스트의 `[Y/n]` 및 상태 변경 즉시 알림 | 창마다 직접 순회 확인 | 개별 탭 배지 수준 |\n| **원격 Linux 24/7 멀티 머신 실행** | **기본 내장** — 릴레이 없는 `Noise_XX` E2EE `yamux/1` TCP(X25519 공개키 인증) + 선택적 Tailscale WhoIs / SSH + `canban-sync` 오프라인 편집 | 수동 SSH + 호스트별 `tmux` 관리 | 원격 IDE 플러그인 또는 클라우드 종속 |\n| **UI 런타임** | 네이티브 AppKit/Metal(macOS) & GTK4(Linux) | 터미널 에뮬레이터 | Electron / 브라우저 DOM |",
         "screenshot": {
-          "src": "/screenshots/workflow-studio.png",
+          "src": "/screenshots/workflows.webp",
           "alt": "Canban Visual Workflow Studio 화면: Backlog, Develop, Review 단계와 외부 PR 조건 분기 및 Queue merge 파이프라인을 표시.",
           "caption": "선언적 YAML 워크플로우(schema: 13)가 로컬 Mac은 물론 원격 Headless Linux canband 호스트의 네이티브 PTY를 구동합니다.",
           "width": 2880,
@@ -460,7 +519,16 @@
     "intro": "**핵심 요약**: 설정과 첫 테스트는 **Agent에게 한 번 맡기고**, 생성되는 예약 워크플로우 자체는 **순수 스크립트(`run:`)로만** 실행되게 하세요(매일 실행 시 `uses: agent` 없음 · PTY 0 · LLM 토큰 0). **병합됨 + 클린 + 7일 이상 비활성** 조건을 모두 만족하는 Worktree만 안전하게 지우고, 실제 회수나 실패가 있을 때만 저장소별 요약 Card를 남깁니다.",
     "date_published": "2026-11-24",
     "updated": "2026-11-27",
-    "breadcrumbs": [["문서", "docs"], ["Worktree 예약 정리", "guides/scheduled-worktree-cleanup"]],
+    "breadcrumbs": [
+      [
+        "문서",
+        "docs"
+      ],
+      [
+        "Worktree 예약 정리",
+        "guides/scheduled-worktree-cleanup"
+      ]
+    ],
     "sections": [
       {
         "id": "why-pure-script-schedule",

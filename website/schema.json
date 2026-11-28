@@ -29,9 +29,11 @@
       ],
       "image": "https://canban.dev/og-image.png",
       "screenshot": [
-        "https://canban.dev/screenshots/board-terminal.png",
-        "https://canban.dev/screenshots/workflow-studio.png",
-        "https://canban.dev/screenshots/review-diff.png"
+        "https://canban.dev/screenshots/daily-briefing.webp",
+        "https://canban.dev/screenshots/board.webp",
+        "https://canban.dev/screenshots/terminals.webp",
+        "https://canban.dev/screenshots/git-review.webp",
+        "https://canban.dev/screenshots/workflows.webp"
       ],
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "Lightweight Kanban & Native Agent CLI App",

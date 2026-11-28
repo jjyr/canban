@@ -17,9 +17,9 @@
     "install_desc": "Install or update Canban on macOS, Linux, and Android, set up a headless server, and find answers to common questions.",
     "install_intro": "Organize with Kanban. Work with native agent CLIs — local-first, zero data collection, direct end-to-end encrypted.",
     "install_screenshot": {
-      "src": "/screenshots/board-terminal.png",
-      "alt": "Canban macOS desktop app showing Card #2 in Develop with an isolated Git worktree, activity comments, workflow pipeline status, and a live Herdr @developer terminal running cargo test.",
-      "caption": "Canban desktop workbench: Card #2 specification, workflow progress bar, and live @developer Herdr PTY terminal side by side.",
+      "src": "/screenshots/daily-briefing.webp",
+      "alt": "Canban Daily Briefing Inbox showing Waiting On You, Ready to Merge, running Claude Code, Codex, and Gemini agents across projects, and active work cards.",
+      "caption": "Canban Daily Briefing Inbox: triage waiting agents, merge-ready PRs, and active sessions across all projects in one view.",
       "width": 2880,
       "height": 1800,
       "lazy": false
@@ -104,9 +104,9 @@
     "install_desc": "在 macOS、Linux 和 Android 上安装或更新 Canban，配置无桌面的远程服务器，并查看常见问题解答。",
     "install_intro": "用看板理清任务，用原生 Agent CLI 完成开发——本地优先、零资料收集、无中转全程端到端加密。",
     "install_screenshot": {
-      "src": "/screenshots/board-terminal.png",
-      "alt": "Canban macOS 桌面应用界面：Develop 列中的 Card #2 展示独立 Git Worktree、活动时间线、工作流进度条，以及右侧运行 cargo test 的实时 Herdr @developer 终端。",
-      "caption": "Canban 桌面工作台：左侧集中呈现卡片规格、工作流状态与讨论，右侧实时运行 @developer Herdr PTY 终端。",
+      "src": "/screenshots/daily-briefing.webp",
+      "alt": "Canban 每日简报收件箱：集中展示待处理卡片、可合并 PR 以及跨项目运行中的 Claude Code、Codex 与 Gemini 会话。",
+      "caption": "Canban 每日简报收件箱：在一处集中处理等待中的 Agent、可合并 PR 与跨项目活跃工作。",
       "width": 2880,
       "height": 1800,
       "lazy": false
@@ -191,9 +191,9 @@
     "install_desc": "在 macOS、Linux 與 Android 上安裝或更新 Canban，部署無桌面環境的遠端伺服器，並查看常見問題解答。",
     "install_intro": "用看板理清任務，用原生 Agent CLI 完成開發——本地優先、零資料收集、無中轉全程端對端加密。",
     "install_screenshot": {
-      "src": "/screenshots/board-terminal.png",
-      "alt": "Canban macOS 桌面應用介面：Develop 欄中的 Card #2 展示獨立 Git Worktree、活動時間軸、工作流進度條，以及右側執行 cargo test 的即時 Herdr @developer 終端機。",
-      "caption": "Canban 桌面工作台：左側集中呈現卡片規格、工作流狀態與討論，右側即時執行 @developer Herdr PTY 終端機。",
+      "src": "/screenshots/daily-briefing.webp",
+      "alt": "Canban 每日簡報收件匣：集中展示待處理卡片、可合併 PR 以及跨專案執行中的 Claude Code、Codex 與 Gemini 工作階段。",
+      "caption": "Canban 每日簡報收件匣：在一處集中處理等待中的 Agent、可合併 PR 與跨專案活躍工作。",
       "width": 2880,
       "height": 1800,
       "lazy": false
@@ -278,9 +278,9 @@
     "install_desc": "macOS、Linux、Android への Canban のインストール・更新方法、ヘッドレス Linux サーバー構築、よくある質問をまとめています。",
     "install_intro": "カンバンで整理し、ネイティブ Agent CLI で開発する——ローカル優先・データ収集ゼロ・リレーなしの完全 E2E 暗号化。",
     "install_screenshot": {
-      "src": "/screenshots/board-terminal.png",
-      "alt": "Canban macOS デスクトップアプリ画面：Develop 列の Card #2 に独立 Git Worktree、アクティビティログ、ワークフロー進捗バー、右側で cargo test を実行中の Herdr @developer ターミナルが並んで表示されています。",
-      "caption": "Canban デスクトップワークベンチ：左側にカード仕様・ワークフロー進捗・議論、右側にライブの @developer Herdr PTY ターミナルを並列表示。",
+      "src": "/screenshots/daily-briefing.webp",
+      "alt": "Canban Daily Briefing インボックス：要対応カード、マージ可能な PR、複数プロジェクトで稼働中の Claude Code・Codex・Gemini エージェントを表示。",
+      "caption": "Canban Daily Briefing インボックス：全プロジェクトの入力待ちエージェント、マージ可能な PR、稼働中セッションを一画面で整理。",
       "width": 2880,
       "height": 1800,
       "lazy": false
@@ -365,9 +365,9 @@
     "install_desc": "macOS, Linux 및 Android에 Canban을 설치·업데이트하고, 헤드리스 Linux 서버를 구성하며, 자주 묻는 질문의 답변을 확인하세요.",
     "install_intro": "칸반으로 정리하고 네이티브 Agent CLI로 개발하세요 — 로컬 우선·데이터 수집 제로·릴레이 없는 직접 E2E 암호화.",
     "install_screenshot": {
-      "src": "/screenshots/board-terminal.png",
-      "alt": "Canban macOS 데스크톱 앱 화면: Develop 열의 Card #2에 격리된 Git Worktree, 활동 내역, 워크플로우 진행 막대 및 오른쪽에서 cargo test를 실행 중인 Herdr @developer 터미널이 나란히 표시됩니다.",
-      "caption": "Canban 데스크톱 워크벤치: 왼쪽 카드 명세·워크플로우 진행률·대화와 오른쪽 실시간 @developer Herdr PTY 터미널을 한 화면에 배치합니다.",
+      "src": "/screenshots/daily-briefing.webp",
+      "alt": "Canban 데일리 브리핑 인박스: 확인 대기 카드, 병합 가능한 PR, 여러 프로젝트에서 실행 중인 Claude Code·Codex·Gemini 에이전트를 표시.",
+      "caption": "Canban 데일리 브리핑 인박스: 모든 프로젝트의 대기 에이전트, 병합 가능한 PR, 활성 세션을 한 화면에서 정리합니다.",
       "width": 2880,
       "height": 1800,
       "lazy": false

@@ -1,32 +1,20 @@
-<div class="crt-shell" id="crt-shell">
-    <!-- Top Monitor Bezel Bar -->
-    <header class="crt-topbar">
-      <a href="#ch-0" class="crt-brand" data-goto-ch="0" aria-label="Canban CH 01">
-        <span class="power-led" aria-hidden="true"></span>
-        <img src="/favicon.svg" alt="Canban logo" class="brand-mark" width="20" height="20">
-        <span class="brand-word">CANBAN</span>
+<div class="site-shell">
+  <header class="site-header">
+    <div class="site-header-inner">
+      <a href="{{home_url}}" class="site-brand" aria-label="Canban home">
+        <img src="/favicon.svg" alt="" class="brand-mark" width="22" height="22">
+        <span>Canban</span>
       </a>
 
-      <nav class="ch-nav" aria-label="CRT Channels">
-        <a href="#ch-0" class="ch-btn is-active" data-goto-ch="0">
-          <span class="ch-idx">CH.01</span>
-          <span data-i18n="ch_1">KANBAN</span>
-        </a>
-        <a href="#ch-1" class="ch-btn" data-goto-ch="1">
-          <span class="ch-idx">CH.02</span>
-          <span data-i18n="ch_2">WORKFLOW</span>
-        </a>
-        <a href="#ch-2" class="ch-btn" data-goto-ch="2">
-          <span class="ch-idx">CH.03</span>
-          <span data-i18n="ch_3">NATIVE CLI</span>
-        </a>
-        <a href="#ch-3" class="ch-btn" data-goto-ch="3">
-          <span class="ch-idx">CH.04</span>
-          <span data-i18n="ch_4">INSTALL</span>
-        </a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <a href="{{install_url}}" data-i18n="nav_install">Install</a>
+        <a href="{{docs_url}}" data-i18n="nav_docs">Docs</a>
+        <a href="{{workflows_url}}" data-i18n="nav_workflows">Workflows</a>
+        <a href="{{cli_url}}" data-i18n="nav_cli">CLI</a>
+        <a href="{{changelog_url}}" data-i18n="nav_changelog">Changelog</a>
       </nav>
 
-      <div class="crt-actions">
+      <div class="site-actions">
         {{lang_switcher}}
 
         <a
@@ -39,798 +27,341 @@
           <svg class="gh-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
             <path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path>
           </svg>
-          <span class="star-icon">★</span>
-          <span class="star-label" data-i18n="star_prompt">STAR</span>
+          <span class="star-label" data-i18n="star_prompt">Star</span>
           <span class="star-count"></span>
         </a>
       </div>
-    </header>
+    </div>
+  </header>
 
-    <!-- Phosphor CRT Tube Viewport -->
-    <main class="crt-glass" id="crt-glass">
-      <div class="crt-scanlines" aria-hidden="true"></div>
-      <div class="crt-noise" aria-hidden="true"></div>
-      <div class="crt-glitch-slice" aria-hidden="true"></div>
-      <div class="crt-vignette" aria-hidden="true"></div>
-      <div class="crt-osd" id="crt-osd" aria-hidden="true">CH 01 // KANBAN</div>
+  <main id="main" class="home-main">
+    <!-- Hero -->
+    <section class="hero" id="hero">
+      <div class="hero-eyebrow">
+        <span class="hero-eyebrow-dot" aria-hidden="true"></span>
+        <span>Canban = Kanban + Workflow + Herdr</span>
+      </div>
 
-      <!-- ================================================================ -->
-      <!-- CH 01: HERO + KANBAN WORKBENCH + INTERACTIVE NOTIFICATION CENTER -->
-      <!-- ================================================================ -->
-      <section class="crt-screen is-active" id="ch-0" data-ch="0" aria-label="Channel 01 Kanban">
-        <div class="screen-inner screen-ch1">
-          <div class="ch1-head">
-            <h1 class="hero-title" data-i18n="hero_title">
-              Keep your agent CLI. Automate your workflow.
-            </h1>
-            <p class="hero-sub-line">
-              <span class="hero-formula hero-formula-sub" data-text="Canban = Kanban + Workflow + Herdr">
-                <span class="f-brand">Canban</span>
-                <span class="f-op">=</span>
-                <span class="f-k">Kanban</span>
-                <span class="f-op">+</span>
-                <span class="f-w">Workflow</span>
-                <span class="f-op">+</span>
-                <span class="f-h">Herdr</span>
-              </span>
-              <span class="hero-sub-sep" aria-hidden="true">—</span>
-              <span data-i18n="hero_description">Organize context on flexible cards, catch waiting agents in one notification center, and automate tasks with GitHub Actions-like workflows.</span>
-            </p>
-            <div class="hero-agents-strip" aria-label="Supported native Agent CLIs">
-              <span class="has-label" data-i18n="hero_agents_label">Native CLI support:</span>
-              <span class="has-chip">Claude Code</span>
-              <span class="has-chip">Codex</span>
-              <span class="has-chip">Antigravity</span>
-              <span class="has-chip">Cursor CLI</span>
-              <span class="has-chip">Pi</span>
-              <span class="has-chip">Gemini CLI</span>
-              <span class="has-chip">OpenCode</span>
-              <span class="has-more" data-i18n="hero_agents_more">+17 more</span>
-            </div>
-            <nav class="ch1-links" aria-label="Resources">
-              <a class="ch1-link is-primary" href="{{install_url}}" data-i18n="nav_install">Install</a>
-              <a class="ch1-link" href="{{docs_url}}" data-i18n="nav_docs">Docs</a>
-              <a class="ch1-link" href="{{workflows_url}}" data-i18n="nav_workflows">Workflows</a>
-              <a class="ch1-link" href="{{cli_url}}" data-i18n="nav_cli">CLI</a>
-              <a class="ch1-link" href="{{changelog_url}}" data-i18n="nav_changelog">Changelog</a>
-            </nav>
+      <h1 class="hero-title" data-i18n="hero_title">Organize with Kanban. Work with native agent CLIs.</h1>
+
+      <p class="hero-description" data-i18n="hero_description">
+        Local-first, zero data collection, direct end-to-end encrypted — a lightweight Rust + libghostty app (zero Electron) pairing Kanban with Claude Code, Codex, Cursor CLI, persistent terminals, an attention inbox (⌘I), diff review, and optional workflows.
+      </p>
+
+      <div class="install-widget" id="hero-install">
+        <div class="install-tabs" role="tablist" aria-label="Installation target">
+          <button type="button" class="install-tab is-active" role="tab" aria-selected="true" data-install-tab="desktop" data-i18n="tab_desktop">Desktop</button>
+          <button type="button" class="install-tab" role="tab" aria-selected="false" data-install-tab="headless" data-i18n="tab_headless">Headless</button>
+          <button type="button" class="install-tab" role="tab" aria-selected="false" data-install-tab="android" data-i18n="tab_android">Android</button>
+        </div>
+
+        <div class="install-shell" data-install-shell>
+          <div class="install-code-wrap">
+            <span class="install-prompt" aria-hidden="true">$</span>
+            <code class="install-cmd" data-install-cmd>curl -fsSL https://canban.dev/install.sh | bash</code>
           </div>
+          <button
+            type="button"
+            class="copy-btn"
+            data-copy-btn
+            data-copy-value="curl -fsSL https://canban.dev/install.sh | bash"
+          >
+            <span class="copy-text" data-i18n="copy_label">Copy</span>
+          </button>
+        </div>
 
-          <!-- Native Canban Desktop Window: Kanban -->
-          <div class="app-window" id="app-window-kanban" data-active-scene="kanban">
-            <div class="app-chrome">
-              <div class="chrome-left">
-                <div class="traffic-lights" aria-hidden="true">
-                  <span class="tl-close"></span><span class="tl-min"></span><span class="tl-max"></span>
-                </div>
-                <div class="chrome-history" aria-hidden="true">
-                  <span>‹</span><span>›</span>
-                </div>
-
-                <div class="chrome-context chrome-ctx-kanban">
-                  <span class="project-picker">canban <small>▾</small></span>
-                  <div class="project-strip">
-                    <span class="proj-chip">herdr <b class="attn-badge">1</b></span>
-                    <span class="proj-chip">nsh-ui</span>
-                    <span class="proj-chip">shear</span>
-                  </div>
-                </div>
-              </div>
-
-              <div class="chrome-right">
-                <div class="chrome-board-actions chrome-ctx-kanban">
-                  <span class="chrome-quiet-btn">Agents</span>
-                  <span class="chrome-quiet-btn">Workflows</span>
-                  <span class="chrome-sec-btn">Drafts</span>
-                  <span class="chrome-pri-btn">+ Add Card</span>
-                </div>
-                <div class="notif-anchor">
-                  <button
-                    type="button"
-                    class="chrome-activity-pill is-interactive"
-                    id="notif-pill-btn"
-                    data-notif-toggle
-                    aria-expanded="false"
-                    aria-controls="notif-popover"
-                    title="Open Notification Center (⌘I)"
-                  >
-                    <span class="act-zap">⚡ 1</span>
-                    <span class="act-sep">·</span>
-                    <span class="act-run"><i class="live-dot"></i> 4/6</span>
-                  </button>
-
-                  <!-- Interactive Notification Center Popover -->
-                  <div class="notif-popover" id="notif-popover" role="dialog" aria-label="Activity and Notifications" hidden>
-                    <div class="np-head">
-                      <div class="np-head-left">
-                        <strong data-i18n="notif_title">Activity &amp; Notifications</strong>
-                        <span class="np-run-badge" data-i18n="notif_running_pill">1 running</span>
-                      </div>
-                      <button type="button" class="np-close" data-notif-close aria-label="Close">×</button>
-                    </div>
-
-                    <div class="np-sec-label is-warn">
-                      <span data-i18n="notif_needs_you">Needs you</span> <b>1</b>
-                    </div>
-                    <div class="np-row is-warn">
-                      <div class="np-row-text">
-                        <div class="np-row-title" data-i18n="notif_item_1_title">Needs answer · @reviewer</div>
-                        <div class="np-row-sub" data-i18n="notif_item_1_sub">#63 GitHub App token rotation · canban</div>
-                      </div>
-                      <button type="button" class="np-jump-btn" data-notif-action="card" data-i18n="notif_card_btn">Card →</button>
-                    </div>
-
-                    <div class="np-sec-label">
-                      <span data-i18n="notif_updates">Updates</span> <b>1</b>
-                    </div>
-                    <div class="np-row">
-                      <div class="np-row-text">
-                        <div class="np-row-title is-ok" data-i18n="notif_item_2_title">Stage completed · @developer</div>
-                        <div class="np-row-sub" data-i18n="notif_item_2_sub">#61 Durable event journal cursor · ready for merge</div>
-                      </div>
-                      <button type="button" class="np-jump-btn" data-notif-action="workflow" data-i18n="notif_card_btn">Card →</button>
-                    </div>
-
-                    <div class="np-sec-label">
-                      <span data-i18n="notif_running_sec">Running</span> <b>1</b>
-                    </div>
-                    <div class="np-row">
-                      <div class="np-row-text">
-                        <div class="np-row-title is-live" data-i18n="notif_item_3_title">Working · @developer · Pi</div>
-                        <div class="np-row-sub" data-i18n="notif_item_3_sub">#65 CRT deck &amp; Monokai polish · canban-0afd/65</div>
-                      </div>
-                      <button type="button" class="np-jump-btn" data-notif-action="terminal" data-i18n="notif_term_btn">Terminal →</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="app-body">
-              <aside class="app-rail" aria-hidden="true">
-                <div class="rail-top">
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
-                  <div class="rail-icon is-selected"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><circle cx="18" cy="18" r="3"/><path d="M18 15V9a3 3 0 0 0-3-3h-3"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg></div>
-                </div>
-                <div class="rail-bottom">
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
-                </div>
-              </aside>
-
-              <!-- SCENE 01: KANBAN -->
-              <div class="scene scene-kanban is-active" id="scene-kanban">
-                <div class="sim-cursor" id="kanban-cursor" aria-hidden="true">
-                  <span class="cursor-ring"></span>
-                  <svg width="19" height="19" viewBox="0 0 24 24" fill="#fdfff1" stroke="#141511" stroke-width="1.8">
-                    <path d="M4 3l6.8 16.5 2.5-6.1 6.2-2.4L4 3z"/>
-                  </svg>
-                </div>
-
-                <div class="kanban-workspace" id="kanban-workspace">
-                  <div class="board-columns">
-                    <div class="b-col">
-                      <div class="b-col-head">
-                        <div class="b-col-title"><span>Backlog</span> <b class="col-cnt">2</b></div>
-                        <span class="col-plus">+</span>
-                      </div>
-                      <div class="c-tile">
-                        <div class="c-row-title"><span class="c-num">#68</span><span class="c-title" data-i18n="c68_title">Wayland fractional scale host</span></div>
-                        <div class="c-tags"><span class="c-tag">#linux</span><span class="c-tag">#nsh</span></div>
-                      </div>
-                      <div class="c-tile">
-                        <div class="c-row-title"><span class="c-num">#67</span><span class="c-title" data-i18n="c67_title">Remote machine SSH multiplexer</span></div>
-                        <div class="c-gh-line">GitHub Issue #41 · open</div>
-                        <div class="c-tags"><span class="c-tag">#remote</span></div>
-                      </div>
-                    </div>
-
-                    <div class="b-col">
-                      <div class="b-col-head">
-                        <div class="b-col-title"><span>Develop</span> <b class="col-cnt">3</b></div>
-                        <span class="auto-pill">⚡ Auto develop</span>
-                      </div>
-
-                      <div class="c-tile is-target" id="target-card-65">
-                        <div class="c-row-title">
-                          <span class="c-num">#65</span>
-                          <span class="c-title" data-i18n="c65_title">CRT deck &amp; Monokai polish</span>
-                          <span class="c-term-icon is-live">&gt;_</span>
-                        </div>
-                        <div class="c-tags"><span class="c-tag">#website</span><span class="c-tag">#monokai</span></div>
-                        <div class="c-footer">
-                          <span class="c-meta">⎇ canban/65 · 💬 3</span>
-                          <span class="agent-capsule is-working"><i class="pulse-ring"></i>✦ @developer · 6m</span>
-                        </div>
-                      </div>
-
-                      <div class="c-tile is-attention">
-                        <div class="c-row-title">
-                          <span class="c-num">#63</span>
-                          <span class="c-title" data-i18n="c63_title">GitHub App token rotation</span>
-                          <span class="c-rem-badge">1</span>
-                          <span class="c-term-icon is-attn">&gt;_</span>
-                        </div>
-                        <div class="c-footer">
-                          <span class="c-meta attn-text" data-i18n="c63_wait">Needs answer</span>
-                          <span class="agent-capsule is-attn">▲ @reviewer · 14m</span>
-                        </div>
-                      </div>
-
-                      <div class="c-tile">
-                        <div class="c-row-title">
-                          <span class="c-num">#64</span>
-                          <span class="c-title" data-i18n="c64_title">Workflow schema v11 migration</span>
-                          <span class="c-term-icon is-live">&gt;_</span>
-                        </div>
-                        <div class="c-footer">
-                          <span class="c-meta">⎇ canban/64</span>
-                          <span class="agent-capsule is-working"><i class="pulse-ring"></i>✦ @developer · 4m</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="b-col">
-                      <div class="b-col-head">
-                        <div class="b-col-title"><span>Review</span> <b class="col-cnt">2</b></div>
-                        <span class="auto-pill">⚡ Auto merge</span>
-                      </div>
-                      <div class="c-tile">
-                        <div class="c-row-title"><span class="c-num">#61</span><span class="c-title" data-i18n="c61_title">Durable event journal cursor</span></div>
-                        <div class="c-footer">
-                          <span class="c-meta ok-text">+182 −24 · Queue merge</span>
-                          <span class="agent-capsule is-done">✓ @developer</span>
-                        </div>
-                      </div>
-                      <div class="c-tile is-merged">
-                        <div class="c-row-title"><span class="c-num">#60</span><span class="c-title" data-i18n="c60_title">Unified ⌘O Command Palette</span></div>
-                        <div class="c-footer"><span class="c-meta">Merged into main</span></div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="card-drawer" id="kanban-drawer">
-                    <div class="cd-header">
-                      <div class="cd-header-top">
-                        <span class="cd-crumb">canban / <b>#65</b> · <code>⎇ canban-0afd/65</code></span>
-                        <div class="cd-actions">
-                          <span class="cd-icon-btn is-tinted" title="Toggle Terminal · ⌘J">&gt;_</span>
-                          <span class="cd-btn">Git</span>
-                          <span class="cd-btn">×</span>
-                        </div>
-                      </div>
-                      <div class="cd-title" data-i18n="c65_title">CRT deck &amp; Monokai polish</div>
-                      <div class="cd-stepper">
-                        <span class="st-done">✓ plan · 1m</span>
-                        <span class="st-arrow">→</span>
-                        <span class="st-run"><i class="live-dot"></i> develop (@developer · 6m)</span>
-                        <span class="st-arrow">→</span>
-                        <span class="st-wait">○ Queue merge</span>
-                      </div>
-                    </div>
-
-                    <div class="cd-timeline" id="kanban-timeline">
-                      <div class="tl-node">
-                        <span class="tl-avatar is-user">JJ</span>
-                        <div class="tl-card">
-                          <div class="tl-meta"><b>jjyr</b> <span>· 6m ago</span></div>
-                          <p data-i18n="tl_msg_1">Build a bold retro CRT Monokai deck, one screen per channel.</p>
-                        </div>
-                      </div>
-
-                      <div class="tl-milestone">
-                        <span class="tl-dot"></span>
-                        <span data-i18n="tl_mile">⎇ Worktree <code>canban-0afd/65</code> · @developer started</span>
-                      </div>
-
-                      <div class="tl-node tl-live-reply" id="kanban-live-reply">
-                        <span class="tl-avatar is-agent">✦</span>
-                        <div class="tl-card is-agent-card">
-                          <div class="tl-meta"><b>@developer</b> <span id="kanban-agent-live-tag">· just now</span></div>
-                          <p id="kanban-agent-live-body" data-i18n="tl_msg_2">Redrew full width Workflow Studio and live Agent CLI view.</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="hs-composer">
-                      <span class="tsc-mention">@developer</span>
-                      <span class="tsc-placeholder" data-i18n="tsc_placeholder">Write a comment…</span>
-                      <span class="hs-send-btn">Send ⌘↩</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+        <div class="install-shell install-shell-android" id="hero-install-android" data-install-android hidden>
+          <span class="install-android-meta">
+            <svg class="android-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993.0001.5511-.4482.9997-.9993.9997m-11.046 0c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993 0 .5511-.4482.9997-.9993.9997m11.4045-6.02 1.9973-3.4592a.416.416 0 0 0-.1521-.5676.416.416 0 0 0-.5676.1521l-2.0223 3.503C15.5902 8.2439 13.8533 7.8508 12 7.8508s-3.5902.3931-5.1367 1.0989L4.841 5.4467a.4161.4161 0 0 0-.5677-.1521.4157.4157 0 0 0-.1521.5676l1.9973 3.4592C2.6889 11.1867.3432 14.6589 0 18.761h24c-.3435-4.1021-2.6892-7.5743-6.1185-9.4396"/>
+            </svg>
+            <span data-i18n="android_meta">Android · arm64-v8a</span>
+          </span>
+          <div class="install-android-actions">
+            <a class="install-action-btn is-primary" href="{{android_apk_url}}" target="_blank" rel="noopener noreferrer" data-i18n="android_download_short">Download APK</a>
+            <a class="install-action-btn" href="{{obtainium_url}}" target="_blank" rel="noopener noreferrer" data-i18n="android_obtainium_short">Obtainium</a>
+            <a class="install-guide-link" href="{{install_url}}#mobile" data-i18n="android_guide_short">Guide →</a>
           </div>
         </div>
-      </section>
+      </div>
 
-      <!-- ================================================================ -->
-      <!-- CH 02: WORKFLOW STUDIO                                           -->
-      <!-- ================================================================ -->
-      <section class="crt-screen" id="ch-1" data-ch="1" aria-label="Channel 02 Workflow">
-        <div class="screen-inner screen-ch2">
-          <div class="ch-head">
-            <h2 class="ch-heading" data-i18n="ch2_title">
-              GitHub Actions-like workflows, zero black-box scheduling.
-            </h2>
-            <p class="ch-sub" data-i18n="ch2_sub">
-              Combine shell scripts with agent + prompt steps, isolated Git worktrees, cron schedules, and serialized merge queues.
-            </p>
-          </div>
+      <div class="hero-meta-row">
+        <span>macOS 13+ · Linux · Android</span>
+        <span aria-hidden="true">·</span>
+        <a href="{{install_url}}" data-i18n="install_guide">Installation guide</a>
+        <span aria-hidden="true">·</span>
+        <a href="{{docs_url}}" data-i18n="nav_docs">Docs</a>
+        <span aria-hidden="true">·</span>
+        <a href="https://github.com/jjyr/canban" target="_blank" rel="noopener noreferrer">Apache-2.0</a>
+      </div>
+    </section>
 
-          <div class="app-window" id="app-window-workflow" data-active-scene="workflow">
-            <div class="app-chrome">
-              <div class="chrome-left">
-                <div class="traffic-lights" aria-hidden="true">
-                  <span class="tl-close"></span><span class="tl-min"></span><span class="tl-max"></span>
-                </div>
-                <div class="chrome-history" aria-hidden="true">
-                  <span>‹</span><span>›</span>
-                </div>
-                <div class="chrome-context chrome-ctx-workflow">
-                  <span class="chrome-back">← Board</span>
-                  <span class="chrome-breadcrumb">canban / Workflows</span>
-                </div>
-              </div>
-
-              <div class="chrome-right">
-                <div class="chrome-board-actions chrome-ctx-workflow">
-                  <span class="chrome-quiet-btn">Project Agents</span>
-                  <span class="chrome-pri-btn">✦ Edit with agent</span>
-                </div>
-                <div class="chrome-activity-pill">
-                  <span class="act-zap">⚡ 1</span>
-                  <span class="act-sep">·</span>
-                  <span class="act-run"><i class="live-dot"></i> 4/6</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="app-body">
-              <aside class="app-rail" aria-hidden="true">
-                <div class="rail-top">
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
-                  <div class="rail-icon is-selected"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><circle cx="18" cy="18" r="3"/><path d="M18 15V9a3 3 0 0 0-3-3h-3"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg></div>
-                </div>
-                <div class="rail-bottom">
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
-                </div>
-              </aside>
-
-              <!-- SCENE 02: WORKFLOW STUDIO -->
-              <div class="scene scene-workflow is-active" id="scene-workflow">
-                <div class="wf-full-canvas">
-                  <div class="wf-studio-bar">
-                    <div class="wfs-left">
-                      <span class="wfs-zap">⚡</span>
-                      <b>Stages</b>
-                      <span class="wfs-dot">·</span>
-                      <span class="wfs-name">Development</span>
-                      <span class="wfs-id-badge">delivery</span>
-                      <span class="wfs-active-pill">Active</span>
-                      <span class="wfs-meta">3 columns · 5 steps</span>
-                    </div>
-                    <div class="wfs-right">
-                      <span class="wf-pulse-status">
-                        <i class="live-dot"></i> <span id="wf-step-banner">Card #65 · Stage pipeline</span>
-                      </span>
-                      <div class="wf-segmented">
-                        <span class="is-on">Visual Studio</span>
-                        <span>YAML Source</span>
-                      </div>
-                      <span class="chrome-sec-btn">+ Add stage</span>
-                    </div>
-                  </div>
-
-                  <div class="wf-lanes-full">
-                    <div class="wf-lane">
-                      <div class="wf-lane-head">
-                        <span class="lane-idx">1</span>
-                        <span class="lane-name">Backlog</span>
-                        <span class="lane-mode" data-i18n="wf_intake">Intake</span>
-                      </div>
-
-                      <div class="wf-node" data-wf-node="0">
-                        <div class="wn-top">
-                          <span class="wn-icon is-purple">✦</span>
-                          <span class="wn-title" data-i18n="wn_0_title">Plan task</span>
-                          <span class="wn-badge">@planner</span>
-                        </div>
-                        <div class="wn-summary" data-i18n="wn_0_sub">Inspect repository &amp; draft implementation steps</div>
-                      </div>
-
-                      <div class="wf-v-wire" data-wf-vwire="0">↓</div>
-
-                      <div class="wf-node" data-wf-node="1">
-                        <div class="wn-top">
-                          <span class="wn-icon is-cyan">⏱</span>
-                          <span class="wn-title" data-i18n="wn_1_title">Wait for free Agent</span>
-                          <span class="wn-badge">Gate</span>
-                        </div>
-                        <div class="wn-summary" data-i18n="wn_1_sub">Admit in Board order when global slot is free</div>
-                      </div>
-
-                      <div class="wf-lane-footer">
-                        <span class="wlf-add">+ Add step</span>
-                        <span class="wlf-exit">Exit: <b>Next stage · Develop →</b></span>
-                      </div>
-                    </div>
-
-                    <div class="wf-connector" aria-hidden="true">
-                      <svg viewBox="0 0 38 140" fill="none">
-                        <path d="M2 70 H32" class="wf-wire" data-wf-wire="0"/>
-                        <polygon points="29,65 37,70 29,75" class="wf-arrow" data-wf-arrow="0"/>
-                      </svg>
-                    </div>
-
-                    <div class="wf-lane">
-                      <div class="wf-lane-head">
-                        <span class="lane-idx">2</span>
-                        <span class="lane-name">Develop</span>
-                        <span class="auto-pill">⚡ on:enter</span>
-                      </div>
-
-                      <div class="wf-node" data-wf-node="2">
-                        <div class="wn-top">
-                          <span class="wn-icon is-pink">✦</span>
-                          <span class="wn-title" data-i18n="wn_2_title">Implement</span>
-                          <span class="wn-badge">@developer</span>
-                        </div>
-                        <div class="wn-summary" data-i18n="wn_2_sub">Isolated Git worktree · awaits explicit CLI report</div>
-                        <div class="wn-pills">
-                          <span>Worktree: auto</span>
-                          <span>Prompt: default</span>
-                          <span>Env (2)</span>
-                        </div>
-                      </div>
-
-                      <div class="wf-lane-footer">
-                        <span class="wlf-add">+ Add step</span>
-                        <span class="wlf-exit">Exit: <b>Next stage · Review →</b></span>
-                      </div>
-                    </div>
-
-                    <div class="wf-connector" aria-hidden="true">
-                      <svg viewBox="0 0 38 140" fill="none">
-                        <path d="M2 70 H32" class="wf-wire" data-wf-wire="1"/>
-                        <polygon points="29,65 37,70 29,75" class="wf-arrow" data-wf-arrow="1"/>
-                      </svg>
-                    </div>
-
-                    <div class="wf-lane">
-                      <div class="wf-lane-head">
-                        <span class="lane-idx">3</span>
-                        <span class="lane-name">Review</span>
-                        <span class="auto-pill">⚡ on:enter</span>
-                      </div>
-
-                      <div class="wf-node is-compact" data-wf-node="3">
-                        <div class="wn-top">
-                          <span class="wn-icon is-orange">⑂</span>
-                          <span class="wn-title" data-i18n="wn_3_title">External PR check</span>
-                          <span class="wn-badge">If ext → Approval</span>
-                        </div>
-                      </div>
-
-                      <div class="wf-v-wire" data-wf-vwire="1">↓ <small>Otherwise (trusted)</small></div>
-
-                      <div class="wf-node" data-wf-node="4">
-                        <div class="wn-top">
-                          <span class="wn-icon is-green">⎇</span>
-                          <span class="wn-title" data-i18n="wn_4_title">Queue merge</span>
-                          <span class="wn-badge">Deliver</span>
-                        </div>
-                        <div class="wn-summary" data-i18n="wn_4_sub">FIFO batch integration &amp; upstream branch sync</div>
-                        <div class="wn-pills">
-                          <span class="is-hi">Rebase</span>
-                          <span class="is-hi">Batch ×5</span>
-                          <span class="is-hi">Sync upstream</span>
-                          <span>@merger</span>
-                        </div>
-                      </div>
-
-                      <div class="wf-lane-footer">
-                        <span class="wlf-add">+ Add step</span>
-                        <span class="wlf-exit">Exit: <b>Archive on merge ✓</b></span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ================================================================ -->
-      <!-- CH 03: NATIVE AGENT CLI (CARD + LIVE HERDR PTY TERMINAL)         -->
-      <!-- ================================================================ -->
-      <section class="crt-screen" id="ch-2" data-ch="2" aria-label="Channel 03 Native CLI">
-        <div class="screen-inner screen-ch3">
-          <div class="ch-head">
-            <h2 class="ch-heading" data-i18n="ch3_title">
-              Native Agent CLI support, paired with everyday tools.
-            </h2>
-            <p class="ch-sub" data-i18n="ch3_sub">
-              Run Claude Code, Codex, Antigravity (agy), Cursor CLI, Pi, Gemini CLI, OpenCode, and 20+ native CLIs in persistent PTYs — with built-in Git diff review, Notification Center (⌘I), and multi-machine Linux hosts.
-            </p>
-          </div>
-
-          <div class="app-window" id="app-window-terminal" data-active-scene="terminal">
-            <div class="app-chrome">
-              <div class="chrome-left">
-                <div class="traffic-lights" aria-hidden="true">
-                  <span class="tl-close"></span><span class="tl-min"></span><span class="tl-max"></span>
-                </div>
-                <div class="chrome-history" aria-hidden="true">
-                  <span>‹</span><span>›</span>
-                </div>
-                <div class="chrome-context chrome-ctx-terminal">
-                  <span class="chrome-back">← Board</span>
-                  <span class="chrome-breadcrumb" data-i18n="term_chrome_crumb">canban / Card #65 · CRT &amp; Monokai polish</span>
-                </div>
-              </div>
-
-              <div class="chrome-right">
-                <div class="chrome-activity-pill">
-                  <span class="act-zap">⚡ 1</span>
-                  <span class="act-sep">·</span>
-                  <span class="act-run"><i class="live-dot"></i> 4/6</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="app-body">
-              <aside class="app-rail" aria-hidden="true">
-                <div class="rail-top">
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/></svg></div>
-                  <div class="rail-icon is-selected"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><circle cx="18" cy="18" r="3"/><path d="M18 15V9a3 3 0 0 0-3-3h-3"/></svg></div>
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg></div>
-                </div>
-                <div class="rail-bottom">
-                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
-                </div>
-              </aside>
-
-              <!-- SCENE 03: HERDR (Left Card Detail + Right Interactive Agent CLI TUI) -->
-              <div class="scene scene-terminal is-active" id="scene-terminal">
-                <div class="herdr-split">
-                  <div class="hs-card-detail">
-                    <div class="cd-header">
-                      <div class="cd-header-top">
-                        <span class="cd-crumb">canban / <b>Card #65</b> · <code>⎇ canban-0afd/65</code></span>
-                        <div class="cd-actions">
-                          <span class="cd-icon-btn is-selected">&gt;_</span>
-                          <span class="cd-btn">Git</span>
-                          <span class="cd-btn">⋯</span>
-                        </div>
-                      </div>
-                      <div class="cd-title" data-i18n="c65_title">CRT deck &amp; Monokai polish</div>
-                    </div>
-
-                    <div class="hs-card-body">
-                      <div class="hs-spec-box">
-                        <div class="hs-spec-head">
-                          <span data-i18n="hs_desc_label">Description</span>
-                          <span class="hs-edit-link">Edit</span>
-                        </div>
-                        <p data-i18n="hs_desc_text">
-                          Present Canban inside a retro Monokai CRT deck. Keep Workflow pure visual Studio and show real Agent CLI TUI beside the Card.
-                        </p>
-                      </div>
-
-                      <div class="hs-activity-label">Activity</div>
-
-                      <div class="tl-node">
-                        <span class="tl-avatar is-user">JJ</span>
-                        <div class="tl-card">
-                          <div class="tl-meta"><b>jjyr</b> <span>· 4m ago</span></div>
-                          <p data-i18n="hs_comment_1">@developer Add CRT scanlines, channel glitch, and interactive Notification Center.</p>
-                        </div>
-                      </div>
-
-                      <div class="tl-node">
-                        <span class="tl-avatar is-agent">✦</span>
-                        <div class="tl-card is-agent-card">
-                          <div class="tl-meta"><b>@developer</b> <span>· Working in TTY →</span></div>
-                          <p data-i18n="hs_comment_2">Applying Monokai phosphor tokens and verifying layout.</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="hs-composer">
-                      <span class="tsc-mention">@developer</span>
-                      <span class="tsc-placeholder" data-i18n="tsc_placeholder">Write a comment…</span>
-                      <span class="hs-send-btn">Send ⌘↩</span>
-                    </div>
-                  </div>
-
-                  <div class="hs-agent-tui">
-                    <div class="ts-tabbar">
-                      <div class="ts-tabs">
-                        <span class="ts-tab is-active"><i class="live-dot"></i> ✦ @developer · Working <small>×</small></span>
-                        <span class="ts-tab">Terminal 1 <small>×</small></span>
-                        <span class="ts-tab-add">+</span>
-                      </div>
-                      <div class="ts-tab-actions">
-                        <span class="ts-act">Interrupt</span>
-                        <span class="ts-act">↗</span>
-                        <span class="ts-act">×</span>
-                      </div>
-                    </div>
-
-                    <div class="tui-session-box">
-                      <div class="tui-s-title">
-                        <span class="vt-purple">π pi</span>
-                        <span class="vt-dim">· v1.4 · session 019a-65f2 · Herdr persistent TTY</span>
-                      </div>
-                      <div class="tui-s-meta">
-                        <span>cwd: <code>~/.canban/worktrees/canban-0afd/65</code></span>
-                        <span class="vt-green">● daemon alive</span>
-                      </div>
-                    </div>
-
-                    <div class="tui-stream" id="agent-tui-stream" aria-live="off"></div>
-
-                    <div class="tui-footer">
-                      <div class="tui-input-row">
-                        <span class="tui-chevron">❯</span>
-                        <span class="tui-input-hint" data-i18n="tui_prompt_hint">Steer @developer directly in TTY, or close window safely…</span>
-                        <span class="vt-cursor"></span>
-                      </div>
-                      <div class="tui-statusline">
-                        <span class="vt-orange">⏵⏵ Working (6m 14s) · esc to interrupt</span>
-                        <span>libghostty · 18.4k tokens</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ================================================================ -->
-      <!-- CH 04: CLOSING CALLBACK + INSTALL + CORE PLAQUE                  -->
-      <!-- ================================================================ -->
-      <section class="crt-screen" id="ch-3" data-ch="3" aria-label="Channel 04 Install">
-        <div class="screen-inner screen-ch4">
-          <div class="closing-terminal-card">
-            <div class="ctc-prompt">CANBAN // READY TO BOOT</div>
-
-            <h2 class="closing-title" data-i18n="closing_title">
-              Keep your agent CLI. Drop the tab chaos.
-            </h2>
-
-            <div class="install-tabs" role="tablist" aria-label="Installation mode">
-              <button type="button" role="tab" class="install-tab" id="install-tab-desktop" data-install-tab="desktop" aria-selected="true" aria-controls="closing-install-shell" data-i18n="tab_desktop">
-                Desktop
-              </button>
-              <button type="button" role="tab" class="install-tab" id="install-tab-headless" data-install-tab="headless" aria-selected="false" aria-controls="closing-install-shell" data-i18n="tab_headless">
-                Headless
-              </button>
-              <button type="button" role="tab" class="install-tab" id="install-tab-android" data-install-tab="android" aria-selected="false" aria-controls="closing-install-android" data-i18n="tab_android">
-                Android
-              </button>
-            </div>
-
-            <div class="install-shell is-large" id="closing-install-shell" role="tabpanel" aria-labelledby="install-tab-desktop">
-              <div class="install-code-wrap">
-                <span class="install-prompt">$</span>
-                <code class="install-cmd" id="closing-install-cmd">curl -fsSL https://canban.dev/install.sh | bash</code>
-              </div>
-              <button
-                type="button"
-                class="copy-btn"
-                id="closing-copy-btn"
-                data-copy-btn
-                data-copy-value="curl -fsSL https://canban.dev/install.sh | bash"
-                aria-label="Copy install command"
-              >
-                <span class="copy-text" data-i18n="copy_label">Copy</span>
-              </button>
-            </div>
-
-            <div class="install-shell is-large install-shell-android" id="closing-install-android" role="tabpanel" aria-labelledby="install-tab-android" hidden>
-              <div class="install-android-meta">
-                <svg class="android-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-                  <rect x="4" y="1.5" width="8" height="13" rx="1.75"></rect>
-                  <line x1="6.75" y1="12.25" x2="9.25" y2="12.25" stroke-linecap="round"></line>
-                </svg>
-                <span class="install-android-label" data-i18n="android_meta">Android · arm64-v8a</span>
-              </div>
-              <div class="install-android-actions">
-                <a
-                  href="{{android_apk_url}}"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="install-action-btn is-primary"
-                  data-i18n="android_download_short"
-                >Download APK</a>
-                <a
-                  href="{{obtainium_url}}"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="install-action-btn"
-                  data-i18n="android_obtainium_short"
-                >Obtainium</a>
-                <a
-                  href="{{install_url}}#mobile"
-                  class="install-guide-link"
-                  data-i18n="android_guide_short"
-                >Guide →</a>
-              </div>
-            </div>
-
-            <div class="closing-cta-row">
-              <a href="https://github.com/jjyr/canban" target="_blank" rel="noopener noreferrer" class="star-pill is-big">
-                <svg class="gh-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                  <path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path>
-                </svg>
-                <span class="star-icon">★</span>
-                <span data-i18n="cta_star">Star jjyr/canban on GitHub</span>
-                <span class="star-count"></span>
-              </a>
-            </div>
-
-            <nav class="page-links" aria-label="Resources">
-              <a href="{{install_url}}" data-i18n="install_guide">Installation guide</a>
-              <a href="{{docs_url}}" data-i18n="nav_docs">Docs</a>
-              <a href="{{workflows_url}}" data-i18n="nav_workflows">Workflows</a>
-              <a href="{{cli_url}}" data-i18n="nav_cli">CLI</a>
-              <a href="{{guide_parallel_url}}" data-i18n="nav_guide_parallel">Parallel Agents Guide</a>
-              <a href="{{guide_native_url}}" data-i18n="nav_guide_native">Native Terminal &amp; Multi-Machine</a>
-              <a href="{{guide_worktree_gc_url}}" data-i18n="nav_guide_worktree_gc">Scheduled Worktree Cleanup</a>
-              <a href="{{changelog_url}}" data-i18n="changelog">Changelog</a>
-            </nav>
-
-            <div class="core-plaque">
-              <div class="cp-cell"><b>Rust</b> <span data-i18n="s_rust">Canban Core Engine</span></div>
-              <div class="cp-cell"><b>Herdr</b> <span data-i18n="s_herdr">TTY Agent Support</span></div>
-              <div class="cp-cell"><b>NSH UI</b> <span data-i18n="s_nsh">Native UI</span></div>
-              <div class="cp-cell"><b>libghostty</b> <span data-i18n="s_ghostty">Terminal Rendering Engine</span></div>
-            </div>
-
-            <p class="closing-seo-note" data-i18n="closing_seo_note">
-              Canban = Kanban + Workflow + Herdr — Lightweight native Kanban, Notification Center, and GitHub Actions-like workflows for Claude Code, Codex, Antigravity, Cursor CLI, Pi, and 20+ native Agent CLIs.
-            </p>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <!-- Bottom Bezel Tray -->
-    <footer class="crt-bottombar">
-      <div class="cb-left">
-        <span class="cb-prompt">$</span>
-        <code class="cb-cmd">curl -fsSL https://canban.dev/install.sh | bash</code>
+    <!-- 5-Tab Unified Product Showcase -->
+    <section class="showcase-section" id="showcase" aria-label="Product showcase">
+      <div class="showcase-bar" role="tablist" aria-label="Canban views">
         <button
           type="button"
-          class="cb-copy"
-          data-copy-btn
-          data-copy-value="curl -fsSL https://canban.dev/install.sh | bash"
+          class="showcase-tab"
+          role="tab"
+          id="tab-daily-briefing"
+          aria-selected="true"
+          aria-controls="panel-daily-briefing"
+          data-showcase-tab="daily-briefing"
+          data-caption="{{tab_briefing_caption}}"
+          data-i18n="tab_briefing"
+        >Daily Briefing</button>
+        <button
+          type="button"
+          class="showcase-tab"
+          role="tab"
+          id="tab-board"
+          aria-selected="false"
+          aria-controls="panel-board"
+          tabindex="-1"
+          data-showcase-tab="board"
+          data-caption="{{tab_board_caption}}"
+          data-i18n="tab_board"
+        >Board</button>
+        <button
+          type="button"
+          class="showcase-tab"
+          role="tab"
+          id="tab-terminals"
+          aria-selected="false"
+          aria-controls="panel-terminals"
+          tabindex="-1"
+          data-showcase-tab="terminals"
+          data-caption="{{tab_terminals_caption}}"
+          data-i18n="tab_terminals"
+        >Terminals</button>
+        <button
+          type="button"
+          class="showcase-tab"
+          role="tab"
+          id="tab-git-review"
+          aria-selected="false"
+          aria-controls="panel-git-review"
+          tabindex="-1"
+          data-showcase-tab="git-review"
+          data-caption="{{tab_review_caption}}"
+          data-i18n="tab_review"
+        >Git Review</button>
+        <button
+          type="button"
+          class="showcase-tab"
+          role="tab"
+          id="tab-workflows"
+          aria-selected="false"
+          aria-controls="panel-workflows"
+          tabindex="-1"
+          data-showcase-tab="workflows"
+          data-caption="{{tab_workflows_caption}}"
+          data-i18n="tab_workflows"
+        >Workflows</button>
+      </div>
+
+      <p class="showcase-caption" id="showcase-caption" data-i18n="tab_briefing_desc">
+        One calm daily briefing across every project, waiting agent, PR, and scheduled run.
+      </p>
+
+      <div class="showcase-stage">
+        <figure class="showcase-panel" id="panel-daily-briefing" role="tabpanel" aria-labelledby="tab-daily-briefing" data-showcase-panel="daily-briefing">
+          <img src="/screenshots/daily-briefing.webp" alt="{{alt_daily_briefing}}" width="2880" height="1800" decoding="async" fetchpriority="high">
+          <figcaption data-i18n="tab_briefing_desc">One calm daily briefing across every project, waiting agent, PR, and scheduled run.</figcaption>
+        </figure>
+        <figure class="showcase-panel" id="panel-board" role="tabpanel" aria-labelledby="tab-board" data-showcase-panel="board" hidden>
+          <img src="/screenshots/board.webp" alt="{{alt_board}}" width="2880" height="1800" decoding="async" loading="lazy">
+          <figcaption data-i18n="tab_board_desc">Backlog, Develop, and Review cards with per-card Git worktrees, live agents, and PR badges.</figcaption>
+        </figure>
+        <figure class="showcase-panel" id="panel-terminals" role="tabpanel" aria-labelledby="tab-terminals" data-showcase-panel="terminals" hidden>
+          <img src="/screenshots/terminals.webp" alt="{{alt_terminals}}" width="2880" height="1800" decoding="async" loading="lazy">
+          <figcaption data-i18n="tab_terminals_desc">Persistent Herdr PTYs rendered by libghostty-vt — native agent TUIs that survive restarts.</figcaption>
+        </figure>
+        <figure class="showcase-panel" id="panel-git-review" role="tabpanel" aria-labelledby="tab-git-review" data-showcase-panel="git-review" hidden>
+          <img src="/screenshots/git-review.webp" alt="{{alt_git_review}}" width="2880" height="1800" decoding="async" loading="lazy">
+          <figcaption data-i18n="tab_review_desc">Inspect isolated worktree commits, stage files, and send inline diff comments back to @Agent.</figcaption>
+        </figure>
+        <figure class="showcase-panel" id="panel-workflows" role="tabpanel" aria-labelledby="tab-workflows" data-showcase-panel="workflows" hidden>
+          <img src="/screenshots/workflows.webp" alt="{{alt_workflows}}" width="2880" height="1800" decoding="async" loading="lazy">
+          <figcaption data-i18n="tab_workflows_desc">GitHub Actions-like local YAML workflows with shell scripts, agent steps, cron schedules, and FIFO Queue Merge.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- Core Capabilities -->
+    <section class="band" id="capabilities">
+      <div class="band-head">
+        <p class="band-eyebrow" data-i18n="cap_eyebrow">Core workbench</p>
+        <h2 class="band-title" data-i18n="cap_title">Built for parallel agents, without giving up your CLI.</h2>
+        <p class="band-sub" data-i18n="cap_sub">Every project, card, worktree, diff, and persistent terminal stays synchronized in one fast native app.</p>
+      </div>
+
+      <div class="cap-grid">
+        <article class="cap-item">
+          <div class="cap-head">
+            <h3 data-i18n="cap_1_title">Daily Briefing Inbox</h3>
+            <span class="cap-tag">⌘I</span>
+          </div>
+          <p data-i18n="cap_1_desc">Catch waiting agents, green PRs, and scheduled runs across local and remote hosts in one noise-filtered view.</p>
+        </article>
+        <article class="cap-item">
+          <div class="cap-head">
+            <h3 data-i18n="cap_2_title">Kanban &amp; Worktrees</h3>
+            <span class="cap-tag">git</span>
+          </div>
+          <p data-i18n="cap_2_desc">Organize specs, screenshots, #Card references, and GitHub Issues per repo with isolated per-card Git worktrees.</p>
+        </article>
+        <article class="cap-item">
+          <div class="cap-head">
+            <h3 data-i18n="cap_3_title">Restart-Safe Terminals</h3>
+            <span class="cap-tag">PTY</span>
+          </div>
+          <p data-i18n="cap_3_desc">Herdr supervises real agent CLIs in libghostty-vt terminals so closing or updating Canban never kills running work.</p>
+        </article>
+        <article class="cap-item">
+          <div class="cap-head">
+            <h3 data-i18n="cap_4_title">Inline Git Review</h3>
+            <span class="cap-tag">diff</span>
+          </div>
+          <p data-i18n="cap_4_desc">Review worktree diffs, stage and commit changes, and route line-level feedback directly back to @Agent.</p>
+        </article>
+        <article class="cap-item">
+          <div class="cap-head">
+            <h3 data-i18n="cap_5_title">YAML Workflows &amp; Schedules</h3>
+            <span class="cap-tag">YAML</span>
+          </div>
+          <p data-i18n="cap_5_desc">Combine shell scripts, agent steps, cron schedules, and serialized FIFO Queue Merge visually or in YAML source.</p>
+        </article>
+        <article class="cap-item">
+          <div class="cap-head">
+            <h3 data-i18n="cap_6_title">Instant Quick Open</h3>
+            <span class="cap-tag">⌘O</span>
+          </div>
+          <p data-i18n="cap_6_desc">Switch projects, open cards, attach live terminals, or run commands from the keyboard without losing context.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Native Agent CLI Ecosystem -->
+    <section class="band" id="agents">
+      <div class="band-head">
+        <p class="band-eyebrow" data-i18n="eco_eyebrow">Native CLI ecosystem</p>
+        <h2 class="band-title" data-i18n="ch3_title">Zero-wrapper native terminals that survive app restarts.</h2>
+        <p class="band-sub" data-i18n="ch3_sub">Run Claude Code, Codex, Antigravity (agy), Pi, Cursor CLI, Gemini CLI, OpenCode, and 24 built-in native CLIs in persistent Herdr PTYs — with inline Git diff review, Attention Inbox (⌘I), and direct E2E remote Linux hosts (optional Tailscale or SSH).</p>
+      </div>
+
+      <div class="cli-strip" aria-label="Supported native Agent CLIs">
+        {{cli_ecosystem_items}}
+        <a class="cli-chip cli-chip-more" href="{{agents_url}}" data-i18n="hero_agents_more">Custom CLIs &amp; docs →</a>
+      </div>
+    </section>
+
+    <!-- Architecture & Privacy -->
+    <section class="band" id="architecture">
+      <div class="band-head">
+        <p class="band-eyebrow" data-i18n="arch_eyebrow">Architecture &amp; privacy</p>
+        <h2 class="band-title" data-i18n="arch_title">Native Rust performance. Local-first and directly encrypted.</h2>
+      </div>
+
+      <div class="arch-grid">
+        <div class="arch-item">
+          <span class="arch-label">Rust + NSH</span>
+          <p class="arch-desc" data-i18n="arch_1">Zero Electron. Native macOS Metal and Linux GTK4 UI backed by local SQLite WAL storage.</p>
+        </div>
+        <div class="arch-item">
+          <span class="arch-label">libghostty-vt + Herdr</span>
+          <p class="arch-desc" data-i18n="arch_2">High-speed VT rendering over persistent PTY sessions with zstd streaming for remote hosts.</p>
+        </div>
+        <div class="arch-item">
+          <span class="arch-label">Noise_XX Direct E2EE</span>
+          <p class="arch-desc" data-i18n="arch_3">Mandatory peer-to-peer encryption to headless Linux canband hosts and Android — zero relay servers.</p>
+        </div>
+        <div class="arch-item">
+          <span class="arch-label" data-i18n="arch_4_label">Zero Data Collection</span>
+          <p class="arch-desc" data-i18n="arch_4">No cloud account, no telemetry, and XChaCha20-Poly1305 encrypted local secret vaults.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Closing Install & Guides -->
+    <section class="closing-section" id="install">
+      <h2 class="closing-title" data-i18n="closing_title">Organize with Kanban. Keep your native agent CLI.</h2>
+
+      <div class="install-widget" id="closing-install">
+        <div class="install-shell" data-install-shell>
+          <div class="install-code-wrap">
+            <span class="install-prompt" aria-hidden="true">$</span>
+            <code class="install-cmd" data-install-cmd>curl -fsSL https://canban.dev/install.sh | bash</code>
+          </div>
+          <button
+            type="button"
+            class="copy-btn"
+            data-copy-btn
+            data-copy-value="curl -fsSL https://canban.dev/install.sh | bash"
+          >
+            <span class="copy-text" data-i18n="copy_label">Copy</span>
+          </button>
+        </div>
+
+        <div class="install-shell install-shell-android" id="closing-install-android" data-install-android hidden>
+          <span class="install-android-meta">
+            <svg class="android-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993.0001.5511-.4482.9997-.9993.9997m-11.046 0c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993 0 .5511-.4482.9997-.9993.9997m11.4045-6.02 1.9973-3.4592a.416.416 0 0 0-.1521-.5676.416.416 0 0 0-.5676.1521l-2.0223 3.503C15.5902 8.2439 13.8533 7.8508 12 7.8508s-3.5902.3931-5.1367 1.0989L4.841 5.4467a.4161.4161 0 0 0-.5677-.1521.4157.4157 0 0 0-.1521.5676l1.9973 3.4592C2.6889 11.1867.3432 14.6589 0 18.761h24c-.3435-4.1021-2.6892-7.5743-6.1185-9.4396"/>
+            </svg>
+            <span data-i18n="android_meta">Android · arm64-v8a</span>
+          </span>
+          <div class="install-android-actions">
+            <a class="install-action-btn is-primary" href="{{android_apk_url}}" target="_blank" rel="noopener noreferrer" data-i18n="android_download_short">Download APK</a>
+            <a class="install-action-btn" href="{{obtainium_url}}" target="_blank" rel="noopener noreferrer" data-i18n="android_obtainium_short">Obtainium</a>
+            <a class="install-guide-link" href="{{install_url}}#mobile" data-i18n="android_guide_short">Guide →</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="closing-actions">
+        <a
+          href="https://github.com/jjyr/canban"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="star-pill is-big"
         >
-          <span class="copy-text" data-i18n="copy_label">Copy</span>
-        </button>
+          <svg class="gh-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path>
+          </svg>
+          <span data-i18n="cta_star">Star jjyr/canban on GitHub</span>
+          <span class="star-count"></span>
+        </a>
       </div>
 
-      <div class="cb-center" data-i18n="footer_meta">
-        Apache-2.0 · © 2026 JJy
-      </div>
+      <nav class="closing-guides" aria-label="Guides">
+        <a class="guide-link-item" href="{{guide_parallel_url}}">
+          <span class="guide-link-title"><span data-i18n="nav_guide_parallel">Parallel Agents Guide</span> <span class="guide-link-arrow">→</span></span>
+        </a>
+        <a class="guide-link-item" href="{{guide_native_url}}">
+          <span class="guide-link-title"><span data-i18n="nav_guide_native">Native Terminal &amp; Multi-Machine</span> <span class="guide-link-arrow">→</span></span>
+        </a>
+        <a class="guide-link-item" href="{{guide_worktree_gc_url}}">
+          <span class="guide-link-title"><span data-i18n="nav_guide_worktree_gc">Scheduled Worktree Cleanup</span> <span class="guide-link-arrow">→</span></span>
+        </a>
+      </nav>
 
-      <div class="cb-right">
-        <button type="button" class="cb-step-btn" id="prev-ch-btn" aria-label="Previous Channel">▲</button>
-        <span class="cb-ch-readout" id="ch-readout">CH 01 / 04</span>
-        <button type="button" class="cb-step-btn" id="next-ch-btn" aria-label="Next Channel">▼</button>
-      </div>
-    </footer>
-  </div>
+      <p class="closing-seo-note" data-i18n="closing_seo_note">
+        Canban = Kanban + Workflow + Herdr — Lightweight native Rust Kanban and persistent libghostty terminals for Claude Code, Codex, Antigravity (agy), Pi, Cursor CLI, Gemini CLI, OpenCode, and 24 built-in Agent CLIs.
+      </p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span data-i18n="footer_meta">Apache-2.0 · © 2026 JJy</span>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="{{install_url}}" data-i18n="nav_install">Install</a>
+      <a href="{{docs_url}}" data-i18n="nav_docs">Docs</a>
+      <a href="{{workflows_url}}" data-i18n="nav_workflows">Workflows</a>
+      <a href="{{cli_url}}" data-i18n="nav_cli">CLI</a>
+      <a href="{{changelog_url}}" data-i18n="nav_changelog">Changelog</a>
+      <a href="{{md_url}}">Markdown (.md)</a>
+      <a href="/llms-full.txt">llms-full.txt</a>
+      <a href="https://github.com/jjyr/canban" target="_blank" rel="noopener noreferrer">GitHub</a>
+    </nav>
+  </footer>
+</div>

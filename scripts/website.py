@@ -635,6 +635,64 @@ def lang_switcher(lang, page):
     )
 
 
+PROVIDER_CLIS = (
+    ("claude", "Claude Code", "#d97757"),
+    ("codex", "Codex", "#10a37f"),
+    ("agy", "Antigravity (agy)", None),
+    ("cursor", "Cursor Agent", "#38bdf8"),
+    ("gemini", "Gemini CLI", None),
+    ("opencode", "OpenCode", "#60a5fa"),
+    ("pi", "Pi", "#2dd4bf"),
+    ("copilot", "GitHub Copilot", None),
+    ("kimi", "Kimi", None),
+    ("qwen", "Qwen Code", None),
+    ("amp", "Amp", "#f34e3f"),
+    ("droid", "Droid", "#a3e635"),
+    ("cline", "Cline", "#22d3ee"),
+    ("devin", "Devin", None),
+    ("grok", "Grok", "#f97316"),
+    ("kiro", "Kiro", "#a855f7"),
+    ("omp", "Omp", "#fb923c"),
+    ("hermes", "Hermes", "#fbbf24"),
+    ("kilo", "Kilo", "#f8f676"),
+    ("qodercli", "Qoder", None),
+    ("letta", "Letta", "#c084fc"),
+    ("mastracode", "Mastra Code", "#34d399"),
+    ("maki", "Maki", "#f472b6"),
+    ("muse", "Muse", None),
+)
+
+
+def render_cli_ecosystem():
+    items = []
+    for cli_id, label, _ in PROVIDER_CLIS:
+        items.append(
+            f'<span class="cli-chip">'
+            f'<img class="cli-chip-icon" src="/providers/{cli_id}.svg" width="15" height="15" alt="" aria-hidden="true">'
+            f'<span>{html.escape(label)}</span>'
+            f'</span>'
+        )
+    return "\n        ".join(items)
+
+
+def copy_provider_icons(output):
+    src_root = ROOT / "crates/ui-kit/assets/providers"
+    dst_root = output / "providers"
+    if dst_root.exists():
+        shutil.rmtree(dst_root)
+    dst_root.mkdir(parents=True, exist_ok=True)
+    for cli_id, _, brand_hex in PROVIDER_CLIS:
+        color_svg = src_root / "color" / f"{cli_id}.svg"
+        mono_svg = src_root / f"{cli_id}.svg"
+        if brand_hex is None and color_svg.is_file():
+            shutil.copyfile(color_svg, dst_root / f"{cli_id}.svg")
+        else:
+            svg_text = mono_svg.read_text()
+            if brand_hex:
+                svg_text = svg_text.replace("currentColor", brand_hex)
+            (dst_root / f"{cli_id}.svg").write_text(svg_text)
+
+
 def localize_home(lang, strings):
     body = (SOURCE / "templates/home.html").read_text()
     pattern = r'(<(?P<tag>[\w-]+)\b[^>]*\bdata-i18n="(?P<key>[^"]+)"[^>]*>)(.*?)(</(?P=tag)>)'
@@ -642,22 +700,35 @@ def localize_home(lang, strings):
     def replace(match):
         key = match["key"]
         value = strings[key]
-        # This sole trusted source translation deliberately contains an inline code tag.
-        return match[1] + (value if key == "tl_mile" else html.escape(value)) + match[5]
+        return match[1] + html.escape(value) + match[5]
 
     body = re.sub(pattern, replace, body, flags=re.DOTALL)
     for key, value in {
         "lang_switcher": lang_switcher(lang, ""),
+        "home_url": route(lang, ""),
         "install_url": route(lang, "install"),
         "docs_url": route(lang, "docs"),
         "workflows_url": route(lang, "docs/workflows"),
         "cli_url": route(lang, "docs/cli"),
+        "agents_url": route(lang, "docs/agents"),
         "guide_parallel_url": route(lang, "guides/parallel-coding-agents"),
         "guide_native_url": route(lang, "guides/native-terminal-and-multi-machine"),
         "guide_worktree_gc_url": route(lang, "guides/scheduled-worktree-cleanup"),
         "changelog_url": route(lang, "changelog"),
+        "md_url": md_route(lang, ""),
         "android_apk_url": html.escape(ANDROID_APK_URL, quote=True),
         "obtainium_url": html.escape(OBTAINIUM_URL, quote=True),
+        "cli_ecosystem_items": render_cli_ecosystem(),
+        "tab_briefing_caption": html.escape(strings["tab_briefing_desc"], quote=True),
+        "tab_board_caption": html.escape(strings["tab_board_desc"], quote=True),
+        "tab_terminals_caption": html.escape(strings["tab_terminals_desc"], quote=True),
+        "tab_review_caption": html.escape(strings["tab_review_desc"], quote=True),
+        "tab_workflows_caption": html.escape(strings["tab_workflows_desc"], quote=True),
+        "alt_daily_briefing": html.escape(strings["alt_daily_briefing"], quote=True),
+        "alt_board": html.escape(strings["alt_board"], quote=True),
+        "alt_terminals": html.escape(strings["alt_terminals"], quote=True),
+        "alt_git_review": html.escape(strings["alt_git_review"], quote=True),
+        "alt_workflows": html.escape(strings["alt_workflows"], quote=True),
     }.items():
         body = body.replace("{{" + key + "}}", value)
     return body
@@ -678,11 +749,11 @@ def header(lang, page, labels):
         for key, name in NAV_PAGES
     )
     nav_label = html.escape(labels.get("nav_aria", "Main navigation"))
-    return f'''<header class="doc-header">
-      <a class="crt-brand" href="{route(lang)}"><span class="power-led" aria-hidden="true"></span>
-      <img src="/favicon.svg" width="20" height="20" alt="">CANBAN</a>
-      <nav class="doc-nav" aria-label="{nav_label}">{links}</nav>
-      {lang_switcher(lang, page)}</header>'''
+    return f'''<header class="site-header"><div class="site-header-inner">
+      <a class="site-brand" href="{route(lang)}">
+      <img src="/favicon.svg" class="brand-mark" width="22" height="22" alt=""><span>Canban</span></a>
+      <nav class="site-nav" aria-label="{nav_label}">{links}</nav>
+      <div class="site-actions">{lang_switcher(lang, page)}</div></div></header>'''
 
 
 def command(text, labels):
@@ -709,7 +780,7 @@ def render_screenshot(shot):
 
 
 def footer(lang, page, labels):
-    return f'''<footer class="doc-footer"><span>Apache-2.0 · © 2026 JJy</span><nav class="page-links">
+    return f'''<footer class="site-footer"><span>Apache-2.0 · © 2026 JJy</span><nav class="footer-links">
       <a href="{route(lang, 'install')}">{html.escape(labels['install'])}</a>
       <a href="{route(lang, 'docs')}">{html.escape(labels['docs'])}</a>
       <a href="{route(lang, 'docs/workflows')}">{html.escape(labels['workflows'])}</a>
@@ -1000,7 +1071,7 @@ def document(lang, page, body, strings, labels, docs_spec=None, latest_release=N
 <title>{html.escape(title)}</title><meta name="description" content="{html.escape(description, quote=True)}">
 <meta name="application-name" content="Canban"><meta name="apple-mobile-web-app-title" content="Canban">
 <meta name="author" content="JJy"><meta name="robots" content="{robots}">
-<meta name="theme-color" content="#141511"><link rel="canonical" href="{ORIGIN + path}">{alternates}
+<meta name="theme-color" content="#141413"><link rel="canonical" href="{ORIGIN + path}">{alternates}
 {md_alternate}
 <meta property="og:site_name" content="Canban"><meta property="og:type" content="website">
 <meta property="og:title" content="{html.escape(title, quote=True)}"><meta property="og:description" content="{html.escape(description, quote=True)}">
@@ -1018,10 +1089,7 @@ def document(lang, page, body, strings, labels, docs_spec=None, latest_release=N
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/pages.css">
-<noscript><style>.home-root{{height:auto;overflow:auto}}.home-page{{height:auto;overflow:visible}}.home-page .crt-shell{{height:auto;display:block}}
-.home-page .crt-glass{{overflow:visible}}.home-page .crt-screen{{position:relative;visibility:visible;opacity:1;pointer-events:auto}}
-.home-page .crt-topbar,.home-page .crt-bottombar{{min-height:48px}}
-.home-page .install-shell-android[hidden]{{display:flex;margin-top:8px}}</style></noscript>
+<noscript><style>.showcase-bar,.showcase-caption{{display:none}}.showcase-panel[hidden]{{display:block!important;border-top:1px solid var(--border)}}.showcase-panel figcaption{{display:block;padding:10px 14px;background:var(--bg-surface);color:var(--fg-sec);font-size:13px}}.install-shell-android[hidden]{{display:flex!important;margin-top:8px}}</style></noscript>
 </head><body class="{'home-page' if not page else 'document-page'}">
 {body}<script type="application/json" id="page-copy">{script_json({key: strings[key] for key in ('copy_label', 'copied_label')})}</script>
 <script src="/app.js" defer></script></body></html>
@@ -1040,9 +1108,11 @@ def render_home_markdown(lang, strings):
         "",
         "## Highlights",
         "",
-        f"- **{strings['ch_1']}**: {strings['hero_description']}",
-        f"- **{strings['ch_2']}**: {strings['ch2_title']} — {strings['ch2_sub']}",
-        f"- **{strings['ch_3']}**: {strings['ch3_title']} — {strings['ch3_sub']}",
+        f"- **{strings['tab_briefing']}**: {strings['tab_briefing_desc']}",
+        f"- **{strings['tab_board']}**: {strings['tab_board_desc']}",
+        f"- **{strings['tab_terminals']}**: {strings['tab_terminals_desc']}",
+        f"- **{strings['tab_review']}**: {strings['tab_review_desc']}",
+        f"- **{strings['tab_workflows']}**: {strings['tab_workflows_desc']}",
         "",
         "## Install",
         "",
@@ -1231,9 +1301,13 @@ def build(output, releases):
     screenshots_src = SOURCE / "screenshots"
     if screenshots_src.is_dir():
         screenshots_dst = output / "screenshots"
+        if screenshots_dst.exists():
+            shutil.rmtree(screenshots_dst)
         screenshots_dst.mkdir(parents=True, exist_ok=True)
-        for shot in sorted(screenshots_src.glob("*.png")):
-            shutil.copyfile(shot, screenshots_dst / shot.name)
+        for shot in sorted(screenshots_src.iterdir()):
+            if shot.is_file() and shot.suffix in (".webp", ".png"):
+                shutil.copyfile(shot, screenshots_dst / shot.name)
+    copy_provider_icons(output)
     shutil.copyfile(ROOT / "scripts/install.sh", output / "install.sh")
     locales = load("locales.json")
     pages = load("pages.json")

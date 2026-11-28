@@ -7,7 +7,12 @@
     "intro": "Canban (canban.dev) is local-first with zero data collection and no relay servers. It unifies Kanban cards for Human Context, declarative schema 13 Workflows with cardless GitHub events and encrypted secrets, Timeline-first Insights, an Agent-first CLI, and Herdr persistent PTY terminals across local and direct end-to-end encrypted remote hosts.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["Docs", "docs"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ]
+    ],
     "cards": [
       {
         "title": "Guide: Parallel Coding Agents",
@@ -71,7 +76,7 @@
         "heading": "Why Canban = Kanban + Workflow + Herdr",
         "markdown": "1. **Kanban maintains Human Context**: Feature specs, pasted screenshots, `#Card` and GitHub Issue/PR references, `@Agent` discussions, structured reports, and diffs stay together on each Card.\n2. **Workflow automates worktrees and delivery**: Dragging a Card into `Develop` allocates an isolated Git worktree (`<dir>-<proj4>/<card-number>`) and runs your workflow graph; `Review` integrates changes through a serialized FIFO Queue Merge.\n3. **Herdr runs native Agent CLIs without interference**: Keep your CLI's native TUI, MCP servers, skills, permissions, and exact-ID session resume intact.",
         "screenshot": {
-          "src": "/screenshots/review-diff.png",
+          "src": "/screenshots/git-review.webp",
           "alt": "Canban Git diff inspector for Card #1 worktree showing commit history, changed Rust files, inline diff lines, Copy Markdown, and the Review & Send to @Agent button.",
           "caption": "Built-in worktree diff review in Canban: inspect commits and inline hunks, add line comments, and hand off findings directly with Review & Send to @Agent.",
           "width": 2880,
@@ -99,14 +104,23 @@
     "intro": "Canban workflows are declarative YAML 1.2 graphs (`schema: 13`, `CURRENT` in `crates/workflow-engine`) stored in SQLite (`workflow_sources` and immutable `workflow_revisions`). Visual Studio, manual YAML edits, and Edit with agent all compile and validate through the exact same Rust engine.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["Docs", "docs"], ["Workflows", "docs/workflows"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ],
+      [
+        "Workflows",
+        "docs/workflows"
+      ]
+    ],
     "sections": [
       {
         "id": "visual-studio",
         "heading": "Visual Studio, SQLite source of truth & Stage projection",
         "markdown": "Open **Workflows** in any Project header to switch between **Visual Studio**, **YAML Source**, **History**, and **Edit with agent**:\n\n- **SQLite Single Source of Truth**: Workflows live inside `canban.sqlite` (`workflow_sources` + immutable `workflow_revisions`) rather than hidden YAML files in `~/.canban`. Each `WorkflowRun` freezes its `definition` and `definition_revision` at creation so publishing new YAML never mutates in-flight runs.\n- **Linear Schema Migrations (`1..=13`)**: `crates/workflow-engine/src/migrations.rs` sets `BASELINE = 1` and `CURRENT = 13`, sequentially upgrading older YAML documents on parse (schema 11 added `cardless` event rules + `exclude_self`, schema 12 added secret/var `env` expressions, and schema 13 replaced `with.profile` on `uses: agent` steps with mutually exclusive `default_agent` / `override` to work with per-Card `assignee`).\n- **How Visual Studio Maps Stages (`stages.rs`)**: YAML files do not have a top-level `stages:` block; instead, `canban_workflow_engine::stages` derives one Stage swimlane (`StageView`) per Board column (`column`, `name`, ordered `steps`, `entry_rule`, and `exit` via `card.move` using `column: $next` / `next: $entry` or `Stay`). Each `Step` can set `stage: <column_id>` explicitly (or let Studio infer it from `on` column entry rules and `card.move` transitions) and `enabled: false` to skip a step at compile time without breaking links.",
         "screenshot": {
-          "src": "/screenshots/workflow-studio.png",
+          "src": "/screenshots/workflows.webp",
           "alt": "Canban Workflows Visual Studio showing development.yaml with Backlog, Develop (@developer Implement), and Review (External PR check condition, Human approval, and Queue merge) lanes.",
           "caption": "Visual Studio for development.yaml: Backlog, Develop (@developer), and Review stages with the /card/source_trust == external_pr branch, Human approval gate, and Rebase · Sync Queue merge.",
           "width": 2880,
@@ -181,7 +195,16 @@
     "intro": "The `canban` binary (`crates/cli/src/main.rs`) talks to the exact same `AppServer` JSON-RPC authority as the native desktop UI. Its response contract is Agent-first by default to minimize context tokens, while `--human` makes the same commands comfortable to read and script interactively.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["Docs", "docs"], ["CLI", "docs/cli"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ],
+      [
+        "CLI",
+        "docs/cli"
+      ]
+    ],
     "sections": [
       {
         "id": "core-commands",
@@ -213,14 +236,23 @@
     "intro": "Canban runs native coding agent CLIs inside persistent Herdr PTY terminals (`herdr-core`) rendered with `libghostty-vt`, preserving every tool's native TUI, MCP servers, skills, permissions, and conversation resume.",
     "date_published": "2026-11-19",
     "updated": "2026-11-24",
-    "breadcrumbs": [["Docs", "docs"], ["Agents", "docs/agents"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ],
+      [
+        "Agents",
+        "docs/agents"
+      ]
+    ],
     "sections": [
       {
         "id": "herdr-preservation",
         "heading": "Zero-interference native TUI, MCP & skill preservation",
         "markdown": "Rather than reimplementing provider chat wrappers or injecting fragile `Stop` hooks, Canban launches your chosen CLI inside a `herdr-core` (`hc`) supervised PTY:\n\n- **Native TUIs & Controls**: Interact directly with the agent's own terminal UI via `libghostty-vt` (rendered in native AppKit/CoreText on macOS and GTK4 on Linux, with SGR/pixel mouse reporting, OSC 8 hyperlinks, and 17 dark themes including Monokai).\n- **MCPs, Skills & Permissions Intact**: Because the real CLI binary executes in the Card worktree with your home configuration, existing MCP servers, custom skills, sandbox flags, and auth logins work unchanged.\n- **Restart-Safe PTYs & Exact Resume**: Closing Canban, restarting `canband`, or live-upgrading the app leaves running `herdr-core` sessions alive. Finished sessions can resume exact provider conversation IDs (`--resume`, `--session`, or `--conversation`) when supported.\n- **Global Scheduler Budget**: Automatic workflow steps share a configurable concurrency limit (`scheduler.max_agents`, default `8`), while manual shells and `script` steps run outside the agent budget.",
         "screenshot": {
-          "src": "/screenshots/board-terminal.png",
+          "src": "/screenshots/terminals.webp",
           "alt": "Canban Card #2 running a native @developer CLI session inside a persistent Herdr PTY terminal alongside card activity, Hold auto-merge, and workflow progress.",
           "caption": "Live @developer Herdr PTY running cargo test inside Card #2's isolated Git worktree (acme-api-f4c9/2), waiting for explicit canban report completion.",
           "width": 2880,
@@ -276,7 +308,16 @@
     "intro": "A single Canban desktop or mobile client connects directly to your local Mac (`This Mac`) and one or more remote Linux or macOS `canband` hosts with **mandatory `Noise_XX` end-to-end encryption and zero relay servers** — over direct LAN/VPN TCP, optionally paired with **Tailscale** (zero-QR WhoIs auto-auth) or managed **SSH** tunnels.",
     "date_published": "2026-11-19",
     "updated": "2026-11-27",
-    "breadcrumbs": [["Docs", "docs"], ["Remote Hosts", "docs/remote-hosts"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ],
+      [
+        "Remote Hosts",
+        "docs/remote-hosts"
+      ]
+    ],
     "sections": [
       {
         "id": "multi-host-model",
@@ -326,14 +367,23 @@
     "intro": "**TL;DR**: Running 5–10 coding agents inside raw terminal tabs breaks on context switching, dirty Git checkouts, and missed `[Y/n]` prompts. Canban pairs a Kanban board (`Human Context`) with per-card Git worktrees (`<dir>-<proj4>/<card-number>`), a global Attention Inbox (`⌘I`), a serialized FIFO Merge Queue, and Timeline-first Insights so multiple native Agent CLIs work in parallel without stepping on each other.",
     "date_published": "2026-11-23",
     "updated": "2026-11-24",
-    "breadcrumbs": [["Docs", "docs"], ["Parallel Coding Agents", "guides/parallel-coding-agents"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ],
+      [
+        "Parallel Coding Agents",
+        "guides/parallel-coding-agents"
+      ]
+    ],
     "sections": [
       {
         "id": "why-tabs-break",
         "heading": "Why terminal tabs break at 5+ parallel coding agents",
         "markdown": "Opening separate tabs for `claude`, `codex`, `agy`, `pi`, or `cursor-agent` works for one task, then collapses once several run concurrently:\n\n- **Lost Human Context**: Specifications, screenshots, design notes, and review feedback get buried across scrollback buffers instead of staying pinned to the task.\n- **Working-tree collisions**: Two agents editing files in the same checkout overwrite each other's changes and pollute `git status`.\n- **Silent `[Y/n]` stalls**: One agent sits blocked waiting for tool permission or clarification for 20 minutes while you watch another pane.\n- **Merge races**: Even with manual `git worktree`, rebasing and testing 5 finished branches into `main` one by one becomes manual release chores.",
         "screenshot": {
-          "src": "/screenshots/board-terminal.png",
+          "src": "/screenshots/board.webp",
           "alt": "Canban desktop board running Card #2 in Develop with an isolated Git worktree, discussion timeline, workflow status, and live @developer Herdr terminal.",
           "caption": "Every Card binds its Markdown spec, isolated Git worktree, workflow stage, and live native Agent CLI terminal in one place.",
           "width": 2880,
@@ -351,7 +401,7 @@
         "heading": "Catch blocked prompts in Attention Inbox (⌘I) & review diffs inline",
         "markdown": "Instead of clicking through 10 tabs, press **`⌘I`** to open Canban's global **Attention Inbox**:\n\n- **Instant triage across all projects and hosts**: See every agent waiting on tool approval, a follow-up question, or human review (`Needs you`), recent completions (`Updates`), and active runs (`Running`).\n- **One-keystroke jump**: Select any notification to jump directly to that Card's discussion drawer or live Herdr PTY terminal.\n- **Built-in line-level diff review & PR tracking**: Inspect commits and hunks inside Canban's Git workbench (with automatic discovery of external Git worktrees, branch PR tracking with fast-fail CI states and GitHub jump links, and auto-expanded / progressively expandable diffs without an 800-line cap), leave inline comments on changed lines, and dispatch `Review & Send to @Agent` without leaving the app.",
         "screenshot": {
-          "src": "/screenshots/review-diff.png",
+          "src": "/screenshots/git-review.webp",
           "alt": "Canban built-in Git diff inspector displaying commit history, changed files, inline line comments, and Review & Send to @Agent.",
           "caption": "Inspect isolated Card worktree commits and send inline line-level feedback directly back to @Agent.",
           "width": 2880,
@@ -402,14 +452,23 @@
     "intro": "**TL;DR**: Raw `tmux` panes preserve your CLI's capabilities but lack task state, diff workflows, and cross-machine attention routing; chat-wrapper UIs add structure at the cost of stripping native TUIs, MCPs, and provider resume. Canban gives you native Rust + `libghostty-vt` terminals supervised by `herdr-core` (`hc`) locally and across remote Linux `canband` servers over direct, relay-free `Noise_XX` E2EE `yamux/1` TCP (optionally paired with Tailscale or SSH)—even keeping remote boards editable offline.",
     "date_published": "2026-11-23",
     "updated": "2026-11-27",
-    "breadcrumbs": [["Docs", "docs"], ["Native Terminal & Multi-Machine", "guides/native-terminal-and-multi-machine"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ],
+      [
+        "Native Terminal & Multi-Machine",
+        "guides/native-terminal-and-multi-machine"
+      ]
+    ],
     "sections": [
       {
         "id": "architecture-comparison",
         "heading": "Canban vs. tmux / terminal tabs vs. chat-wrapper IDEs",
         "markdown": "| Capability | Canban (`Rust + libghostty-vt + Herdr`) | Raw `tmux` / Terminal Tabs | Chat-Wrapper IDE / Web UI |\n| --- | --- | --- | --- |\n| **Native CLI TUI, MCPs & Skills** | **100% intact** — runs real `claude`, `codex`, `agy`, `pi`, `cursor-agent`, `gemini`, `opencode` binaries | **100% intact** | Often stripped, proxied, or reimplemented |\n| **PTY Persistence Across App Restarts** | **Yes** — `herdr-core` (`hc`) keeps live TTYs alive across GUI quit/upgrades | **Yes** (per machine via `tmux` server) | Typically stops on window/process reload |\n| **Task Specs, Worktrees & Merge Queue** | **Built in** — Kanban Cards, `<dir>-<proj4>/<card>`, YAML Workflows, FIFO Queue Merge | Manual branches & scripting | Partial or single-repo only |\n| **Cross-Project Attention Inbox (`⌘I`)** | **Built in** — catches `[Y/n]` prompts & stage updates across local + remote hosts | Manual pane scanning | Per-tab badges only |\n| **Multi-Machine Linux Execution** | **Built in** — direct `Noise_XX` E2EE `yamux/1` TCP (no relays, X25519 public-key auth) + optional Tailscale WhoIs / SSH + offline editing & 3-way sync | Manual SSH + separate `tmux` sessions | Remote SSH IDE plugins or cloud lock-in |\n| **UI Runtime** | Native AppKit/Metal (macOS) & GTK4 (Linux) | Terminal emulator | Electron / browser DOM |",
         "screenshot": {
-          "src": "/screenshots/workflow-studio.png",
+          "src": "/screenshots/workflows.webp",
           "alt": "Canban Visual Workflow Studio showing Backlog, Develop (@developer), and Review stages with external PR check, Human approval, and Queue merge.",
           "caption": "Declarative YAML workflows (schema: 13) drive native Agent CLI PTYs locally or on remote headless Linux canband hosts.",
           "width": 2880,
@@ -460,7 +519,16 @@
     "intro": "**TL;DR**: Let an Agent write, validate, and dry-run test the schedule **once**—while the generated workflow itself executes purely via a `run:` script (no `uses: agent` at runtime, zero PTYs, zero LLM tokens). It enforces strict **AND** safety checks (`merged` + `clean` + `7+ days inactive`), removes only safe worktrees, and posts a per-repo summary Card only when worktrees were reclaimed or failed.",
     "date_published": "2026-11-24",
     "updated": "2026-11-27",
-    "breadcrumbs": [["Docs", "docs"], ["Scheduled Worktree Cleanup", "guides/scheduled-worktree-cleanup"]],
+    "breadcrumbs": [
+      [
+        "Docs",
+        "docs"
+      ],
+      [
+        "Scheduled Worktree Cleanup",
+        "guides/scheduled-worktree-cleanup"
+      ]
+    ],
     "sections": [
       {
         "id": "why-pure-script-schedule",
